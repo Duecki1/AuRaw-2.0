@@ -348,7 +348,6 @@ enum CloudClipboardMode {
 
 #[derive(Clone, Debug)]
 enum CloudClipboardContent {
-    Assets(Vec<crate::cloud::CloudAsset>),
     Folder(crate::cloud::CloudFolder),
 }
 
@@ -358,12 +357,68 @@ struct CloudClipboard {
     content: CloudClipboardContent,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageClipboardMode {
+    Copy,
+    Cut,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Debug)]
+struct AndroidImageClipboardItem {
+    uri: String,
+    display_name: String,
+    bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+enum ImageClipboardContent {
+    #[cfg(not(target_os = "android"))]
+    Local(Vec<PathBuf>),
+    #[cfg(target_os = "android")]
+    Local(Vec<AndroidImageClipboardItem>),
+    Cloud(Vec<crate::cloud::CloudAsset>),
+}
+
+#[derive(Clone, Debug)]
+struct ImageClipboard {
+    mode: ImageClipboardMode,
+    content: ImageClipboardContent,
+}
+
+impl ImageClipboard {
+    fn count(&self) -> usize {
+        match &self.content {
+            ImageClipboardContent::Local(items) => items.len(),
+            ImageClipboardContent::Cloud(items) => items.len(),
+        }
+    }
+
+    fn paste_label(&self) -> String {
+        let count = self.count();
+        format!("Paste {count} RAW{}", if count == 1 { "" } else { "s" })
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ImagePasteDestination {
+    #[cfg(not(target_os = "android"))]
+    LocalFolder(PathBuf),
+    #[cfg(target_os = "android")]
+    LocalLibrary,
+    CloudFolder(String),
+}
+
+struct ImagePasteCompletion {
+    result: Result<String, String>,
+    clear_clipboard: bool,
+    remaining_clipboard: Option<ImageClipboard>,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum CloudPreparedPurpose {
     Export,
-    #[cfg(not(target_os = "android"))]
     CopyAdjustments,
-    #[cfg(not(target_os = "android"))]
     PasteAdjustments,
 }
 
@@ -391,10 +446,6 @@ enum CloudActionRequest {
         assets: Vec<crate::cloud::CloudAsset>,
         destination_folder_id: String,
         clear_clipboard: bool,
-    },
-    MoveAssets {
-        assets: Vec<crate::cloud::CloudAsset>,
-        destination_folder_id: String,
     },
     RenameAsset {
         asset: crate::cloud::CloudAsset,
@@ -447,9 +498,7 @@ enum CloudDeleteTarget {
 #[derive(Clone, Debug)]
 enum CloudLibraryCardAction {
     Export(Vec<crate::cloud::CloudAsset>),
-    #[cfg(not(target_os = "android"))]
     CopyAdjustments(crate::cloud::CloudAsset),
-    #[cfg(not(target_os = "android"))]
     PasteAdjustments(Vec<crate::cloud::CloudAsset>),
     Copy(Vec<crate::cloud::CloudAsset>),
     Cut(Vec<crate::cloud::CloudAsset>),
@@ -497,8 +546,25 @@ struct LibraryAdjustmentPasteDialog {
 
 #[cfg(target_os = "android")]
 #[derive(Clone)]
+enum AndroidAdjustmentPasteTargets {
+    Local(Vec<(String, String)>),
+    Cloud(Vec<PathBuf>),
+}
+
+#[cfg(target_os = "android")]
+impl AndroidAdjustmentPasteTargets {
+    fn len(&self) -> usize {
+        match self {
+            Self::Local(targets) => targets.len(),
+            Self::Cloud(paths) => paths.len(),
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+#[derive(Clone)]
 struct LibraryAdjustmentPasteDialog {
-    targets: Vec<(String, String)>,
+    targets: AndroidAdjustmentPasteTargets,
     edited_count: usize,
 }
 
@@ -611,6 +677,7 @@ enum LibraryFolderUiAction {
     Copy(PathBuf),
     Cut(PathBuf),
     Paste(PathBuf),
+    PasteImages(PathBuf),
     Rename(PathBuf),
     Delete(PathBuf),
     Move {
@@ -631,6 +698,22 @@ struct LibraryFolderNameDialog {
     kind: LibraryFolderNameDialogKind,
     name: String,
     error: Option<String>,
+}
+
+#[cfg(not(target_os = "android"))]
+struct LibraryRawNameDialog {
+    source: PathBuf,
+    name: String,
+    error: Option<String>,
+    focus_requested: bool,
+}
+
+#[cfg(target_os = "android")]
+struct AndroidLibraryRawNameDialog {
+    source: AndroidImageClipboardItem,
+    name: String,
+    error: Option<String>,
+    focus_requested: bool,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -683,6 +766,8 @@ pub(crate) struct LibraryState {
     cloud_expanded_folders: HashSet<String>,
     cloud_action_receiver: Option<mpsc::Receiver<CloudActionCompletion>>,
     cloud_clipboard: Option<CloudClipboard>,
+    image_clipboard: Option<ImageClipboard>,
+    image_paste_receiver: Option<mpsc::Receiver<ImagePasteCompletion>>,
     cloud_name_dialog: Option<CloudNameDialog>,
     cloud_delete_confirmation: Option<CloudDeleteTarget>,
     #[cfg(not(target_os = "android"))]
@@ -725,6 +810,10 @@ pub(crate) struct LibraryState {
     folder_name_dialog: Option<LibraryFolderNameDialog>,
     #[cfg(not(target_os = "android"))]
     folder_delete_confirmation: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    raw_name_dialog: Option<LibraryRawNameDialog>,
+    #[cfg(target_os = "android")]
+    android_raw_name_dialog: Option<AndroidLibraryRawNameDialog>,
     export_dialog: Option<LibraryExportDialog>,
     adjustment_paste_dialog: Option<LibraryAdjustmentPasteDialog>,
     ai_mask_refresh_prompt: Option<LibraryAiMaskRefreshPrompt>,
@@ -744,6 +833,362 @@ fn cloud_batch_summary(
             "{verb} {completed} of {total} cloud {noun}. {}",
             errors.join(" · ")
         ))
+    }
+}
+
+fn image_paste_summary(
+    mode: ImageClipboardMode,
+    total: usize,
+    completed: usize,
+    destination: &str,
+    errors: Vec<String>,
+) -> Result<String, String> {
+    let verb = if mode == ImageClipboardMode::Copy {
+        "Copied"
+    } else {
+        "Moved"
+    };
+    let noun = if total == 1 { "RAW" } else { "RAWs" };
+    if errors.is_empty() {
+        Ok(format!("{verb} {completed} {noun} to {destination}."))
+    } else {
+        Err(format!(
+            "{verb} {completed} of {total} {noun} to {destination}. {}",
+            errors.join(" · ")
+        ))
+    }
+}
+
+fn run_image_paste(
+    config: &crate::cloud::CloudConfig,
+    cache_root: Option<&Path>,
+    allow_network: bool,
+    clipboard: ImageClipboard,
+    destination: ImagePasteDestination,
+    #[cfg(target_os = "android")] android_app: &auraw_ffi::AndroidApp,
+) -> ImagePasteCompletion {
+    let mode = clipboard.mode;
+    // A Cut can succeed for only part of a multi-selection. Keep a private
+    // copy and remove each item only after its complete move has committed so
+    // retrying the paste never acts on sources that already moved.
+    let mut remaining_cut_clipboard = (mode == ImageClipboardMode::Cut).then(|| clipboard.clone());
+    let result = match (clipboard.content, destination) {
+        #[cfg(not(target_os = "android"))]
+        (ImageClipboardContent::Local(paths), ImagePasteDestination::LocalFolder(folder)) => {
+            let total = paths.len();
+            let mut completed = 0usize;
+            let mut errors = Vec::new();
+            for path in paths {
+                let result = if mode == ImageClipboardMode::Cut
+                    && path.parent() == Some(folder.as_path())
+                {
+                    Ok(())
+                } else {
+                    let name = path
+                        .file_name()
+                        .ok_or_else(|| format!("{} has no usable filename", path.display()));
+                    name.and_then(|name| {
+                        copy_raw_bundle_to_folder(&path, name, &folder).and_then(|destination| {
+                            if mode == ImageClipboardMode::Cut {
+                                if let Err(error) = remove_local_raw_bundle(&path) {
+                                    let _ = remove_local_raw_bundle(&destination);
+                                    return Err(error);
+                                }
+                            }
+                            Ok(())
+                        })
+                    })
+                };
+                match result {
+                    Ok(_) => {
+                        completed += 1;
+                        if let Some(ImageClipboard {
+                            content: ImageClipboardContent::Local(remaining),
+                            ..
+                        }) = remaining_cut_clipboard.as_mut()
+                        {
+                            remaining.retain(|candidate| candidate != &path);
+                        }
+                    }
+                    Err(error) => errors.push(format!("{}: {error}", path.display())),
+                }
+            }
+            image_paste_summary(
+                mode,
+                total,
+                completed,
+                &folder.display().to_string(),
+                errors,
+            )
+        }
+        #[cfg(not(target_os = "android"))]
+        (ImageClipboardContent::Local(paths), ImagePasteDestination::CloudFolder(folder_id)) => {
+            let total = paths.len();
+            let mut completed = 0usize;
+            let mut errors = Vec::new();
+            for path in paths {
+                let label = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("local RAW")
+                    .to_owned();
+                let result = crate::cloud::upload_asset_path_to_folder(config, &path, &folder_id)
+                    .and_then(|uploaded| {
+                        if mode == ImageClipboardMode::Cut {
+                            if let Err(error) = remove_local_raw_bundle(&path) {
+                                let rollback = crate::cloud::delete_asset(config, &uploaded);
+                                return Err(if let Err(rollback) = rollback {
+                                    format!("{error} The uploaded rollback also failed: {rollback}")
+                                } else {
+                                    error
+                                });
+                            }
+                        }
+                        Ok(())
+                    });
+                match result {
+                    Ok(()) => {
+                        completed += 1;
+                        if let Some(ImageClipboard {
+                            content: ImageClipboardContent::Local(remaining),
+                            ..
+                        }) = remaining_cut_clipboard.as_mut()
+                        {
+                            remaining.retain(|candidate| candidate != &path);
+                        }
+                    }
+                    Err(error) => errors.push(format!("{label}: {error}")),
+                }
+            }
+            image_paste_summary(mode, total, completed, "AuRaw Cloud", errors)
+        }
+        #[cfg(target_os = "android")]
+        (ImageClipboardContent::Local(items), ImagePasteDestination::LocalLibrary) => {
+            let total = items.len();
+            let mut completed = 0usize;
+            let mut errors = Vec::new();
+            for item in items {
+                let result = if mode == ImageClipboardMode::Cut {
+                    Ok(())
+                } else {
+                    crate::android::duplicate_library_document(
+                        android_app,
+                        &item.uri,
+                        &item.display_name,
+                    )
+                    .map(|_| ())
+                };
+                match result {
+                    Ok(()) => {
+                        completed += 1;
+                        if let Some(ImageClipboard {
+                            content: ImageClipboardContent::Local(remaining),
+                            ..
+                        }) = remaining_cut_clipboard.as_mut()
+                        {
+                            remaining.retain(|candidate| candidate.uri != item.uri);
+                        }
+                    }
+                    Err(error) => errors.push(format!("{}: {error}", item.display_name)),
+                }
+            }
+            image_paste_summary(mode, total, completed, "the local library", errors)
+        }
+        #[cfg(target_os = "android")]
+        (ImageClipboardContent::Local(items), ImagePasteDestination::CloudFolder(folder_id)) => {
+            let total = items.len();
+            let mut completed = 0usize;
+            let mut errors = Vec::new();
+            for item in items {
+                let staged_sidecar = crate::android::materialize_raw_sidecar(
+                    android_app,
+                    &item.uri,
+                    &item.display_name,
+                );
+                let result = staged_sidecar.and_then(|staged_sidecar| {
+                    let upload = (|| {
+                        let raw =
+                            crate::android::open_document_for_cloud_upload(android_app, &item.uri)?;
+                        crate::cloud::upload_asset_file_with_sidecar_to_folder(
+                            config,
+                            raw,
+                            &item.display_name,
+                            Some(item.bytes),
+                            staged_sidecar.as_deref(),
+                            &folder_id,
+                        )
+                    })();
+                    if let Some(path) = staged_sidecar.as_deref() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    upload.and_then(|uploaded| {
+                        if mode == ImageClipboardMode::Cut {
+                            if let Err(error) = crate::android::delete_library_document(
+                                android_app,
+                                &item.uri,
+                                &item.display_name,
+                            ) {
+                                let rollback = crate::cloud::delete_asset(config, &uploaded);
+                                return Err(if let Err(rollback) = rollback {
+                                    format!("{error} The uploaded rollback also failed: {rollback}")
+                                } else {
+                                    error
+                                });
+                            }
+                        }
+                        Ok(())
+                    })
+                });
+                match result {
+                    Ok(()) => {
+                        completed += 1;
+                        if let Some(ImageClipboard {
+                            content: ImageClipboardContent::Local(remaining),
+                            ..
+                        }) = remaining_cut_clipboard.as_mut()
+                        {
+                            remaining.retain(|candidate| candidate.uri != item.uri);
+                        }
+                    }
+                    Err(error) => errors.push(format!("{}: {error}", item.display_name)),
+                }
+            }
+            image_paste_summary(mode, total, completed, "AuRaw Cloud", errors)
+        }
+        (ImageClipboardContent::Cloud(assets), ImagePasteDestination::CloudFolder(folder_id)) => {
+            let total = assets.len();
+            let mut completed = 0usize;
+            let mut errors = Vec::new();
+            for asset in assets {
+                let result = if mode == ImageClipboardMode::Copy {
+                    crate::cloud::copy_asset(config, &asset, &folder_id).map(|_| ())
+                } else {
+                    crate::cloud::update_asset(config, &asset, &folder_id, &asset.name).map(|_| ())
+                };
+                match result {
+                    Ok(()) => {
+                        completed += 1;
+                        if let Some(ImageClipboard {
+                            content: ImageClipboardContent::Cloud(remaining),
+                            ..
+                        }) = remaining_cut_clipboard.as_mut()
+                        {
+                            remaining.retain(|candidate| candidate.id != asset.id);
+                        }
+                    }
+                    Err(error) => errors.push(format!("{}: {error}", asset.name)),
+                }
+            }
+            image_paste_summary(mode, total, completed, "AuRaw Cloud", errors)
+        }
+        #[cfg(not(target_os = "android"))]
+        (ImageClipboardContent::Cloud(assets), ImagePasteDestination::LocalFolder(folder)) => {
+            let total = assets.len();
+            let result = (|| {
+                let cache_root = cache_root
+                    .ok_or_else(|| "AuRaw could not locate its private cloud cache.".to_owned())?;
+                let cached = crate::cloud::open_assets(config, cache_root, &assets, allow_network)?;
+                let mut completed = 0usize;
+                let mut errors = Vec::new();
+                for (asset, cached) in assets.iter().zip(cached) {
+                    let copied = copy_raw_bundle_to_folder(
+                        &cached.raw_path,
+                        std::ffi::OsStr::new(&asset.name),
+                        &folder,
+                    )
+                    .and_then(|destination| {
+                        if mode == ImageClipboardMode::Cut {
+                            if let Err(error) = crate::cloud::delete_asset(config, asset) {
+                                let _ = remove_local_raw_bundle(&destination);
+                                return Err(error);
+                            }
+                        }
+                        Ok(())
+                    });
+                    match copied {
+                        Ok(()) => {
+                            completed += 1;
+                            if let Some(ImageClipboard {
+                                content: ImageClipboardContent::Cloud(remaining),
+                                ..
+                            }) = remaining_cut_clipboard.as_mut()
+                            {
+                                remaining.retain(|candidate| candidate.id != asset.id);
+                            }
+                        }
+                        Err(error) => errors.push(format!("{}: {error}", asset.name)),
+                    }
+                }
+                image_paste_summary(
+                    mode,
+                    total,
+                    completed,
+                    &folder.display().to_string(),
+                    errors,
+                )
+            })();
+            result
+        }
+        #[cfg(target_os = "android")]
+        (ImageClipboardContent::Cloud(assets), ImagePasteDestination::LocalLibrary) => {
+            let total = assets.len();
+            let result = (|| {
+                let cache_root = cache_root
+                    .ok_or_else(|| "AuRaw could not locate its private cloud cache.".to_owned())?;
+                let cached = crate::cloud::open_assets(config, cache_root, &assets, allow_network)?;
+                let mut completed = 0usize;
+                let mut errors = Vec::new();
+                for (asset, cached) in assets.iter().zip(cached) {
+                    let copied = crate::android::import_cached_library_document(
+                        android_app,
+                        &cached.raw_path,
+                        &asset.name,
+                    )
+                    .and_then(|imported_name| {
+                        if mode == ImageClipboardMode::Cut {
+                            if let Err(error) = crate::cloud::delete_asset(config, asset) {
+                                let rollback = crate::android::delete_imported_library_document(
+                                    android_app,
+                                    &imported_name,
+                                );
+                                return Err(if let Err(rollback) = rollback {
+                                    format!(
+                                        "{error} The imported-copy rollback also failed: {rollback}"
+                                    )
+                                } else {
+                                    error
+                                });
+                            }
+                        }
+                        Ok(())
+                    });
+                    match copied {
+                        Ok(()) => {
+                            completed += 1;
+                            if let Some(ImageClipboard {
+                                content: ImageClipboardContent::Cloud(remaining),
+                                ..
+                            }) = remaining_cut_clipboard.as_mut()
+                            {
+                                remaining.retain(|candidate| candidate.id != asset.id);
+                            }
+                        }
+                        Err(error) => errors.push(format!("{}: {error}", asset.name)),
+                    }
+                }
+                image_paste_summary(mode, total, completed, "the local library", errors)
+            })();
+            result
+        }
+    };
+    let clear_clipboard = remaining_cut_clipboard
+        .as_ref()
+        .is_some_and(|clipboard| clipboard.count() == 0);
+    let remaining_clipboard = remaining_cut_clipboard.filter(|clipboard| clipboard.count() > 0);
+    ImagePasteCompletion {
+        result,
+        clear_clipboard,
+        remaining_clipboard,
     }
 }
 
@@ -828,30 +1273,6 @@ fn run_cloud_action(
             let result = cloud_batch_summary("Copied", total, completed, errors);
             CloudActionCompletion::Mutation {
                 clear_clipboard: clear_clipboard && result.is_ok(),
-                result,
-            }
-        }
-        CloudActionRequest::MoveAssets {
-            assets,
-            destination_folder_id,
-        } => {
-            let total = assets.len();
-            let mut completed = 0usize;
-            let mut errors = Vec::new();
-            for asset in assets {
-                match crate::cloud::update_asset(
-                    config,
-                    &asset,
-                    &destination_folder_id,
-                    &asset.name,
-                ) {
-                    Ok(_) => completed += 1,
-                    Err(error) => errors.push(format!("{}: {error}", asset.name)),
-                }
-            }
-            let result = cloud_batch_summary("Moved", total, completed, errors);
-            CloudActionCompletion::Mutation {
-                clear_clipboard: result.is_ok(),
                 result,
             }
         }
@@ -959,6 +1380,8 @@ impl LibraryState {
             cloud_expanded_folders: initial_cloud_expanded_folders(),
             cloud_action_receiver: None,
             cloud_clipboard: None,
+            image_clipboard: None,
+            image_paste_receiver: None,
             cloud_name_dialog: None,
             cloud_delete_confirmation: None,
             folder: None,
@@ -988,6 +1411,7 @@ impl LibraryState {
             folder_clipboard: None,
             folder_name_dialog: None,
             folder_delete_confirmation: None,
+            raw_name_dialog: None,
             export_dialog: None,
             adjustment_paste_dialog: None,
             ai_mask_refresh_prompt: None,
@@ -1027,8 +1451,11 @@ impl LibraryState {
             cloud_expanded_folders: initial_cloud_expanded_folders(),
             cloud_action_receiver: None,
             cloud_clipboard: None,
+            image_clipboard: None,
+            image_paste_receiver: None,
             cloud_name_dialog: None,
             cloud_delete_confirmation: None,
+            android_raw_name_dialog: None,
             android_app,
             entries: Vec::new(),
             entry_indices: HashMap::new(),
@@ -1189,6 +1616,8 @@ impl LibraryState {
             self.cloud_expanded_folders = initial_cloud_expanded_folders();
             self.cloud_action_receiver = None;
             self.cloud_clipboard = None;
+            self.image_clipboard = None;
+            self.image_paste_receiver = None;
             self.cloud_name_dialog = None;
             self.cloud_delete_confirmation = None;
         }
@@ -1402,9 +1831,105 @@ impl LibraryState {
         self.cloud_action_receiver.is_some()
     }
 
+    fn image_paste_in_progress(&self) -> bool {
+        self.image_paste_receiver.is_some()
+    }
+
+    fn start_image_paste(&mut self, destination: ImagePasteDestination, context: &egui::Context) {
+        if self.image_paste_receiver.is_some()
+            || self.cloud_action_receiver.is_some()
+            || self.cloud_upload_receiver.is_some()
+            || self.cloud_open_receiver.is_some()
+            || {
+                #[cfg(not(target_os = "android"))]
+                {
+                    self.file_action_receiver.is_some()
+                        || self.raw_import_receiver.is_some()
+                        || self.folder_operation_receiver.is_some()
+                }
+                #[cfg(target_os = "android")]
+                {
+                    false
+                }
+            }
+        {
+            self.status = "Wait for the current library transfer to finish.".to_owned();
+            return;
+        }
+        let Some(clipboard) = self.image_clipboard.clone() else {
+            self.status = "Copy or cut one or more RAW files first.".to_owned();
+            return;
+        };
+        #[cfg(not(target_os = "android"))]
+        let destination = match destination {
+            ImagePasteDestination::LocalFolder(folder) => {
+                let Some(root) = self.root_folder.as_deref() else {
+                    self.status = "Open a top-level local library folder first.".to_owned();
+                    return;
+                };
+                match canonical_library_directory(root, &folder, false) {
+                    Ok(folder) => ImagePasteDestination::LocalFolder(folder),
+                    Err(error) => {
+                        self.status = error;
+                        return;
+                    }
+                }
+            }
+            destination => destination,
+        };
+        if matches!(&destination, ImagePasteDestination::CloudFolder(_))
+            && self.cloud_config.normalized().is_err()
+        {
+            self.status = "Configure AuRaw Cloud before pasting RAW files there.".to_owned();
+            return;
+        }
+
+        let count = clipboard.count();
+        let config = self.cloud_config.clone();
+        let cache_root = self.cloud_cache_root.clone();
+        let allow_network = self.cloud_network_available();
+        #[cfg(target_os = "android")]
+        let android_app = self.android_app.clone();
+        let repaint = context.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.image_paste_receiver = Some(receiver);
+        self.status = format!(
+            "{} {count} RAW{}…",
+            if clipboard.mode == ImageClipboardMode::Copy {
+                "Copying"
+            } else {
+                "Moving"
+            },
+            if count == 1 { "" } else { "s" }
+        );
+        let spawn = std::thread::Builder::new()
+            .name("auraw-image-paste".to_owned())
+            .spawn(move || {
+                let completion = run_image_paste(
+                    &config,
+                    cache_root.as_deref(),
+                    allow_network,
+                    clipboard,
+                    destination,
+                    #[cfg(target_os = "android")]
+                    &android_app,
+                );
+                let _ = sender.send(completion);
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawn {
+            self.image_paste_receiver = None;
+            self.status = format!("Could not start the image paste: {error}");
+        }
+    }
+
     fn start_cloud_action(&mut self, request: CloudActionRequest, context: &egui::Context) {
         if self.cloud_action_receiver.is_some() {
             self.status = "Another cloud action is still running.".to_owned();
+            return;
+        }
+        if self.image_paste_receiver.is_some() {
+            self.status = "Wait for the current image paste to finish.".to_owned();
             return;
         }
         if self.cloud_upload_receiver.is_some() || self.cloud_open_receiver.is_some() {
@@ -1443,9 +1968,6 @@ impl LibraryState {
             CloudActionRequest::CopyAssets { assets, .. } => {
                 format!("Copying {} cloud RAWs…", assets.len())
             }
-            CloudActionRequest::MoveAssets { assets, .. } => {
-                format!("Moving {} cloud RAWs…", assets.len())
-            }
             CloudActionRequest::RenameAsset { .. } => "Renaming cloud RAW…".to_owned(),
             CloudActionRequest::DeleteAssets { assets } => {
                 format!("Deleting {} cloud RAWs…", assets.len())
@@ -1459,9 +1981,7 @@ impl LibraryState {
                 if assets.len() == 1 { "" } else { "s" },
                 match purpose {
                     CloudPreparedPurpose::Export => "export",
-                    #[cfg(not(target_os = "android"))]
                     CloudPreparedPurpose::CopyAdjustments => "copying adjustments",
-                    #[cfg(not(target_os = "android"))]
                     CloudPreparedPurpose::PasteAdjustments => "pasting adjustments",
                 }
             ),
@@ -1514,6 +2034,10 @@ impl LibraryState {
         paths: Vec<PathBuf>,
         context: &egui::Context,
     ) {
+        if self.image_paste_receiver.is_some() {
+            self.status = "Wait for the current image paste to finish.".to_owned();
+            return;
+        }
         if self.cloud_upload_receiver.is_some() {
             self.status = "Wait for the current AuRaw Cloud upload to finish.".to_owned();
             return;
@@ -1567,11 +2091,7 @@ impl LibraryState {
                         label: label.clone(),
                     });
                     repaint.request_repaint();
-                    match crate::cloud::upload_asset_path_to_folder(
-                        &config,
-                        &path,
-                        &folder_id,
-                    ) {
+                    match crate::cloud::upload_asset_path_to_folder(&config, &path, &folder_id) {
                         Ok(_) => uploaded += 1,
                         Err(error) => {
                             failed += 1;
@@ -1603,6 +2123,10 @@ impl LibraryState {
         selection_errors: String,
         context: &egui::Context,
     ) {
+        if self.image_paste_receiver.is_some() {
+            self.status = "Wait for the current image paste to finish.".to_owned();
+            return;
+        }
         if self.cloud_upload_receiver.is_some() {
             self.status = "Wait for the current AuRaw Cloud upload to finish.".to_owned();
             return;
@@ -1662,19 +2186,17 @@ impl LibraryState {
                         label: label.clone(),
                     });
                     repaint.request_repaint();
-                    let result = crate::android::open_document_for_cloud_upload(
-                        &android_app,
-                        &document.uri,
-                    )
-                    .and_then(|raw| {
-                        crate::cloud::upload_asset_file_to_folder(
-                            &config,
-                            raw,
-                            &document.display_name,
-                            document.bytes,
-                            &folder_id,
-                        )
-                    });
+                    let result =
+                        crate::android::open_document_for_cloud_upload(&android_app, &document.uri)
+                            .and_then(|raw| {
+                                crate::cloud::upload_asset_file_to_folder(
+                                    &config,
+                                    raw,
+                                    &document.display_name,
+                                    document.bytes,
+                                    &folder_id,
+                                )
+                            });
                     match result {
                         Ok(_) => uploaded += 1,
                         Err(error) => {
@@ -1944,6 +2466,9 @@ impl LibraryState {
             || self.raw_import_receiver.is_some()
             || self.folder_operation_receiver.is_some()
             || self.cloud_action_receiver.is_some()
+            || self.cloud_upload_receiver.is_some()
+            || self.cloud_open_receiver.is_some()
+            || self.image_paste_receiver.is_some()
     }
 
     #[cfg(not(target_os = "android"))]
@@ -2366,11 +2891,8 @@ impl LibraryState {
                         .into_iter()
                         .filter(|asset| asset.folder_id == folder_id)
                         .map(|asset| {
-                            let cloud_downloaded = crate::cloud::asset_available_offline(
-                                &config,
-                                &cache_root,
-                                &asset,
-                            );
+                            let cloud_downloaded =
+                                crate::cloud::asset_available_offline(&config, &cache_root, &asset);
                             LibraryFileInfo {
                                 display_path: format!("AuRaw Cloud / {}", asset.name),
                                 name: asset.name.clone(),
@@ -2378,9 +2900,7 @@ impl LibraryState {
                                 dimensions_hint: Some([asset.width, asset.height]),
                                 cloud_downloaded,
                                 #[cfg(not(target_os = "android"))]
-                                modified: Some(crate::cloud::modified_time(
-                                    asset.modified_seconds,
-                                )),
+                                modified: Some(crate::cloud::modified_time(asset.modified_seconds)),
                                 source: LibrarySource::Cloud(asset),
                             }
                         })
@@ -2585,6 +3105,31 @@ impl LibraryState {
     }
 
     pub(crate) fn poll(&mut self, context: &egui::Context) {
+        let pasted = self
+            .image_paste_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match pasted {
+            Some(Ok(completion)) => {
+                self.image_paste_receiver = None;
+                if completion.clear_clipboard {
+                    self.image_clipboard = None;
+                } else if let Some(remaining) = completion.remaining_clipboard {
+                    self.image_clipboard = Some(remaining);
+                }
+                self.clear_selection();
+                #[cfg(target_os = "android")]
+                crate::android::set_back_navigation_active(false);
+                self.status = completion.result.unwrap_or_else(|error| error);
+                self.refresh(context);
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.image_paste_receiver = None;
+                self.status = "The image paste stopped unexpectedly.".to_owned();
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+
         loop {
             let received = self
                 .cloud_upload_receiver
@@ -2596,9 +3141,8 @@ impl LibraryState {
                     total,
                     label,
                 })) => {
-                    self.status = format!(
-                        "Uploading {position} of {total} to AuRaw Cloud · {label}…"
-                    );
+                    self.status =
+                        format!("Uploading {position} of {total} to AuRaw Cloud · {label}…");
                 }
                 Some(Ok(CloudUploadEvent::Finished {
                     target,
@@ -3913,6 +4457,8 @@ fn cloud_image_context_menu(
     let selected_count = assets.len();
     let action_enabled = !app.library.cloud_action_in_progress()
         && !app.library.cloud_upload_in_progress()
+        && !app.library.image_paste_in_progress()
+        && app.library.cloud_open_receiver.is_none()
         && app.library_batch_export_progress().is_none()
         && !assets.is_empty();
     let mut action = None;
@@ -3932,37 +4478,34 @@ fn cloud_image_context_menu(
         ui.close();
     }
 
-    #[cfg(not(target_os = "android"))]
+    ui.separator();
+    if ui
+        .add_enabled(
+            action_enabled && selected_count == 1,
+            egui::Button::new("Copy adjustments"),
+        )
+        .clicked()
     {
-        ui.separator();
-        if ui
-            .add_enabled(
-                action_enabled && selected_count == 1,
-                egui::Button::new("Copy adjustments"),
-            )
-            .clicked()
-        {
-            action = assets
-                .first()
-                .cloned()
-                .map(CloudLibraryCardAction::CopyAdjustments);
-            ui.close();
-        }
-        if ui
-            .add_enabled(
-                action_enabled && app.has_copied_adjustments(),
-                egui::Button::new(if selected_count > 1 {
-                    "Paste adjustments to selected"
-                } else {
-                    "Paste adjustments"
-                }),
-            )
-            .on_disabled_hover_text("Copy adjustments from an image first")
-            .clicked()
-        {
-            action = Some(CloudLibraryCardAction::PasteAdjustments(assets.to_vec()));
-            ui.close();
-        }
+        action = assets
+            .first()
+            .cloned()
+            .map(CloudLibraryCardAction::CopyAdjustments);
+        ui.close();
+    }
+    if ui
+        .add_enabled(
+            action_enabled && app.has_copied_adjustments(),
+            egui::Button::new(if selected_count > 1 {
+                "Paste adjustments to selected"
+            } else {
+                "Paste adjustments"
+            }),
+        )
+        .on_disabled_hover_text("Copy adjustments from an image first")
+        .clicked()
+    {
+        action = Some(CloudLibraryCardAction::PasteAdjustments(assets.to_vec()));
+        ui.close();
     }
 
     ui.separator();
@@ -4001,10 +4544,7 @@ fn cloud_image_context_menu(
         )
         .clicked()
     {
-        action = assets
-            .first()
-            .cloned()
-            .map(CloudLibraryCardAction::Rename);
+        action = assets.first().cloned().map(CloudLibraryCardAction::Rename);
         ui.close();
     }
     ui.separator();
@@ -4023,9 +4563,7 @@ fn cloud_image_context_menu(
         )
         .clicked()
     {
-        action = Some(CloudLibraryCardAction::ResetAdjustments(
-            assets.to_vec(),
-        ));
+        action = Some(CloudLibraryCardAction::ResetAdjustments(assets.to_vec()));
         ui.close();
     }
     if ui
@@ -4045,10 +4583,7 @@ fn cloud_image_context_menu(
     action
 }
 
-fn detach_current_cloud_asset_if_selected(
-    app: &mut AurawApp,
-    assets: &[crate::cloud::CloudAsset],
-) {
+fn detach_current_cloud_asset_if_selected(app: &mut AurawApp, assets: &[crate::cloud::CloudAsset]) {
     let current = app.current_path.clone();
     let selected_current = current.as_ref().is_some_and(|path| {
         crate::cloud::cached_asset_id_for_raw(path)
@@ -4069,13 +4604,11 @@ fn detach_current_cloud_asset_if_inside_folder(app: &mut AurawApp, folder_id: &s
         .and_then(crate::cloud::cached_asset_id_for_raw)
         .and_then(|asset_id| app.library.cloud_asset_folders.get(&asset_id))
         .cloned();
-    let inside_folder = current_folder_id.as_deref().is_some_and(|current_folder_id| {
-        cloud_folder_contains(
-            &app.library.cloud_folders,
-            folder_id,
-            current_folder_id,
-        )
-    });
+    let inside_folder = current_folder_id
+        .as_deref()
+        .is_some_and(|current_folder_id| {
+            cloud_folder_contains(&app.library.cloud_folders, folder_id, current_folder_id)
+        });
     if inside_folder {
         if let Some(path) = current.as_deref() {
             app.detach_current_file_for_library_action(path);
@@ -4097,7 +4630,6 @@ fn apply_cloud_image_action(
             },
             context,
         ),
-        #[cfg(not(target_os = "android"))]
         CloudLibraryCardAction::CopyAdjustments(asset) => app.library.start_cloud_action(
             CloudActionRequest::PrepareAssets {
                 assets: vec![asset],
@@ -4105,7 +4637,6 @@ fn apply_cloud_image_action(
             },
             context,
         ),
-        #[cfg(not(target_os = "android"))]
         CloudLibraryCardAction::PasteAdjustments(assets) => app.library.start_cloud_action(
             CloudActionRequest::PrepareAssets {
                 assets,
@@ -4115,23 +4646,33 @@ fn apply_cloud_image_action(
         ),
         CloudLibraryCardAction::Copy(assets) => {
             let count = assets.len();
-            app.library.cloud_clipboard = Some(CloudClipboard {
-                mode: CloudClipboardMode::Copy,
-                content: CloudClipboardContent::Assets(assets),
+            app.library.image_clipboard = Some(ImageClipboard {
+                mode: ImageClipboardMode::Copy,
+                content: ImageClipboardContent::Cloud(assets),
             });
+            app.library.cloud_clipboard = None;
+            #[cfg(not(target_os = "android"))]
+            {
+                app.library.folder_clipboard = None;
+            }
             app.library.status = format!(
-                "Copied {count} cloud RAW{}. Choose Paste in a destination folder.",
+                "Copied {count} cloud RAW{}. Choose Paste in any local or cloud folder.",
                 if count == 1 { "" } else { "s" }
             );
         }
         CloudLibraryCardAction::Cut(assets) => {
             let count = assets.len();
-            app.library.cloud_clipboard = Some(CloudClipboard {
-                mode: CloudClipboardMode::Cut,
-                content: CloudClipboardContent::Assets(assets),
+            app.library.image_clipboard = Some(ImageClipboard {
+                mode: ImageClipboardMode::Cut,
+                content: ImageClipboardContent::Cloud(assets),
             });
+            app.library.cloud_clipboard = None;
+            #[cfg(not(target_os = "android"))]
+            {
+                app.library.folder_clipboard = None;
+            }
             app.library.status = format!(
-                "Cut {count} cloud RAW{}. Choose Paste in a destination folder.",
+                "Cut {count} cloud RAW{}. Choose Paste in any local or cloud folder.",
                 if count == 1 { "" } else { "s" }
             );
         }
@@ -4167,7 +4708,10 @@ pub(crate) enum LibraryCardAction {
     Export(Vec<PathBuf>),
     CopyAdjustments(PathBuf),
     PasteAdjustments(Vec<PathBuf>),
+    Copy(Vec<PathBuf>),
+    Cut(Vec<PathBuf>),
     Duplicate(Vec<PathBuf>),
+    Rename(PathBuf),
     ResetAdjustments(Vec<PathBuf>),
     Delete(Vec<PathBuf>),
 }
@@ -4201,7 +4745,10 @@ pub(crate) fn desktop_image_context_menu(
     }
     ui.separator();
     if ui
-        .add_enabled(action_enabled, egui::Button::new("Copy adjustments"))
+        .add_enabled(
+            action_enabled && selected_count == 1,
+            egui::Button::new("Copy adjustments"),
+        )
         .clicked()
     {
         action = Some(LibraryCardAction::CopyAdjustments(
@@ -4223,6 +4770,20 @@ pub(crate) fn desktop_image_context_menu(
         ui.close();
     }
     ui.separator();
+    if ui
+        .add_enabled(action_enabled, egui::Button::new("Copy"))
+        .clicked()
+    {
+        action = Some(LibraryCardAction::Copy(context_paths.to_vec()));
+        ui.close();
+    }
+    if ui
+        .add_enabled(action_enabled, egui::Button::new("Cut"))
+        .clicked()
+    {
+        action = Some(LibraryCardAction::Cut(context_paths.to_vec()));
+        ui.close();
+    }
     let duplicate_label = if selected_count > 1 {
         "Duplicate selected (RAW + sidecars)"
     } else {
@@ -4233,6 +4794,19 @@ pub(crate) fn desktop_image_context_menu(
         .clicked()
     {
         action = Some(LibraryCardAction::Duplicate(context_paths.to_vec()));
+        ui.close();
+    }
+    if ui
+        .add_enabled(
+            action_enabled && selected_count == 1,
+            egui::Button::new("Rename…"),
+        )
+        .clicked()
+    {
+        action = context_paths
+            .first()
+            .cloned()
+            .map(LibraryCardAction::Rename);
         ui.close();
     }
     let reset_label = if selected_count > 1 {
@@ -4321,9 +4895,58 @@ pub(crate) fn apply_desktop_image_action(
                 );
             }
         }
+        LibraryCardAction::Copy(paths) => {
+            let mode = ImageClipboardMode::Copy;
+            let count = paths.len();
+            app.library.image_clipboard = Some(ImageClipboard {
+                mode,
+                content: ImageClipboardContent::Local(paths),
+            });
+            app.library.cloud_clipboard = None;
+            app.library.folder_clipboard = None;
+            app.library.status = format!(
+                "{} {count} local RAW{}. Choose Paste in any local or cloud folder.",
+                if mode == ImageClipboardMode::Copy {
+                    "Copied"
+                } else {
+                    "Cut"
+                },
+                if count == 1 { "" } else { "s" }
+            );
+        }
+        LibraryCardAction::Cut(paths) => {
+            let mode = ImageClipboardMode::Cut;
+            let count = paths.len();
+            app.library.image_clipboard = Some(ImageClipboard {
+                mode,
+                content: ImageClipboardContent::Local(paths),
+            });
+            app.library.cloud_clipboard = None;
+            app.library.folder_clipboard = None;
+            app.library.status = format!(
+                "Cut {count} local RAW{}. Choose Paste in any local or cloud folder.",
+                if count == 1 { "" } else { "s" }
+            );
+        }
         LibraryCardAction::Duplicate(paths) => {
             app.library.clear_selection();
             app.library.duplicate_raws_with_sidecars(paths, ui.ctx());
+        }
+        LibraryCardAction::Rename(path) => {
+            let Some(name) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+            else {
+                app.library.status = "This RAW filename cannot be edited as text.".to_owned();
+                return;
+            };
+            app.library.raw_name_dialog = Some(LibraryRawNameDialog {
+                source: path,
+                name,
+                error: None,
+                focus_requested: false,
+            });
         }
         LibraryCardAction::ResetAdjustments(paths) => {
             let current_to_reopen = app
@@ -4701,7 +5324,10 @@ enum LibraryCardAction {
     Export(Vec<(String, String)>),
     CopyAdjustments((String, String)),
     PasteAdjustments(Vec<(String, String)>),
+    Copy(Vec<AndroidImageClipboardItem>),
+    Cut(Vec<AndroidImageClipboardItem>),
     Duplicate(Vec<(String, String)>),
+    Rename(AndroidImageClipboardItem),
     ResetAdjustments(Vec<(String, String)>),
     Delete(Vec<(String, String)>),
 }
@@ -4721,6 +5347,24 @@ fn android_selection_menu(
                 LibrarySource::Android {
                     uri, display_name, ..
                 } => Some((uri.clone(), display_name.clone())),
+                LibrarySource::Cloud(_) => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let clipboard_targets = || {
+        selected
+            .iter()
+            .filter_map(|(source, _)| match source {
+                LibrarySource::Android {
+                    uri,
+                    display_name,
+                    bytes,
+                    ..
+                } => Some(AndroidImageClipboardItem {
+                    uri: uri.clone(),
+                    display_name: display_name.clone(),
+                    bytes: *bytes,
+                }),
                 LibrarySource::Cloud(_) => None,
             })
             .collect::<Vec<_>>()
@@ -4776,6 +5420,20 @@ fn android_selection_menu(
         ui.close();
     }
     ui.separator();
+    if ui
+        .add_enabled(action_enabled, egui::Button::new("Copy"))
+        .clicked()
+    {
+        *library_action = Some(LibraryCardAction::Copy(clipboard_targets()));
+        ui.close();
+    }
+    if ui
+        .add_enabled(action_enabled, egui::Button::new("Cut"))
+        .clicked()
+    {
+        *library_action = Some(LibraryCardAction::Cut(clipboard_targets()));
+        ui.close();
+    }
     let duplicate_label = if selected_count > 1 {
         "Duplicate selected (RAW + sidecars)"
     } else {
@@ -4786,6 +5444,17 @@ fn android_selection_menu(
         .clicked()
     {
         *library_action = Some(LibraryCardAction::Duplicate(targets()));
+        ui.close();
+    }
+    if selected_count == 1
+        && ui
+            .add_enabled(action_enabled, egui::Button::new("Rename…"))
+            .clicked()
+    {
+        *library_action = clipboard_targets()
+            .into_iter()
+            .next()
+            .map(LibraryCardAction::Rename);
         ui.close();
     }
     let reset_label = if selected_count > 1 {
@@ -4893,6 +5562,152 @@ fn copy_file_create_new(source: &Path, destination: &Path) -> io::Result<()> {
         let _ = fs::set_permissions(destination, metadata.permissions());
     }
     result.map(|_| ())
+}
+
+#[cfg(not(target_os = "android"))]
+fn copy_raw_bundle_to_folder(
+    source_raw: &Path,
+    requested_name: &std::ffi::OsStr,
+    destination_folder: &Path,
+) -> Result<PathBuf, String> {
+    let requested_path = Path::new(requested_name);
+    if requested_path.file_name() != Some(requested_name)
+        || !crate::pipeline::is_supported_raw_path(requested_path)
+    {
+        return Err("The RAW has an unsafe or unsupported filename.".to_owned());
+    }
+    if !source_raw.is_file() {
+        return Err(format!("{} is no longer a file.", source_raw.display()));
+    }
+    if !destination_folder.is_dir() {
+        return Err(format!(
+            "The destination folder {} no longer exists.",
+            destination_folder.display()
+        ));
+    }
+
+    let stem = requested_path
+        .file_stem()
+        .map(OsString::from)
+        .unwrap_or_else(|| requested_name.to_os_string());
+    let extension = requested_path.extension().map(OsString::from);
+    let source_sidecar = crate::sidecar::sidecar_path_for_raw(source_raw);
+    for number in 0..=10_000usize {
+        let file_name = if number == 0 {
+            requested_name.to_os_string()
+        } else {
+            let mut candidate = stem.clone();
+            candidate.push(format!(" ({number})"));
+            if let Some(extension) = &extension {
+                candidate.push(".");
+                candidate.push(extension);
+            }
+            candidate
+        };
+        let destination_raw = destination_folder.join(file_name);
+        let destination_sidecar = crate::sidecar::sidecar_path_for_raw(&destination_raw);
+        if destination_raw.exists() || destination_sidecar.exists() {
+            continue;
+        }
+        match copy_file_create_new(source_raw, &destination_raw) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("Could not copy {}: {error}", source_raw.display()));
+            }
+        }
+        if source_sidecar.is_file() {
+            if let Err(error) = copy_file_create_new(&source_sidecar, &destination_sidecar) {
+                let _ = fs::remove_file(&destination_raw);
+                let _ = fs::remove_file(&destination_sidecar);
+                return Err(format!("Could not copy the matching sidecar: {error}"));
+            }
+        }
+        if let Err(error) = crate::file_ops::sync_parent_directory(destination_folder) {
+            log::warn!(
+                "could not sync image paste folder {} after copying {}: {error}",
+                destination_folder.display(),
+                destination_raw.display()
+            );
+        }
+        return Ok(destination_raw);
+    }
+    Err(format!(
+        "Could not find an unused name for {:?} in {}.",
+        requested_name,
+        destination_folder.display()
+    ))
+}
+
+#[cfg(not(target_os = "android"))]
+fn remove_local_raw_bundle(raw_path: &Path) -> Result<(), String> {
+    fs::remove_file(raw_path).map_err(|error| {
+        format!(
+            "Could not remove {} after copying it: {error}",
+            raw_path.display()
+        )
+    })?;
+    let sidecar = crate::sidecar::sidecar_path_for_raw(raw_path);
+    if let Err(error) = fs::remove_file(&sidecar) {
+        if error.kind() != io::ErrorKind::NotFound {
+            log::warn!(
+                "could not remove the old sidecar {} after moving its RAW: {error}",
+                sidecar.display()
+            );
+        }
+    }
+    if let Err(error) = crate::sidecar::invalidate_developed_thumbnail_cache(raw_path) {
+        log::warn!("could not remove the old developed thumbnail after moving a RAW: {error}");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn rename_raw_bundle(source_raw: &Path, requested_name: &str) -> Result<PathBuf, String> {
+    validate_cloud_item_name(requested_name, true)?;
+    let parent = source_raw
+        .parent()
+        .ok_or_else(|| "The RAW has no parent folder.".to_owned())?;
+    let destination_raw = parent.join(requested_name);
+    if destination_raw == source_raw {
+        return Ok(destination_raw);
+    }
+    let source_sidecar = crate::sidecar::sidecar_path_for_raw(source_raw);
+    let destination_sidecar = crate::sidecar::sidecar_path_for_raw(&destination_raw);
+    if destination_raw.exists() || destination_sidecar.exists() {
+        return Err(format!("{} already exists.", destination_raw.display()));
+    }
+    fs::rename(source_raw, &destination_raw).map_err(|error| {
+        format!(
+            "Could not rename {} to {}: {error}",
+            source_raw.display(),
+            destination_raw.display()
+        )
+    })?;
+    if source_sidecar.is_file() {
+        if let Err(error) = fs::rename(&source_sidecar, &destination_sidecar) {
+            let rollback = fs::rename(&destination_raw, source_raw);
+            return Err(if rollback.is_ok() {
+                format!("Could not rename the matching sidecar: {error}")
+            } else {
+                format!(
+                    "The RAW was renamed to {}, but its sidecar could not be renamed: {error}",
+                    destination_raw.display()
+                )
+            });
+        }
+    }
+    if let Err(error) = crate::sidecar::invalidate_developed_thumbnail_cache(source_raw) {
+        log::warn!("could not clear the old thumbnail after renaming a RAW: {error}");
+    }
+    if let Err(error) = crate::file_ops::sync_parent_directory(parent) {
+        log::warn!(
+            "could not sync RAW folder {} after renaming {}: {error}",
+            parent.display(),
+            destination_raw.display()
+        );
+    }
+    Ok(destination_raw)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -5486,6 +6301,74 @@ fn apply_library_adjustment_paste(
         });
 }
 
+#[cfg(target_os = "android")]
+fn prepare_android_cloud_adjustment_paste(
+    ui: &mut Ui,
+    app: &mut AurawApp,
+    paths: Vec<PathBuf>,
+    frame: &eframe::Frame,
+) {
+    let (edited_count, failures) = app.library_adjustment_edit_count_paths(&paths);
+    if !failures.is_empty() {
+        app.library.status = format!(
+            "Could not inspect selected cloud adjustments. {}",
+            failures.join(" · ")
+        );
+    } else if edited_count > 0 {
+        app.library.adjustment_paste_dialog = Some(LibraryAdjustmentPasteDialog {
+            targets: AndroidAdjustmentPasteTargets::Cloud(paths),
+            edited_count,
+        });
+    } else {
+        apply_android_cloud_adjustment_paste(
+            app,
+            paths,
+            crate::sidecar::AdjustmentPasteMode::Merge,
+            ui.ctx(),
+            frame,
+        );
+    }
+}
+
+#[cfg(target_os = "android")]
+fn apply_android_cloud_adjustment_paste(
+    app: &mut AurawApp,
+    paths: Vec<PathBuf>,
+    mode: crate::sidecar::AdjustmentPasteMode,
+    context: &egui::Context,
+    frame: &eframe::Frame,
+) {
+    let total = paths.len();
+    let (completed, ai_refresh, failures) =
+        app.paste_library_adjustments_to_paths(&paths, mode, frame);
+    app.library.clear_selection();
+    crate::android::set_back_navigation_active(false);
+    app.library.refresh(context);
+    let mut status = if failures.is_empty() {
+        format!(
+            "Pasted adjustments to {} selected {}",
+            completed.len(),
+            if completed.len() == 1 {
+                "cloud image"
+            } else {
+                "cloud images"
+            }
+        )
+    } else {
+        format!(
+            "Pasted adjustments to {} of {total} selected cloud images. {}",
+            completed.len(),
+            failures.join(" · ")
+        )
+    };
+    if !ai_refresh.is_empty() {
+        status.push_str(
+            " Content-aware masks were marked for regeneration and can be refreshed when each cloud RAW is opened.",
+        );
+    }
+    app.library.status = status;
+}
+
 fn show_library_batch_export_progress(ui: &mut Ui, app: &mut AurawApp) {
     let mut cancel = false;
     #[cfg(not(target_os = "android"))]
@@ -5599,6 +6482,7 @@ fn show_cloud_folder_node(
     folders: &[crate::cloud::CloudFolder],
     selected_folder_id: &str,
     clipboard: Option<&CloudClipboard>,
+    image_clipboard: Option<&ImageClipboard>,
     action_in_progress: bool,
     expanded_folders: &mut HashSet<String>,
     requested_action: &mut Option<CloudFolderUiAction>,
@@ -5650,11 +6534,8 @@ fn show_cloud_folder_node(
                 egui_phosphor::regular::FOLDER
             };
             let response = ui.add(
-                egui::Button::selectable(
-                    selected,
-                    egui::RichText::new(format!("{icon}  {name}")),
-                )
-                .sense(Sense::click_and_drag()),
+                egui::Button::selectable(selected, egui::RichText::new(format!("{icon}  {name}")))
+                    .sense(Sense::click_and_drag()),
             );
             if response.clicked() {
                 *requested_action = Some(CloudFolderUiAction::Select(folder_id.to_owned()));
@@ -5672,20 +6553,19 @@ fn show_cloud_folder_node(
                     *requested_action = Some(CloudFolderUiAction::New(folder_id.to_owned()));
                     ui.close();
                 }
-                let paste_label = match clipboard.map(|clipboard| &clipboard.content) {
-                    Some(CloudClipboardContent::Assets(assets)) => format!(
-                        "Paste {} RAW{}",
-                        assets.len(),
-                        if assets.len() == 1 { "" } else { "s" }
-                    ),
-                    Some(CloudClipboardContent::Folder(folder)) => {
-                        format!("Paste “{}”", folder.name)
+                let paste_label = if let Some(clipboard) = image_clipboard {
+                    clipboard.paste_label()
+                } else {
+                    match clipboard.map(|clipboard| &clipboard.content) {
+                        Some(CloudClipboardContent::Folder(folder)) => {
+                            format!("Paste “{}”", folder.name)
+                        }
+                        None => "Paste".to_owned(),
                     }
-                    None => "Paste".to_owned(),
                 };
                 if ui
                     .add_enabled(
-                        enabled && clipboard.is_some(),
+                        enabled && (clipboard.is_some() || image_clipboard.is_some()),
                         egui::Button::new(paste_label),
                     )
                     .clicked()
@@ -5771,6 +6651,7 @@ fn show_cloud_folder_node(
                         folders,
                         selected_folder_id,
                         clipboard,
+                        image_clipboard,
                         action_in_progress,
                         expanded_folders,
                         requested_action,
@@ -5804,6 +6685,8 @@ fn apply_cloud_folder_ui_action(
                 mode: CloudClipboardMode::Copy,
                 content: CloudClipboardContent::Folder(folder.clone()),
             });
+            app.library.image_clipboard = None;
+            app.library.folder_clipboard = None;
             app.library.status = format!(
                 "Copied cloud folder {}. Choose Paste in a destination.",
                 folder.name
@@ -5814,6 +6697,8 @@ fn apply_cloud_folder_ui_action(
                 mode: CloudClipboardMode::Cut,
                 content: CloudClipboardContent::Folder(folder.clone()),
             });
+            app.library.image_clipboard = None;
+            app.library.folder_clipboard = None;
             app.library.status = format!(
                 "Cut cloud folder {}. Choose Paste in a destination.",
                 folder.name
@@ -5856,6 +6741,7 @@ fn show_library_folder_node(
     root_folder: &Path,
     selected_folder: Option<&Path>,
     clipboard: Option<&LibraryFolderClipboard>,
+    image_clipboard: Option<&ImageClipboard>,
     action_in_progress: bool,
     expanded_folders: &mut HashSet<PathBuf>,
     requested_folder: &mut Option<PathBuf>,
@@ -5932,21 +6818,27 @@ fn show_library_folder_node(
                     ui.close();
                 }
 
-                let clipboard_name = clipboard
-                    .and_then(|clipboard| clipboard.path.file_name())
-                    .map(|name| name.to_string_lossy());
-                let paste_label = clipboard_name.map_or_else(
-                    || "Paste Folder".to_owned(),
-                    |name| format!("Paste “{name}”"),
+                let paste_label = image_clipboard.map_or_else(
+                    || {
+                        clipboard
+                            .and_then(|clipboard| clipboard.path.file_name())
+                            .map(|name| format!("Paste “{}”", name.to_string_lossy()))
+                            .unwrap_or_else(|| "Paste".to_owned())
+                    },
+                    ImageClipboard::paste_label,
                 );
                 if ui
                     .add_enabled(
-                        enabled && clipboard.is_some(),
+                        enabled && (clipboard.is_some() || image_clipboard.is_some()),
                         egui::Button::new(paste_label),
                     )
                     .clicked()
                 {
-                    *requested_action = Some(LibraryFolderUiAction::Paste(node.path.clone()));
+                    *requested_action = Some(if image_clipboard.is_some() {
+                        LibraryFolderUiAction::PasteImages(node.path.clone())
+                    } else {
+                        LibraryFolderUiAction::Paste(node.path.clone())
+                    });
                     ui.close();
                 }
                 ui.separator();
@@ -6020,6 +6912,7 @@ fn show_library_folder_node(
                         root_folder,
                         selected_folder,
                         clipboard,
+                        image_clipboard,
                         action_in_progress,
                         expanded_folders,
                         requested_folder,
@@ -6055,6 +6948,8 @@ fn apply_library_folder_ui_action(
                         path: path.clone(),
                         mode: LibraryFolderClipboardMode::Copy,
                     });
+                    app.library.image_clipboard = None;
+                    app.library.cloud_clipboard = None;
                     app.library.status = format!(
                         "Copied folder {}. Choose Paste Folder in a destination.",
                         path.display()
@@ -6070,6 +6965,8 @@ fn apply_library_folder_ui_action(
                         path: path.clone(),
                         mode: LibraryFolderClipboardMode::Cut,
                     });
+                    app.library.image_clipboard = None;
+                    app.library.cloud_clipboard = None;
                     app.library.status = format!(
                         "Cut folder {}. Choose Paste Folder in a destination.",
                         path.display()
@@ -6107,6 +7004,13 @@ fn apply_library_folder_ui_action(
                 },
             };
             app.library.start_folder_operation(operation, context);
+        }
+        LibraryFolderUiAction::PasteImages(destination_parent) => {
+            start_image_clipboard_paste(
+                app,
+                ImagePasteDestination::LocalFolder(destination_parent),
+                context,
+            );
         }
         LibraryFolderUiAction::Rename(source) => {
             if app
@@ -6317,22 +7221,19 @@ fn paste_cloud_clipboard(
     destination_folder_id: String,
     context: &egui::Context,
 ) {
+    if app.library.image_clipboard.is_some() {
+        start_image_clipboard_paste(
+            app,
+            ImagePasteDestination::CloudFolder(destination_folder_id),
+            context,
+        );
+        return;
+    }
     let Some(clipboard) = app.library.cloud_clipboard.clone() else {
-        app.library.status = "Copy or cut cloud items first.".to_owned();
+        app.library.status = "Copy or cut images or a cloud folder first.".to_owned();
         return;
     };
     let request = match clipboard.content {
-        CloudClipboardContent::Assets(assets) => match clipboard.mode {
-            CloudClipboardMode::Copy => CloudActionRequest::CopyAssets {
-                assets,
-                destination_folder_id,
-                clear_clipboard: false,
-            },
-            CloudClipboardMode::Cut => CloudActionRequest::MoveAssets {
-                assets,
-                destination_folder_id,
-            },
-        },
         CloudClipboardContent::Folder(folder) => match clipboard.mode {
             CloudClipboardMode::Copy => CloudActionRequest::CopyFolder {
                 folder,
@@ -6348,6 +7249,89 @@ fn paste_cloud_clipboard(
         },
     };
     app.library.start_cloud_action(request, context);
+}
+
+fn start_image_clipboard_paste(
+    app: &mut AurawApp,
+    destination: ImagePasteDestination,
+    context: &egui::Context,
+) {
+    let Some(clipboard) = app.library.image_clipboard.clone() else {
+        app.library.status = "Copy or cut one or more RAW files first.".to_owned();
+        return;
+    };
+    let busy = app.library.image_paste_receiver.is_some()
+        || app.library.cloud_action_receiver.is_some()
+        || app.library.cloud_upload_receiver.is_some()
+        || app.library.cloud_open_receiver.is_some()
+        || {
+            #[cfg(not(target_os = "android"))]
+            {
+                app.library.file_action_receiver.is_some()
+                    || app.library.raw_import_receiver.is_some()
+                    || app.library.folder_operation_receiver.is_some()
+            }
+            #[cfg(target_os = "android")]
+            {
+                false
+            }
+        };
+    if busy {
+        app.library.status = "Wait for the current library transfer to finish.".to_owned();
+        return;
+    }
+    if matches!(&destination, ImagePasteDestination::CloudFolder(_))
+        && app.library.cloud_config.normalized().is_err()
+    {
+        app.library.status = "Configure AuRaw Cloud before pasting RAW files there.".to_owned();
+        return;
+    }
+    if clipboard.mode == ImageClipboardMode::Cut {
+        match &clipboard.content {
+            #[cfg(not(target_os = "android"))]
+            ImageClipboardContent::Local(paths) => {
+                let moves_current = app.current_path.as_ref().is_some_and(|current| {
+                    paths.iter().any(|path| path == current)
+                        && match &destination {
+                            ImagePasteDestination::LocalFolder(folder) => {
+                                current.parent() != Some(folder.as_path())
+                            }
+                            ImagePasteDestination::CloudFolder(_) => true,
+                        }
+                });
+                if moves_current {
+                    if let Some(current) = app.current_path.clone() {
+                        app.detach_current_file_for_library_action(&current);
+                        app.current_path = None;
+                    }
+                }
+            }
+            #[cfg(target_os = "android")]
+            ImageClipboardContent::Local(items) => {
+                if matches!(&destination, ImagePasteDestination::CloudFolder(_)) {
+                    for item in items {
+                        app.detach_current_android_document_for_library_action(
+                            &item.uri,
+                            &item.display_name,
+                        );
+                    }
+                }
+            }
+            ImageClipboardContent::Cloud(assets) => {
+                let deletes_server_copy = match &destination {
+                    ImagePasteDestination::CloudFolder(_) => false,
+                    #[cfg(not(target_os = "android"))]
+                    ImagePasteDestination::LocalFolder(_) => true,
+                    #[cfg(target_os = "android")]
+                    ImagePasteDestination::LocalLibrary => true,
+                };
+                if deletes_server_copy {
+                    detach_current_cloud_asset_if_selected(app, assets);
+                }
+            }
+        }
+    }
+    app.library.start_image_paste(destination, context);
 }
 
 fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
@@ -6367,7 +7351,9 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
         .cloud_folder(&app.library.cloud_folder_id)
         .cloned();
     let action_enabled = !app.library.cloud_action_in_progress()
-        && !app.library.cloud_upload_in_progress();
+        && !app.library.cloud_upload_in_progress()
+        && !app.library.image_paste_in_progress()
+        && app.library.cloud_open_receiver.is_none();
     let mut navigate_to = None;
     let mut create_folder = false;
     let mut paste = false;
@@ -6397,8 +7383,16 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
         }
         if ui
             .add_enabled(
-                action_enabled && app.library.cloud_clipboard.is_some(),
-                egui::Button::new("Paste here"),
+                action_enabled
+                    && (app.library.cloud_clipboard.is_some()
+                        || app.library.image_clipboard.is_some()),
+                egui::Button::new(
+                    app.library
+                        .image_clipboard
+                        .as_ref()
+                        .map(ImageClipboard::paste_label)
+                        .unwrap_or_else(|| "Paste here".to_owned()),
+                ),
             )
             .clicked()
         {
@@ -6484,6 +7478,11 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
             mode,
             content: CloudClipboardContent::Folder(folder.clone()),
         });
+        app.library.image_clipboard = None;
+        #[cfg(not(target_os = "android"))]
+        {
+            app.library.folder_clipboard = None;
+        }
         app.library.status = format!(
             "{} cloud folder {}. Choose Paste in a destination.",
             if mode == CloudClipboardMode::Copy {
@@ -6493,6 +7492,37 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
             },
             folder.name
         );
+    }
+}
+
+fn show_local_image_paste_bar(ui: &mut Ui, app: &mut AurawApp) {
+    if app.library.is_cloud_view() {
+        return;
+    }
+    let Some(clipboard) = app.library.image_clipboard.as_ref() else {
+        return;
+    };
+    let label = format!("{} here", clipboard.paste_label());
+    let enabled = {
+        #[cfg(not(target_os = "android"))]
+        {
+            !app.library.file_action_in_progress() && app.library.folder.is_some()
+        }
+        #[cfg(target_os = "android")]
+        {
+            !app.library.image_paste_in_progress()
+                && !app.library.cloud_action_in_progress()
+                && !app.library.cloud_upload_in_progress()
+                && app.library.cloud_open_receiver.is_none()
+        }
+    };
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        #[cfg(not(target_os = "android"))]
+        if let Some(folder) = app.library.folder.clone() {
+            start_image_clipboard_paste(app, ImagePasteDestination::LocalFolder(folder), ui.ctx());
+        }
+        #[cfg(target_os = "android")]
+        start_image_clipboard_paste(app, ImagePasteDestination::LocalLibrary, ui.ctx());
     }
 }
 
@@ -6511,11 +7541,13 @@ fn show_cloud_dialogs(ui: &mut Ui, app: &mut AurawApp) {
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ui.ctx(), |ui| {
-                ui.label(if matches!(dialog.kind, CloudNameDialogKind::RenameAsset { .. }) {
-                    "RAW filename"
-                } else {
-                    "Folder name"
-                });
+                ui.label(
+                    if matches!(dialog.kind, CloudNameDialogKind::RenameAsset { .. }) {
+                        "RAW filename"
+                    } else {
+                        "Folder name"
+                    },
+                );
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut dialog.name)
                         .desired_width(320.0)
@@ -6658,6 +7690,200 @@ fn show_cloud_dialogs(ui: &mut Ui, app: &mut AurawApp) {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn show_local_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+    let mut close = false;
+    let mut rename = None;
+    if let Some(dialog) = app.library.raw_name_dialog.as_mut() {
+        egui::Window::new("Rename local RAW")
+            .id(egui::Id::new("local-raw-name-dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label("RAW filename");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut dialog.name)
+                        .desired_width(320.0)
+                        .id_source("local-raw-name-input"),
+                );
+                if !dialog.focus_requested {
+                    response.request_focus();
+                    dialog.focus_requested = true;
+                }
+                if let Some(error) = dialog.error.as_deref() {
+                    ui.label(
+                        egui::RichText::new(error)
+                            .small()
+                            .color(ui.visuals().error_fg_color),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    let enter = response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui.button("Rename").clicked() || enter {
+                        match validate_cloud_item_name(&dialog.name, true) {
+                            Ok(()) => {
+                                rename = Some((dialog.source.clone(), dialog.name.clone()));
+                            }
+                            Err(error) => {
+                                dialog.error = Some(error);
+                                dialog.focus_requested = false;
+                            }
+                        }
+                    }
+                });
+            });
+    }
+    if close {
+        app.library.raw_name_dialog = None;
+    }
+    if let Some((source, name)) = rename {
+        let was_current = app.detach_current_file_for_library_action(&source);
+        if was_current {
+            app.current_path = None;
+        }
+        match rename_raw_bundle(&source, &name) {
+            Ok(destination) => {
+                if let Some(ImageClipboard {
+                    content: ImageClipboardContent::Local(paths),
+                    ..
+                }) = app.library.image_clipboard.as_mut()
+                {
+                    for path in paths {
+                        if path == &source {
+                            *path = destination.clone();
+                        }
+                    }
+                }
+                app.library.raw_name_dialog = None;
+                app.library.clear_selection();
+                app.library.refresh(ui.ctx());
+                app.library.status = format!("Renamed local RAW to {}.", destination.display());
+                if was_current {
+                    app.open_path_labeled(
+                        destination.clone(),
+                        name,
+                        false,
+                        crate::sidecar::SidecarTarget::Desktop {
+                            raw_path: destination,
+                        },
+                        frame,
+                        None,
+                    );
+                }
+            }
+            Err(error) => {
+                if let Some(dialog) = app.library.raw_name_dialog.as_mut() {
+                    dialog.error = Some(error);
+                    dialog.focus_requested = false;
+                }
+                if was_current && source.is_file() {
+                    let label = source
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("local RAW")
+                        .to_owned();
+                    app.open_path_labeled(
+                        source.clone(),
+                        label,
+                        false,
+                        crate::sidecar::SidecarTarget::Desktop { raw_path: source },
+                        frame,
+                        None,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn show_android_local_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp) {
+    let mut close = false;
+    let mut rename = None;
+    if let Some(dialog) = app.library.android_raw_name_dialog.as_mut() {
+        crate::ui::responsive_popup(egui::Window::new("Rename local RAW"), ui.ctx(), 420.0)
+            .id(egui::Id::new("android-local-raw-name-dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                ui.label("RAW filename");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut dialog.name)
+                        .desired_width(320.0)
+                        .id_source("android-local-raw-name-input"),
+                );
+                if !dialog.focus_requested {
+                    response.request_focus();
+                    dialog.focus_requested = true;
+                }
+                if let Some(error) = dialog.error.as_deref() {
+                    ui.label(
+                        egui::RichText::new(error)
+                            .small()
+                            .color(ui.visuals().error_fg_color),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    let enter = response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui.button("Rename").clicked() || enter {
+                        match validate_cloud_item_name(&dialog.name, true) {
+                            Ok(()) => {
+                                rename = Some((dialog.source.clone(), dialog.name.clone()));
+                            }
+                            Err(error) => {
+                                dialog.error = Some(error);
+                                dialog.focus_requested = false;
+                            }
+                        }
+                    }
+                });
+            });
+    }
+    if close {
+        app.library.android_raw_name_dialog = None;
+    }
+    if let Some((source, name)) = rename {
+        match app.rename_android_library_item(&source.uri, &source.display_name, &name) {
+            Ok(renamed_uri) => {
+                if let Some(ImageClipboard {
+                    content: ImageClipboardContent::Local(items),
+                    ..
+                }) = app.library.image_clipboard.as_mut()
+                {
+                    for item in items {
+                        if item.uri == source.uri {
+                            item.uri = renamed_uri.clone();
+                            item.display_name = name.clone();
+                        }
+                    }
+                }
+                app.library.android_raw_name_dialog = None;
+                app.library.clear_selection();
+                crate::android::set_back_navigation_active(false);
+                app.library.refresh(ui.ctx());
+                app.library.status = format!("Renamed local RAW to {name}.");
+            }
+            Err(error) => {
+                if let Some(dialog) = app.library.android_raw_name_dialog.as_mut() {
+                    dialog.error = Some(error);
+                    dialog.focus_requested = false;
+                }
+            }
+        }
+    }
+}
+
 pub struct Library;
 
 impl Library {
@@ -6749,6 +7975,7 @@ impl Library {
                     ""
                 },
                 app.library.cloud_clipboard.as_ref(),
+                app.library.image_clipboard.as_ref(),
                 action_in_progress,
                 &mut app.library.cloud_expanded_folders,
                 &mut requested_cloud_action,
@@ -6768,6 +7995,7 @@ impl Library {
                 app.library.folder.as_deref()
             };
             let clipboard = app.library.folder_clipboard.as_ref();
+            let image_clipboard = app.library.image_clipboard.as_ref();
             let expanded_folders = &mut app.library.expanded_folders;
             egui::ScrollArea::both()
                 .max_height(tree_height)
@@ -6781,6 +8009,7 @@ impl Library {
                             root_folder,
                             selected_folder,
                             clipboard,
+                            image_clipboard,
                             action_in_progress,
                             expanded_folders,
                             &mut requested_folder,
@@ -6863,33 +8092,34 @@ impl Library {
                                     }
                                 }
                             }
-                            #[cfg(not(target_os = "android"))]
                             CloudPreparedPurpose::CopyAdjustments => {
                                 if let Some(path) = paths.first() {
-                                    let status =
-                                        match app.copy_library_adjustments_from_path(path) {
-                                            Ok(()) => format!(
-                                                "Copied adjustments from {}",
-                                                cached
-                                                    .first()
-                                                    .map(|asset| asset.label.as_str())
-                                                    .unwrap_or("cloud RAW")
-                                            ),
-                                            Err(error) => {
-                                                format!("Could not copy adjustments: {error}")
-                                            }
-                                        };
+                                    let status = match app.copy_library_adjustments_from_path(path)
+                                    {
+                                        Ok(()) => format!(
+                                            "Copied adjustments from {}",
+                                            cached
+                                                .first()
+                                                .map(|asset| asset.label.as_str())
+                                                .unwrap_or("cloud RAW")
+                                        ),
+                                        Err(error) => {
+                                            format!("Could not copy adjustments: {error}")
+                                        }
+                                    };
                                     app.library.status = status;
                                 }
                             }
-                            #[cfg(not(target_os = "android"))]
                             CloudPreparedPurpose::PasteAdjustments => {
+                                #[cfg(not(target_os = "android"))]
                                 apply_desktop_image_action(
                                     ui,
                                     app,
                                     frame,
                                     LibraryCardAction::PasteAdjustments(paths),
                                 );
+                                #[cfg(target_os = "android")]
+                                prepare_android_cloud_adjustment_paste(ui, app, paths, frame);
                             }
                         }
                     }
@@ -7000,7 +8230,11 @@ impl Library {
                             }
                         } else {
                             let action_enabled = app.library_batch_export_progress().is_none()
-                                && app.library_ai_mask_refresh_status().is_none();
+                                && app.library_ai_mask_refresh_status().is_none()
+                                && !app.library.image_paste_in_progress()
+                                && !app.library.cloud_action_in_progress()
+                                && !app.library.cloud_upload_in_progress()
+                                && app.library.cloud_open_receiver.is_none();
                             android_selection_menu(
                                 ui,
                                 &selected_android_items,
@@ -7174,6 +8408,7 @@ impl Library {
             );
         }
         show_cloud_folder_bar(ui, app);
+        show_local_image_paste_bar(ui, app);
         if !app.library.status.is_empty() {
             ui.add(
                 egui::Label::new(
@@ -7402,6 +8637,10 @@ impl Library {
         }
 
         show_cloud_dialogs(ui, app);
+        #[cfg(not(target_os = "android"))]
+        show_local_raw_name_dialog(ui, app, frame);
+        #[cfg(target_os = "android")]
+        show_android_local_raw_name_dialog(ui, app);
 
         #[cfg(target_os = "android")]
         if let Some(action) = library_action {
@@ -7438,7 +8677,7 @@ impl Library {
                         if edited_count > 0 {
                             app.library.adjustment_paste_dialog =
                                 Some(LibraryAdjustmentPasteDialog {
-                                    targets,
+                                    targets: AndroidAdjustmentPasteTargets::Local(targets),
                                     edited_count,
                                 });
                         } else {
@@ -7456,6 +8695,34 @@ impl Library {
                             failures.join(" · ")
                         );
                     }
+                }
+                LibraryCardAction::Copy(items) => {
+                    let count = items.len();
+                    app.library.image_clipboard = Some(ImageClipboard {
+                        mode: ImageClipboardMode::Copy,
+                        content: ImageClipboardContent::Local(items),
+                    });
+                    app.library.cloud_clipboard = None;
+                    app.library.clear_selection();
+                    crate::android::set_back_navigation_active(false);
+                    app.library.status = format!(
+                        "Copied {count} local RAW{}. Paste the selection in Local or any cloud folder.",
+                        if count == 1 { "" } else { "s" }
+                    );
+                }
+                LibraryCardAction::Cut(items) => {
+                    let count = items.len();
+                    app.library.image_clipboard = Some(ImageClipboard {
+                        mode: ImageClipboardMode::Cut,
+                        content: ImageClipboardContent::Local(items),
+                    });
+                    app.library.cloud_clipboard = None;
+                    app.library.clear_selection();
+                    crate::android::set_back_navigation_active(false);
+                    app.library.status = format!(
+                        "Cut {count} local RAW{}. Paste the selection in Local or any cloud folder.",
+                        if count == 1 { "" } else { "s" }
+                    );
                 }
                 LibraryCardAction::Duplicate(targets) => {
                     let total = targets.len();
@@ -7481,6 +8748,14 @@ impl Library {
                             failures.join(" · ")
                         )
                     };
+                }
+                LibraryCardAction::Rename(source) => {
+                    app.library.android_raw_name_dialog = Some(AndroidLibraryRawNameDialog {
+                        name: source.display_name.clone(),
+                        source,
+                        error: None,
+                        focus_requested: false,
+                    });
                 }
                 LibraryCardAction::ResetAdjustments(targets) => {
                     let total = targets.len();
@@ -7579,22 +8854,31 @@ impl Library {
             }
             if paste_action != 0 {
                 if let Some(dialog) = app.library.adjustment_paste_dialog.take() {
-                    match paste_action {
-                        2 => apply_library_adjustment_paste(
-                            app,
-                            dialog.targets,
-                            crate::sidecar::AdjustmentPasteMode::Merge,
-                            ui.ctx(),
-                            frame,
-                        ),
-                        3 => apply_library_adjustment_paste(
-                            app,
-                            dialog.targets,
-                            crate::sidecar::AdjustmentPasteMode::Replace,
-                            ui.ctx(),
-                            frame,
-                        ),
-                        _ => {}
+                    let mode = match paste_action {
+                        2 => Some(crate::sidecar::AdjustmentPasteMode::Merge),
+                        3 => Some(crate::sidecar::AdjustmentPasteMode::Replace),
+                        _ => None,
+                    };
+                    match (mode, dialog.targets) {
+                        (Some(mode), AndroidAdjustmentPasteTargets::Local(targets)) => {
+                            apply_library_adjustment_paste(
+                                app,
+                                targets,
+                                mode,
+                                ui.ctx(),
+                                frame,
+                            );
+                        }
+                        (Some(mode), AndroidAdjustmentPasteTargets::Cloud(paths)) => {
+                            apply_android_cloud_adjustment_paste(
+                                app,
+                                paths,
+                                mode,
+                                ui.ctx(),
+                                frame,
+                            );
+                        }
+                        (None, _) => {}
                     }
                 }
             }
@@ -7817,8 +9101,7 @@ impl Library {
         #[cfg(target_os = "android")]
         let show_import_fab = !app.library.has_selection();
         #[cfg(not(target_os = "android"))]
-        let show_import_fab =
-            app.library.is_cloud_view() && !app.library.selection_mode();
+        let show_import_fab = app.library.is_cloud_view() && !app.library.selection_mode();
         if show_import_fab && !app.library.cloud_upload_in_progress() {
             let cloud_upload = app.library.is_cloud_view();
             let bounds = ui.max_rect().shrink(16.0);
@@ -8423,21 +9706,78 @@ mod tests {
     use super::{
         balanced_justified_row_ranges, cloud_cache_icon, cloud_folder_id_for_catalog,
         copy_directory_create_new, desktop_selection_toggle_label, duplicate_raw_and_sidecar,
-        elide_middle, format_file_size,
-        import_folder_into_library, import_raw_into_folder, justified_thumbnail_layout,
-        library_import_fab_rect, library_import_icon, loaded_library_thumbnail,
-        make_resident_thumbnail, new_library_entry, run_folder_operation, run_thumbnail_workers,
-        scan_folder, scan_folder_tree, scan_folder_with_limit, validate_folder_name, LibraryFileInfo,
+        elide_middle, format_file_size, import_folder_into_library, import_raw_into_folder,
+        justified_thumbnail_layout, library_import_fab_rect, library_import_icon,
+        loaded_library_thumbnail, make_resident_thumbnail, new_library_entry, rename_raw_bundle,
+        run_folder_operation, run_image_paste, run_thumbnail_workers, scan_folder,
+        scan_folder_tree, scan_folder_with_limit, validate_folder_name, ImageClipboard,
+        ImageClipboardContent, ImageClipboardMode, ImagePasteDestination, LibraryFileInfo,
         LibraryFolderOperation, LibraryState, LibraryThumbnailSize, LibraryView, RawImportOutcome,
-        ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction, LIBRARY_IMPORT_FAB_EDGE,
+        ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
+        LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     use std::collections::HashSet;
     use std::fs;
+    #[cfg(not(target_os = "android"))]
+    use std::io::{Read, Write};
+    #[cfg(not(target_os = "android"))]
+    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{mpsc, Arc, RwLock};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[cfg(not(target_os = "android"))]
+    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let header_end = loop {
+            let count = stream.read(&mut buffer).unwrap();
+            assert!(count > 0, "client closed before sending HTTP headers");
+            request.extend_from_slice(&buffer[..count]);
+            if let Some(index) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let content_length = String::from_utf8_lossy(&request[..header_end])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let count = stream.read(&mut buffer).unwrap();
+            assert!(count > 0, "client closed before sending HTTP body");
+            request.extend_from_slice(&buffer[..count]);
+        }
+        request
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn write_http_response(stream: &mut std::net::TcpStream, content_type: &str, body: &[u8]) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn sha256_hex(bytes: &[u8]) -> String {
+        ring::digest::digest(&ring::digest::SHA256, bytes)
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
 
     #[test]
     fn missing_cloud_catalog_folder_falls_back_to_root() {
@@ -8455,7 +9795,6 @@ mod tests {
             crate::cloud::CLOUD_ROOT_FOLDER_ID
         );
     }
-
 
     #[test]
     fn middle_elision_preserves_both_ends() {
@@ -8538,7 +9877,10 @@ mod tests {
         };
         library.cloud_folders = vec![parent.clone(), child.clone()];
         library.cloud_folder_id = child.id.clone();
-        assert_eq!(library.cloud_folder_path(&child.id), "Cloud / Trips / Day 1");
+        assert_eq!(
+            library.cloud_folder_path(&child.id),
+            "Cloud / Trips / Day 1"
+        );
         assert_eq!(
             library.cloud_breadcrumbs(),
             vec![
@@ -8582,10 +9924,7 @@ mod tests {
         let rect = library_import_fab_rect(bounds);
         assert_eq!(
             rect.size(),
-            eframe::egui::vec2(
-                LIBRARY_IMPORT_FAB_EDGE,
-                LIBRARY_IMPORT_FAB_EDGE
-            )
+            eframe::egui::vec2(LIBRARY_IMPORT_FAB_EDGE, LIBRARY_IMPORT_FAB_EDGE)
         );
         assert_eq!(rect.right_bottom(), bounds.right_bottom());
         assert_eq!(library_import_icon(), egui_phosphor::regular::PLUS);
@@ -9195,6 +10534,288 @@ mod tests {
             b"sidecar-bytes"
         );
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_image_clipboard_copies_and_moves_raws_with_sidecars() {
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-image-clipboard-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        let raw = source.join("photo.CR3");
+        fs::write(&raw, b"raw-bytes").unwrap();
+        fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"sidecar-bytes").unwrap();
+
+        let copy = run_image_paste(
+            &crate::cloud::CloudConfig::default(),
+            None,
+            false,
+            ImageClipboard {
+                mode: ImageClipboardMode::Copy,
+                content: ImageClipboardContent::Local(vec![raw.clone()]),
+            },
+            ImagePasteDestination::LocalFolder(destination.clone()),
+        );
+        assert!(copy.result.is_ok());
+        assert!(!copy.clear_clipboard);
+        let copied = destination.join("photo.CR3");
+        assert_eq!(fs::read(&copied).unwrap(), b"raw-bytes");
+        assert_eq!(
+            fs::read(crate::sidecar::sidecar_path_for_raw(&copied)).unwrap(),
+            b"sidecar-bytes"
+        );
+        assert!(raw.is_file());
+
+        let cut = run_image_paste(
+            &crate::cloud::CloudConfig::default(),
+            None,
+            false,
+            ImageClipboard {
+                mode: ImageClipboardMode::Cut,
+                content: ImageClipboardContent::Local(vec![raw.clone()]),
+            },
+            ImagePasteDestination::LocalFolder(destination.clone()),
+        );
+        assert!(cut.result.is_ok());
+        assert!(cut.clear_clipboard);
+        assert!(!raw.exists());
+        assert!(!crate::sidecar::sidecar_path_for_raw(&raw).exists());
+        let moved = destination.join("photo (1).CR3");
+        assert_eq!(fs::read(&moved).unwrap(), b"raw-bytes");
+        assert_eq!(
+            fs::read(crate::sidecar::sidecar_path_for_raw(&moved)).unwrap(),
+            b"sidecar-bytes"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn partial_local_cut_keeps_only_unmoved_raws_on_the_clipboard() {
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-partial-cut-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        let moved = source.join("moved.CR3");
+        let missing = source.join("missing.CR3");
+        fs::write(&moved, b"raw").unwrap();
+
+        let completion = run_image_paste(
+            &crate::cloud::CloudConfig::default(),
+            None,
+            false,
+            ImageClipboard {
+                mode: ImageClipboardMode::Cut,
+                content: ImageClipboardContent::Local(vec![moved.clone(), missing.clone()]),
+            },
+            ImagePasteDestination::LocalFolder(destination.clone()),
+        );
+
+        assert!(completion.result.is_err());
+        assert!(!completion.clear_clipboard);
+        assert!(!moved.exists());
+        assert_eq!(fs::read(destination.join("moved.CR3")).unwrap(), b"raw");
+        let remaining = completion.remaining_clipboard.unwrap();
+        assert_eq!(remaining.count(), 1);
+        match remaining.content {
+            ImageClipboardContent::Local(paths) => assert_eq!(paths, vec![missing]),
+            ImageClipboardContent::Cloud(_) => panic!("expected a local clipboard"),
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_raw_rename_keeps_the_matching_sidecar() {
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-rename-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let raw = root.join("before.NEF");
+        fs::write(&raw, b"raw").unwrap();
+        fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"sidecar").unwrap();
+
+        let renamed = rename_raw_bundle(&raw, "after.NEF").unwrap();
+        assert_eq!(renamed, root.join("after.NEF"));
+        assert!(!raw.exists());
+        assert!(!crate::sidecar::sidecar_path_for_raw(&raw).exists());
+        assert_eq!(fs::read(&renamed).unwrap(), b"raw");
+        assert_eq!(
+            fs::read(crate::sidecar::sidecar_path_for_raw(&renamed)).unwrap(),
+            b"sidecar"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn image_clipboard_uploads_local_raw_and_sidecar_to_cloud() {
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-local-cloud-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let raw = root.join("upload.DNG");
+        let raw_bytes = b"clipboard-raw";
+        let sidecar_bytes = b"clipboard-sidecar";
+        fs::write(&raw, raw_bytes).unwrap();
+        fs::write(crate::sidecar::sidecar_path_for_raw(&raw), sidecar_bytes).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let raw_etag = sha256_hex(raw_bytes);
+        let sidecar_etag = sha256_hex(sidecar_bytes);
+        let response = serde_json::to_vec(&serde_json::json!({
+            "id": raw_etag,
+            "name": "upload.DNG",
+            "bytes": raw_bytes.len(),
+            "modified_seconds": 1,
+            "width": 32,
+            "height": 24,
+            "raw_etag": raw_etag,
+            "sidecar_etag": sidecar_etag,
+            "thumbnail_etag": "d".repeat(64),
+            "folder_id": crate::cloud::CLOUD_ROOT_FOLDER_ID,
+        }))
+        .unwrap();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /api/v1/assets HTTP/1.1\r\n"));
+            assert!(request_text.contains("name=\"raw\""));
+            assert!(request_text.contains("clipboard-raw"));
+            assert!(request_text.contains("name=\"sidecar\""));
+            assert!(request_text.contains("clipboard-sidecar"));
+            write_http_response(&mut stream, "application/json", &response);
+        });
+
+        let completion = run_image_paste(
+            &crate::cloud::CloudConfig {
+                enabled: true,
+                server_url: format!("http://{address}"),
+                access_token: String::new(),
+            },
+            None,
+            true,
+            ImageClipboard {
+                mode: ImageClipboardMode::Copy,
+                content: ImageClipboardContent::Local(vec![raw.clone()]),
+            },
+            ImagePasteDestination::CloudFolder(crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned()),
+        );
+        responder.join().unwrap();
+        assert!(completion.result.is_ok());
+        assert!(raw.is_file());
+        assert!(crate::sidecar::sidecar_path_for_raw(&raw).is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn image_clipboard_downloads_cloud_raw_and_sidecar_to_local_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "auraw-library-cloud-local-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache = root.join("cache");
+        let destination = root.join("destination");
+        fs::create_dir_all(&destination).unwrap();
+        let raw = b"downloaded-cloud-raw";
+        let sidecar = b"downloaded-cloud-sidecar";
+        let asset = crate::cloud::CloudAsset {
+            id: sha256_hex(raw),
+            name: "download.NEF".to_owned(),
+            bytes: raw.len() as u64,
+            modified_seconds: 1,
+            width: 40,
+            height: 30,
+            raw_etag: sha256_hex(raw),
+            sidecar_etag: Some(sha256_hex(sidecar)),
+            thumbnail_etag: "e".repeat(64),
+            folder_id: crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned(),
+        };
+        let catalog = serde_json::to_vec(&serde_json::json!({
+            "items": [asset.clone()],
+            "folders": [],
+        }))
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_asset_id = asset.id.clone();
+        let responder = std::thread::spawn(move || {
+            for (path, content_type, body) in [
+                ("/api/v1/assets".to_owned(), "application/json", catalog),
+                (
+                    format!("/api/v1/assets/{expected_asset_id}/raw"),
+                    "application/octet-stream",
+                    raw.to_vec(),
+                ),
+                (
+                    format!("/api/v1/assets/{expected_asset_id}/sidecar"),
+                    "application/vnd.auraw.sidecar",
+                    sidecar.to_vec(),
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                assert!(String::from_utf8_lossy(&request)
+                    .starts_with(&format!("GET {path} HTTP/1.1\r\n")));
+                write_http_response(&mut stream, content_type, &body);
+            }
+        });
+
+        let completion = run_image_paste(
+            &crate::cloud::CloudConfig {
+                enabled: true,
+                server_url: format!("http://{address}"),
+                access_token: String::new(),
+            },
+            Some(&cache),
+            true,
+            ImageClipboard {
+                mode: ImageClipboardMode::Copy,
+                content: ImageClipboardContent::Cloud(vec![asset]),
+            },
+            ImagePasteDestination::LocalFolder(destination.clone()),
+        );
+        responder.join().unwrap();
+        assert!(completion.result.is_ok(), "{:?}", completion.result);
+        let copied = destination.join("download.NEF");
+        assert_eq!(fs::read(&copied).unwrap(), raw);
+        assert_eq!(
+            fs::read(crate::sidecar::sidecar_path_for_raw(&copied)).unwrap(),
+            sidecar
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

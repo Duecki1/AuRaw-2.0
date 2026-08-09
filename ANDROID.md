@@ -171,9 +171,18 @@ The Cloud tab also exposes the server's nested folder hierarchy through a
 breadcrumb and child-folder buttons. The current-folder menu creates, copies,
 cuts, renames, or deletes folders, and **Paste here** accepts folders or RAWs.
 Long-press a cloud RAW to enter multi-select; the overflow menu can copy, cut,
-duplicate, reset, delete, or export the selection. Cloud batch export prepares
+duplicate, rename, reset, delete, or export the selection. Cloud batch export prepares
 only those selected RAWs in app-private cache and publishes the results to
 `Pictures/AuRaw` like a Local batch export.
+
+Copy and cut use one clipboard across the **Local** and **Cloud** tabs. The
+Local paste button duplicates local selections or imports cached cloud RAWs;
+**Paste here** in Cloud uploads local selections or copies/moves server RAWs.
+Matching `.auraw` sidecars are carried in both directions, and cut removes the
+source only after its destination succeeds. Local's long-press menu exposes
+the same image actions, including collision-safe RAW-and-sidecar rename. If a
+multi-file cut is only partly successful, only the unmoved items remain ready
+to paste again.
 
 Embedded RAW previews are read lazily through a file descriptor and
 `/proc/self/fd`. When a provider or LibRaw path cannot seek that descriptor, AuRaw

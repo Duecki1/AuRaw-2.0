@@ -812,6 +812,82 @@ pub fn duplicate_library_document(
     .map_err(|error| format!("could not duplicate Android RAW library item: {error:#}"))
 }
 
+pub fn import_cached_library_document(
+    app: &AndroidApp,
+    raw_path: &std::path::Path,
+    display_name: &str,
+) -> Result<String, String> {
+    let raw_path = raw_path
+        .to_str()
+        .ok_or_else(|| "Cloud cache path is not valid UTF-8".to_owned())?
+        .to_owned();
+    let display_name = display_name.to_owned();
+    with_storage_manager(app, |env, storage_manager| {
+        let raw_path = env.new_string(&raw_path)?;
+        let display_name = env.new_string(&display_name)?;
+        let object = env
+            .call_method(
+                storage_manager,
+                jni::jni_str!("importCachedRawLibraryDocument"),
+                jni::jni_sig!((JString, JString) -> JString),
+                &[JValue::Object(&raw_path), JValue::Object(&display_name)],
+            )?
+            .l()?;
+        let imported_name = env.cast_local::<JString>(object)?;
+        Ok(imported_name.to_string())
+    })
+    .map_err(|error| format!("could not import cloud RAW into Android library: {error:#}"))
+}
+
+pub fn delete_imported_library_document(
+    app: &AndroidApp,
+    display_name: &str,
+) -> Result<(), String> {
+    let display_name = display_name.to_owned();
+    with_storage_manager(app, |env, storage_manager| {
+        let display_name = env.new_string(&display_name)?;
+        env.call_method(
+            storage_manager,
+            jni::jni_str!("deleteImportedRawLibraryDocument"),
+            jni::jni_sig!((JString) -> void),
+            &[JValue::Object(&display_name)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not roll back imported Android RAW: {error:#}"))
+}
+
+pub fn rename_library_document(
+    app: &AndroidApp,
+    raw_uri: &str,
+    display_name: &str,
+    requested_name: &str,
+) -> Result<String, String> {
+    let raw_uri = raw_uri.to_owned();
+    let display_name = display_name.to_owned();
+    let requested_name = requested_name.to_owned();
+    with_storage_manager(app, |env, storage_manager| {
+        let raw_uri = env.new_string(&raw_uri)?;
+        let display_name = env.new_string(&display_name)?;
+        let requested_name = env.new_string(&requested_name)?;
+        let object = env
+            .call_method(
+                storage_manager,
+                jni::jni_str!("renameRawLibraryDocument"),
+                jni::jni_sig!((JString, JString, JString) -> JString),
+                &[
+                    JValue::Object(&raw_uri),
+                    JValue::Object(&display_name),
+                    JValue::Object(&requested_name),
+                ],
+            )?
+            .l()?;
+        let renamed_uri = env.cast_local::<JString>(object)?;
+        Ok(renamed_uri.to_string())
+    })
+    .map_err(|error| format!("could not rename Android RAW library item: {error:#}"))
+}
+
 pub fn delete_library_document(
     app: &AndroidApp,
     raw_uri: &str,
