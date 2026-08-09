@@ -93,6 +93,14 @@ copy/cut/paste, duplicate, rename, reset, and delete. Export downloads only the
 selected RAWs and sidecars into the existing private cache before running the
 same batch exporter used by the Local library.
 
+The image clipboard is shared between Local and Cloud. Copy or cut one or more
+RAWs, switch tabs or folders, and use **Paste** in a local or cloud destination.
+Local-to-local copies, uploads, and downloads preserve the matching `.auraw`
+sidecar and choose a collision-safe filename instead of overwriting an existing
+RAW. A cut removes its source only after the destination has been completed.
+If only part of a multi-file cut succeeds, the clipboard keeps only the RAWs
+that still need moving, so **Paste** can be retried without duplicating work.
+
 The Docker server project lives beside this checkout in `AuRaw-2.0-Server`.
 Its README covers startup, token authentication, imports, HTTPS deployment,
 storage, and backups.

@@ -466,6 +466,88 @@ final class StorageManager {
         }
     }
 
+    /** Imports a RAW prepared in AuRaw's private cloud cache and its sidecar. */
+    String importCachedRawLibraryDocument(String rawPath, String displayName) throws Exception {
+        File sourceRaw = new File(rawPath);
+        if (!sourceRaw.isFile() || !isRawName(displayName)) {
+            throw new IllegalArgumentException("The cached cloud RAW is missing or unsupported");
+        }
+        StoredRaw imported = null;
+        try {
+            imported = storeRawInLibrary(Uri.fromFile(sourceRaw), displayName);
+            File sourceSidecar = new File(rawPath + ".auraw");
+            if (sourceSidecar.isFile()) {
+                publishRawSidecar(
+                        sourceSidecar.getAbsolutePath(),
+                        imported.uri.toString(),
+                        imported.displayName);
+            }
+            return imported.displayName;
+        } catch (Exception error) {
+            if (imported != null) {
+                try {
+                    deleteRawLibraryDocument(imported.uri.toString(), imported.displayName);
+                } catch (Exception ignored) {
+                    // Preserve the original failure; best-effort cleanup only.
+                }
+            }
+            throw error;
+        }
+    }
+
+    /** Rolls back a cloud-cache import that completed before its server-side move failed. */
+    void deleteImportedRawLibraryDocument(String displayName) throws Exception {
+        String safeName = safeRawName(displayName);
+        if (!safeName.equals(displayName) || !isRawName(displayName)) {
+            throw new IllegalArgumentException("The imported RAW filename is unsafe or unsupported");
+        }
+        File raw = new File(rawLibraryDirectory(), displayName);
+        if (!raw.isFile()) {
+            throw new IllegalStateException("The imported RAW no longer exists");
+        }
+        deleteRawLibraryDocument(Uri.fromFile(raw).toString(), displayName);
+    }
+
+    /** Renames an app-owned library RAW and its matching sidecar as one bundle. */
+    String renameRawLibraryDocument(
+            String rawUriText,
+            String displayName,
+            String requestedName) throws Exception {
+        Uri rawUri = Uri.parse(rawUriText);
+        verifyRawLibraryIdentity(rawUri, displayName);
+        String safeName = safeRawName(requestedName);
+        if (!safeName.equals(requestedName) || !isRawName(requestedName)) {
+            throw new IllegalArgumentException("Enter a safe supported RAW filename");
+        }
+        if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
+            throw new IllegalStateException(
+                    "This legacy Android library item must finish migrating before it can be renamed");
+        }
+
+        File sourceRaw = new File(rawUri.getPath());
+        if (displayName.equals(requestedName)) {
+            return rawUri.toString();
+        }
+        File parent = sourceRaw.getParentFile();
+        File destinationRaw = new File(parent, requestedName);
+        File sourceSidecar = new File(parent, sidecarDisplayName(displayName));
+        File destinationSidecar = new File(parent, sidecarDisplayName(requestedName));
+        if (destinationRaw.exists() || destinationSidecar.exists()) {
+            throw new IllegalStateException(requestedName + " already exists");
+        }
+        if (!sourceRaw.renameTo(destinationRaw)) {
+            throw new IllegalStateException("Android storage could not rename the RAW file");
+        }
+        if (sourceSidecar.isFile() && !sourceSidecar.renameTo(destinationSidecar)) {
+            if (!destinationRaw.renameTo(sourceRaw)) {
+                throw new IllegalStateException(
+                        "The RAW was renamed, but its sidecar and RAW rollback both failed");
+            }
+            throw new IllegalStateException("Android storage could not rename the RAW sidecar");
+        }
+        return Uri.fromFile(destinationRaw).toString();
+    }
+
     /** Deletes a library RAW and its sidecar after validating AuRaw ownership. */
     void deleteRawLibraryDocument(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);

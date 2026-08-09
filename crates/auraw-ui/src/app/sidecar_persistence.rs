@@ -514,7 +514,7 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    fn detach_current_android_document_for_library_action(
+    pub(crate) fn detach_current_android_document_for_library_action(
         &mut self,
         raw_uri: &str,
         display_name: &str,
@@ -561,6 +561,37 @@ impl AurawApp {
         display_name: &str,
     ) -> Result<String, String> {
         crate::android::duplicate_library_document(&self.android_app, raw_uri, display_name)
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn rename_android_library_item(
+        &mut self,
+        raw_uri: &str,
+        display_name: &str,
+        requested_name: &str,
+    ) -> Result<String, String> {
+        let was_current =
+            self.detach_current_android_document_for_library_action(raw_uri, display_name);
+        let result = crate::android::rename_library_document(
+            &self.android_app,
+            raw_uri,
+            display_name,
+            requested_name,
+        );
+        match result {
+            Ok(renamed_uri) => {
+                if was_current {
+                    self.open_android_library_document(&renamed_uri, requested_name);
+                }
+                Ok(renamed_uri)
+            }
+            Err(error) => {
+                if was_current {
+                    self.open_android_library_document(raw_uri, display_name);
+                }
+                Err(error)
+            }
+        }
     }
 
     #[cfg(target_os = "android")]

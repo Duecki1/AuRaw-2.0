@@ -719,7 +719,6 @@ fn validate_upload_size(display_name: &str, bytes: Option<u64>) -> Result<(), St
     Ok(())
 }
 
-#[cfg(not(target_os = "android"))]
 fn checked_upload_part<'a>(
     path: &Path,
     maximum_bytes: u64,
@@ -858,17 +857,43 @@ pub fn upload_asset_file_to_folder<'a>(
     declared_bytes: Option<u64>,
     folder_id: &'a str,
 ) -> Result<CloudAsset, String> {
+    upload_asset_file_with_sidecar_to_folder(
+        config,
+        raw,
+        display_name,
+        declared_bytes,
+        None,
+        folder_id,
+    )
+}
+
+pub fn upload_asset_file_with_sidecar_to_folder<'a>(
+    config: &CloudConfig,
+    raw: File,
+    display_name: &'a str,
+    declared_bytes: Option<u64>,
+    sidecar_path: Option<&Path>,
+    folder_id: &'a str,
+) -> Result<CloudAsset, String> {
     validate_upload_name(display_name)?;
     validate_upload_size(display_name, declared_bytes)?;
     let raw = ureq::unversioned::multipart::Part::owned_reader(raw.take(MAX_RAW_BYTES + 1))
         .file_name(display_name)
         .mime_str("application/octet-stream")
         .map_err(|error| format!("Could not prepare {display_name} for upload: {error}"))?;
-    send_upload_form(
-        config,
-        ureq::unversioned::multipart::Form::new().part("raw", raw),
-        folder_id,
-    )
+    let mut form = ureq::unversioned::multipart::Form::new().part("raw", raw);
+    if let Some(sidecar_path) = sidecar_path {
+        let sidecar = checked_upload_part(
+            sidecar_path,
+            crate::sidecar::MAX_SIDECAR_BYTES,
+            "sidecar",
+        )?
+        .file_name(&format!("{display_name}.auraw"))
+        .mime_str("application/vnd.auraw.sidecar")
+        .map_err(|error| format!("Could not prepare the sidecar for upload: {error}"))?;
+        form = form.part("sidecar", sidecar);
+    }
+    send_upload_form(config, form, folder_id)
 }
 
 fn asset_cache_dir(cache_root: &Path, server_url: &str, asset_id: &str) -> PathBuf {
