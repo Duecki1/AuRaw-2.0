@@ -151,6 +151,12 @@ the server. A Cloud status label remains visible in Develop, and sidecar saves
 sync back with conflict detection. Plain HTTP addresses are supported for a
 trusted LAN; use an HTTPS reverse proxy on any wider network.
 
+The floating **+** button is available in both Library tabs. In **Local**, it
+imports selected documents into AuRaw's hidden local library. In **Cloud**, it
+streams the selections directly from Android's system picker to the server,
+shows per-file upload status, and refreshes the cloud catalog when finished;
+it does not create local-library copies.
+
 Embedded RAW previews are read lazily through a file descriptor and
 `/proc/self/fd`. When a provider or LibRaw path cannot seek that descriptor, AuRaw
 materializes a temporary cache copy and removes it after decode. This also works
