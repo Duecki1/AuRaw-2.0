@@ -185,6 +185,14 @@ fn library_import_icon() -> &'static str {
     egui_phosphor::regular::PLUS
 }
 
+fn cloud_cache_icon(downloaded: bool) -> &'static str {
+    if downloaded {
+        egui_phosphor::regular::DOWNLOAD
+    } else {
+        egui_phosphor::regular::CLOUD
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LibraryFileInfo {
     source: LibrarySource,
@@ -192,6 +200,7 @@ struct LibraryFileInfo {
     name: String,
     bytes: u64,
     dimensions_hint: Option<[u32; 2]>,
+    cloud_downloaded: bool,
     #[cfg(not(target_os = "android"))]
     modified: Option<SystemTime>,
 }
@@ -284,6 +293,10 @@ impl ThumbnailWorkQueue {
 }
 
 enum ScanEvent {
+    CloudAvailability {
+        generation: u64,
+        offline_reason: Option<String>,
+    },
     Catalog {
         generation: u64,
         files: Vec<LibraryFileInfo>,
@@ -517,6 +530,7 @@ pub(crate) struct LibraryState {
     view: LibraryView,
     cloud_config: crate::cloud::CloudConfig,
     cloud_cache_root: Option<PathBuf>,
+    cloud_offline_reason: Option<String>,
     cloud_connection_receiver: Option<mpsc::Receiver<Result<String, String>>>,
     cloud_connection_status: Option<Result<String, String>>,
     cloud_open_receiver: Option<mpsc::Receiver<CloudOpenEvent>>,
@@ -610,6 +624,7 @@ impl LibraryState {
             view: LibraryView::Local,
             cloud_config: crate::cloud::CloudConfig::default(),
             cloud_cache_root: None,
+            cloud_offline_reason: None,
             cloud_connection_receiver: None,
             cloud_connection_status: None,
             cloud_open_receiver: None,
@@ -669,6 +684,7 @@ impl LibraryState {
             view: LibraryView::Local,
             cloud_config: crate::cloud::CloudConfig::default(),
             cloud_cache_root: None,
+            cloud_offline_reason: None,
             cloud_connection_receiver: None,
             cloud_connection_status: None,
             cloud_open_receiver: None,
@@ -733,6 +749,7 @@ impl LibraryState {
             // bounded cache write, but it can no longer navigate the UI.
             self.cloud_open_receiver = None;
             self.cloud_open_label = None;
+            self.cloud_offline_reason = None;
         }
         if !self.cloud_config.enabled && self.view == LibraryView::Cloud {
             self.show_local(context);
@@ -765,6 +782,7 @@ impl LibraryState {
     pub(crate) fn show_local(&mut self, context: &egui::Context) {
         self.cloud_open_receiver = None;
         self.cloud_open_label = None;
+        self.cloud_offline_reason = None;
         if self.view != LibraryView::Local {
             self.view = LibraryView::Local;
             self.location = self.local_location.clone();
@@ -835,6 +853,7 @@ impl LibraryState {
             return;
         };
         let config = self.cloud_config.clone();
+        let allow_network = self.cloud_network_available();
         let label = asset.name.clone();
         let repaint = context.clone();
         let (sender, receiver) = mpsc::channel();
@@ -847,10 +866,11 @@ impl LibraryState {
                 let progress_sender = sender.clone();
                 let progress_repaint = repaint.clone();
                 let mut last_reported = 0u64;
-                let result = crate::cloud::download_asset(
+                let result = crate::cloud::open_asset(
                     &config,
                     &cache_root,
                     &asset,
+                    allow_network,
                     move |downloaded, total| {
                         if downloaded == total
                             || downloaded.saturating_sub(last_reported)
@@ -871,6 +891,19 @@ impl LibraryState {
             self.cloud_open_label = None;
             self.status = format!("Could not start the cloud RAW download: {error}");
         }
+    }
+
+    #[cfg(target_os = "android")]
+    fn cloud_network_available(&self) -> bool {
+        crate::android::network_available(&self.android_app).unwrap_or_else(|error| {
+            log::warn!("could not inspect Android network state: {error}");
+            true
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn cloud_network_available(&self) -> bool {
+        true
     }
 
     fn poll_cloud_open(&mut self) -> Option<Result<crate::cloud::CachedCloudAsset, String>> {
@@ -897,6 +930,16 @@ impl LibraryState {
                 Some(Ok(CloudOpenEvent::Finished(result))) => {
                     self.cloud_open_receiver = None;
                     self.cloud_open_label = None;
+                    if let Ok(cached) = &result {
+                        for entry in &mut self.entries {
+                            if matches!(
+                                &entry.info.source,
+                                LibrarySource::Cloud(asset) if asset.id == cached.asset_id
+                            ) {
+                                entry.info.cloud_downloaded = true;
+                            }
+                        }
+                    }
                     return Some(result);
                 }
                 Some(Err(mpsc::TryRecvError::Disconnected)) => {
@@ -1718,6 +1761,7 @@ impl LibraryState {
 
         if self.view == LibraryView::Cloud {
             let config = self.cloud_config.clone();
+            let allow_network = self.cloud_network_available();
             let Some(cache_root) = self.cloud_cache_root.clone() else {
                 self.event_receiver = None;
                 self.request_sender = None;
@@ -1730,23 +1774,46 @@ impl LibraryState {
             let worker = std::thread::Builder::new()
                 .name("auraw-cloud-library".to_owned())
                 .spawn(move || {
-                    let assets = match crate::cloud::list_assets(&config) {
-                        Ok(assets) => assets,
-                        Err(error) => {
-                            send_scan_failure(&event_sender, generation, error, &repaint);
-                            return;
-                        }
-                    };
-                    let files = assets
+                    let snapshot =
+                        match crate::cloud::list_assets_cached(&config, &cache_root, allow_network)
+                        {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                send_scan_failure(&event_sender, generation, error, &repaint);
+                                return;
+                            }
+                        };
+                    let thumbnail_network_available = snapshot.offline_reason.is_none();
+                    if event_sender
+                        .send(ScanEvent::CloudAvailability {
+                            generation,
+                            offline_reason: snapshot.offline_reason,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let files = snapshot
+                        .items
                         .into_iter()
-                        .map(|asset| LibraryFileInfo {
-                            display_path: format!("AuRaw Cloud / {}", asset.name),
-                            name: asset.name.clone(),
-                            bytes: asset.bytes,
-                            dimensions_hint: Some([asset.width, asset.height]),
-                            #[cfg(not(target_os = "android"))]
-                            modified: Some(crate::cloud::modified_time(asset.modified_seconds)),
-                            source: LibrarySource::Cloud(asset),
+                        .map(|asset| {
+                            let cloud_downloaded = crate::cloud::asset_available_offline(
+                                &config,
+                                &cache_root,
+                                &asset,
+                            );
+                            LibraryFileInfo {
+                                display_path: format!("AuRaw Cloud / {}", asset.name),
+                                name: asset.name.clone(),
+                                bytes: asset.bytes,
+                                dimensions_hint: Some([asset.width, asset.height]),
+                                cloud_downloaded,
+                                #[cfg(not(target_os = "android"))]
+                                modified: Some(crate::cloud::modified_time(
+                                    asset.modified_seconds,
+                                )),
+                                source: LibrarySource::Cloud(asset),
+                            }
                         })
                         .collect::<Vec<_>>();
                     let thumbnail_config = config.clone();
@@ -1771,6 +1838,7 @@ impl LibraryState {
                                 &thumbnail_cache,
                                 asset,
                                 THUMBNAIL_EDGE,
+                                thumbnail_network_available,
                             )
                             .map(|thumbnail| loaded_library_thumbnail(thumbnail, false)),
                             _ => Err("invalid cloud thumbnail request".to_owned()),
@@ -1890,6 +1958,7 @@ impl LibraryState {
                                 name: document.display_name,
                                 bytes: document.bytes,
                                 dimensions_hint,
+                                cloud_downloaded: false,
                             }
                         })
                         .collect();
@@ -2088,6 +2157,12 @@ impl LibraryState {
             };
 
             match event {
+                ScanEvent::CloudAvailability {
+                    generation,
+                    offline_reason,
+                } if generation == self.generation.load(Ordering::Acquire) => {
+                    self.cloud_offline_reason = offline_reason;
+                }
                 #[cfg(not(target_os = "android"))]
                 ScanEvent::FolderTree { generation, tree }
                     if generation == self.generation.load(Ordering::Acquire) =>
@@ -2128,8 +2203,15 @@ impl LibraryState {
                     }
                     self.scanning = false;
                     self.catalog_ready = true;
-                    let catalog_status =
+                    let mut catalog_status =
                         catalog_status(self.entries.len(), warning_count, truncated);
+                    if self.view == LibraryView::Cloud {
+                        if let Some(reason) = &self.cloud_offline_reason {
+                            catalog_status = format!(
+                                "Offline · cached cloud library · {catalog_status}\n{reason}"
+                            );
+                        }
+                    }
                     self.status = self
                         .cloud_upload_completion
                         .take()
@@ -6425,21 +6507,28 @@ fn thumbnail_tile(
 
     if matches!(&entry.info.source, LibrarySource::Cloud(_)) {
         let badge = egui::Rect::from_min_size(
-            egui::pos2(rect.right() - 66.0, rect.top() + 7.0),
-            egui::vec2(58.0, 22.0),
+            egui::pos2(rect.right() - 37.0, rect.top() + 7.0),
+            egui::vec2(29.0, 25.0),
         );
         ui.painter()
             .rect_filled(badge, 4.0, Color32::from_black_alpha(176));
         ui.painter().text(
             badge.center(),
             Align2::CENTER_CENTER,
-            format!("{} CLOUD", egui_phosphor::regular::CLOUD),
-            FontId::proportional(10.0),
+            cloud_cache_icon(entry.info.cloud_downloaded),
+            FontId::proportional(16.0),
             Color32::WHITE,
         );
     }
 
     let mut tooltip = entry.info.display_path.clone();
+    if matches!(&entry.info.source, LibrarySource::Cloud(_)) {
+        tooltip.push_str(if entry.info.cloud_downloaded {
+            "\nDownloaded · available offline"
+        } else {
+            "\nCloud only · opens after downloading"
+        });
+    }
     if let Some(error) = &entry.thumbnail_error {
         tooltip.push_str("\nPreview: ");
         tooltip.push_str(error);
@@ -6626,6 +6715,7 @@ fn scan_folder_with_limit(
             name: entry.file_name().to_string_lossy().into_owned(),
             bytes: file_metadata.as_ref().map_or(0, std::fs::Metadata::len),
             dimensions_hint: None,
+            cloud_downloaded: false,
             modified: file_metadata.and_then(|metadata| metadata.modified().ok()),
         });
         if files.len() < maximum_files {
@@ -6694,15 +6784,14 @@ mod tests {
     #[cfg(not(target_os = "android"))]
     use super::LibrarySource;
     use super::{
-        library_import_fab_rect, library_import_icon,
         balanced_justified_row_ranges, copy_directory_create_new, desktop_selection_toggle_label,
-        duplicate_raw_and_sidecar, elide_middle, format_file_size, import_folder_into_library,
-        import_raw_into_folder, justified_thumbnail_layout, loaded_library_thumbnail,
+        cloud_cache_icon, duplicate_raw_and_sidecar, elide_middle, format_file_size,
+        import_folder_into_library, import_raw_into_folder, justified_thumbnail_layout,
+        library_import_fab_rect, library_import_icon, loaded_library_thumbnail,
         make_resident_thumbnail, new_library_entry, run_folder_operation, run_thumbnail_workers,
-        scan_folder, scan_folder_tree, scan_folder_with_limit, validate_folder_name,
-        LibraryFileInfo, LibraryFolderOperation, LibraryState, LibraryThumbnailSize, LibraryView,
-        RawImportOutcome, ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
-        LIBRARY_IMPORT_FAB_EDGE,
+        scan_folder, scan_folder_tree, scan_folder_with_limit, validate_folder_name, LibraryFileInfo,
+        LibraryFolderOperation, LibraryState, LibraryThumbnailSize, LibraryView, RawImportOutcome,
+        ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction, LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     use std::collections::HashSet;
@@ -6795,6 +6884,12 @@ mod tests {
     }
 
     #[test]
+    fn cloud_cache_icons_distinguish_remote_and_downloaded_raws() {
+        assert_eq!(cloud_cache_icon(false), egui_phosphor::regular::CLOUD);
+        assert_eq!(cloud_cache_icon(true), egui_phosphor::regular::DOWNLOAD);
+    }
+
+    #[test]
     fn justified_rows_rebalance_to_avoid_a_sparse_last_row() {
         let aspects = vec![1.5; 13];
         let rows = balanced_justified_row_ranges(&aspects, 1000.0, 140.0, 6.0);
@@ -6825,6 +6920,7 @@ mod tests {
                                 name: format!("sparse-{index}.dng"),
                                 bytes: 1,
                                 dimensions_hint: Some([3, 2]),
+                                cloud_downloaded: false,
                                 modified: None,
                             })
                         })
@@ -6857,6 +6953,7 @@ mod tests {
             name: "stable-layout.dng".to_owned(),
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
+            cloud_downloaded: false,
             modified: None,
         };
         let mut entry = new_library_entry(info);
@@ -6999,6 +7096,7 @@ mod tests {
             name: "resident-restore.dng".to_owned(),
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
+            cloud_downloaded: false,
             modified: None,
         };
         let mut entry = new_library_entry(info);
@@ -7029,6 +7127,7 @@ mod tests {
             name: "develop-loading-resident.dng".to_owned(),
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
+            cloud_downloaded: false,
             modified: None,
         };
         let mut entry = new_library_entry(info);
@@ -7062,6 +7161,7 @@ mod tests {
             name: "reset-preview.dng".to_owned(),
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
+            cloud_downloaded: false,
             modified: None,
         };
         let mut entry = new_library_entry(info);
@@ -7271,6 +7371,7 @@ mod tests {
                 name: name.to_owned(),
                 bytes: 1,
                 dimensions_hint: Some([3, 2]),
+                cloud_downloaded: false,
                 modified: None,
             })
             .collect::<Vec<_>>();

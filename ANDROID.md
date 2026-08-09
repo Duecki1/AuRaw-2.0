@@ -151,6 +151,16 @@ the server. A Cloud status label remains visible in Develop, and sidecar saves
 sync back with conflict detection. Plain HTTP addresses are supported for a
 trusted LAN; use an HTTPS reverse proxy on any wider network.
 
+The most recently refreshed cloud catalog and thumbnails remain available
+offline. Cloud RAWs that have already been opened on this device can also be
+opened and edited offline; not-yet-downloaded RAWs still require the server.
+Offline sidecar saves remain in app-private storage with a **waiting to sync**
+status and retry after connectivity returns. Opening a card while online first
+revalidates its server version, so a sidecar saved by another client is loaded
+without requiring a manual Library refresh. Each card uses a cloud icon until
+its RAW is cached locally, then changes to a download icon to show that it is
+available offline.
+
 The floating **+** button is available in both Library tabs. In **Local**, it
 imports selected documents into AuRaw's hidden local library. In **Cloud**, it
 streams the selections directly from Android's system picker to the server,

@@ -63,6 +63,15 @@ and uploads it with a version precondition; if another client saved first,
 AuRaw reports a conflict instead of silently replacing those edits. A rendered
 developed thumbnail is uploaded against the same sidecar revision.
 
+Every cloud-card click revalidates that asset's current RAW, sidecar, and
+thumbnail versions before opening, so edits made by another client do not
+require a manual Library refresh. The latest successful catalog and previews
+are kept for offline browsing. A RAW can be opened offline after it has been
+downloaded once on that device; offline edits are saved in the private cache,
+shown as **waiting to sync**, and retried when the image is next opened or
+saved with the server reachable. Cloud thumbnails show a cloud icon while the
+RAW still needs downloading and a download icon once it is available offline.
+
 In the Cloud library, use the floating **+** button to select and upload one or
 more RAW files. Desktop also sends a matching `.auraw` sidecar and current
 developed thumbnail when present. Android streams each selected document
