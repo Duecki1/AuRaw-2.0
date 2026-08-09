@@ -191,6 +191,66 @@ fn cloud_cache_icon(downloaded: bool) -> &'static str {
     }
 }
 
+fn cloud_sync_badge(
+    state: crate::cloud::CloudSyncState,
+    downloaded: bool,
+) -> (&'static str, Color32, &'static str) {
+    match state {
+        crate::cloud::CloudSyncState::Synced => (
+            cloud_cache_icon(downloaded),
+            Color32::WHITE,
+            if downloaded {
+                "Synced · available offline"
+            } else {
+                "Synced · cloud only"
+            },
+        ),
+        crate::cloud::CloudSyncState::Queued => (
+            egui_phosphor::regular::ARROW_CLOCKWISE,
+            Color32::from_rgb(245, 190, 55),
+            "Queued for cloud sync",
+        ),
+        crate::cloud::CloudSyncState::Failed => (
+            egui_phosphor::regular::X,
+            Color32::from_rgb(240, 78, 78),
+            "Cloud sync failed",
+        ),
+        crate::cloud::CloudSyncState::Conflict => (
+            egui_phosphor::regular::INTERSECT,
+            Color32::from_rgb(240, 78, 78),
+            "Cloud edit conflict",
+        ),
+    }
+}
+
+fn cloud_preview_notice(kind: crate::cloud::CloudThumbnailKind) -> Option<&'static str> {
+    match kind {
+        crate::cloud::CloudThumbnailKind::Edited => None,
+        crate::cloud::CloudThumbnailKind::Placeholder => {
+            Some("Temporary unedited RAW preview · full preview is rendering")
+        }
+        crate::cloud::CloudThumbnailKind::Raw => Some("Unedited RAW preview"),
+        crate::cloud::CloudThumbnailKind::Legacy => {
+            Some("Legacy preview · edit rendering is unknown")
+        }
+    }
+}
+
+fn cloud_preview_label(kind: crate::cloud::CloudThumbnailKind) -> Option<&'static str> {
+    match kind {
+        crate::cloud::CloudThumbnailKind::Edited | crate::cloud::CloudThumbnailKind::Legacy => {
+            None
+        }
+        crate::cloud::CloudThumbnailKind::Placeholder => Some("PREVIEW RENDERING"),
+        crate::cloud::CloudThumbnailKind::Raw => Some("UNEDITED PREVIEW"),
+    }
+}
+
+fn cloud_preview_icon(kind: crate::cloud::CloudThumbnailKind) -> Option<&'static str> {
+    matches!(kind, crate::cloud::CloudThumbnailKind::Legacy)
+        .then_some(egui_phosphor::regular::CLOCK_COUNTER_CLOCKWISE)
+}
+
 #[derive(Clone, Debug)]
 struct LibraryFileInfo {
     source: LibrarySource,
@@ -199,6 +259,7 @@ struct LibraryFileInfo {
     bytes: u64,
     dimensions_hint: Option<[u32; 2]>,
     cloud_downloaded: bool,
+    cloud_sync_state: crate::cloud::CloudSyncState,
     #[cfg(not(target_os = "android"))]
     modified: Option<SystemTime>,
 }
@@ -465,6 +526,13 @@ enum CloudActionRequest {
     DeleteAssets {
         assets: Vec<crate::cloud::CloudAsset>,
     },
+    RestoreTrash {
+        items: Vec<crate::cloud::CloudTrashItem>,
+    },
+    PermanentlyDeleteTrash {
+        items: Vec<crate::cloud::CloudTrashItem>,
+    },
+    EmptyTrash,
     ResetAssets {
         assets: Vec<crate::cloud::CloudAsset>,
     },
@@ -498,6 +566,12 @@ struct CloudNameDialog {
     name: String,
     error: Option<String>,
     focus_requested: bool,
+}
+
+#[derive(Clone, Debug)]
+enum CloudTrashDeleteTarget {
+    Selected(Vec<crate::cloud::CloudTrashItem>),
+    Empty,
 }
 
 #[derive(Clone, Debug)]
@@ -781,6 +855,14 @@ pub(crate) struct LibraryState {
     image_paste_receiver: Option<mpsc::Receiver<ImagePasteCompletion>>,
     cloud_name_dialog: Option<CloudNameDialog>,
     cloud_delete_confirmation: Option<CloudDeleteTarget>,
+    cloud_trash_open: bool,
+    cloud_trash_items: Vec<crate::cloud::CloudTrashItem>,
+    cloud_trash_server_time: u64,
+    cloud_trash_retention_days: u32,
+    cloud_trash_receiver:
+        Option<mpsc::Receiver<Result<crate::cloud::CloudTrashCatalog, String>>>,
+    cloud_trash_selection: HashSet<String>,
+    cloud_trash_delete_confirmation: Option<CloudTrashDeleteTarget>,
     #[cfg(not(target_os = "android"))]
     folder: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
@@ -1387,6 +1469,41 @@ fn run_cloud_action(
                 clear_clipboard: false,
             }
         }
+        CloudActionRequest::RestoreTrash { items } => {
+            let total = items.len();
+            let mut completed = 0usize;
+            let mut errors = Vec::new();
+            for item in items {
+                match crate::cloud::restore_trash_item(config, &item, None) {
+                    Ok(_) => completed += 1,
+                    Err(error) => errors.push(format!("{}: {error}", item.name)),
+                }
+            }
+            CloudActionCompletion::Mutation {
+                result: cloud_batch_summary("Restored", total, completed, errors),
+                clear_clipboard: false,
+            }
+        }
+        CloudActionRequest::PermanentlyDeleteTrash { items } => {
+            let total = items.len();
+            let mut completed = 0usize;
+            let mut errors = Vec::new();
+            for item in items {
+                match crate::cloud::permanently_delete_trash_item(config, &item) {
+                    Ok(()) => completed += 1,
+                    Err(error) => errors.push(format!("{}: {error}", item.name)),
+                }
+            }
+            CloudActionCompletion::Mutation {
+                result: cloud_batch_summary("Permanently deleted", total, completed, errors),
+                clear_clipboard: false,
+            }
+        }
+        CloudActionRequest::EmptyTrash => CloudActionCompletion::Mutation {
+            result: crate::cloud::empty_trash(config)
+                .map(|()| "Emptied AuRaw Cloud Trash.".to_owned()),
+            clear_clipboard: false,
+        },
         CloudActionRequest::ResetAssets { assets } => {
             let total = assets.len();
             let mut completed = 0usize;
@@ -1472,6 +1589,13 @@ impl LibraryState {
             image_paste_receiver: None,
             cloud_name_dialog: None,
             cloud_delete_confirmation: None,
+            cloud_trash_open: false,
+            cloud_trash_items: Vec::new(),
+            cloud_trash_server_time: 0,
+            cloud_trash_retention_days: 14,
+            cloud_trash_receiver: None,
+            cloud_trash_selection: HashSet::new(),
+            cloud_trash_delete_confirmation: None,
             folder: None,
             root_folder: None,
             folder_tree: None,
@@ -1543,6 +1667,13 @@ impl LibraryState {
             image_paste_receiver: None,
             cloud_name_dialog: None,
             cloud_delete_confirmation: None,
+            cloud_trash_open: false,
+            cloud_trash_items: Vec::new(),
+            cloud_trash_server_time: 0,
+            cloud_trash_retention_days: 14,
+            cloud_trash_receiver: None,
+            cloud_trash_selection: HashSet::new(),
+            cloud_trash_delete_confirmation: None,
             android_raw_name_dialog: None,
             android_app,
             entries: Vec::new(),
@@ -1640,7 +1771,11 @@ impl LibraryState {
     }
 
     fn update_cloud_location(&mut self) {
-        let path = self.cloud_folder_path(&self.cloud_folder_id);
+        let path = if self.cloud_trash_open {
+            "Cloud / Trash".to_owned()
+        } else {
+            self.cloud_folder_path(&self.cloud_folder_id)
+        };
         self.location = self
             .cloud_config
             .normalized()
@@ -1656,7 +1791,10 @@ impl LibraryState {
             self.status = "That cloud folder no longer exists. Refresh the library.".to_owned();
             return false;
         }
-        if self.view == LibraryView::Cloud && self.cloud_folder_id == folder_id {
+        if self.view == LibraryView::Cloud
+            && !self.cloud_trash_open
+            && self.cloud_folder_id == folder_id
+        {
             return false;
         }
         let mut ancestor_id = folder_id.clone();
@@ -1671,6 +1809,7 @@ impl LibraryState {
             ancestor_id = parent_id;
         }
         self.view = LibraryView::Cloud;
+        self.cloud_trash_open = false;
         self.cloud_folder_id = folder_id;
         self.update_cloud_location();
         self.entries.clear();
@@ -1708,6 +1847,11 @@ impl LibraryState {
             self.image_paste_receiver = None;
             self.cloud_name_dialog = None;
             self.cloud_delete_confirmation = None;
+            self.cloud_trash_open = false;
+            self.cloud_trash_items.clear();
+            self.cloud_trash_receiver = None;
+            self.cloud_trash_selection.clear();
+            self.cloud_trash_delete_confirmation = None;
         }
         if !self.cloud_config.enabled && self.view == LibraryView::Cloud {
             self.show_local(context);
@@ -1721,7 +1865,9 @@ impl LibraryState {
             self.status = "Enable AuRaw Cloud in Settings first.".to_owned();
             return;
         }
-        if self.view != LibraryView::Cloud {
+        let changed_view = self.view != LibraryView::Cloud || self.cloud_trash_open;
+        self.cloud_trash_open = false;
+        if changed_view {
             self.view = LibraryView::Cloud;
             self.update_cloud_location();
             self.entries.clear();
@@ -1729,6 +1875,21 @@ impl LibraryState {
             self.clear_selection();
             self.catalog_ready = false;
         }
+        self.refresh(context);
+    }
+
+    fn show_cloud_trash(&mut self, context: &egui::Context) {
+        if !self.cloud_config.enabled {
+            self.status = "Enable AuRaw Cloud in Settings first.".to_owned();
+            return;
+        }
+        self.view = LibraryView::Cloud;
+        self.cloud_trash_open = true;
+        self.update_cloud_location();
+        self.entries.clear();
+        self.entry_indices.clear();
+        self.clear_selection();
+        self.catalog_ready = false;
         self.refresh(context);
     }
 
@@ -2066,6 +2227,15 @@ impl LibraryState {
             CloudActionRequest::DeleteAssets { assets } => {
                 format!("Deleting {} cloud RAWs…", assets.len())
             }
+            CloudActionRequest::RestoreTrash { items } => {
+                format!("Restoring {} Trash item{}…", items.len(), if items.len() == 1 { "" } else { "s" })
+            }
+            CloudActionRequest::PermanentlyDeleteTrash { items } => format!(
+                "Permanently deleting {} Trash item{}…",
+                items.len(),
+                if items.len() == 1 { "" } else { "s" }
+            ),
+            CloudActionRequest::EmptyTrash => "Emptying AuRaw Cloud Trash…".to_owned(),
             CloudActionRequest::ResetAssets { assets } => {
                 format!("Resetting {} cloud RAWs…", assets.len())
             }
@@ -2938,7 +3108,71 @@ impl LibraryState {
         true
     }
 
+    fn refresh_cloud_trash(&mut self, context: &egui::Context) {
+        if self.cloud_action_receiver.is_some() {
+            self.status = "Wait for the current Trash action to finish.".to_owned();
+            return;
+        }
+        let config = self.cloud_config.clone();
+        let repaint = context.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.cloud_trash_receiver = Some(receiver);
+        self.catalog_ready = false;
+        self.status = "Refreshing AuRaw Cloud Trash…".to_owned();
+        let spawn = std::thread::Builder::new()
+            .name("auraw-cloud-trash".to_owned())
+            .spawn(move || {
+                let _ = sender.send(crate::cloud::list_trash(&config));
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawn {
+            self.cloud_trash_receiver = None;
+            self.catalog_ready = true;
+            self.status = format!("Could not start the Trash refresh: {error}");
+        }
+    }
+
+    fn poll_cloud_trash(&mut self) {
+        let received = self
+            .cloud_trash_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match received {
+            Some(Ok(Ok(catalog))) => {
+                self.cloud_trash_receiver = None;
+                self.cloud_trash_server_time = catalog.server_time;
+                self.cloud_trash_retention_days = catalog.retention_days;
+                self.cloud_trash_items = catalog.items;
+                self.cloud_trash_selection.retain(|id| {
+                    self.cloud_trash_items.iter().any(|item| &item.id == id)
+                });
+                self.catalog_ready = true;
+                self.status = format!(
+                    "Trash · {} item{} · retained for {} days",
+                    self.cloud_trash_items.len(),
+                    if self.cloud_trash_items.len() == 1 { "" } else { "s" },
+                    catalog.retention_days
+                );
+            }
+            Some(Ok(Err(error))) => {
+                self.cloud_trash_receiver = None;
+                self.catalog_ready = true;
+                self.status = error;
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.cloud_trash_receiver = None;
+                self.catalog_ready = true;
+                self.status = "The AuRaw Cloud Trash refresh stopped unexpectedly.".to_owned();
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+    }
+
     pub(crate) fn refresh(&mut self, context: &egui::Context) {
+        if self.view == LibraryView::Cloud && self.cloud_trash_open {
+            self.refresh_cloud_trash(context);
+            return;
+        }
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let cancellation = Arc::clone(&self.generation);
         let decoding_paused = Arc::clone(&self.decoding_paused);
@@ -3014,12 +3248,15 @@ impl LibraryState {
                         .map(|asset| {
                             let cloud_downloaded =
                                 crate::cloud::asset_available_offline(&config, &cache_root, &asset);
+                            let cloud_sync_state =
+                                crate::cloud::asset_sync_state(&config, &cache_root, &asset);
                             LibraryFileInfo {
                                 display_path: format!("AuRaw Cloud / {}", asset.name),
                                 name: asset.name.clone(),
                                 bytes: asset.bytes,
                                 dimensions_hint: Some([asset.width, asset.height]),
                                 cloud_downloaded,
+                                cloud_sync_state,
                                 #[cfg(not(target_os = "android"))]
                                 modified: Some(crate::cloud::modified_time(asset.modified_seconds)),
                                 source: LibrarySource::Cloud(asset),
@@ -3169,6 +3406,7 @@ impl LibraryState {
                                 bytes: document.bytes,
                                 dimensions_hint,
                                 cloud_downloaded: false,
+                                cloud_sync_state: crate::cloud::CloudSyncState::Synced,
                             }
                         })
                         .collect();
@@ -6897,7 +7135,13 @@ fn apply_cloud_folder_ui_action(
             },
             context,
         ),
-        CloudFolderUiAction::Refresh => app.library.show_cloud(context),
+        CloudFolderUiAction::Refresh => {
+            if app.library.cloud_trash_open {
+                app.library.refresh(context);
+            } else {
+                app.library.show_cloud(context);
+            }
+        }
     }
 }
 
@@ -7505,6 +7749,32 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
     if !app.library.is_cloud_view() {
         return;
     }
+    if app.library.cloud_trash_open {
+        let action_enabled = !app.library.cloud_action_in_progress()
+            && app.library.cloud_trash_receiver.is_none();
+        let mut back = false;
+        let mut refresh = false;
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Cloud").clicked() {
+                back = true;
+            }
+            ui.label(egui_phosphor::regular::CARET_RIGHT);
+            ui.strong(format!("{} Trash", egui_phosphor::regular::TRASH));
+            ui.separator();
+            if ui
+                .add_enabled(action_enabled, egui::Button::new("Refresh"))
+                .clicked()
+            {
+                refresh = true;
+            }
+        });
+        if back {
+            app.library.show_cloud(ui.ctx());
+        } else if refresh {
+            app.library.refresh(ui.ctx());
+        }
+        return;
+    }
     let breadcrumbs = app.library.cloud_breadcrumbs();
     let children = app
         .library
@@ -7525,6 +7795,7 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
     let mut create_folder = false;
     let mut paste = false;
     let mut folder_action = None;
+    let mut open_trash = false;
 
     ui.horizontal_wrapped(|ui| {
         for (index, (folder_id, name)) in breadcrumbs.iter().enumerate() {
@@ -7606,6 +7877,12 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
                 }
             });
         }
+        if ui
+            .button(format!("{} Trash", egui_phosphor::regular::TRASH))
+            .clicked()
+        {
+            open_trash = true;
+        }
     });
 
     if !children.is_empty() {
@@ -7626,6 +7903,9 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
     }
     if let Some(folder_id) = navigate_to {
         app.library.select_cloud_folder(folder_id, ui.ctx());
+    }
+    if open_trash {
+        app.library.show_cloud_trash(ui.ctx());
     }
     if create_folder {
         app.library.cloud_name_dialog = Some(CloudNameDialog {
@@ -7690,6 +7970,221 @@ fn show_local_image_paste_bar(ui: &mut Ui, app: &mut AurawApp) {
         }
         #[cfg(target_os = "android")]
         start_image_clipboard_paste(app, ImagePasteDestination::LocalLibrary, ui.ctx());
+    }
+}
+
+fn trash_age_label(seconds: u64) -> String {
+    if seconds < 60 {
+        "just now".to_owned()
+    } else if seconds < 60 * 60 {
+        format!("{} min ago", seconds / 60)
+    } else if seconds < 24 * 60 * 60 {
+        format!("{} h ago", seconds / (60 * 60))
+    } else {
+        let days = seconds / (24 * 60 * 60);
+        format!("{days} day{} ago", if days == 1 { "" } else { "s" })
+    }
+}
+
+fn trash_remaining_label(seconds: u64) -> String {
+    if seconds == 0 {
+        "expires now".to_owned()
+    } else if seconds < 24 * 60 * 60 {
+        let hours = seconds.div_ceil(60 * 60);
+        format!("{hours} h remaining")
+    } else {
+        let days = seconds.div_ceil(24 * 60 * 60);
+        format!("{days} day{} remaining", if days == 1 { "" } else { "s" })
+    }
+}
+
+fn trash_size_label(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn show_cloud_trash_panel(ui: &mut Ui, app: &mut AurawApp) {
+    let action_enabled = !app.library.cloud_action_in_progress()
+        && app.library.cloud_trash_receiver.is_none();
+    let items = app.library.cloud_trash_items.clone();
+    let selected = items
+        .iter()
+        .filter(|item| app.library.cloud_trash_selection.contains(&item.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut request = None;
+    let mut request_delete = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.heading("Trash");
+        ui.label(
+            egui::RichText::new(format!(
+                "Deleted bundles are retained for {} days.",
+                app.library.cloud_trash_retention_days
+            ))
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.separator();
+        if ui
+            .add_enabled(
+                action_enabled && !selected.is_empty(),
+                egui::Button::new(format!("Restore selected ({})", selected.len())),
+            )
+            .clicked()
+        {
+            request = Some(CloudActionRequest::RestoreTrash {
+                items: selected.clone(),
+            });
+        }
+        if ui
+            .add_enabled(
+                action_enabled && !selected.is_empty(),
+                egui::Button::new("Permanently delete selected…"),
+            )
+            .clicked()
+        {
+            request_delete = Some(CloudTrashDeleteTarget::Selected(selected.clone()));
+        }
+        if ui
+            .add_enabled(
+                action_enabled && !items.is_empty(),
+                egui::Button::new("Empty Trash…"),
+            )
+            .clicked()
+        {
+            request_delete = Some(CloudTrashDeleteTarget::Empty);
+        }
+    });
+    ui.separator();
+
+    if app.library.catalog_ready && items.is_empty() {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading("Trash is empty");
+                ui.label("Deleted cloud RAWs and folders will appear here.");
+            });
+        });
+    } else {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for item in &items {
+                let mut checked = app.library.cloud_trash_selection.contains(&item.id);
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut checked, "").changed() {
+                            if checked {
+                                app.library.cloud_trash_selection.insert(item.id.clone());
+                            } else {
+                                app.library.cloud_trash_selection.remove(&item.id);
+                            }
+                        }
+                        let icon = if item.kind == "folder" {
+                            egui_phosphor::regular::FOLDER
+                        } else {
+                            egui_phosphor::regular::IMAGE
+                        };
+                        ui.strong(format!("{icon}  {}", item.name));
+                        ui.label(trash_size_label(item.bytes));
+                        if item.kind == "folder" {
+                            ui.label(format!(
+                                "{} bundled item{}",
+                                item.item_count,
+                                if item.item_count == 1 { "" } else { "s" }
+                            ));
+                        }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui
+                                    .add_enabled(action_enabled, egui::Button::new("Restore"))
+                                    .clicked()
+                                {
+                                    request = Some(CloudActionRequest::RestoreTrash {
+                                        items: vec![item.clone()],
+                                    });
+                                }
+                            },
+                        );
+                    });
+                    let age = app
+                        .library
+                        .cloud_trash_server_time
+                        .saturating_sub(item.deleted_seconds);
+                    let remaining = item
+                        .expires_seconds
+                        .saturating_sub(app.library.cloud_trash_server_time);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Deleted {} · {}",
+                            trash_age_label(age),
+                            trash_remaining_label(remaining)
+                        ))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                });
+                ui.add_space(4.0);
+            }
+        });
+    }
+    if let Some(target) = request_delete {
+        app.library.cloud_trash_delete_confirmation = Some(target);
+    }
+
+    let confirmation = app.library.cloud_trash_delete_confirmation.clone();
+    let mut close_confirmation = false;
+    if let Some(target) = confirmation {
+        let (count, empty) = match &target {
+            CloudTrashDeleteTarget::Selected(items) => (items.len(), false),
+            CloudTrashDeleteTarget::Empty => (items.len(), true),
+        };
+        egui::Window::new(if empty {
+            "Empty Cloud Trash?"
+        } else {
+            "Permanently delete selected items?"
+        })
+        .id(egui::Id::new("cloud-trash-permanent-confirmation"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ui.ctx(), |ui| {
+            ui.label(format!(
+                "Permanently delete {count} Trash item{}?",
+                if count == 1 { "" } else { "s" }
+            ));
+            ui.label(
+                egui::RichText::new("This cannot be undone.")
+                    .strong()
+                    .color(ui.visuals().warn_fg_color),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    close_confirmation = true;
+                }
+                if ui.button("Permanently delete").clicked() {
+                    request = Some(match target.clone() {
+                        CloudTrashDeleteTarget::Selected(items) => {
+                            CloudActionRequest::PermanentlyDeleteTrash { items }
+                        }
+                        CloudTrashDeleteTarget::Empty => CloudActionRequest::EmptyTrash,
+                    });
+                    close_confirmation = true;
+                }
+            });
+        });
+    }
+    if close_confirmation {
+        app.library.cloud_trash_delete_confirmation = None;
+    }
+    if let Some(request) = request {
+        app.library.cloud_trash_selection.clear();
+        app.library.start_cloud_action(request, ui.ctx());
     }
 }
 
@@ -7813,9 +8308,10 @@ fn show_cloud_dialogs(ui: &mut Ui, app: &mut AurawApp) {
             .show(ui.ctx(), |ui| {
                 ui.label(message);
                 ui.label(
-                    egui::RichText::new("This deletes the server copy and cannot be undone.")
-                        .strong()
-                        .color(ui.visuals().warn_fg_color),
+                    egui::RichText::new(
+                        "This moves the complete server copy to Trash for its retention period.",
+                    )
+                    .strong(),
                 );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -8059,6 +8555,7 @@ impl Library {
         let action_in_progress = app.library.file_action_in_progress();
         let mut requested_action = None;
         let mut requested_cloud_action = None;
+        let mut requested_cloud_trash = false;
         // The folder header and Library toolbar share the same dimensions so
         // their controls and separators stay aligned across the split view.
         ui.horizontal(|ui| {
@@ -8093,7 +8590,8 @@ impl Library {
                 }
                 if crate::ui::icons::phosphor_icon_button_enabled(
                     ui,
-                    (app.library.folder.is_some() || app.library.is_cloud_view())
+                    (app.library.folder.is_some()
+                        || (app.library.is_cloud_view() && !app.library.cloud_trash_open))
                         && !action_in_progress,
                     egui_phosphor::regular::FOLDER_PLUS,
                     crate::ui::theme::toolbar_icon_size(),
@@ -8147,6 +8645,15 @@ impl Library {
                 &mut app.library.cloud_expanded_folders,
                 &mut requested_cloud_action,
             );
+            if ui
+                .selectable_label(
+                    app.library.cloud_trash_open,
+                    format!("{}  Trash", egui_phosphor::regular::TRASH),
+                )
+                .clicked()
+            {
+                requested_cloud_trash = true;
+            }
             ui.separator();
         }
 
@@ -8201,12 +8708,16 @@ impl Library {
         if let Some(action) = requested_cloud_action {
             apply_cloud_folder_ui_action(app, action, ui.ctx());
         }
+        if requested_cloud_trash {
+            app.library.show_cloud_trash(ui.ctx());
+        }
         show_library_folder_dialogs(ui, app);
     }
 
     pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         app.library.resume_thumbnail_decoding();
         app.library.poll(ui.ctx());
+        app.library.poll_cloud_trash();
         if let Some(completion) = app.library.poll_cloud_action() {
             match completion {
                 CloudActionCompletion::Mutation {
@@ -8423,7 +8934,13 @@ impl Library {
             let desktop_selection_available = true;
 
             #[cfg(not(target_os = "android"))]
-            if desktop_selection_mode {
+            if app.library.cloud_trash_open {
+                let count = app.library.cloud_trash_items.len();
+                ui.strong(format!(
+                    "{count} Trash item{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+            } else if desktop_selection_mode {
                 ui.strong(format!("{desktop_selection_count} selected"));
             } else {
                 let count = app.library.entries.len();
@@ -8434,11 +8951,19 @@ impl Library {
             }
             #[cfg(target_os = "android")]
             {
-                let count = app.library.entries.len();
-                ui.strong(format!(
-                    "{count} RAW {}",
-                    if count == 1 { "file" } else { "files" }
-                ));
+                if app.library.cloud_trash_open {
+                    let count = app.library.cloud_trash_items.len();
+                    ui.strong(format!(
+                        "{count} Trash item{}",
+                        if count == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    let count = app.library.entries.len();
+                    ui.strong(format!(
+                        "{count} RAW {}",
+                        if count == 1 { "file" } else { "files" }
+                    ));
+                }
             }
 
             let mut selected_sort = app.library.sort_order();
@@ -8587,6 +9112,11 @@ impl Library {
             );
         }
         ui.separator();
+
+        if app.library.cloud_trash_open {
+            show_cloud_trash_panel(ui, app);
+            return;
+        }
 
         if app.library.location.is_none() {
             ui.centered_and_justified(|ui| {
@@ -9592,7 +10122,11 @@ fn thumbnail_tile(
         Color32::WHITE,
     );
 
-    if matches!(&entry.info.source, LibrarySource::Cloud(_)) {
+    if let LibrarySource::Cloud(asset) = &entry.info.source {
+        let (icon, color, _) = cloud_sync_badge(
+            entry.info.cloud_sync_state,
+            entry.info.cloud_downloaded,
+        );
         let badge = egui::Rect::from_min_size(
             egui::pos2(rect.right() - 37.0, rect.top() + 7.0),
             egui::vec2(29.0, 25.0),
@@ -9602,19 +10136,58 @@ fn thumbnail_tile(
         ui.painter().text(
             badge.center(),
             Align2::CENTER_CENTER,
-            cloud_cache_icon(entry.info.cloud_downloaded),
+            icon,
             FontId::proportional(16.0),
-            Color32::WHITE,
+            color,
         );
+        if let Some(icon) = cloud_preview_icon(asset.thumbnail_kind) {
+            let preview_badge = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 7.0, rect.top() + 7.0),
+                egui::vec2(29.0, 25.0),
+            );
+            ui.painter()
+                .rect_filled(preview_badge, 4.0, Color32::from_black_alpha(176));
+            ui.painter().text(
+                preview_badge.center(),
+                Align2::CENTER_CENTER,
+                icon,
+                FontId::proportional(16.0),
+                Color32::from_rgb(170, 205, 245),
+            );
+        }
+        if let Some(label) = cloud_preview_label(asset.thumbnail_kind) {
+            let label_width = (label.chars().count() as f32 * 6.4 + 14.0)
+                .min((rect.width() - 53.0).max(0.0));
+            if label_width >= 58.0 {
+                let preview_badge = egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + 7.0, rect.top() + 7.0),
+                    egui::vec2(label_width, 25.0),
+                );
+                ui.painter()
+                    .rect_filled(preview_badge, 4.0, Color32::from_black_alpha(176));
+                ui.painter().text(
+                    preview_badge.center(),
+                    Align2::CENTER_CENTER,
+                    label,
+                    FontId::proportional(10.5),
+                    Color32::from_rgb(170, 205, 245),
+                );
+            }
+        }
     }
 
     let mut tooltip = entry.info.display_path.clone();
-    if matches!(&entry.info.source, LibrarySource::Cloud(_)) {
-        tooltip.push_str(if entry.info.cloud_downloaded {
-            "\nDownloaded · available offline"
-        } else {
-            "\nCloud only · opens after downloading"
-        });
+    if let LibrarySource::Cloud(asset) = &entry.info.source {
+        let (_, _, sync_text) = cloud_sync_badge(
+            entry.info.cloud_sync_state,
+            entry.info.cloud_downloaded,
+        );
+        tooltip.push('\n');
+        tooltip.push_str(sync_text);
+        if let Some(preview_notice) = cloud_preview_notice(asset.thumbnail_kind) {
+            tooltip.push('\n');
+            tooltip.push_str(preview_notice);
+        }
     }
     if let Some(error) = &entry.thumbnail_error {
         tooltip.push_str("\nPreview: ");
@@ -9803,6 +10376,7 @@ fn scan_folder_with_limit(
             bytes: file_metadata.as_ref().map_or(0, std::fs::Metadata::len),
             dimensions_hint: None,
             cloud_downloaded: false,
+            cloud_sync_state: crate::cloud::CloudSyncState::Synced,
             modified: file_metadata.and_then(|metadata| metadata.modified().ok()),
         });
         if files.len() < maximum_files {
@@ -9872,18 +10446,20 @@ mod tests {
     use super::LibrarySource;
     use super::{
         balanced_justified_row_ranges, cloud_cache_icon, cloud_folder_id_for_catalog,
+        cloud_preview_icon, cloud_preview_label, cloud_preview_notice, cloud_sync_badge,
         copy_directory_create_new, desktop_selection_toggle_label, duplicate_raw_and_sidecar,
         elide_middle, format_file_size, import_folder_into_library, import_raw_into_folder,
         justified_thumbnail_layout, library_import_fab_rect, library_import_icon,
         loaded_library_thumbnail, make_resident_thumbnail, new_library_entry, rename_raw_bundle,
         run_folder_operation, run_image_paste, run_thumbnail_workers, scan_folder,
-        scan_folder_tree, scan_folder_with_limit, validate_folder_name, ImageClipboard,
-        ImageClipboardContent, ImageClipboardMode, ImagePasteDestination, LibraryFileInfo,
-        LibraryFolderOperation, LibraryState, LibraryThumbnailSize, LibraryView, RawImportOutcome,
-        ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
-        LIBRARY_IMPORT_FAB_EDGE,
+        scan_folder_tree, scan_folder_with_limit, trash_age_label, trash_remaining_label,
+        trash_size_label, validate_folder_name, ImageClipboard, ImageClipboardContent,
+        ImageClipboardMode, ImagePasteDestination, LibraryFileInfo, LibraryFolderOperation,
+        LibraryState, LibraryThumbnailSize, LibraryView, RawImportOutcome, ScanEvent,
+        ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction, LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
+    use eframe::egui::Color32;
     use std::collections::HashSet;
     use std::fs;
     #[cfg(not(target_os = "android"))]
@@ -10027,6 +10603,14 @@ mod tests {
     }
 
     #[test]
+    fn cloud_trash_retention_metadata_is_readable() {
+        assert_eq!(trash_age_label(0), "just now");
+        assert_eq!(trash_age_label(2 * 24 * 60 * 60), "2 days ago");
+        assert_eq!(trash_remaining_label(25 * 60 * 60), "2 days remaining");
+        assert_eq!(trash_size_label(2 * 1024 * 1024), "2.0 MiB");
+    }
+
+    #[test]
     fn desktop_selection_toggle_label_matches_the_next_action() {
         assert_eq!(desktop_selection_toggle_label(false), "Select");
         assert_eq!(desktop_selection_toggle_label(true), "Cancel");
@@ -10120,6 +10704,7 @@ mod tests {
             raw_etag: "d".repeat(64),
             sidecar_etag: None,
             thumbnail_etag: "e".repeat(64),
+            thumbnail_kind: crate::cloud::CloudThumbnailKind::Edited,
             folder_id: "b".repeat(64),
         };
         let source = LibrarySource::Cloud(asset);
@@ -10154,6 +10739,40 @@ mod tests {
     }
 
     #[test]
+    fn cloud_sync_badges_distinguish_queue_failure_and_conflict() {
+        let (queued_icon, queued_color, _) =
+            cloud_sync_badge(crate::cloud::CloudSyncState::Queued, true);
+        assert_eq!(queued_icon, egui_phosphor::regular::ARROW_CLOCKWISE);
+        assert_eq!(queued_color, Color32::from_rgb(245, 190, 55));
+
+        let (failed_icon, failed_color, _) =
+            cloud_sync_badge(crate::cloud::CloudSyncState::Failed, true);
+        assert_eq!(failed_icon, egui_phosphor::regular::X);
+        assert_eq!(failed_color, Color32::from_rgb(240, 78, 78));
+
+        let (conflict_icon, conflict_color, _) =
+            cloud_sync_badge(crate::cloud::CloudSyncState::Conflict, true);
+        assert_eq!(conflict_icon, egui_phosphor::regular::INTERSECT);
+        assert_eq!(conflict_color, Color32::from_rgb(240, 78, 78));
+    }
+
+    #[test]
+    fn cloud_preview_provenance_uses_matching_in_thumbnail_badges() {
+        use crate::cloud::CloudThumbnailKind::{Edited, Legacy, Placeholder, Raw};
+
+        assert_eq!(cloud_preview_label(Edited), None);
+        assert_eq!(cloud_preview_label(Raw), Some("UNEDITED PREVIEW"));
+        assert_eq!(cloud_preview_label(Legacy), None);
+        assert_eq!(
+            cloud_preview_icon(Legacy),
+            Some(egui_phosphor::regular::CLOCK_COUNTER_CLOCKWISE)
+        );
+        assert_eq!(cloud_preview_icon(Edited), None);
+        assert_eq!(cloud_preview_label(Placeholder), Some("PREVIEW RENDERING"));
+        assert!(cloud_preview_notice(Legacy).unwrap().contains("Legacy"));
+    }
+
+    #[test]
     fn justified_rows_rebalance_to_avoid_a_sparse_last_row() {
         let aspects = vec![1.5; 13];
         let rows = balanced_justified_row_ranges(&aspects, 1000.0, 140.0, 6.0);
@@ -10185,6 +10804,7 @@ mod tests {
                                 bytes: 1,
                                 dimensions_hint: Some([3, 2]),
                                 cloud_downloaded: false,
+                                cloud_sync_state: crate::cloud::CloudSyncState::Synced,
                                 modified: None,
                             })
                         })
@@ -10218,6 +10838,7 @@ mod tests {
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
             cloud_downloaded: false,
+            cloud_sync_state: crate::cloud::CloudSyncState::Synced,
             modified: None,
         };
         let mut entry = new_library_entry(info);
@@ -10361,6 +10982,7 @@ mod tests {
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
             cloud_downloaded: false,
+            cloud_sync_state: crate::cloud::CloudSyncState::Synced,
             modified: None,
         };
         let mut entry = new_library_entry(info);
@@ -10392,6 +11014,7 @@ mod tests {
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
             cloud_downloaded: false,
+            cloud_sync_state: crate::cloud::CloudSyncState::Synced,
             modified: None,
         };
         let mut entry = new_library_entry(info);
@@ -10429,6 +11052,7 @@ mod tests {
             raw_etag: "c".repeat(64),
             sidecar_etag: Some("d".repeat(64)),
             thumbnail_etag: "e".repeat(64),
+            thumbnail_kind: crate::cloud::CloudThumbnailKind::Edited,
             folder_id,
         };
         library.entries.push(new_library_entry(LibraryFileInfo {
@@ -10438,6 +11062,7 @@ mod tests {
             bytes: asset.bytes,
             dimensions_hint: Some([asset.width, asset.height]),
             cloud_downloaded: false,
+            cloud_sync_state: crate::cloud::CloudSyncState::Synced,
             modified: None,
         }));
 
@@ -10465,6 +11090,7 @@ mod tests {
             bytes: 1,
             dimensions_hint: Some([6000, 4000]),
             cloud_downloaded: false,
+            cloud_sync_state: crate::cloud::CloudSyncState::Synced,
             modified: None,
         };
         let mut entry = new_library_entry(info);
@@ -10675,6 +11301,7 @@ mod tests {
                 bytes: 1,
                 dimensions_hint: Some([3, 2]),
                 cloud_downloaded: false,
+                cloud_sync_state: crate::cloud::CloudSyncState::Synced,
                 modified: None,
             })
             .collect::<Vec<_>>();
@@ -11039,6 +11666,7 @@ mod tests {
             raw_etag: sha256_hex(raw),
             sidecar_etag: Some(sha256_hex(sidecar)),
             thumbnail_etag: sha256_hex(&thumbnail),
+            thumbnail_kind: crate::cloud::CloudThumbnailKind::Edited,
             folder_id: crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned(),
         };
         let catalog = serde_json::to_vec(&serde_json::json!({
