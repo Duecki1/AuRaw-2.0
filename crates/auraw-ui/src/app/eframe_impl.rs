@@ -78,7 +78,7 @@ impl eframe::App for AurawApp {
         self.poll_library_batch_export_worker();
         self.poll_export_worker(frame);
         #[cfg(target_os = "android")]
-        self.resume_android_library_batch_export_if_possible();
+        self.resume_android_library_batch_export_if_possible(frame);
         self.poll_subject_worker();
         self.poll_object_worker();
         self.poll_library_ai_mask_refresh(frame);
@@ -307,6 +307,7 @@ impl eframe::App for AurawApp {
         self.show_subject_dialogs(ui.ctx());
         self.show_inpainting_dialogs(ui.ctx());
         self.show_ai_denoise_dialogs(ui.ctx(), frame);
+        self.poll_cloud_sidecar_conflict_resolution(frame);
         self.show_sidecar_save_error_dialog(ui.ctx());
         self.show_background_task_detail_windows(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());

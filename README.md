@@ -79,6 +79,20 @@ straight to the server through the system picker and does not add another copy
 to the Local library. Upload progress and the final success/failure summary are
 shown in the Library.
 
+Cloud libraries can use nested folders. Desktop shows the hierarchy in the
+folder sidebar, while the Library breadcrumb and child-folder buttons provide
+the same navigation on Android. **New folder** and **Paste here** act on the
+folder currently being viewed. Folder menus support copy, cut, paste, rename,
+move, and recursive deletion; desktop folders can also be dragged onto another
+cloud folder.
+
+Cloud RAW cards support the normal selection workflow. Use **Select** on
+desktop or long-press a card on Android, then add as many RAWs as needed.
+Desktop right-click menus and Android's selection overflow menu support export,
+copy/cut/paste, duplicate, rename, reset, and delete. Export downloads only the
+selected RAWs and sidecars into the existing private cache before running the
+same batch exporter used by the Local library.
+
 The Docker server project lives beside this checkout in `AuRaw-2.0-Server`.
 Its README covers startup, token authentication, imports, HTTPS deployment,
 storage, and backups.

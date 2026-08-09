@@ -410,6 +410,8 @@ impl AurawApp {
             sidecar_receiver: None,
             sidecar_save_feedback_until: None,
             sidecar_save_error_dialog: None,
+            sidecar_conflict_receiver: None,
+            sidecar_conflict_resolution_error: None,
             sidecar_autosave_deadline: None,
             developed_thumbnail_pending: None,
             developed_thumbnail_in_flight: None,
@@ -690,6 +692,8 @@ impl AurawApp {
             sidecar_receiver: None,
             sidecar_save_feedback_until: None,
             sidecar_save_error_dialog: None,
+            sidecar_conflict_receiver: None,
+            sidecar_conflict_resolution_error: None,
             sidecar_autosave_deadline: None,
             developed_thumbnail_pending: None,
             developed_thumbnail_in_flight: None,
@@ -2021,7 +2025,7 @@ impl AurawApp {
         }
     }
 
-    fn open_path_labeled(
+    pub(crate) fn open_path_labeled(
         &mut self,
         path: PathBuf,
         label: String,
