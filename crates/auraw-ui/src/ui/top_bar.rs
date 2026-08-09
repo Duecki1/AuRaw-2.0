@@ -18,8 +18,7 @@ impl TopBar {
             size,
             egui::Button::new(
                 egui::RichText::new(egui_phosphor::regular::ARROW_LEFT).size(size.y * 0.55),
-            )
-            .frame(false),
+            ),
         )
         .on_hover_text("Back to Library")
     }
@@ -38,9 +37,7 @@ impl TopBar {
         };
         ui.add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new(icon).size(size.y * 0.55))
-                .min_size(size)
-                .frame(!cfg!(target_os = "android")),
+            egui::Button::new(egui::RichText::new(icon).size(size.y * 0.55)).min_size(size),
         )
         .on_hover_text(hover_text)
     }
@@ -67,7 +64,7 @@ impl TopBar {
                 .add_enabled_ui(app.can_save_edits(), |ui| {
                     ui.add_sized(
                         egui::vec2(42.0, 36.0),
-                        egui::Button::new(egui::RichText::new(save_icon).size(19.8)).frame(false),
+                        egui::Button::new(egui::RichText::new(save_icon).size(19.8)),
                     )
                 })
                 .inner

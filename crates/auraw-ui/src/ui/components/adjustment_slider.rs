@@ -13,10 +13,7 @@ const HEADER_HEIGHT: f32 = 22.0;
 const SLIDER_HEIGHT: f32 = 28.0;
 #[cfg(target_os = "android")]
 const SLIDER_HEIGHT: f32 = 24.0;
-#[cfg(not(target_os = "android"))]
 const TRACK_HEIGHT: f32 = 4.0;
-#[cfg(target_os = "android")]
-const TRACK_HEIGHT: f32 = 2.0;
 #[cfg(not(target_os = "android"))]
 const HANDLE_RADIUS: f32 = 7.0;
 #[cfg(target_os = "android")]
@@ -302,33 +299,14 @@ fn touch_value_field(ui: &mut Ui, value: f64, decimals: usize) -> egui::Response
         ui.allocate_exact_size(egui::vec2(VALUE_FIELD_WIDTH, HEADER_HEIGHT), Sense::click());
     let visuals = ui.style().interact(&response);
     let painter = ui.painter_at(rect);
-    #[cfg(not(target_os = "android"))]
-    {
-        painter.rect_filled(rect, 3.0, visuals.bg_fill);
-        painter.rect_stroke(rect, 3.0, visuals.bg_stroke, egui::StrokeKind::Inside);
-    }
-    let formatted = if cfg!(target_os = "android") && value > 0.0 {
-        format!("{value:+.decimals$}")
-    } else {
-        format!("{value:.decimals$}")
-    };
+    painter.rect_filled(rect, 3.0, visuals.bg_fill);
+    painter.rect_stroke(rect, 3.0, visuals.bg_stroke, egui::StrokeKind::Inside);
+    let formatted = format!("{value:.decimals$}");
     painter.text(
-        if cfg!(target_os = "android") {
-            rect.right_center()
-        } else {
-            rect.center()
-        },
-        if cfg!(target_os = "android") {
-            Align2::RIGHT_CENTER
-        } else {
-            Align2::CENTER_CENTER
-        },
+        rect.center(),
+        Align2::CENTER_CENTER,
         formatted,
-        if cfg!(target_os = "android") {
-            FontId::proportional(12.0)
-        } else {
-            FontId::monospace(12.0)
-        },
+        FontId::monospace(12.0),
         visuals.fg_stroke.color,
     );
     response
@@ -493,9 +471,7 @@ where
         || handle_response.is_pointer_button_down_on()
         || (track_response.is_pointer_button_down_on()
             && pointer.0.is_some_and(|origin| rect.contains(origin)));
-    #[cfg(not(target_os = "android"))]
     let hovered = track_response.hovered() || handle_response.hovered();
-    #[cfg(not(target_os = "android"))]
     let widget_visuals = if active {
         &ui.visuals().widgets.active
     } else if hovered {
@@ -510,83 +486,55 @@ where
     } else {
         accent
     };
-    #[cfg(target_os = "android")]
-    {
-        if hue_track {
-            paint_hue_track(painter, track_rect);
-        } else {
-            painter.rect_filled(
-                track_rect,
-                TRACK_HEIGHT * 0.5,
-                ui.visuals().weak_text_color().gamma_multiply(0.72),
-            );
-        }
-        painter.circle_filled(handle_center, HANDLE_RADIUS, ui.visuals().panel_fill);
-        painter.circle_stroke(
-            handle_center,
-            HANDLE_RADIUS,
-            Stroke::new(
-                if active { 2.0 } else { 1.5 },
-                if active {
-                    visual_accent.unwrap_or(ui.visuals().selection.bg_fill)
-                } else {
-                    ui.visuals().weak_text_color()
-                },
-            ),
+    if hue_track {
+        paint_hue_track(painter, track_rect);
+    } else {
+        painter.rect_filled(
+            track_rect,
+            TRACK_HEIGHT * 0.5,
+            ui.visuals().widgets.inactive.bg_fill,
         );
     }
-    #[cfg(not(target_os = "android"))]
-    {
-        if hue_track {
-            paint_hue_track(painter, track_rect);
-        } else {
-            painter.rect_filled(
-                track_rect,
-                TRACK_HEIGHT * 0.5,
-                ui.visuals().widgets.inactive.bg_fill,
-            );
-        }
-        // Signed adjustment ranges use zero as their visual origin. This keeps
-        // neutral values neutral instead of showing a misleading half-filled
-        // blue track, while one-sided controls continue filling from the left.
-        let bipolar = start < 0.0 && end > 0.0;
-        let fill_origin = if bipolar {
-            let zero_fraction = ((-start) / span).clamp(0.0, 1.0) as f32;
-            egui::lerp(track_rect.left()..=track_rect.right(), zero_fraction)
-        } else {
-            track_rect.left()
-        };
-        let fill_left = fill_origin.min(handle_x);
-        let fill_right = fill_origin.max(handle_x);
-        if !hue_track && fill_right - fill_left > 0.25 {
-            let fill_rect = egui::Rect::from_min_max(
-                egui::pos2(fill_left, track_rect.top()),
-                egui::pos2(fill_right, track_rect.bottom()),
-            );
-            painter.rect_filled(
-                fill_rect,
-                TRACK_HEIGHT * 0.5,
-                visual_accent.unwrap_or(ui.visuals().selection.bg_fill),
-            );
-        }
-        if bipolar {
-            painter.vline(
-                fill_origin,
-                (track_rect.center().y - 5.0)..=(track_rect.center().y + 5.0),
-                Stroke::new(1.0, egui::Color32::from_white_alpha(75)),
-            );
-        }
-        painter.circle_filled(
-            handle_center,
-            HANDLE_RADIUS,
-            visual_accent.unwrap_or(widget_visuals.bg_fill),
+    // Signed adjustment ranges use zero as their visual origin on every
+    // platform. Android retains its touch geometry, but uses the same visual
+    // language as the desktop Develop controls.
+    let bipolar = start < 0.0 && end > 0.0;
+    let fill_origin = if bipolar {
+        let zero_fraction = ((-start) / span).clamp(0.0, 1.0) as f32;
+        egui::lerp(track_rect.left()..=track_rect.right(), zero_fraction)
+    } else {
+        track_rect.left()
+    };
+    let fill_left = fill_origin.min(handle_x);
+    let fill_right = fill_origin.max(handle_x);
+    if !hue_track && fill_right - fill_left > 0.25 {
+        let fill_rect = egui::Rect::from_min_max(
+            egui::pos2(fill_left, track_rect.top()),
+            egui::pos2(fill_right, track_rect.bottom()),
         );
-        painter.circle_stroke(
-            handle_center,
-            HANDLE_RADIUS,
-            Stroke::new(1.0, widget_visuals.fg_stroke.color),
+        painter.rect_filled(
+            fill_rect,
+            TRACK_HEIGHT * 0.5,
+            visual_accent.unwrap_or(ui.visuals().selection.bg_fill),
         );
     }
+    if bipolar {
+        painter.vline(
+            fill_origin,
+            (track_rect.center().y - 5.0)..=(track_rect.center().y + 5.0),
+            Stroke::new(1.0, egui::Color32::from_white_alpha(75)),
+        );
+    }
+    painter.circle_filled(
+        handle_center,
+        HANDLE_RADIUS,
+        visual_accent.unwrap_or(widget_visuals.bg_fill),
+    );
+    painter.circle_stroke(
+        handle_center,
+        HANDLE_RADIUS,
+        Stroke::new(1.0, widget_visuals.fg_stroke.color),
+    );
 
     let combined = track_response
         .union(handle_response)

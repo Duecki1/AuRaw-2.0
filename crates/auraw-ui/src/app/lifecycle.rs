@@ -544,10 +544,9 @@ impl AurawApp {
         android_app: auraw_ffi::AndroidApp,
     ) -> Self {
         crate::android::install_context(&cc.egui_ctx);
-        // Android keeps the same AuRaw layout, but intentionally uses eframe's
-        // native/default widget styling instead of the desktop Lightroom-like
-        // palette and spacing overrides. We only install the icon font here.
-        Self::install_ui_fonts(&cc.egui_ctx);
+        // Share AuRaw's palette, typography, icon font, and widget styling with
+        // desktop. Portrait/landscape composition remains Android-specific.
+        crate::ui::theme::install(&cc.egui_ctx);
         match crate::android::device_diagnostics(&android_app) {
             Ok(info) => crate::diagnostics::set_device_info(info),
             Err(error) => crate::diagnostics::record(error),
