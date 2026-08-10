@@ -37,6 +37,12 @@ pub struct LibraryDocument {
     pub modified_seconds: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryFolder {
+    pub path: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct CloudUploadDocument {
     pub uri: String,
@@ -462,6 +468,72 @@ pub fn list_library_documents(app: &AndroidApp) -> Result<Vec<LibraryDocument>, 
         .collect()
 }
 
+pub fn list_library_folders(app: &AndroidApp) -> Result<Vec<LibraryFolder>, String> {
+    let encoded = with_storage_manager(app, |env, storage_manager| {
+        let object = env
+            .call_method(
+                storage_manager,
+                jni::jni_str!("listRawLibraryFolders"),
+                jni::jni_sig!(() -> JString),
+                &[],
+            )?
+            .l()?;
+        Ok(env.cast_local::<JString>(object)?.to_string())
+    })
+    .map_err(|error| format!("could not list Android RAW library folders: {error:#}"))?;
+    encoded
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let mut fields = line.split('\t');
+            let path = decode_uri_component(fields.next().unwrap_or_default())?;
+            let name = decode_uri_component(fields.next().unwrap_or_default())?;
+            if fields.next().is_some() || path.is_empty() || name.is_empty() {
+                return Err("malformed Android library folder record".to_owned());
+            }
+            Ok(LibraryFolder { path, name })
+        })
+        .collect()
+}
+
+pub fn select_library_folder(app: &AndroidApp, relative_path: &str) -> Result<(), String> {
+    let relative_path = relative_path.to_owned();
+    with_storage_manager(app, |env, storage_manager| {
+        let relative_path = env.new_string(&relative_path)?;
+        env.call_method(
+            storage_manager,
+            jni::jni_str!("selectRawLibraryFolder"),
+            jni::jni_sig!((JString) -> void),
+            &[JValue::Object(&relative_path)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not select Android RAW library folder: {error:#}"))
+}
+
+pub fn create_library_folder(
+    app: &AndroidApp,
+    parent_path: &str,
+    name: &str,
+) -> Result<String, String> {
+    let parent_path = parent_path.to_owned();
+    let name = name.to_owned();
+    with_storage_manager(app, |env, storage_manager| {
+        let parent_path = env.new_string(&parent_path)?;
+        let name = env.new_string(&name)?;
+        let object = env
+            .call_method(
+                storage_manager,
+                jni::jni_str!("createRawLibraryFolder"),
+                jni::jni_sig!((JString, JString) -> JString),
+                &[JValue::Object(&parent_path), JValue::Object(&name)],
+            )?
+            .l()?;
+        Ok(env.cast_local::<JString>(object)?.to_string())
+    })
+    .map_err(|error| format!("could not create Android RAW library folder: {error:#}"))
+}
+
 pub fn load_library_thumbnail(
     app: &AndroidApp,
     uri: &str,
@@ -870,16 +942,19 @@ pub fn import_cached_library_document(
 
 pub fn delete_imported_library_document(
     app: &AndroidApp,
+    raw_uri: &str,
     display_name: &str,
 ) -> Result<(), String> {
+    let raw_uri = raw_uri.to_owned();
     let display_name = display_name.to_owned();
     with_storage_manager(app, |env, storage_manager| {
+        let raw_uri = env.new_string(&raw_uri)?;
         let display_name = env.new_string(&display_name)?;
         env.call_method(
             storage_manager,
             jni::jni_str!("deleteImportedRawLibraryDocument"),
-            jni::jni_sig!((JString) -> void),
-            &[JValue::Object(&display_name)],
+            jni::jni_sig!((JString, JString) -> void),
+            &[JValue::Object(&raw_uri), JValue::Object(&display_name)],
         )?;
         Ok(())
     })

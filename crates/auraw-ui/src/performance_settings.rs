@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 11;
+const SETTINGS_VERSION: u32 = 12;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,6 +59,9 @@ pub struct PerformanceSettings {
     pub(crate) last_library_view: crate::ui::library::LibraryView,
     #[serde(default = "default_cloud_library_folder")]
     pub(crate) last_cloud_library_folder: String,
+    #[cfg(target_os = "android")]
+    #[serde(default)]
+    pub(crate) last_android_library_folder: String,
     #[cfg(not(target_os = "android"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_library_folder: Option<PathBuf>,
@@ -131,6 +134,8 @@ impl Default for PerformanceSettings {
             cloud_access_token: String::new(),
             last_library_view: crate::ui::library::LibraryView::Local,
             last_cloud_library_folder: default_cloud_library_folder(),
+            #[cfg(target_os = "android")]
+            last_android_library_folder: String::new(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
             #[cfg(not(target_os = "android"))]

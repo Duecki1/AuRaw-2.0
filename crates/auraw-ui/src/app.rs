@@ -1154,6 +1154,8 @@ impl AurawApp {
         if self.active_tab == AppTab::Library && tab != AppTab::Library {
             // Keep thumbnail decoding from competing with Develop rendering.
             self.library.prepare_for_develop();
+            #[cfg(target_os = "android")]
+            self.library.set_folder_sidebar_open(false);
         }
         if tab == AppTab::Settings {
             self.thumbnail_cache_size = None;

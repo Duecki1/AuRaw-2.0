@@ -60,9 +60,12 @@ impl Sidebar {
         } else {
             let mut regenerate_stroke = None;
             let mut delete_stroke = None;
+            let stroke_list_height = ui.available_height().max(32.0);
             egui::ScrollArea::vertical()
                 .id_salt("inpainting-stroke-list")
-                .max_height(180.0)
+                .max_height(stroke_list_height)
+                .min_scrolled_height(stroke_list_height)
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
                     for index in (0..app.inpaint_strokes.len()).rev() {
                         let dab_count = app.inpaint_strokes[index].dabs.len();

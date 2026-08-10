@@ -36,6 +36,54 @@ final class AndroidStorageContract {
         return new File(rawLibraryDirectory, ".nomedia");
     }
 
+    static String safeFolderName(String requestedName) {
+        String name = requestedName == null ? "" : requestedName.trim();
+        if (name.isEmpty()
+                || ".".equals(name)
+                || "..".equals(name)
+                || name.startsWith(".")
+                || name.indexOf('/') >= 0
+                || name.indexOf('\\') >= 0
+                || name.indexOf('\0') >= 0
+                || name.getBytes(StandardCharsets.UTF_8).length > 240) {
+            throw new IllegalArgumentException("Enter a safe folder name");
+        }
+        return name;
+    }
+
+    /** Resolves an AuRaw-owned relative folder without permitting path traversal. */
+    static File libraryFolder(File canonicalLibrary, String relativePath) throws Exception {
+        String relative = relativePath == null ? "" : relativePath.trim();
+        File root = canonicalLibrary.getCanonicalFile();
+        if (relative.isEmpty()) {
+            return root;
+        }
+        if (relative.startsWith("/") || relative.startsWith("\\")) {
+            throw new IllegalArgumentException("The library folder path is invalid");
+        }
+        File current = root;
+        for (String component : relative.replace('\\', '/').split("/", -1)) {
+            if (component.isEmpty() || !safeFolderName(component).equals(component)) {
+                throw new IllegalArgumentException("The library folder path is invalid");
+            }
+            current = new File(current, component);
+        }
+        File resolved = current.getCanonicalFile();
+        if (!resolved.toPath().startsWith(root.toPath())) {
+            throw new IllegalArgumentException("The library folder is outside AuRaw's library");
+        }
+        return resolved;
+    }
+
+    static String relativeLibraryFolder(File canonicalLibrary, File folder) throws Exception {
+        File root = canonicalLibrary.getCanonicalFile();
+        File resolved = folder.getCanonicalFile();
+        if (!resolved.toPath().startsWith(root.toPath())) {
+            throw new IllegalArgumentException("The folder is outside AuRaw's library");
+        }
+        return root.toPath().relativize(resolved.toPath()).toString().replace(File.separatorChar, '/');
+    }
+
     static boolean isAllowedRawFile(
             File raw,
             String expectedDisplayName,
@@ -46,9 +94,10 @@ final class AndroidStorageContract {
         }
         File canonicalRaw = raw.getCanonicalFile();
         File parent = canonicalRaw.getParentFile();
+        File canonicalLibraryRoot = canonicalLibrary.getCanonicalFile();
         return expectedDisplayName.equals(canonicalRaw.getName())
                 && parent != null
-                && (canonicalLibrary.getCanonicalFile().equals(parent)
+                && (parent.toPath().startsWith(canonicalLibraryRoot.toPath())
                         || legacyRoot.getCanonicalFile().equals(parent));
     }
 
