@@ -98,6 +98,17 @@ const fn default_camera_profile_auto_detect() -> bool {
     !cfg!(target_os = "android")
 }
 
+const fn subject_quality_for_platform(
+    configured: crate::ai_masks::BiRefNetQuality,
+    android: bool,
+) -> crate::ai_masks::BiRefNetQuality {
+    if android {
+        crate::ai_masks::BiRefNetQuality::Low
+    } else {
+        configured
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 const fn default_true() -> bool {
     true
@@ -172,6 +183,8 @@ impl PerformanceSettings {
         self.thumbnail_workers = self
             .thumbnail_workers
             .clamp(1, crate::ui::library::maximum_thumbnail_worker_count());
+        self.birefnet_quality =
+            subject_quality_for_platform(self.birefnet_quality, cfg!(target_os = "android"));
         self
     }
 }
@@ -443,7 +456,7 @@ mod tests {
         assert!(!settings.image_relative_brush_size);
         assert_eq!(
             settings.birefnet_quality,
-            crate::ai_masks::BiRefNetQuality::Medium
+            crate::ai_masks::BiRefNetQuality::Low
         );
         assert_eq!(
             settings.library_thumbnail_size,
@@ -514,6 +527,18 @@ mod tests {
             assert!(!restored.library_folder_sidebar_open);
             assert!(!restored.develop_filmstrip_open);
         }
+    }
+
+    #[test]
+    fn android_always_sanitizes_subject_quality_to_low() {
+        assert_eq!(
+            subject_quality_for_platform(crate::ai_masks::BiRefNetQuality::High, true),
+            crate::ai_masks::BiRefNetQuality::Low
+        );
+        assert_eq!(
+            subject_quality_for_platform(crate::ai_masks::BiRefNetQuality::High, false),
+            crate::ai_masks::BiRefNetQuality::High
+        );
     }
 
     #[test]

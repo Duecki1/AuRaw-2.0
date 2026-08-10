@@ -1552,6 +1552,8 @@ impl Sidebar {
         request_object: &mut bool,
     ) -> bool {
         let (request_subject, birefnet_quality, birefnet_quality_change_enabled) = subject_controls;
+        #[cfg(target_os = "android")]
+        let _ = birefnet_quality_change_enabled;
         let (
             refinement_active,
             refinement_size,
@@ -1810,24 +1812,27 @@ impl Sidebar {
                             }
                         });
                     }
-                    ui.add_enabled_ui(birefnet_quality_change_enabled, |ui| {
-                        crate::ui::theme::form_combo(
-                            ui,
-                            "Subject quality",
-                            "mask-subject-quality",
-                            birefnet_quality.label(),
-                            150.0,
-                            |ui| {
-                                for quality in crate::ai_masks::BiRefNetQuality::ALL {
-                                    ui.selectable_value(
-                                        birefnet_quality,
-                                        quality,
-                                        quality.label(),
-                                    );
-                                }
-                            },
-                        );
-                    });
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        ui.add_enabled_ui(birefnet_quality_change_enabled, |ui| {
+                            crate::ui::theme::form_combo(
+                                ui,
+                                "Subject quality",
+                                "mask-subject-quality",
+                                birefnet_quality.label(),
+                                150.0,
+                                |ui| {
+                                    for quality in crate::ai_masks::BiRefNetQuality::ALL {
+                                        ui.selectable_value(
+                                            birefnet_quality,
+                                            quality,
+                                            quality.label(),
+                                        );
+                                    }
+                                },
+                            );
+                        });
+                    }
                     ui.add(
                         egui::Label::new(birefnet_quality.model().explanation)
                             .wrap()

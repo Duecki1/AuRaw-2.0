@@ -43,8 +43,8 @@ pub const BIREFNET_HIGH_MODEL_SHA256_HEX: &str =
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BiRefNetQuality {
-    Low,
     #[default]
+    Low,
     Medium,
     High,
 }
@@ -1398,6 +1398,11 @@ mod tests {
         validate_birefnet_output_shape, BiRefNetQuality, IMAGENET_MEAN, IMAGENET_STD,
     };
     use image::{ImageBuffer, Rgba};
+
+    #[test]
+    fn birefnet_defaults_to_the_low_quality_model() {
+        assert_eq!(BiRefNetQuality::default(), BiRefNetQuality::Low);
+    }
 
     #[test]
     fn birefnet_preprocessing_normalizes_the_complete_native_tensor() {
