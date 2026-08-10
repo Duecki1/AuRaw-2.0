@@ -8,7 +8,7 @@ impl Sidebar {
         // Keep the context label and clear action in one predictable header row.
         // The horizontal parent prevents the right-aligned action from consuming
         // the scroll area's remaining vertical height.
-        ui.horizontal(|ui| {
+        crate::ui::theme::toolbar_row(ui, |ui| {
             ui.strong("Brush and strokes");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let clear = crate::ui::icons::phosphor_icon_button_enabled(

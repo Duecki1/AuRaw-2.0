@@ -14,7 +14,7 @@ pub fn color_grading_editor(
 ) -> bool {
     let mut changed = false;
 
-    ui.horizontal(|ui| {
+    crate::ui::theme::toolbar_row(ui, |ui| {
         ui.strong("Four-way color grading");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if crate::ui::icons::phosphor_icon_button(
@@ -101,7 +101,7 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
     // wheel under the scrollbar when the Develop panel is narrowed.
     let size = ui.available_width().min(WHEEL_MAX_SIZE).max(1.0);
 
-    ui.horizontal(|ui| {
+    crate::ui::theme::toolbar_row(ui, |ui| {
         ui.strong("Hue / Saturation");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if crate::ui::icons::phosphor_icon_button(

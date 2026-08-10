@@ -1,3 +1,14 @@
+fn mobile_tab_text_geometry(height: f32) -> (f32, f32, f32, f32) {
+    let icon_size = (height * 0.38).clamp(19.0, 23.0);
+    let label_size = if height > 54.0 { 10.5 } else { 9.5 };
+    let gap = if height > 54.0 { 4.0 } else { 3.0 };
+    let stack_height = icon_size + gap + label_size;
+    let stack_top = (height - stack_height) * 0.5;
+    let icon_center = stack_top + icon_size * 0.5;
+    let label_center = stack_top + icon_size + gap + label_size * 0.5;
+    (icon_size, label_size, icon_center, label_center)
+}
+
 impl Sidebar {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
         // The scroll area below uses a solid scrollbar that reserves its own
@@ -12,8 +23,7 @@ impl Sidebar {
             return;
         }
 
-        ui.horizontal(|ui| {
-            crate::ui::theme::prepare_toolbar(ui);
+        crate::ui::theme::toolbar_row(ui, |ui| {
             ui.heading(match app.sidebar_tab {
                 SidebarTab::Adjustments => "Edit",
                 SidebarTab::Crop => "Crop & Straighten",
@@ -257,18 +267,20 @@ impl Sidebar {
         } else {
             visuals.weak_text_color()
         };
+        let (icon_size, label_size, icon_center, label_center) =
+            mobile_tab_text_geometry(size.y);
         painter.text(
-            egui::pos2(rect.center().x, rect.top() + size.y * 0.35),
+            egui::pos2(rect.center().x, rect.top() + icon_center),
             Align2::CENTER_CENTER,
             icon,
-            FontId::proportional((size.y * 0.38).clamp(19.0, 23.0)),
+            FontId::proportional(icon_size),
             color,
         );
         painter.text(
-            egui::pos2(rect.center().x, rect.bottom() - size.y * 0.19),
+            egui::pos2(rect.center().x, rect.top() + label_center),
             Align2::CENTER_CENTER,
             label,
-            FontId::proportional(if size.y > 54.0 { 10.5 } else { 9.5 }),
+            FontId::proportional(label_size),
             color,
         );
         response.on_hover_text(tooltip)
@@ -452,7 +464,7 @@ impl Sidebar {
         // Keep the context label and reset action in one predictable header row.
         // Nesting the right-aligned action inside a horizontal row also prevents
         // it from consuming the scroll area's remaining vertical height.
-        ui.horizontal(|ui| {
+        crate::ui::theme::toolbar_row(ui, |ui| {
             if layout == ScreenLayout::Vertical {
                 ui.strong(match app.adjustment_section {
                     AdjustmentSection::Light => "Light",

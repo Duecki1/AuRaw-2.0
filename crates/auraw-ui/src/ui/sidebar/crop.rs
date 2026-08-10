@@ -11,7 +11,7 @@ impl Sidebar {
         // Match the compact action row used by the other Develop tabs. Touch
         // friendliness is handled by egui's platform spacing and by the larger
         // invisible crop handles in the preview, not by oversized visible widgets.
-        ui.horizontal(|ui| {
+        crate::ui::theme::toolbar_row(ui, |ui| {
             ui.strong("Crop geometry");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::ui::icons::phosphor_icon_button(
@@ -72,7 +72,7 @@ impl Sidebar {
                 ui,
                 crate::ui::icons::UiIcon::RotateLeft,
                 false,
-                egui::vec2(36.0, 30.0),
+                crate::ui::theme::toolbar_icon_size(),
                 "Rotate 90° counter-clockwise",
             )
             .clicked()
@@ -83,7 +83,7 @@ impl Sidebar {
                 ui,
                 crate::ui::icons::UiIcon::RotateRight,
                 false,
-                egui::vec2(36.0, 30.0),
+                crate::ui::theme::toolbar_icon_size(),
                 "Rotate 90° clockwise",
             )
             .clicked()

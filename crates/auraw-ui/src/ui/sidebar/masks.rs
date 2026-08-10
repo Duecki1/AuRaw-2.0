@@ -1311,7 +1311,7 @@ impl Sidebar {
             });
 
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            crate::ui::theme::toolbar_row(ui, |ui| {
                 ui.strong("Local Adjustments");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::ui::icons::phosphor_icon_button(
@@ -1457,7 +1457,7 @@ impl Sidebar {
                     );
                 }
                 section => {
-                    ui.horizontal(|ui| {
+                    crate::ui::theme::toolbar_row(ui, |ui| {
                         ui.strong(match section {
                             MaskSection::Light => "Light",
                             MaskSection::ToneCurve => "Tone Curve",
@@ -2271,8 +2271,9 @@ impl Sidebar {
             MaskCardSize::Submask => 10,
         };
         let display_label: String = label.chars().take(max_label_chars).collect();
+        let label_center_y = (image_rect.bottom() + rect.bottom()) * 0.5;
         painter.text(
-            egui::pos2(rect.center().x, rect.bottom() - 9.0),
+            egui::pos2(rect.center().x, label_center_y),
             Align2::CENTER_CENTER,
             display_label,
             FontId::proportional(card_size.label_font_size()),
