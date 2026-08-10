@@ -14,13 +14,12 @@ impl TopBar {
 
     #[cfg(target_os = "android")]
     pub(crate) fn back_icon_button(ui: &mut Ui, size: egui::Vec2) -> egui::Response {
-        ui.add_sized(
+        crate::ui::icons::phosphor_icon_button(
+            ui,
+            egui_phosphor::regular::ARROW_LEFT,
             size,
-            egui::Button::new(
-                egui::RichText::new(egui_phosphor::regular::ARROW_LEFT).size(size.y * 0.55),
-            ),
+            "Back to Library",
         )
-        .on_hover_text("Back to Library")
     }
 
     fn history_icon_button(
@@ -35,11 +34,7 @@ impl TopBar {
         } else {
             egui_phosphor::regular::ARROW_U_UP_LEFT
         };
-        ui.add_enabled(
-            enabled,
-            egui::Button::new(egui::RichText::new(icon).size(size.y * 0.55)).min_size(size),
-        )
-        .on_hover_text(hover_text)
+        crate::ui::icons::phosphor_icon_button_enabled(ui, enabled, icon, size, hover_text)
     }
 
     #[cfg(target_os = "android")]
@@ -60,17 +55,13 @@ impl TopBar {
             } else {
                 egui_phosphor::regular::FLOPPY_DISK
             };
-            let save_response = ui
-                .add_enabled_ui(app.can_save_edits(), |ui| {
-                    ui.add_sized(
-                        theme::toolbar_icon_size(),
-                        egui::Button::new(
-                            egui::RichText::new(save_icon).size(theme::TOOLBAR_ICON_EDGE * 0.55),
-                        ),
-                    )
-                })
-                .inner
-                .on_hover_text(save_tooltip);
+            let save_response = crate::ui::icons::phosphor_icon_button_enabled(
+                ui,
+                app.can_save_edits(),
+                save_icon,
+                theme::toolbar_icon_size(),
+                save_tooltip,
+            );
             if save_response.clicked() {
                 app.save_edits_now();
             }
@@ -190,18 +181,13 @@ impl TopBar {
                     } else {
                         egui_phosphor::regular::FLOPPY_DISK
                     };
-                    let save_response = ui
-                        .add_enabled_ui(app.can_save_edits(), |ui| {
-                            ui.add_sized(
-                                theme::toolbar_icon_size(),
-                                egui::Button::new(
-                                    egui::RichText::new(save_icon)
-                                        .size(theme::TOOLBAR_ICON_EDGE * 0.55),
-                                ),
-                            )
-                        })
-                        .inner
-                        .on_hover_text(save_tooltip);
+                    let save_response = crate::ui::icons::phosphor_icon_button_enabled(
+                        ui,
+                        app.can_save_edits(),
+                        save_icon,
+                        theme::toolbar_icon_size(),
+                        save_tooltip,
+                    );
                     if save_response.clicked() {
                         app.save_edits_now();
                     }
@@ -216,10 +202,11 @@ impl TopBar {
                     } else {
                         "Show original preview"
                     };
-                    if crate::ui::icons::phosphor_icon_button_enabled(
+                    if crate::ui::icons::phosphor_icon_toggle_button_enabled(
                         ui,
                         app.gpu_pipeline.is_some(),
                         preview_icon,
+                        original_visible,
                         theme::toolbar_icon_size(),
                         preview_tooltip,
                     )

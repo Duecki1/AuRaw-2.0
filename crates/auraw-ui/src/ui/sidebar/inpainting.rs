@@ -78,18 +78,12 @@ impl Sidebar {
                                 regenerate_stroke = Some(index);
                             }
 
-                            let stroke_response = ui
-                                .add_sized(
-                                    [
-                                        ui.available_width().max(1.0),
-                                        crate::ui::theme::CONTROL_HEIGHT,
-                                    ],
-                                    egui::Button::new(format!(
-                                        "◎  Stroke {}  ·  {dab_count} dabs",
-                                        index + 1
-                                    ))
-                                    .selected(selected),
-                                )
+                            let stroke_response = crate::ui::theme::navigation_row(
+                                ui,
+                                format!("◎  Stroke {}  ·  {dab_count} dabs", index + 1),
+                                selected,
+                                egui::Sense::click(),
+                            )
                                 .on_hover_text(
                                     "Show this stroke on the image. Click to keep it highlighted.",
                                 );

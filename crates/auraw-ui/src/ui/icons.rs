@@ -68,6 +68,39 @@ pub fn phosphor_icon_button(ui: &mut Ui, glyph: &str, size: Vec2, tooltip: &str)
     .on_hover_text(tooltip)
 }
 
+pub fn phosphor_icon_toggle_button(
+    ui: &mut Ui,
+    glyph: &str,
+    selected: bool,
+    size: Vec2,
+    tooltip: &str,
+) -> Response {
+    ui.add_sized(
+        size,
+        egui::Button::new(RichText::new(glyph).size(size.y * 0.55)).selected(selected),
+    )
+    .on_hover_text(tooltip)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn phosphor_icon_toggle_button_enabled(
+    ui: &mut Ui,
+    enabled: bool,
+    glyph: &str,
+    selected: bool,
+    size: Vec2,
+    tooltip: &str,
+) -> Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.add_sized(
+            size,
+            egui::Button::new(RichText::new(glyph).size(size.y * 0.55)).selected(selected),
+        )
+    })
+    .inner
+    .on_hover_text(tooltip)
+}
+
 pub fn phosphor_icon_button_enabled(
     ui: &mut Ui,
     enabled: bool,

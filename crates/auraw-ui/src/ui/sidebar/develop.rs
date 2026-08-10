@@ -424,16 +424,13 @@ impl Sidebar {
                                 }
                             }
                         });
-                    let picker = ui
-                        .add_sized(
-                            [picker_width, crate::ui::theme::CONTROL_HEIGHT],
-                            egui::Button::new(
-                                egui::RichText::new(egui_phosphor::regular::EYEDROPPER)
-                                    .size(crate::ui::theme::TOOLBAR_ICON_EDGE * 0.55),
-                            )
-                            .selected(*white_balance_picker_active),
-                        )
-                        .on_hover_text("Pick a neutral gray or white area in the image");
+                    let picker = crate::ui::icons::phosphor_icon_toggle_button(
+                        ui,
+                        egui_phosphor::regular::EYEDROPPER,
+                        *white_balance_picker_active,
+                        egui::vec2(picker_width, crate::ui::theme::CONTROL_HEIGHT),
+                        "Pick a neutral gray or white area in the image",
+                    );
                     if picker.clicked() {
                         *white_balance_picker_active = !*white_balance_picker_active;
                     }
