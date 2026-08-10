@@ -23,17 +23,16 @@ impl Sidebar {
             return;
         }
 
-        crate::ui::theme::toolbar_row(ui, |ui| {
-            ui.heading(match app.sidebar_tab {
+        crate::ui::theme::panel_title(
+            ui,
+            match app.sidebar_tab {
                 SidebarTab::Adjustments => "Edit",
                 SidebarTab::Crop => "Crop & Straighten",
                 SidebarTab::Masks => "Masking",
                 SidebarTab::Inpainting => "Remove & Heal",
                 SidebarTab::Export => "Export",
-            });
-        });
-        ui.add_space(3.0);
-        ui.separator();
+            },
+        );
 
         Self::show_sidebar_content(ui, app, layout, frame);
     }

@@ -22,6 +22,8 @@ pub const TOOLBAR_HEIGHT: f32 = if cfg!(target_os = "android") {
 pub const TOOLBAR_ICON_EDGE: f32 = CONTROL_HEIGHT;
 pub const TOOL_RAIL_ICON_EDGE: f32 = 40.0;
 pub const CARD_GAP: f32 = 10.0;
+pub const PANEL_TITLE_HEIGHT: f32 = 42.0;
+pub const PANEL_TITLE_TEXT_SIZE: f32 = 18.0;
 
 const fn platform_control_height(android: bool) -> f32 {
     if android {
@@ -56,6 +58,22 @@ pub fn toolbar_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> I
     ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
         prepare_toolbar(ui);
         add_contents(ui)
+    })
+}
+
+/// A borderless panel title with a stable vertical center and a flush divider.
+pub fn panel_title(ui: &mut Ui, title: impl Into<RichText>) -> InnerResponse<Response> {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let title = ui
+            .allocate_ui_with_layout(
+                egui::vec2(ui.available_width().max(1.0), PANEL_TITLE_HEIGHT),
+                Layout::left_to_right(Align::Center),
+                |ui| ui.label(title.into().strong().size(PANEL_TITLE_TEXT_SIZE)),
+            )
+            .inner;
+        ui.separator();
+        title
     })
 }
 
@@ -115,7 +133,9 @@ pub fn segmented_button(
 ) -> Response {
     ui.add_sized(
         [width, CONTROL_HEIGHT],
-        egui::Button::new(label.into()).selected(selected),
+        egui::Button::new(label.into())
+            .selected(selected)
+            .truncate(),
     )
 }
 
@@ -253,6 +273,27 @@ mod tests {
     fn toolbar_geometry_never_understates_its_controls() {
         assert_eq!(TOOLBAR_ICON_EDGE, CONTROL_HEIGHT);
         assert!(TOOLBAR_HEIGHT >= CONTROL_HEIGHT);
+    }
+
+    #[test]
+    fn segmented_buttons_honor_their_assigned_width() {
+        eframe::egui::__run_test_ui(|ui| {
+            let width = 42.0;
+            let response = super::segmented_button(ui, "Long segment label", false, width);
+            assert_eq!(response.rect.width(), width);
+            assert_eq!(response.rect.height(), CONTROL_HEIGHT);
+        });
+    }
+
+    #[test]
+    fn panel_title_text_is_vertically_centered() {
+        eframe::egui::__run_test_ui(|ui| {
+            ui.set_width(320.0);
+            let row_top = ui.cursor().top();
+            let title = super::panel_title(ui, "Edit").inner;
+            let expected_center = row_top + super::PANEL_TITLE_HEIGHT * 0.5;
+            assert!((title.rect.center().y - expected_center).abs() < 0.001);
+        });
     }
 
     #[test]
