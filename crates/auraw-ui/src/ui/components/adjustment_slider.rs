@@ -5,10 +5,10 @@ use std::ops::RangeInclusive;
 const VALUE_FIELD_WIDTH: f32 = 72.0;
 #[cfg(target_os = "android")]
 const VALUE_FIELD_WIDTH: f32 = 60.0;
-#[cfg(not(target_os = "android"))]
-const HEADER_HEIGHT: f32 = 24.0;
-#[cfg(target_os = "android")]
-const HEADER_HEIGHT: f32 = 22.0;
+// The label row and numeric field must reserve the same height as every other
+// themed control. A shorter allocation lets egui's minimum interaction height
+// paint the value field outside its row and leaves the label visibly off-axis.
+const HEADER_HEIGHT: f32 = crate::ui::theme::CONTROL_HEIGHT;
 #[cfg(not(target_os = "android"))]
 const SLIDER_HEIGHT: f32 = 28.0;
 #[cfg(target_os = "android")]
@@ -22,10 +22,6 @@ const HANDLE_TOUCH_RADIUS: f32 = 18.0;
 const TRACK_DRAG_THRESHOLD: f32 = 8.0;
 const HANDLE_DRAG_THRESHOLD: f32 = 2.0;
 const FINE_HUE_DRAG_SCALE: f64 = 1.0 / 12.0;
-#[cfg(not(target_os = "android"))]
-const LABEL_SIZE: f32 = 12.5;
-#[cfg(target_os = "android")]
-const LABEL_SIZE: f32 = 12.0;
 #[cfg(not(target_os = "android"))]
 const CONTROL_GAP: f32 = 4.0;
 #[cfg(target_os = "android")]
@@ -243,9 +239,9 @@ where
                             4.5,
                             Stroke::new(1.0, egui::Color32::from_white_alpha(90)),
                         );
-                        swatch_response.union(ui.label(RichText::new(label).size(LABEL_SIZE)))
+                        swatch_response.union(ui.label(RichText::new(label)))
                     } else {
-                        ui.label(RichText::new(label).size(LABEL_SIZE))
+                        ui.label(label)
                     };
                     label_response = label_response.on_hover_text(reset_tooltip(hover_text));
                     if label_response.double_clicked() {
@@ -306,7 +302,7 @@ fn touch_value_field(ui: &mut Ui, value: f64, decimals: usize) -> egui::Response
         rect.center(),
         Align2::CENTER_CENTER,
         formatted,
-        FontId::monospace(12.0),
+        FontId::monospace(13.0),
         visuals.fg_stroke.color,
     );
     response
@@ -655,8 +651,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{set_from_pointer_with_sensitivity, FINE_HUE_DRAG_SCALE};
+    use super::{set_from_pointer_with_sensitivity, FINE_HUE_DRAG_SCALE, HEADER_HEIGHT};
     use eframe::egui;
+
+    #[test]
+    fn slider_header_reserves_the_full_themed_control_height() {
+        assert_eq!(HEADER_HEIGHT, crate::ui::theme::CONTROL_HEIGHT);
+    }
 
     #[test]
     fn fine_hue_drag_covers_thirty_degrees_per_track_width() {

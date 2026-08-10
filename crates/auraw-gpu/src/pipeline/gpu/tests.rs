@@ -109,10 +109,7 @@ fn named_f32_constant(module: &naga::Module, constant_name: &str) -> f32 {
     }
 }
 
-fn wgsl_struct_layout(
-    module: &naga::Module,
-    struct_name: &str,
-) -> (u32, Vec<(String, u32)>) {
+fn wgsl_struct_layout(module: &naga::Module, struct_name: &str) -> (u32, Vec<(String, u32)>) {
     let (_, ty) = module
         .types
         .iter()
@@ -425,7 +422,10 @@ fn high_quality_shader_variants_parse_and_use_full_float_storage() {
             std::borrow::Cow::Borrowed(SHADER_VIEW_TRANSFORM),
         ),
     ] {
-        assert_eq!(processing_work_format(ProcessingQuality::High), wgpu::TextureFormat::Rgba32Float);
+        assert_eq!(
+            processing_work_format(ProcessingQuality::High),
+            wgpu::TextureFormat::Rgba32Float
+        );
         validated_shader_module_with_format(
             name,
             source.as_ref(),
@@ -494,9 +494,7 @@ fn highlight_shader_exposes_the_single_reconstruction_entry_point() {
 #[test]
 fn inpaint_opposed_uses_darktable_clip_and_never_lowers_clipped_signal() {
     let module = validated_shader_module("highlight reconstruction", SHADER_HIGHLIGHTS);
-    assert!(
-        (named_f32_constant(&module, "DARKTABLE_OPPOSED_CLIP_MAGIC") - 0.987).abs() < 1e-6
-    );
+    assert!((named_f32_constant(&module, "DARKTABLE_OPPOSED_CLIP_MAGIC") - 0.987).abs() < 1e-6);
     let calls = function_call_names(&module, "inpaint_opposed_cfa_at");
     assert!(calls.iter().any(|call| call == "inpaint_opposed_refavg"));
 }
@@ -579,7 +577,6 @@ fn profile_highlight_shoulder_is_scene_adaptive_and_monotonic() {
             previous = current;
         }
     }
-
 }
 
 #[test]
@@ -614,7 +611,6 @@ fn masked_contrast_has_protected_toe_midtones_and_shoulder() {
     assert!(contrast_ev(-8.0, 1.0) > -14.0);
     assert!(contrast_ev(8.0, 1.0) < 9.0);
     assert_eq!(contrast_ev(0.12, 1.0), 0.12);
-
 }
 
 #[test]
@@ -680,12 +676,19 @@ fn demosaic_contracts_are_compiler_validated() {
     assert!(has_function(&xtrans_finish, "xt_gaussian5_weight"));
 
     for entry in ["dual_green_reconstruct", "dual_rgb_reconstruct"] {
-        assert!(dual.entry_points.iter().any(|candidate| candidate.name == entry));
+        assert!(dual
+            .entry_points
+            .iter()
+            .any(|candidate| candidate.name == entry));
     }
     let bayer_output_calls = entry_point_call_names(&bayer_finish, "bayer_rcd_output");
-    assert!(bayer_output_calls.iter().any(|call| call == "finish_reference_at"));
+    assert!(bayer_output_calls
+        .iter()
+        .any(|call| call == "finish_reference_at"));
     let xtrans_output_calls = entry_point_call_names(&xtrans_finish, "xtrans_demosaic_finish");
-    assert!(xtrans_output_calls.iter().any(|call| call == "finish_reference_at"));
+    assert!(xtrans_output_calls
+        .iter()
+        .any(|call| call == "finish_reference_at"));
 }
 
 #[test]
@@ -982,23 +985,11 @@ fn shader_tuning_defaults_match_the_previous_wgsl_constants() {
     );
     assert_eq!(tuning.vignette_dark_half_fit, [0.10, 1.235, 2.88, 0.86]);
     assert_eq!(tuning.vignette_dark_full_fit, [0.02, 1.135, 3.46, 1.0]);
-    assert_eq!(
-        tuning.vignette_light_half_fit,
-        [0.305, 1.24, 4.36, 0.90]
-    );
-    assert_eq!(
-        tuning.vignette_light_full_fit,
-        [0.13, 1.075, 5.66, 1.0]
-    );
+    assert_eq!(tuning.vignette_light_half_fit, [0.305, 1.24, 4.36, 0.90]);
+    assert_eq!(tuning.vignette_light_full_fit, [0.13, 1.075, 5.66, 1.0]);
     assert_eq!(tuning.capture_scale_sigma, [0.74, 1.75, 0.58, 1.65]);
-    assert_eq!(
-        tuning.capture_thresholds,
-        [0.015, 0.0045, 0.055, 0.28]
-    );
-    assert_eq!(
-        tuning.capture_mask_coherence,
-        [0.035, 0.62, 0.055, 0.22]
-    );
+    assert_eq!(tuning.capture_thresholds, [0.015, 0.0045, 0.055, 0.28]);
+    assert_eq!(tuning.capture_mask_coherence, [0.035, 0.62, 0.055, 0.22]);
 }
 
 #[test]
@@ -1009,7 +1000,10 @@ fn adjustments_shader_exposes_darktable_sigmoid_paths() {
         "preserve_hue_and_energy",
         "sigmoid_rgb_ratio",
     ] {
-        assert!(has_function(&module, function), "missing WGSL function {function}");
+        assert!(
+            has_function(&module, function),
+            "missing WGSL function {function}"
+        );
     }
     let calls = function_call_names(&module, "apply_sigmoid_view_transform");
     assert!(calls.iter().any(|call| call == "sigmoid_rgb_ratio"));
@@ -1023,10 +1017,15 @@ fn signed_scene_rgb_is_preserved_until_explicit_positive_domain_boundaries() {
         "gamut_project_unit",
         "perceptual_gamut_compress_unit_rec2020",
     ] {
-        assert!(has_function(&module, function), "missing explicit gamut boundary {function}");
+        assert!(
+            has_function(&module, function),
+            "missing explicit gamut boundary {function}"
+        );
     }
     let calls = function_call_names(&module, "apply_explicit_view_node");
-    assert!(calls.iter().any(|call| call == "gamut_project_nonnegative_rec2020"));
+    assert!(calls
+        .iter()
+        .any(|call| call == "gamut_project_nonnegative_rec2020"));
 
     for (name, source) in [
         ("Bayer pass 2", SHADER_BAYER_RCD_P2),
@@ -1045,8 +1044,15 @@ fn adjustment_modules_expose_the_render_graph_controls() {
     let creative = validated_shader_module("creative effects", SHADER_CREATIVE_EFFECTS);
     let view = validated_shader_module("view transform", SHADER_VIEW_TRANSFORM);
 
-    for function in ["apply_mask_contrast_value", "apply_point_tone_curve", "local_curve_tangent"] {
-        assert!(has_function(&scene, function), "missing scene-control function {function}");
+    for function in [
+        "apply_mask_contrast_value",
+        "apply_point_tone_curve",
+        "local_curve_tangent",
+    ] {
+        assert!(
+            has_function(&scene, function),
+            "missing scene-control function {function}"
+        );
     }
     for function in ["apply_creative_effects", "apply_glow", "apply_vignette"] {
         assert!(
@@ -1063,7 +1069,10 @@ fn adjustment_modules_expose_the_render_graph_controls() {
         "color_grade_tonal_weights",
         "apply_local_color_grading",
     ] {
-        assert!(has_function(&view, function), "missing view-control function {function}");
+        assert!(
+            has_function(&view, function),
+            "missing view-control function {function}"
+        );
     }
 }
 
@@ -1076,7 +1085,10 @@ fn profile_shader_parses_with_the_profile_storage_contract() {
         "apply_profile_tone_curve",
         "apply_profile_view_tone",
     ] {
-        assert!(has_function(&module, function), "missing profile function {function}");
+        assert!(
+            has_function(&module, function),
+            "missing profile function {function}"
+        );
     }
 }
 
@@ -1194,7 +1206,7 @@ impl LocalMaskSchedulingHarness {
     const MASK_EDGE: u32 = 64;
 
     fn try_new() -> Option<Self> {
-                use half::f16;
+        use half::f16;
 
         let instance = wgpu::Instance::default();
         let adapter =

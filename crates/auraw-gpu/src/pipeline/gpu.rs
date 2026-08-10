@@ -4,9 +4,8 @@ use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
-    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
-    GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES,
-    MAX_LOCAL_MASKS,
+    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, GLOBAL_TEMPERATURE_LIMIT,
+    GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -32,9 +31,8 @@ const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
 const CAMERA_UNIFORMS_SIZE_BYTES: u32 = 416;
 const SCENE_TONE_UNIFORMS_SIZE_BYTES: u32 = 768;
 const EFFECTS_UNIFORMS_SIZE_BYTES: u32 = 208;
-const GPU_STAGE_UNIFORM_SIZE_BYTES: u32 = CAMERA_UNIFORMS_SIZE_BYTES
-    + SCENE_TONE_UNIFORMS_SIZE_BYTES
-    + EFFECTS_UNIFORMS_SIZE_BYTES;
+const GPU_STAGE_UNIFORM_SIZE_BYTES: u32 =
+    CAMERA_UNIFORMS_SIZE_BYTES + SCENE_TONE_UNIFORMS_SIZE_BYTES + EFFECTS_UNIFORMS_SIZE_BYTES;
 // Resource accounting rounds each independently allocated buffer to 256 bytes.
 const GPU_STAGE_UNIFORM_ALLOCATION_BYTES: u64 = 512 + 768 + 256;
 const MASK_DATA_SIZE_BYTES: u64 = (std::mem::size_of::<MaskData>() * MAX_LOCAL_MASKS) as u64;
@@ -388,8 +386,7 @@ struct CameraUniforms {
     _pad_camera_1: u32,
 }
 
-const _: () =
-    assert!(std::mem::size_of::<CameraUniforms>() == CAMERA_UNIFORMS_SIZE_BYTES as usize);
+const _: () = assert!(std::mem::size_of::<CameraUniforms>() == CAMERA_UNIFORMS_SIZE_BYTES as usize);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -441,9 +438,8 @@ struct SceneToneUniforms {
     bradford_to_xyz: [[f32; 4]; 3],
 }
 
-const _: () = assert!(
-    std::mem::size_of::<SceneToneUniforms>() == SCENE_TONE_UNIFORMS_SIZE_BYTES as usize
-);
+const _: () =
+    assert!(std::mem::size_of::<SceneToneUniforms>() == SCENE_TONE_UNIFORMS_SIZE_BYTES as usize);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -820,9 +816,7 @@ impl GpuParams {
                     u32::from(mask.enabled),
                     u32::from(!adjustment.is_neutral()),
                     curve_flags,
-                    u32::from(has_hsl)
-                        | (u32::from(has_grading) << 1)
-                        | (u32::from(has_hue) << 2),
+                    u32::from(has_hsl) | (u32::from(has_grading) << 1) | (u32::from(has_hue) << 2),
                 ],
                 adjust_0: [
                     adjustment.exposure.clamp(-5.0, 5.0),
@@ -847,10 +841,7 @@ impl GpuParams {
                 grade_midtones: pack_color_grade_wheel(adjustment.color_grading.midtones),
                 grade_highlights: pack_color_grade_wheel(adjustment.color_grading.highlights),
                 grade_global: pack_color_grade_wheel(adjustment.color_grading.global),
-                grade_options: pack_view_color_options(
-                    adjustment.color_grading,
-                    adjustment.hue,
-                ),
+                grade_options: pack_view_color_options(adjustment.color_grading, adjustment.hue),
                 curves_red: pack_local_point_curve(&adjustment.tone_curve_red),
                 curves_green: pack_local_point_curve(&adjustment.tone_curve_green),
                 curves_blue: pack_local_point_curve(&adjustment.tone_curve_blue),
@@ -1317,7 +1308,9 @@ impl GpuParams {
         // sliders a no-op.
         let global_effects = self.scene_tone.saturation.abs() > 1e-6
             || self.scene_tone.vibrance.abs() > 1e-6
-            || self.effects.presence[..3].iter().any(|value| value.abs() > 1e-6);
+            || self.effects.presence[..3]
+                .iter()
+                .any(|value| value.abs() > 1e-6);
         let creative = self.effects.creative_effects[0].abs() > 1e-6;
         let local_count = (self.scene_tone.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
         let local_effects = (0..local_count).any(|index| {
@@ -1333,16 +1326,12 @@ impl GpuParams {
             // already applied by prepare_scene_node, Blacks is deferred to the
             // display-linear view node, and local mixer/grading run in the
             // always-dispatched view pass, so none of those need this gate.
-            let tone = local.adjust_0[1..]
-                .iter()
-                .any(|value| value.abs() > 1e-6);
+            let tone = local.adjust_0[1..].iter().any(|value| value.abs() > 1e-6);
             let white_balance = local.adjust_1[0].abs() > 1e-6
                 || local.adjust_1[2].abs() > 1e-6
                 || local.adjust_1[3].abs() > 1e-6;
             let curves = state[2] != 0;
-            let presence_or_saturation = local.adjust_2
-                .iter()
-                .any(|value| value.abs() > 1e-6);
+            let presence_or_saturation = local.adjust_2.iter().any(|value| value.abs() > 1e-6);
             tone || white_balance || curves || presence_or_saturation
         });
         global_effects || creative || local_effects
@@ -1982,7 +1971,9 @@ impl RawGpuPipeline {
         config: RawGpuPipelineConfig,
     ) -> Result<Self> {
         validate_raw(raw)?;
-        config.workgroup_size.validate_for_limits(&device.limits())?;
+        config
+            .workgroup_size
+            .validate_for_limits(&device.limits())?;
         if let Some(template) = program_template {
             if template.cfa_kind != raw.cfa_kind
                 || template.processing_quality != quality
@@ -3666,75 +3657,148 @@ impl RawGpuPipeline {
 
         let mut shader_manager = program_template
             .is_none()
-            .then(|| {
-                ShaderManager::new_with_workgroup_size(work_format, config.workgroup_size)
-            })
+            .then(|| ShaderManager::new_with_workgroup_size(work_format, config.workgroup_size))
             .transpose()
             .context("initialize WGSL shader composer")?;
-        let mut create_shader = |
-            label: &'static str,
-            source: &str,
-            file_name: &str,
-        | -> Result<wgpu::ShaderModule> {
-            shader_manager
-                .as_mut()
-                .expect("shader manager exists without a program template")
-                .create_shader_module(device, label, source, file_name)
-        };
+        let mut create_shader =
+            |label: &'static str, source: &str, file_name: &str| -> Result<wgpu::ShaderModule> {
+                shader_manager
+                    .as_mut()
+                    .expect("shader manager exists without a program template")
+                    .create_shader_module(device, label, source, file_name)
+            };
         // One validated Naga module per WGSL entrypoint source. Entry-point
         // pipelines below share these modules instead of recompiling the same
         // source for every pass.
         let highlight_module = program_template
             .is_none()
-            .then(|| create_shader("auraw highlight module", SHADER_HIGHLIGHTS, "highlights.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw highlight module",
+                    SHADER_HIGHLIGHTS,
+                    "highlights.wgsl",
+                )
+            })
             .transpose()?;
         let bayer_rcd_p1_module = program_template
             .is_none()
-            .then(|| create_shader("auraw Bayer RCD pass 1", bayer_rcd_p1.as_ref(), "pass1.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw Bayer RCD pass 1",
+                    bayer_rcd_p1.as_ref(),
+                    "pass1.wgsl",
+                )
+            })
             .transpose()?;
         let bayer_rcd_p2_module = program_template
             .is_none()
-            .then(|| create_shader("auraw Bayer RCD pass 2", bayer_rcd_p2.as_ref(), "pass2.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw Bayer RCD pass 2",
+                    bayer_rcd_p2.as_ref(),
+                    "pass2.wgsl",
+                )
+            })
             .transpose()?;
         let bayer_rcd_p3_module = program_template
             .is_none()
-            .then(|| create_shader("auraw Bayer RCD pass 3", bayer_rcd_p3.as_ref(), "pass3.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw Bayer RCD pass 3",
+                    bayer_rcd_p3.as_ref(),
+                    "pass3.wgsl",
+                )
+            })
             .transpose()?;
         let bayer_rcd_p4_module = program_template
             .is_none()
-            .then(|| create_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref(), "pass4.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw Bayer RCD pass 4",
+                    bayer_rcd_p4.as_ref(),
+                    "pass4.wgsl",
+                )
+            })
             .transpose()?;
         let dual_demosaic_module = program_template
             .is_none()
-            .then(|| create_shader("auraw robust dual demosaic", dual_demosaic.as_ref(), "dual_demosaic.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw robust dual demosaic",
+                    dual_demosaic.as_ref(),
+                    "dual_demosaic.wgsl",
+                )
+            })
             .transpose()?;
         let xtrans_demosaic_module = program_template
             .is_none()
-            .then(|| create_shader("auraw grouped X-Trans demosaic", xtrans_demosaic.as_ref(), "xtrans_demosaic.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw grouped X-Trans demosaic",
+                    xtrans_demosaic.as_ref(),
+                    "xtrans_demosaic.wgsl",
+                )
+            })
             .transpose()?;
         let xtrans_finish_module = program_template
             .is_none()
-            .then(|| create_shader("auraw X-Trans finish", xtrans_finish.as_ref(), "xtrans_finish.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw X-Trans finish",
+                    xtrans_finish.as_ref(),
+                    "xtrans_finish.wgsl",
+                )
+            })
             .transpose()?;
         let color_denoise_module = program_template
             .is_none()
-            .then(|| create_shader("auraw multiscale color denoise", color_denoise_shader.as_ref(), "color_denoise.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw multiscale color denoise",
+                    color_denoise_shader.as_ref(),
+                    "color_denoise.wgsl",
+                )
+            })
             .transpose()?;
         let tone_analysis_module = program_template
             .is_none()
-            .then(|| create_shader("auraw tone analysis", SHADER_TONE_ANALYSIS, "tone_analysis.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw tone analysis",
+                    SHADER_TONE_ANALYSIS,
+                    "tone_analysis.wgsl",
+                )
+            })
             .transpose()?;
         let scene_adjustments_module = program_template
             .is_none()
-            .then(|| create_shader("auraw scene adjustments", scene_adjustments_shader.as_ref(), "scene_adjustments.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw scene adjustments",
+                    scene_adjustments_shader.as_ref(),
+                    "scene_adjustments.wgsl",
+                )
+            })
             .transpose()?;
         let creative_effects_module = program_template
             .is_none()
-            .then(|| create_shader("auraw creative effects", SHADER_CREATIVE_EFFECTS, "creative_effects.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw creative effects",
+                    SHADER_CREATIVE_EFFECTS,
+                    "creative_effects.wgsl",
+                )
+            })
             .transpose()?;
         let view_transform_module = program_template
             .is_none()
-            .then(|| create_shader("auraw view transform", SHADER_VIEW_TRANSFORM, "view_transform.wgsl"))
+            .then(|| {
+                create_shader(
+                    "auraw view transform",
+                    SHADER_VIEW_TRANSFORM,
+                    "view_transform.wgsl",
+                )
+            })
             .transpose()?;
         debug_assert!(explicit_render_graph_contracts_are_contiguous());
 
@@ -4432,11 +4496,7 @@ impl RawGpuPipeline {
     /// source texture needed for the requested state. Bayer AI output replaces
     /// the mosaic upload and therefore must match exactly. X-Trans uses a
     /// separate scene texture which may safely remain resident while disabled.
-    pub const fn immutable_ai_source_matches(
-        &self,
-        cfa_kind: CfaKind,
-        enabled: bool,
-    ) -> bool {
+    pub const fn immutable_ai_source_matches(&self, cfa_kind: CfaKind, enabled: bool) -> bool {
         match cfa_kind {
             CfaKind::Bayer => self.has_ai_cfa == enabled,
             CfaKind::XTrans => !enabled || self.has_ai_scene,

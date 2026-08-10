@@ -558,10 +558,9 @@ mod tests {
 
     #[test]
     fn old_settings_default_to_the_local_library_and_cloud_root() {
-        let settings: PerformanceSettings = serde_json::from_str(
-            r#"{"version":9,"raw_cache_files":1,"thumbnail_workers":1}"#,
-        )
-        .unwrap();
+        let settings: PerformanceSettings =
+            serde_json::from_str(r#"{"version":9,"raw_cache_files":1,"thumbnail_workers":1}"#)
+                .unwrap();
 
         assert_eq!(
             settings.last_library_view,

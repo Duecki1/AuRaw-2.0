@@ -20,6 +20,9 @@ fn main() {
         .arg(&output)
         .status()
         .unwrap_or_else(|error| panic!("could not start windres: {error}"));
-    assert!(status.success(), "windres failed while embedding the AuRaw icon");
+    assert!(
+        status.success(),
+        "windres failed while embedding the AuRaw icon"
+    );
     println!("cargo:rustc-link-arg-bin=auraw={}", output.display());
 }

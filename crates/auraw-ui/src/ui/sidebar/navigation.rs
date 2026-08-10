@@ -267,8 +267,7 @@ impl Sidebar {
         } else {
             visuals.weak_text_color()
         };
-        let (icon_size, label_size, icon_center, label_center) =
-            mobile_tab_text_geometry(size.y);
+        let (icon_size, label_size, icon_center, label_center) = mobile_tab_text_geometry(size.y);
         painter.text(
             egui::pos2(rect.center().x, rect.top() + icon_center),
             Align2::CENTER_CENTER,
@@ -497,7 +496,7 @@ impl Sidebar {
                 }
             });
         });
-        ui.separator();
+        ui.add_space(4.0);
 
         Self::show_camera_profile_selector(ui, app, frame);
 
@@ -544,12 +543,8 @@ impl Sidebar {
                     changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, false);
                 }
                 AdjustmentSection::ColorMixer => {
-                    changed |= Self::show_hsl(
-                        ui,
-                        &mut app.exposure,
-                        &mut app.hsl_mixer_color,
-                        false,
-                    );
+                    changed |=
+                        Self::show_hsl(ui, &mut app.exposure, &mut app.hsl_mixer_color, false);
                 }
                 AdjustmentSection::Optics => {
                     lens_changed |= Self::show_optics(ui, app, false);
@@ -582,12 +577,7 @@ impl Sidebar {
             changed |= detail_changed;
             ai_denoise_request = request;
             changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, true);
-            changed |= Self::show_hsl(
-                ui,
-                &mut app.exposure,
-                &mut app.hsl_mixer_color,
-                true,
-            );
+            changed |= Self::show_hsl(ui, &mut app.exposure, &mut app.hsl_mixer_color, true);
             lens_changed |= Self::show_optics(ui, app, true);
             if app.expert_mode {
                 changed |= Self::show_rendering(ui, &mut app.exposure, true);
@@ -648,46 +638,35 @@ impl Sidebar {
             })
             .unwrap_or_else(|| format!("Automatic — {active_name}"));
 
-        crate::ui::theme::form_combo(
-            ui,
-            egui::RichText::new("Camera profile").strong(),
-            "current-image-camera-profile",
-            selected_text,
-            240.0,
-            |ui| {
-                ui.selectable_value(&mut selection, None, "Automatic (recommended)")
-                    .on_hover_text("Use the RAW's embedded camera matrix by default.");
-                if let Some(root) = app.camera_profile_folder.as_ref() {
-                    ui.selectable_value(&mut selection, Some(root.clone()), "Embedded Matrix")
-                        .on_hover_text(
-                            "Use the RAW's embedded camera matrix without a DCP profile.",
-                        );
-                }
-                ui.separator();
-                for candidate in &candidates {
-                    ui.selectable_value(
-                        &mut selection,
-                        Some(candidate.path.clone()),
-                        &candidate.name,
-                    )
-                    .on_hover_text(candidate.path.display().to_string());
-                }
-            },
-        );
-        let profile_count = if candidates.len() == 1 {
-            "1 matching DCP profile".to_owned()
-        } else {
-            format!("{} matching DCP profiles", candidates.len())
-        };
-        ui.label(
-            egui::RichText::new(format!(
-                "{profile_count} found for {} {}.",
-                raw.camera_make, raw.camera_model
-            ))
-            .size(11.0)
-            .color(ui.visuals().weak_text_color()),
-        );
-        ui.separator();
+        crate::ui::theme::section_card(ui, "Camera profile", |ui| {
+            crate::ui::theme::form_combo(
+                ui,
+                "Profile",
+                "current-image-camera-profile",
+                selected_text,
+                240.0,
+                |ui| {
+                    ui.selectable_value(&mut selection, None, "Automatic (recommended)")
+                        .on_hover_text("Use the RAW's embedded camera matrix by default.");
+                    if let Some(root) = app.camera_profile_folder.as_ref() {
+                        ui.selectable_value(&mut selection, Some(root.clone()), "Embedded Matrix")
+                            .on_hover_text(
+                                "Use the RAW's embedded camera matrix without a DCP profile.",
+                            );
+                    }
+                    ui.separator();
+                    for candidate in &candidates {
+                        ui.selectable_value(
+                            &mut selection,
+                            Some(candidate.path.clone()),
+                            &candidate.name,
+                        )
+                        .on_hover_text(candidate.path.display().to_string());
+                    }
+                },
+            );
+        });
+        ui.add_space(crate::ui::theme::CARD_GAP);
 
         if selection != previous {
             app.select_camera_profile_for_current(selection, frame);
@@ -701,13 +680,19 @@ impl Sidebar {
         foldable: bool,
         contents: impl FnOnce(&mut Ui),
     ) {
-        if foldable {
-            egui::CollapsingHeader::new(egui::RichText::new(title).strong())
-                .default_open(default_open)
-                .show_background(true)
-                .show(ui, contents);
-        } else {
-            contents(ui);
-        }
+        crate::ui::theme::content_card(ui, |ui| {
+            if foldable {
+                egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+                    .default_open(default_open)
+                    .show_background(false)
+                    // Cards already provide their own visual grouping. Keep
+                    // expanded controls on the card's content axis instead of
+                    // adding egui's inset body and vertical guide rule.
+                    .show_unindented(ui, contents);
+            } else {
+                contents(ui);
+            }
+        });
+        ui.add_space(crate::ui::theme::CARD_GAP);
     }
 }

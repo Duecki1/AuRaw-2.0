@@ -65,8 +65,7 @@ impl TopBar {
                     ui.add_sized(
                         theme::toolbar_icon_size(),
                         egui::Button::new(
-                            egui::RichText::new(save_icon)
-                                .size(theme::TOOLBAR_ICON_EDGE * 0.55),
+                            egui::RichText::new(save_icon).size(theme::TOOLBAR_ICON_EDGE * 0.55),
                         ),
                     )
                 })

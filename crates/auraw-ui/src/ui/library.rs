@@ -149,9 +149,7 @@ enum LibrarySource {
     Cloud(crate::cloud::CloudAsset),
 }
 
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LibraryView {
     #[default]
@@ -241,9 +239,7 @@ fn cloud_preview_notice(kind: crate::cloud::CloudThumbnailKind) -> Option<&'stat
 
 fn cloud_preview_label(kind: crate::cloud::CloudThumbnailKind) -> Option<&'static str> {
     match kind {
-        crate::cloud::CloudThumbnailKind::Edited | crate::cloud::CloudThumbnailKind::Legacy => {
-            None
-        }
+        crate::cloud::CloudThumbnailKind::Edited | crate::cloud::CloudThumbnailKind::Legacy => None,
         crate::cloud::CloudThumbnailKind::Placeholder => Some("PREVIEW RENDERING"),
         crate::cloud::CloudThumbnailKind::Raw => Some("UNEDITED PREVIEW"),
     }
@@ -880,8 +876,7 @@ pub(crate) struct LibraryState {
     cloud_trash_items: Vec<crate::cloud::CloudTrashItem>,
     cloud_trash_server_time: u64,
     cloud_trash_retention_days: u32,
-    cloud_trash_receiver:
-        Option<mpsc::Receiver<Result<crate::cloud::CloudTrashCatalog, String>>>,
+    cloud_trash_receiver: Option<mpsc::Receiver<Result<crate::cloud::CloudTrashCatalog, String>>>,
     cloud_trash_selection: HashSet<String>,
     cloud_trash_delete_confirmation: Option<CloudTrashDeleteTarget>,
     #[cfg(not(target_os = "android"))]
@@ -1723,23 +1718,23 @@ impl LibraryState {
         sort_order: LibrarySortOrder,
         selected_folder: String,
     ) -> Self {
-        let root_location = crate::android::library_location(&android_app).unwrap_or_else(|error| {
-            log::warn!("{error}");
-            "Android/media/de.duecki.auraw/.library".to_owned()
-        });
-        let selected_folder = match crate::android::select_library_folder(
-            &android_app,
-            &selected_folder,
-        ) {
-            Ok(()) => selected_folder,
-            Err(error) => {
+        let root_location =
+            crate::android::library_location(&android_app).unwrap_or_else(|error| {
                 log::warn!("{error}");
-                if let Err(root_error) = crate::android::select_library_folder(&android_app, "") {
-                    log::warn!("{root_error}");
+                "Android/media/de.duecki.auraw/.library".to_owned()
+            });
+        let selected_folder =
+            match crate::android::select_library_folder(&android_app, &selected_folder) {
+                Ok(()) => selected_folder,
+                Err(error) => {
+                    log::warn!("{error}");
+                    if let Err(root_error) = crate::android::select_library_folder(&android_app, "")
+                    {
+                        log::warn!("{root_error}");
+                    }
+                    String::new()
                 }
-                String::new()
-            }
-        };
+            };
         let location = android_library_location_label(&root_location, &selected_folder);
         let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
         crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
@@ -1986,9 +1981,7 @@ impl LibraryState {
     ) {
         self.cloud_folder_id = if cloud_folder_id == crate::cloud::CLOUD_ROOT_FOLDER_ID
             || (cloud_folder_id.len() == 64
-                && cloud_folder_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit()))
+                && cloud_folder_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
         {
             cloud_folder_id
         } else {
@@ -2386,7 +2379,11 @@ impl LibraryState {
                 format!("Deleting {} cloud RAWs…", assets.len())
             }
             CloudActionRequest::RestoreTrash { items } => {
-                format!("Restoring {} Trash item{}…", items.len(), if items.len() == 1 { "" } else { "s" })
+                format!(
+                    "Restoring {} Trash item{}…",
+                    items.len(),
+                    if items.len() == 1 { "" } else { "s" }
+                )
             }
             CloudActionRequest::PermanentlyDeleteTrash { items } => format!(
                 "Permanently deleting {} Trash item{}…",
@@ -2739,10 +2736,8 @@ impl LibraryState {
         self.android_folder = folder;
         self.android_expanded_folders
             .extend(android_folder_ancestors(&self.android_folder));
-        let location = android_library_location_label(
-            &self.android_root_location,
-            &self.android_folder,
-        );
+        let location =
+            android_library_location_label(&self.android_root_location, &self.android_folder);
         self.location = Some(location.clone());
         self.local_location = Some(location);
         self.entries.clear();
@@ -3335,14 +3330,17 @@ impl LibraryState {
                 self.cloud_trash_server_time = catalog.server_time;
                 self.cloud_trash_retention_days = catalog.retention_days;
                 self.cloud_trash_items = catalog.items;
-                self.cloud_trash_selection.retain(|id| {
-                    self.cloud_trash_items.iter().any(|item| &item.id == id)
-                });
+                self.cloud_trash_selection
+                    .retain(|id| self.cloud_trash_items.iter().any(|item| &item.id == id));
                 self.catalog_ready = true;
                 self.status = format!(
                     "Trash · {} item{} · retained for {} days",
                     self.cloud_trash_items.len(),
-                    if self.cloud_trash_items.len() == 1 { "" } else { "s" },
+                    if self.cloud_trash_items.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                     catalog.retention_days
                 );
             }
@@ -7387,7 +7385,10 @@ fn show_android_library_folder_node(
     expanded_folders: &mut HashSet<String>,
     requested_action: &mut Option<AndroidLibraryFolderUiAction>,
 ) {
-    let children = children_by_parent.get(path).map(Vec::as_slice).unwrap_or(&[]);
+    let children = children_by_parent
+        .get(path)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     let has_children = !children.is_empty();
     let expanded = expanded_folders.contains(path);
     let selected = selected_folder == path;
@@ -8159,8 +8160,8 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
         return;
     }
     if app.library.cloud_trash_open {
-        let action_enabled = !app.library.cloud_action_in_progress()
-            && app.library.cloud_trash_receiver.is_none();
+        let action_enabled =
+            !app.library.cloud_action_in_progress() && app.library.cloud_trash_receiver.is_none();
         let mut back = false;
         let mut refresh = false;
         ui.horizontal_wrapped(|ui| {
@@ -8423,8 +8424,8 @@ fn trash_size_label(bytes: u64) -> String {
 }
 
 fn show_cloud_trash_panel(ui: &mut Ui, app: &mut AurawApp) {
-    let action_enabled = !app.library.cloud_action_in_progress()
-        && app.library.cloud_trash_receiver.is_none();
+    let action_enabled =
+        !app.library.cloud_action_in_progress() && app.library.cloud_trash_receiver.is_none();
     let items = app.library.cloud_trash_items.clone();
     let selected = items
         .iter()
@@ -8440,8 +8441,8 @@ fn show_cloud_trash_panel(ui: &mut Ui, app: &mut AurawApp) {
                 "Deleted bundles are retained for {} days.",
                 app.library.cloud_trash_retention_days
             ))
-                .small()
-                .color(ui.visuals().weak_text_color()),
+            .small()
+            .color(ui.visuals().weak_text_color()),
         );
         ui.separator();
         if ui
@@ -8510,19 +8511,16 @@ fn show_cloud_trash_panel(ui: &mut Ui, app: &mut AurawApp) {
                                 if item.item_count == 1 { "" } else { "s" }
                             ));
                         }
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui
-                                    .add_enabled(action_enabled, egui::Button::new("Restore"))
-                                    .clicked()
-                                {
-                                    request = Some(CloudActionRequest::RestoreTrash {
-                                        items: vec![item.clone()],
-                                    });
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_enabled(action_enabled, egui::Button::new("Restore"))
+                                .clicked()
+                            {
+                                request = Some(CloudActionRequest::RestoreTrash {
+                                    items: vec![item.clone()],
+                                });
+                            }
+                        });
                     });
                     let age = app
                         .library
@@ -9018,8 +9016,7 @@ impl Library {
                         }
                         #[cfg(target_os = "android")]
                         {
-                            requested_android_action =
-                                Some(AndroidLibraryFolderUiAction::Refresh);
+                            requested_android_action = Some(AndroidLibraryFolderUiAction::Refresh);
                         }
                     }
                 }
@@ -9043,11 +9040,9 @@ impl Library {
                         }
                         #[cfg(target_os = "android")]
                         {
-                            requested_android_action = Some(
-                                AndroidLibraryFolderUiAction::New(
-                                    app.library.android_folder.clone(),
-                                ),
-                            );
+                            requested_android_action = Some(AndroidLibraryFolderUiAction::New(
+                                app.library.android_folder.clone(),
+                            ));
                         }
                     }
                 }
@@ -9125,46 +9120,46 @@ impl Library {
         } else {
             #[cfg(not(target_os = "android"))]
             {
-            let tree = app.library.folder_tree.as_ref();
-            let root_folder = app.library.root_folder.as_deref();
-            let selected_folder = app.library.folder.as_deref();
-            let clipboard = app.library.folder_clipboard.as_ref();
-            let image_clipboard = app.library.image_clipboard.as_ref();
-            let expanded_folders = &mut app.library.expanded_folders;
-            egui::ScrollArea::both()
-                .max_height(tree_height)
-                .min_scrolled_height(tree_height)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if let (Some(tree), Some(root_folder)) = (tree, root_folder) {
-                        show_library_folder_node(
-                            ui,
-                            tree,
-                            root_folder,
-                            selected_folder,
-                            clipboard,
-                            image_clipboard,
-                            action_in_progress,
-                            expanded_folders,
-                            &mut requested_folder,
-                            &mut requested_action,
-                        );
-                    } else {
-                        ui.label(
-                            egui::RichText::new("Open a top-level folder to browse its hierarchy.")
+                let tree = app.library.folder_tree.as_ref();
+                let root_folder = app.library.root_folder.as_deref();
+                let selected_folder = app.library.folder.as_deref();
+                let clipboard = app.library.folder_clipboard.as_ref();
+                let image_clipboard = app.library.image_clipboard.as_ref();
+                let expanded_folders = &mut app.library.expanded_folders;
+                egui::ScrollArea::both()
+                    .max_height(tree_height)
+                    .min_scrolled_height(tree_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if let (Some(tree), Some(root_folder)) = (tree, root_folder) {
+                            show_library_folder_node(
+                                ui,
+                                tree,
+                                root_folder,
+                                selected_folder,
+                                clipboard,
+                                image_clipboard,
+                                action_in_progress,
+                                expanded_folders,
+                                &mut requested_folder,
+                                &mut requested_action,
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Open a top-level folder to browse its hierarchy.",
+                                )
                                 .small()
                                 .color(ui.visuals().weak_text_color()),
-                        );
-                    }
-                });
+                            );
+                        }
+                    });
             }
             #[cfg(target_os = "android")]
             {
                 let folders = &app.library.android_folders;
-                let mut children_by_parent = HashMap::<
-                    &str,
-                    Vec<&crate::android::LibraryFolder>,
-                >::new();
+                let mut children_by_parent =
+                    HashMap::<&str, Vec<&crate::android::LibraryFolder>>::new();
                 for folder in folders {
                     children_by_parent
                         .entry(android_folder_parent(&folder.path))
@@ -10049,22 +10044,10 @@ impl Library {
                     };
                     match (mode, dialog.targets) {
                         (Some(mode), AndroidAdjustmentPasteTargets::Local(targets)) => {
-                            apply_library_adjustment_paste(
-                                app,
-                                targets,
-                                mode,
-                                ui.ctx(),
-                                frame,
-                            );
+                            apply_library_adjustment_paste(app, targets, mode, ui.ctx(), frame);
                         }
                         (Some(mode), AndroidAdjustmentPasteTargets::Cloud(paths)) => {
-                            apply_android_cloud_adjustment_paste(
-                                app,
-                                paths,
-                                mode,
-                                ui.ctx(),
-                                frame,
-                            );
+                            apply_android_cloud_adjustment_paste(app, paths, mode, ui.ctx(), frame);
                         }
                         (None, _) => {}
                     }
@@ -10614,10 +10597,8 @@ fn thumbnail_tile(
     );
 
     if let LibrarySource::Cloud(asset) = &entry.info.source {
-        let (icon, color, _) = cloud_sync_badge(
-            entry.info.cloud_sync_state,
-            entry.info.cloud_downloaded,
-        );
+        let (icon, color, _) =
+            cloud_sync_badge(entry.info.cloud_sync_state, entry.info.cloud_downloaded);
         let badge = egui::Rect::from_min_size(
             egui::pos2(rect.right() - 37.0, rect.top() + 7.0),
             egui::vec2(29.0, 25.0),
@@ -10647,8 +10628,8 @@ fn thumbnail_tile(
             );
         }
         if let Some(label) = cloud_preview_label(asset.thumbnail_kind) {
-            let label_width = (label.chars().count() as f32 * 6.4 + 14.0)
-                .min((rect.width() - 53.0).max(0.0));
+            let label_width =
+                (label.chars().count() as f32 * 6.4 + 14.0).min((rect.width() - 53.0).max(0.0));
             if label_width >= 58.0 {
                 let preview_badge = egui::Rect::from_min_size(
                     egui::pos2(rect.left() + 7.0, rect.top() + 7.0),
@@ -10669,10 +10650,8 @@ fn thumbnail_tile(
 
     let mut tooltip = entry.info.display_path.clone();
     if let LibrarySource::Cloud(asset) = &entry.info.source {
-        let (_, _, sync_text) = cloud_sync_badge(
-            entry.info.cloud_sync_state,
-            entry.info.cloud_downloaded,
-        );
+        let (_, _, sync_text) =
+            cloud_sync_badge(entry.info.cloud_sync_state, entry.info.cloud_downloaded);
         tooltip.push('\n');
         tooltip.push_str(sync_text);
         if let Some(preview_notice) = cloud_preview_notice(asset.thumbnail_kind) {
@@ -10939,17 +10918,17 @@ mod tests {
         android_folder_ancestors, android_folder_parent, android_library_location_label,
         balanced_justified_row_ranges, catalog_status, cloud_cache_icon,
         cloud_folder_id_for_catalog, cloud_preview_icon, cloud_preview_label, cloud_preview_notice,
-        cloud_sync_badge,
-        copy_directory_create_new, desktop_selection_toggle_label, duplicate_raw_and_sidecar,
-        elide_middle, format_file_size, import_folder_into_library, import_raw_into_folder,
-        justified_thumbnail_layout, library_import_fab_rect, library_import_icon,
-        loaded_library_thumbnail, make_resident_thumbnail, new_library_entry, rename_raw_bundle,
-        run_folder_operation, run_image_paste, run_thumbnail_workers, scan_folder,
-        scan_folder_tree, scan_folder_with_limit, trash_age_label, trash_remaining_label,
-        trash_size_label, validate_folder_name, ImageClipboard, ImageClipboardContent,
-        ImageClipboardMode, ImagePasteDestination, LibraryFileInfo, LibraryFolderOperation,
-        LibraryState, LibraryThumbnailSize, LibraryView, RawImportOutcome, ScanEvent,
-        ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction, LIBRARY_IMPORT_FAB_EDGE,
+        cloud_sync_badge, copy_directory_create_new, desktop_selection_toggle_label,
+        duplicate_raw_and_sidecar, elide_middle, format_file_size, import_folder_into_library,
+        import_raw_into_folder, justified_thumbnail_layout, library_import_fab_rect,
+        library_import_icon, loaded_library_thumbnail, make_resident_thumbnail, new_library_entry,
+        rename_raw_bundle, run_folder_operation, run_image_paste, run_thumbnail_workers,
+        scan_folder, scan_folder_tree, scan_folder_with_limit, trash_age_label,
+        trash_remaining_label, trash_size_label, validate_folder_name, ImageClipboard,
+        ImageClipboardContent, ImageClipboardMode, ImagePasteDestination, LibraryFileInfo,
+        LibraryFolderOperation, LibraryState, LibraryThumbnailSize, LibraryView, RawImportOutcome,
+        ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
+        LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     use eframe::egui::Color32;

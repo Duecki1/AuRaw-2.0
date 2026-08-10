@@ -1915,7 +1915,7 @@ fn refine_mask_with_vitmatte(
             )?
         } else {
             let mut session =
-            create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
+                create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
             run_vitmatte_session(&mut session, input)?
         }
     };
@@ -3042,16 +3042,19 @@ fn run_sam_encoder(
     session: &mut FallbackSession,
     input: Tensor<f32>,
 ) -> Result<(SamTensorData, SamTensorData, SamTensorData)> {
-    session.run_with_fallback("SAM 2.1 image encoder inference", |ort_session, accelerated| {
-        let outputs = ort_session
-            .run(ort::inputs![&input])
-            .context("run SAM 2.1 image encoder")?;
-        Ok((
-            extract_sam_encoder_output(&outputs, 0, "high-resolution feature 0", accelerated)?,
-            extract_sam_encoder_output(&outputs, 1, "high-resolution feature 1", accelerated)?,
-            extract_sam_encoder_output(&outputs, 2, "image embedding", accelerated)?,
-        ))
-    })
+    session.run_with_fallback(
+        "SAM 2.1 image encoder inference",
+        |ort_session, accelerated| {
+            let outputs = ort_session
+                .run(ort::inputs![&input])
+                .context("run SAM 2.1 image encoder")?;
+            Ok((
+                extract_sam_encoder_output(&outputs, 0, "high-resolution feature 0", accelerated)?,
+                extract_sam_encoder_output(&outputs, 1, "high-resolution feature 1", accelerated)?,
+                extract_sam_encoder_output(&outputs, 2, "image embedding", accelerated)?,
+            ))
+        },
+    )
 }
 
 fn extract_sam_encoder_output(
@@ -3220,10 +3223,8 @@ fn decode_sam_mask(
 
     #[cfg(target_os = "android")]
     let (masks, scores) = {
-        let mut session = create_session_with_fallback(
-            decoder_path,
-            SessionOptions::new("SAM 2.1 decoder"),
-        )?;
+        let mut session =
+            create_session_with_fallback(decoder_path, SessionOptions::new("SAM 2.1 decoder"))?;
         run_sam_decoder(
             &mut session,
             image_embedding,
@@ -3261,10 +3262,8 @@ fn decode_sam_mask(
                 has_mask,
             )?
         } else {
-            let mut session = create_session_with_fallback(
-            decoder_path,
-            SessionOptions::new("SAM 2.1 decoder"),
-        )?;
+            let mut session =
+                create_session_with_fallback(decoder_path, SessionOptions::new("SAM 2.1 decoder"))?;
             run_sam_decoder(
                 &mut session,
                 image_embedding,
@@ -3296,23 +3295,26 @@ fn run_sam_decoder(
     mask_input: Tensor<f32>,
     has_mask: Tensor<f32>,
 ) -> Result<(SamTensorData, SamTensorData)> {
-    session.run_with_fallback("SAM 2.1 mask decoder inference", |ort_session, _accelerated| {
-        let outputs = ort_session
-            .run(ort::inputs![
-                &image_embedding,
-                &high_res_0,
-                &high_res_1,
-                &point_coords,
-                &point_labels,
-                &mask_input,
-                &has_mask
-            ])
-            .context("run SAM 2.1 mask decoder")?;
-        Ok((
-            extract_f32_output(&outputs, 0, "mask logits")?,
-            extract_f32_output(&outputs, 1, "mask scores")?,
-        ))
-    })
+    session.run_with_fallback(
+        "SAM 2.1 mask decoder inference",
+        |ort_session, _accelerated| {
+            let outputs = ort_session
+                .run(ort::inputs![
+                    &image_embedding,
+                    &high_res_0,
+                    &high_res_1,
+                    &point_coords,
+                    &point_labels,
+                    &mask_input,
+                    &has_mask
+                ])
+                .context("run SAM 2.1 mask decoder")?;
+            Ok((
+                extract_f32_output(&outputs, 0, "mask logits")?,
+                extract_f32_output(&outputs, 1, "mask scores")?,
+            ))
+        },
+    )
 }
 
 fn select_sam_candidate(

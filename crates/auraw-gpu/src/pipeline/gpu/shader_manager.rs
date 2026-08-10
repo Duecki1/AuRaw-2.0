@@ -2,8 +2,8 @@ use super::{
     specialize_compute_workgroup_size, work_shader_source, ComputeWorkgroupSize,
     SHADER_BASIC_ADJUSTMENTS, SHADER_COLOR, SHADER_COMMON, SHADER_CREATIVE_EFFECTS,
     SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_NOISE, SHADER_NOISE_CA_FINISH,
-    SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS, SHADER_TONE_COMMON,
-    SHADER_TONEMAP,
+    SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS, SHADER_TONEMAP,
+    SHADER_TONE_COMMON,
 };
 use anyhow::{anyhow, Context, Result};
 use naga_oil::compose::{
@@ -141,6 +141,9 @@ impl ShaderManager {
     }
 
     fn composer_error(&self, operation: &str, error: ComposerError) -> anyhow::Error {
-        anyhow!("{operation} failed:\n{}", error.emit_to_string(&self.composer))
+        anyhow!(
+            "{operation} failed:\n{}",
+            error.emit_to_string(&self.composer)
+        )
     }
 }
