@@ -233,8 +233,8 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CropAspectRatio {
-    #[default]
     Free,
+    #[default]
     Original,
     Square,
     FourThree,
@@ -307,7 +307,7 @@ impl Default for GeometryTransform {
     fn default() -> Self {
         Self {
             crop: default_crop_rect(),
-            aspect_ratio: CropAspectRatio::Free,
+            aspect_ratio: CropAspectRatio::Original,
             quarter_turns: 0,
             rotation_degrees: 0.0,
             flip_horizontal: false,
@@ -898,7 +898,9 @@ mod tests {
 
     #[test]
     fn geometry_defaults_to_identity() {
-        assert!(GeometryTransform::default().is_identity());
+        let geometry = GeometryTransform::default();
+        assert!(geometry.is_identity());
+        assert_eq!(geometry.aspect_ratio, CropAspectRatio::Original);
     }
 
     #[test]

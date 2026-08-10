@@ -305,6 +305,7 @@ impl AurawApp {
             preview_program_template: None,
             retired_egui_textures: Vec::new(),
             preview_quality: performance.preview_quality,
+            image_relative_brush_size: performance.image_relative_brush_size,
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],
             preview_visible_uv: PreviewUvRect {
@@ -615,6 +616,7 @@ impl AurawApp {
             gpu_preview_prewarm_receiver,
             gpu_export_prewarm: Some(gpu_export_prewarm),
             preview_quality: performance.preview_quality,
+            image_relative_brush_size: performance.image_relative_brush_size,
             preview_zoom: 1.0,
             preview_center: [0.5, 0.5],
             preview_visible_uv: PreviewUvRect {
@@ -1906,6 +1908,7 @@ impl AurawApp {
             library_thumbnail_size: self.library.thumbnail_size(),
             library_sort_order: self.library.sort_order(),
             preview_quality: self.preview_quality,
+            image_relative_brush_size: self.image_relative_brush_size,
             birefnet_quality: self.birefnet_quality,
             camera_profile_mode: self.camera_profile_mode,
             camera_profile_folder: self.camera_profile_folder.clone(),

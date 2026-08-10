@@ -1534,6 +1534,32 @@ fn run_cloud_action(
 }
 
 impl LibraryState {
+    /// Refreshes one cached cloud asset after a sidecar/thumbnail worker has
+    /// changed its local sync metadata. This avoids a catalog rescan and keeps
+    /// queued, failed, conflict, and synced badges live.
+    pub(crate) fn update_cloud_sync_state_for_cached_raw(
+        &mut self,
+        raw_path: &Path,
+        context: &egui::Context,
+    ) {
+        let Some((asset_id, state)) = crate::cloud::cached_asset_sync_state(raw_path) else {
+            return;
+        };
+        let mut changed = false;
+        for entry in &mut self.entries {
+            let LibrarySource::Cloud(asset) = &entry.info.source else {
+                continue;
+            };
+            if asset.id == asset_id && entry.info.cloud_sync_state != state {
+                entry.info.cloud_sync_state = state;
+                changed = true;
+            }
+        }
+        if changed {
+            context.request_repaint();
+        }
+    }
+
     #[cfg(all(not(target_os = "android"), test))]
     pub(crate) fn new(context: &egui::Context) -> Self {
         Self::new_with_workers(
@@ -2106,12 +2132,16 @@ impl LibraryState {
                     self.cloud_open_receiver = None;
                     self.cloud_open_label = None;
                     if let Ok(cached) = &result {
+                        let sync_state = crate::cloud::cached_asset_sync_state(&cached.raw_path)
+                            .map(|(_, state)| state)
+                            .unwrap_or(crate::cloud::CloudSyncState::Synced);
                         for entry in &mut self.entries {
                             if matches!(
                                 &entry.info.source,
                                 LibrarySource::Cloud(asset) if asset.id == cached.asset_id
                             ) {
                                 entry.info.cloud_downloaded = true;
+                                entry.info.cloud_sync_state = sync_state;
                             }
                         }
                     }
