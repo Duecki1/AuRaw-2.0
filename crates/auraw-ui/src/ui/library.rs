@@ -7403,7 +7403,7 @@ fn show_android_library_folder_node(
                 };
                 if ui
                     .add_sized(
-                        egui::vec2(34.0, 38.0),
+                        crate::ui::theme::toolbar_icon_size(),
                         egui::Button::new(egui::RichText::new(caret).size(13.0)).frame(false),
                     )
                     .clicked()
@@ -7415,7 +7415,7 @@ fn show_android_library_folder_node(
                     }
                 }
             } else {
-                ui.allocate_space(egui::vec2(34.0, 38.0));
+                ui.allocate_space(crate::ui::theme::toolbar_icon_size());
             }
 
             let icon = if expanded && has_children {
@@ -7425,7 +7425,10 @@ fn show_android_library_folder_node(
             };
             let response = ui.add_enabled_ui(!action_in_progress, |ui| {
                 ui.add_sized(
-                    [ui.available_width().max(80.0), 38.0],
+                    [
+                        ui.available_width().max(80.0),
+                        crate::ui::theme::CONTROL_HEIGHT,
+                    ],
                     egui::Button::selectable(
                         selected,
                         egui::RichText::new(format!("{icon}  {name}")),
@@ -8984,8 +8987,7 @@ impl Library {
         let mut requested_cloud_trash = false;
         // The folder header and Library toolbar share the same dimensions so
         // their controls and separators stay aligned across the split view.
-        ui.horizontal(|ui| {
-            crate::ui::theme::prepare_toolbar(ui);
+        crate::ui::theme::toolbar_row(ui, |ui| {
             ui.strong("Folders");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::ui::icons::phosphor_icon_button(
@@ -9065,7 +9067,7 @@ impl Library {
                 .add_enabled(
                     navigation_enabled,
                     egui::Button::selectable(!cloud_view, "Local")
-                        .min_size(egui::vec2(width, 34.0)),
+                        .min_size(egui::vec2(width, crate::ui::theme::CONTROL_HEIGHT)),
                 )
                 .clicked()
                 && cloud_view
@@ -9075,7 +9077,7 @@ impl Library {
             let cloud_tab = ui.add_enabled(
                 app.library.cloud_enabled() && navigation_enabled,
                 egui::Button::selectable(cloud_view, "Cloud")
-                    .min_size(egui::vec2(width, 34.0)),
+                    .min_size(egui::vec2(width, crate::ui::theme::CONTROL_HEIGHT)),
             );
             if cloud_tab.clicked() && !cloud_view {
                 requested_view = Some(LibraryView::Cloud);
@@ -9336,8 +9338,7 @@ impl Library {
             .collect::<Vec<_>>();
 
         let compact_header = ui.available_width() < 520.0;
-        ui.horizontal(|ui| {
-            crate::ui::theme::prepare_toolbar(ui);
+        crate::ui::theme::toolbar_row(ui, |ui| {
             if compact_header {
                 ui.spacing_mut().item_spacing.x = 4.0;
             }

@@ -59,7 +59,12 @@ impl Settings {
 
         #[cfg(target_os = "android")]
         {
-            if crate::ui::top_bar::TopBar::back_icon_button(ui, egui::vec2(42.0, 36.0)).clicked() {
+            if crate::ui::top_bar::TopBar::back_icon_button(
+                ui,
+                crate::ui::theme::toolbar_icon_size(),
+            )
+            .clicked()
+            {
                 app.activate_tab(crate::app::AppTab::Library);
             }
             ui.add_space(4.0);

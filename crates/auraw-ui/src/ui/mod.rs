@@ -49,34 +49,55 @@ fn android_overflow_button_rect(anchor_rect: eframe::egui::Rect, edge: f32) -> e
 fn android_overflow_button(
     ui: &mut eframe::egui::Ui,
     anchor_rect: eframe::egui::Rect,
+    id: eframe::egui::Id,
     edge: f32,
 ) -> eframe::egui::Response {
-    use eframe::egui;
+    use eframe::egui::{self, Align2, Sense, StrokeKind};
 
-    // This is an overlay inside an already allocated thumbnail card. `Ui::put`
-    // advances the parent's cursor to the overlay's bottom/right edge, which
-    // rewinds a vertical strip into the middle of the card and makes the next
-    // submask overlap it. `Ui::place` preserves the existing layout cursor.
-    ui.place(
-        android_overflow_button_rect(anchor_rect, edge),
-        egui::Button::new(
-            egui::RichText::new(egui_phosphor::regular::DOTS_THREE_VERTICAL).size(edge * 0.52),
-        )
-        .corner_radius((edge * 0.22).clamp(3.0, 7.0)),
+    // Paint the small overlay directly. A normal `Button` always expands to
+    // `interact_size.y` (40 points on Android), even when placed in a 20–22
+    // point thumbnail rectangle. That made the visual cover most of the mask
+    // preview and disagree with its layout bounds. The invisible hit target
+    // remains large enough for touch while the visible control stays compact.
+    let button_rect = android_overflow_button_rect(anchor_rect, edge);
+    let touch_edge = ui
+        .spacing()
+        .interact_size
+        .x
+        .max(ui.spacing().interact_size.y)
+        .max(edge);
+    let hit_rect = egui::Rect::from_min_size(
+        egui::pos2(anchor_rect.right() - touch_edge, anchor_rect.top()),
+        egui::vec2(touch_edge, touch_edge),
     )
+    .intersect(anchor_rect);
+    let response = ui.interact(hit_rect, id, Sense::click());
+    let visuals = ui.style().interact(&response);
+    let radius = (edge * 0.22).clamp(3.0, 7.0);
+    let painter = ui.painter_at(button_rect);
+    painter.rect_filled(button_rect, radius, visuals.weak_bg_fill);
+    painter.rect_stroke(button_rect, radius, visuals.bg_stroke, StrokeKind::Inside);
+    painter.text(
+        button_rect.center(),
+        Align2::CENTER_CENTER,
+        egui_phosphor::regular::DOTS_THREE_VERTICAL,
+        egui::FontId::proportional(edge * 0.52),
+        visuals.fg_stroke.color,
+    );
+    response
 }
 
 #[cfg(target_os = "android")]
 pub(crate) fn android_overflow_menu<R>(
     ui: &mut eframe::egui::Ui,
     anchor_rect: eframe::egui::Rect,
-    _id: eframe::egui::Id,
+    id: eframe::egui::Id,
     edge: f32,
     add_contents: impl FnOnce(&mut eframe::egui::Ui) -> R,
 ) -> eframe::egui::Response {
     use eframe::egui::Popup;
 
-    let response = android_overflow_button(ui, anchor_rect, edge);
+    let response = android_overflow_button(ui, anchor_rect, id, edge);
     Popup::menu(&response).show(add_contents);
 
     response.on_hover_text("More actions")
@@ -122,7 +143,8 @@ mod tests {
                 ui.allocate_exact_size(egui::vec2(68.0, 72.0), egui::Sense::click());
             let next_position = ui.next_widget_position();
 
-            let overflow = android_overflow_button(ui, card_rect, 22.0);
+            let overflow =
+                android_overflow_button(ui, card_rect, egui::Id::new("test-overflow"), 22.0);
 
             assert_eq!(ui.next_widget_position(), next_position);
             assert!(card_rect.contains(overflow.rect.min));

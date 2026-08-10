@@ -63,8 +63,11 @@ impl TopBar {
             let save_response = ui
                 .add_enabled_ui(app.can_save_edits(), |ui| {
                     ui.add_sized(
-                        egui::vec2(42.0, 36.0),
-                        egui::Button::new(egui::RichText::new(save_icon).size(19.8)),
+                        theme::toolbar_icon_size(),
+                        egui::Button::new(
+                            egui::RichText::new(save_icon)
+                                .size(theme::TOOLBAR_ICON_EDGE * 0.55),
+                        ),
                     )
                 })
                 .inner
@@ -82,14 +85,14 @@ impl TopBar {
             }
 
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                if Self::back_icon_button(ui, egui::vec2(42.0, 36.0)).clicked() {
+                if Self::back_icon_button(ui, theme::toolbar_icon_size()).clicked() {
                     app.activate_tab(AppTab::Library);
                 }
                 if Self::history_icon_button(
                     ui,
                     app.can_undo_edit(),
                     false,
-                    egui::vec2(42.0, 36.0),
+                    theme::toolbar_icon_size(),
                     "Undo the last edit",
                 )
                 .clicked()
@@ -100,7 +103,7 @@ impl TopBar {
                     ui,
                     app.can_redo_edit(),
                     true,
-                    egui::vec2(42.0, 36.0),
+                    theme::toolbar_icon_size(),
                     "Redo the last edit",
                 )
                 .clicked()

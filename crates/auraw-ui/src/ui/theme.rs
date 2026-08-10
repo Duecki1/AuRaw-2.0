@@ -1,14 +1,35 @@
-use eframe::egui::{self, Color32, Frame, Margin, Response, RichText, Stroke, Ui, Vec2};
+use eframe::egui::{
+    self, Align, Color32, Frame, InnerResponse, Layout, Margin, Response, RichText, Stroke, Ui,
+    Vec2,
+};
 
-/// Shared dimensions for the desktop editor chrome.
+/// Shared dimensions for the editor chrome.
 ///
 /// Keeping these values in one place prevents toolbars and section actions from
 /// slowly acquiring slightly different heights as individual screens evolve.
-pub const CONTROL_HEIGHT: f32 = 30.0;
-pub const TOOLBAR_HEIGHT: f32 = 32.0;
-pub const TOOLBAR_ICON_EDGE: f32 = 30.0;
+/// Android's normal interaction height must also be the requested widget
+/// height. Requesting 30 points while the style enforces a 40-point touch
+/// target makes egui paint outside the allocated rectangle, which misaligns
+/// neighboring labels and makes width calculations inaccurate.
+const DESKTOP_CONTROL_HEIGHT: f32 = 30.0;
+const ANDROID_CONTROL_HEIGHT: f32 = 40.0;
+pub const CONTROL_HEIGHT: f32 = platform_control_height(cfg!(target_os = "android"));
+pub const TOOLBAR_HEIGHT: f32 = if cfg!(target_os = "android") {
+    ANDROID_CONTROL_HEIGHT
+} else {
+    32.0
+};
+pub const TOOLBAR_ICON_EDGE: f32 = CONTROL_HEIGHT;
 pub const TOOL_RAIL_ICON_EDGE: f32 = 40.0;
 pub const CARD_GAP: f32 = 10.0;
+
+const fn platform_control_height(android: bool) -> f32 {
+    if android {
+        ANDROID_CONTROL_HEIGHT
+    } else {
+        DESKTOP_CONTROL_HEIGHT
+    }
+}
 
 pub fn toolbar_icon_size() -> Vec2 {
     Vec2::splat(TOOLBAR_ICON_EDGE)
@@ -21,7 +42,21 @@ pub fn tool_rail_icon_size() -> Vec2 {
 /// Apply the common rhythm used by top bars and panel headers.
 pub fn prepare_toolbar(ui: &mut Ui) {
     ui.set_min_height(TOOLBAR_HEIGHT);
+    // Keep the local style and explicit helper sizes in lockstep even when a
+    // caller installs a temporary style before constructing a toolbar.
+    ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+}
+
+/// Allocate a full-width row with a stable cross-axis center before adding any
+/// of its children. This prevents a compact label added first from establishing
+/// a different visual center than a trailing icon button.
+pub fn toolbar_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let size = egui::vec2(ui.available_width().max(1.0), TOOLBAR_HEIGHT);
+    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+        prepare_toolbar(ui);
+        add_contents(ui)
+    })
 }
 
 pub fn toolbar_frame(ui: &Ui) -> Frame {
@@ -146,13 +181,55 @@ pub fn install(ctx: &egui::Context) {
     style.spacing.slider_width = 220.0;
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    style.spacing.interact_size.y = if cfg!(target_os = "android") {
-        40.0
-    } else {
-        CONTROL_HEIGHT
-    };
+    style.spacing.interact_size.y = CONTROL_HEIGHT;
     style.spacing.window_margin = Margin::same(if cfg!(target_os = "android") { 12 } else { 10 });
     style.spacing.menu_margin = Margin::same(8);
     style.spacing.indent = 14.0;
     ctx.set_style_of(egui::Theme::Dark, style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        platform_control_height, ANDROID_CONTROL_HEIGHT, CONTROL_HEIGHT, DESKTOP_CONTROL_HEIGHT,
+        TOOLBAR_HEIGHT, TOOLBAR_ICON_EDGE,
+    };
+
+    #[test]
+    fn android_widgets_request_the_full_touch_target_height() {
+        assert_eq!(platform_control_height(true), ANDROID_CONTROL_HEIGHT);
+        assert_eq!(platform_control_height(false), DESKTOP_CONTROL_HEIGHT);
+    }
+
+    #[test]
+    fn toolbar_geometry_never_understates_its_controls() {
+        assert_eq!(TOOLBAR_ICON_EDGE, CONTROL_HEIGHT);
+        assert!(TOOLBAR_HEIGHT >= CONTROL_HEIGHT);
+    }
+
+    #[test]
+    fn toolbar_row_centers_labels_and_actions_on_the_same_axis() {
+        eframe::egui::__run_test_ui(|ui| {
+            ui.set_width(320.0);
+            let (label, action) = super::toolbar_row(ui, |ui| {
+                let label = ui.strong("Section");
+                let action = ui
+                    .with_layout(
+                        eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                        |ui| {
+                            ui.add_sized(
+                                super::toolbar_icon_size(),
+                                eframe::egui::Button::new("R"),
+                            )
+                        },
+                    )
+                    .inner;
+                (label.rect, action.rect)
+            })
+            .inner;
+
+            assert!((label.center().y - action.center().y).abs() < 0.001);
+            assert_eq!(action.size(), super::toolbar_icon_size());
+        });
+    }
 }

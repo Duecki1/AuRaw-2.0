@@ -53,7 +53,10 @@ impl MaskCardSize {
     }
 
     fn create_button_size(self, orientation: MaskStripOrientation) -> egui::Vec2 {
-        const THIN_EDGE: f32 = 26.0;
+        // Menu buttons must request at least the platform interaction height.
+        // Asking for 26 points on Android still paints a 40-point control and
+        // makes the following mask card start from stale geometry.
+        const THIN_EDGE: f32 = crate::ui::theme::CONTROL_HEIGHT;
         let card = self.card_size();
         match orientation {
             // Portrait: the strip runs left-to-right, so creation controls are
@@ -90,8 +93,8 @@ include!("sidebar/crop.rs");
 #[cfg(test)]
 mod tests {
     use super::{
-        mask_component_badge, mask_creation_icon, MaskCardSize, MaskCombineMode,
-        MaskStripOrientation,
+        mask_component_badge, mask_creation_icon, mobile_tab_text_geometry, MaskCardSize,
+        MaskCombineMode, MaskStripOrientation,
     };
 
     #[test]
@@ -120,19 +123,31 @@ mod tests {
     fn mask_creation_controls_are_thin_along_the_strip_axis() {
         assert_eq!(
             MaskCardSize::Group.create_button_size(MaskStripOrientation::Horizontal),
-            eframe::egui::vec2(26.0, 72.0)
+            eframe::egui::vec2(crate::ui::theme::CONTROL_HEIGHT, 72.0)
         );
         assert_eq!(
             MaskCardSize::Submask.create_button_size(MaskStripOrientation::Horizontal),
-            eframe::egui::vec2(26.0, 62.0)
+            eframe::egui::vec2(crate::ui::theme::CONTROL_HEIGHT, 62.0)
         );
         assert_eq!(
             MaskCardSize::Group.create_button_size(MaskStripOrientation::Vertical),
-            eframe::egui::vec2(68.0, 26.0)
+            eframe::egui::vec2(68.0, crate::ui::theme::CONTROL_HEIGHT)
         );
         assert_eq!(
             MaskCardSize::Submask.create_button_size(MaskStripOrientation::Vertical),
-            eframe::egui::vec2(56.0, 26.0)
+            eframe::egui::vec2(56.0, crate::ui::theme::CONTROL_HEIGHT)
         );
+    }
+
+    #[test]
+    fn mobile_tab_icon_and_label_stack_is_vertically_centered() {
+        for height in [52.0, 56.0] {
+            let (icon_size, label_size, icon_center, label_center) =
+                mobile_tab_text_geometry(height);
+            let stack_top = icon_center - icon_size * 0.5;
+            let stack_bottom = label_center + label_size * 0.5;
+            assert!(((stack_top + stack_bottom) * 0.5 - height * 0.5).abs() < 0.001);
+            assert!(icon_center < label_center);
+        }
     }
 }

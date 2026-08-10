@@ -53,7 +53,7 @@ pub fn hsl_mixer(
     let mut reset_color = false;
 
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
+    crate::ui::theme::toolbar_row(ui, |ui| {
         ui.label(RichText::new(format!("{name} adjustments")).strong());
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             reset_color = crate::ui::icons::phosphor_icon_button(
