@@ -13,6 +13,9 @@ pub fn color_grading_editor(
     selected: &mut ColorGradeTab,
 ) -> bool {
     let mut changed = false;
+    let editor_width = ui.available_width().max(1.0);
+    ui.set_width(editor_width);
+    ui.set_max_width(editor_width);
 
     crate::ui::theme::toolbar_row(ui, |ui| {
         ui.strong("Four-way color grading");
