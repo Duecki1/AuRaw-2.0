@@ -806,12 +806,8 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn set_birefnet_quality(&mut self, quality: BiRefNetQuality) {
-        let quality = if cfg!(target_os = "android") {
-            BiRefNetQuality::Low
-        } else {
-            quality
-        };
         if self.birefnet_quality == quality {
             return;
         }

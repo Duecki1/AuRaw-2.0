@@ -564,7 +564,33 @@ impl Settings {
         {
             ui.add_space(8.0);
             Self::group(ui, content_width, |ui| {
-                ui.heading("Subject selection runtime");
+                ui.heading("AI subject masks");
+                let previous_quality = app.birefnet_quality;
+                let mut quality = previous_quality;
+                ui.add_enabled_ui(app.birefnet_quality_change_enabled(), |ui| {
+                    crate::ui::theme::form_combo(
+                        ui,
+                        "Subject mask quality",
+                        "settings-subject-mask-quality",
+                        quality.label(),
+                        180.0,
+                        |ui| {
+                            for option in crate::ai_masks::BiRefNetQuality::ALL {
+                                ui.selectable_value(&mut quality, option, option.label());
+                            }
+                        },
+                    );
+                });
+                if quality != previous_quality {
+                    app.set_birefnet_quality(quality);
+                }
+                ui.add(egui::Label::new(quality.model().explanation).wrap());
+                ui.small(
+                    "This quality is used for newly generated and rerun Subject / Not Subject masks.",
+                );
+
+                ui.separator();
+                ui.strong("ONNX Runtime");
                 let runtime_help = if cfg!(target_os = "windows") {
                     "Choose a trusted ONNX Runtime 1.18 or newer onnxruntime.dll that matches this AuRaw build's CPU architecture. AuRaw validates the DLL in an isolated helper process before AI tools use it. Windows AI masks currently use the core CPU execution provider for stability with user-selected runtimes."
                 } else {
