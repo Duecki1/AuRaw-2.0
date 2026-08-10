@@ -846,12 +846,8 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn set_birefnet_quality(&mut self, quality: BiRefNetQuality) {
-        let quality = if cfg!(target_os = "android") {
-            BiRefNetQuality::Low
-        } else {
-            quality
-        };
         if self.birefnet_quality == quality {
             return;
         }
@@ -2098,29 +2094,6 @@ impl AurawApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    #[cfg(not(target_os = "android"))]
-                    {
-                        let mut quality = self.birefnet_quality;
-                        crate::ui::theme::form_combo(
-                            ui,
-                            "Subject quality",
-                            "subject-download-quality",
-                            quality.label(),
-                            180.0,
-                            |ui| {
-                                for option in BiRefNetQuality::ALL {
-                                    ui.selectable_value(
-                                        &mut quality,
-                                        option,
-                                        option.label(),
-                                    );
-                                }
-                            },
-                        );
-                        if quality != self.birefnet_quality {
-                            self.set_birefnet_quality(quality);
-                        }
-                    }
                     let model = self.birefnet_quality.model();
                     ui.label(format!(
                         "{} quality uses {} with its native {} x {} input tensor.",

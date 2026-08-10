@@ -1284,7 +1284,7 @@ impl Sidebar {
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
         let mut local_hsl_mixer_color = app.hsl_mixer_color;
-        let mut birefnet_quality = app.birefnet_quality;
+        let birefnet_quality = app.birefnet_quality;
         let birefnet_quality_change_enabled = app.birefnet_quality_change_enabled();
 
         {
@@ -1298,7 +1298,7 @@ impl Sidebar {
                     &mut brush_mode,
                     (
                         &mut request_subject,
-                        &mut birefnet_quality,
+                        birefnet_quality,
                         birefnet_quality_change_enabled,
                     ),
                     (
@@ -1370,10 +1370,6 @@ impl Sidebar {
         } else if refinement_settings_changed {
             app.note_mask_edit_changed();
         }
-        if birefnet_quality != app.birefnet_quality {
-            app.set_birefnet_quality(birefnet_quality);
-            request_subject = true;
-        }
         if request_subject {
             app.request_subject_mask(frame);
         }
@@ -1435,7 +1431,7 @@ impl Sidebar {
         let mut local_curve_tab = app.tone_curve_tab;
         let mut local_color_grade_tab = app.color_grade_tab;
         let mut local_hsl_mixer_color = app.hsl_mixer_color;
-        let mut birefnet_quality = app.birefnet_quality;
+        let birefnet_quality = app.birefnet_quality;
         let birefnet_quality_change_enabled = app.birefnet_quality_change_enabled();
 
         {
@@ -1449,7 +1445,7 @@ impl Sidebar {
                         &mut brush_mode,
                         (
                             &mut request_subject,
-                            &mut birefnet_quality,
+                            birefnet_quality,
                             birefnet_quality_change_enabled,
                         ),
                         (
@@ -1519,10 +1515,6 @@ impl Sidebar {
         } else if refinement_settings_changed {
             app.note_mask_edit_changed();
         }
-        if birefnet_quality != app.birefnet_quality {
-            app.set_birefnet_quality(birefnet_quality);
-            request_subject = true;
-        }
         if request_subject {
             app.request_subject_mask(frame);
         }
@@ -1556,14 +1548,12 @@ impl Sidebar {
         mask: &mut crate::pipeline::LocalMask,
         component_index: usize,
         brush_mode: &mut BrushMode,
-        subject_controls: (&mut bool, &mut crate::ai_masks::BiRefNetQuality, bool),
+        subject_controls: (&mut bool, crate::ai_masks::BiRefNetQuality, bool),
         refinement_controls: (&mut bool, &mut f32, &mut f32, &mut f32, &mut bool),
         request_object: &mut bool,
         request_landscape: &mut bool,
     ) -> bool {
         let (request_subject, birefnet_quality, birefnet_quality_change_enabled) = subject_controls;
-        #[cfg(target_os = "android")]
-        let _ = birefnet_quality_change_enabled;
         let (
             refinement_active,
             refinement_size,
@@ -1822,43 +1812,30 @@ impl Sidebar {
                             }
                         });
                     }
-                    #[cfg(not(target_os = "android"))]
-                    {
-                        ui.add_enabled_ui(birefnet_quality_change_enabled, |ui| {
-                            crate::ui::theme::form_combo(
-                                ui,
-                                "Subject quality",
-                                "mask-subject-quality",
-                                birefnet_quality.label(),
-                                150.0,
-                                |ui| {
-                                    for quality in crate::ai_masks::BiRefNetQuality::ALL {
-                                        ui.selectable_value(
-                                            birefnet_quality,
-                                            quality,
-                                            quality.label(),
-                                        );
-                                    }
-                                },
-                            );
-                        });
-                    }
-                    ui.add(
-                        egui::Label::new(birefnet_quality.model().explanation)
-                            .wrap()
-                            .selectable(false),
-                    );
-                    if generated_mask.is_none() {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Waiting for subject selection");
-                        });
-                        if ui.button("Generate subject mask").clicked() {
+                    let has_generated_mask = generated_mask.is_some();
+                    let action = if has_generated_mask {
+                        "Rerun"
+                    } else {
+                        "Generate"
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!(
+                            "{action} in {} quality",
+                            birefnet_quality.label()
+                        ));
+                        if ui
+                            .add_enabled(
+                                birefnet_quality_change_enabled,
+                                egui::Button::new(format!("{action} subject mask")),
+                            )
+                            .clicked()
+                        {
                             *request_subject = true;
                         }
-                    } else if ui.button("Recalculate subject mask").clicked() {
-                        *request_subject = true;
-                    }
+                        if !birefnet_quality_change_enabled {
+                            ui.spinner();
+                        }
+                    });
                     geometry_changed |= adjustment_slider(
                         ui,
                         "Grow",
