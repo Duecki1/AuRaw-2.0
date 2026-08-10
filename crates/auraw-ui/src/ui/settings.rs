@@ -190,15 +190,11 @@ impl Settings {
                 .wrap(),
             );
             let cache_size = app.thumbnail_cache_size_label();
-            ui.horizontal(|ui| {
+            crate::ui::theme::action_row(ui, |ui| {
                 if ui.button("Clear thumbnail cache").clicked() {
                     app.clear_thumbnail_cache();
                 }
-                ui.label(
-                    egui::RichText::new(cache_size)
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
+                ui.label(egui::RichText::new(cache_size).color(ui.visuals().weak_text_color()));
             });
         });
 
@@ -246,7 +242,7 @@ impl Settings {
                 app.set_cloud_settings(enabled, server_url.clone(), access_token);
             }
 
-            ui.horizontal(|ui| {
+            crate::ui::theme::action_row(ui, |ui| {
                 let testing = app.library.cloud_connection_test_in_progress();
                 if ui
                     .add_enabled(
@@ -344,7 +340,7 @@ impl Settings {
                         "Linux automatic discovery uses X11 _ICC_PROFILE properties; Wayland-only sessions can use a manual ICC override.",
                     );
                 }
-                ui.horizontal_wrapped(|ui| {
+                crate::ui::theme::action_row(ui, |ui| {
                     if ui.button("Choose ICC…").clicked() {
                         app.choose_display_profile_override();
                     }
@@ -503,7 +499,7 @@ impl Settings {
             } else {
                 ui.small("No external DCP folder selected.");
             }
-            ui.horizontal_wrapped(|ui| {
+            crate::ui::theme::action_row(ui, |ui| {
                 #[cfg(target_os = "android")]
                 let choose_label = if app.camera_profile_folder_importing_label.is_some() {
                     "Importing…"
@@ -617,7 +613,7 @@ impl Settings {
                         "No runtime selected. Subject and Not Subject masks cannot run yet.",
                     );
                 }
-                ui.horizontal_wrapped(|ui| {
+                crate::ui::theme::action_row(ui, |ui| {
                     if ui.button("Choose ONNX Runtime…").clicked() {
                         app.choose_onnx_runtime();
                     }
@@ -655,7 +651,7 @@ impl Settings {
             ui.add_space(4.0);
 
             let mut diagnostic_log = diagnostics_snapshot_with_ai_backends();
-            ui.horizontal_wrapped(|ui| {
+            crate::ui::theme::action_row(ui, |ui| {
                 if ui.button("Copy log").clicked() {
                     #[cfg(target_os = "android")]
                     match app.copy_text_to_clipboard("AuRaw diagnostics", &diagnostic_log) {

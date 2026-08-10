@@ -123,6 +123,32 @@ pub fn toolbar_button(ui: &mut Ui, label: impl Into<egui::WidgetText>, width: f3
     ui.add_sized([width, CONTROL_HEIGHT], egui::Button::new(label.into()))
 }
 
+/// A full-width, left-aligned selectable row for navigation trees and lists.
+pub fn navigation_row(
+    ui: &mut Ui,
+    label: impl Into<egui::WidgetText>,
+    selected: bool,
+    sense: egui::Sense,
+) -> Response {
+    ui.add_sized(
+        [ui.available_width().max(1.0), CONTROL_HEIGHT],
+        egui::Button::selectable(selected, ())
+            .left_text(label)
+            .truncate()
+            .sense(sense),
+    )
+}
+
+/// Lay out related Settings actions with the same control height and wrapping
+/// rhythm on both desktop and narrow mobile panels.
+pub fn action_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+        add_contents(ui)
+    })
+}
+
 /// A consistent form row: descriptive label on the left, fixed-width control
 /// on the right. This avoids egui's default trailing ComboBox labels, which are
 /// difficult to scan when several settings are stacked vertically.

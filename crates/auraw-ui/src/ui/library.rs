@@ -7139,7 +7139,7 @@ fn show_cloud_folder_node(
                 };
                 if ui
                     .add_sized(
-                        egui::vec2(24.0, 28.0),
+                        egui::Vec2::splat(crate::ui::theme::CONTROL_HEIGHT),
                         egui::Button::new(egui::RichText::new(caret).size(12.0)).frame(false),
                     )
                     .clicked()
@@ -7151,7 +7151,7 @@ fn show_cloud_folder_node(
                     }
                 }
             } else {
-                ui.allocate_space(egui::vec2(24.0, 28.0));
+                ui.allocate_space(egui::Vec2::splat(crate::ui::theme::CONTROL_HEIGHT));
             }
 
             let icon = if is_root {
@@ -7161,9 +7161,11 @@ fn show_cloud_folder_node(
             } else {
                 egui_phosphor::regular::FOLDER
             };
-            let response = ui.add(
-                egui::Button::selectable(selected, egui::RichText::new(format!("{icon}  {name}")))
-                    .sense(Sense::click_and_drag()),
+            let response = crate::ui::theme::navigation_row(
+                ui,
+                egui::RichText::new(format!("{icon}  {name}")),
+                selected,
+                Sense::click_and_drag(),
             );
             if response.clicked() {
                 *requested_action = Some(CloudFolderUiAction::Select(folder_id.to_owned()));
@@ -7271,20 +7273,24 @@ fn show_cloud_folder_node(
         });
 
         if expanded {
-            ui.indent("cloud-children", |ui| {
-                for child in children {
-                    show_cloud_folder_node(
-                        ui,
-                        Some(child),
-                        folders,
-                        selected_folder_id,
-                        clipboard,
-                        image_clipboard,
-                        action_in_progress,
-                        expanded_folders,
-                        requested_action,
-                    );
-                }
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    for child in children {
+                        show_cloud_folder_node(
+                            ui,
+                            Some(child),
+                            folders,
+                            selected_folder_id,
+                            clipboard,
+                            image_clipboard,
+                            action_in_progress,
+                            expanded_folders,
+                            requested_action,
+                        );
+                    }
+                });
             });
         }
     });
@@ -7425,15 +7431,11 @@ fn show_android_library_folder_node(
                 egui_phosphor::regular::FOLDER
             };
             let response = ui.add_enabled_ui(!action_in_progress, |ui| {
-                ui.add_sized(
-                    [
-                        ui.available_width().max(80.0),
-                        crate::ui::theme::CONTROL_HEIGHT,
-                    ],
-                    egui::Button::selectable(
-                        selected,
-                        egui::RichText::new(format!("{icon}  {name}")),
-                    ),
+                crate::ui::theme::navigation_row(
+                    ui,
+                    egui::RichText::new(format!("{icon}  {name}")),
+                    selected,
+                    Sense::click(),
                 )
             });
             if response.inner.clicked() {
@@ -7452,19 +7454,23 @@ fn show_android_library_folder_node(
         });
 
         if expanded {
-            ui.indent("android-library-children", |ui| {
-                for child in children {
-                    show_android_library_folder_node(
-                        ui,
-                        &child.path,
-                        &child.name,
-                        children_by_parent,
-                        selected_folder,
-                        action_in_progress,
-                        expanded_folders,
-                        requested_action,
-                    );
-                }
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    for child in children {
+                        show_android_library_folder_node(
+                            ui,
+                            &child.path,
+                            &child.name,
+                            children_by_parent,
+                            selected_folder,
+                            action_in_progress,
+                            expanded_folders,
+                            requested_action,
+                        );
+                    }
+                });
             });
         }
     });
@@ -7582,7 +7588,7 @@ fn show_library_folder_node(
                 };
                 if ui
                     .add_sized(
-                        egui::vec2(24.0, 28.0),
+                        egui::Vec2::splat(crate::ui::theme::CONTROL_HEIGHT),
                         egui::Button::new(egui::RichText::new(caret).size(12.0)).frame(false),
                     )
                     .on_hover_text(if expanded {
@@ -7599,7 +7605,7 @@ fn show_library_folder_node(
                     }
                 }
             } else {
-                ui.allocate_space(egui::vec2(24.0, 28.0));
+                ui.allocate_space(egui::Vec2::splat(crate::ui::theme::CONTROL_HEIGHT));
             }
 
             let folder_icon = if expanded && has_children {
@@ -7610,18 +7616,16 @@ fn show_library_folder_node(
             // Sensing both clicks and drags makes egui wait until the pointer
             // crosses its real drag threshold. A simple press/release remains
             // normal folder navigation and never creates a drag payload.
-            let response = ui
-                .add(
-                    egui::Button::selectable(
-                        selected,
-                        egui::RichText::new(format!("{folder_icon}  {}", node.name)),
-                    )
-                    .sense(Sense::click_and_drag()),
-                )
-                .on_hover_text(format!(
-                    "{}\nDrag onto another folder to move",
-                    node.path.display()
-                ));
+            let response = crate::ui::theme::navigation_row(
+                ui,
+                egui::RichText::new(format!("{folder_icon}  {}", node.name)),
+                selected,
+                Sense::click_and_drag(),
+            )
+            .on_hover_text(format!(
+                "{}\nDrag onto another folder to move",
+                node.path.display()
+            ));
             response.dnd_set_drag_payload(LibraryFolderDrag(node.path.clone()));
             if response.clicked() {
                 *requested_folder = Some(node.path.clone());
@@ -7724,21 +7728,25 @@ fn show_library_folder_node(
         });
 
         if expanded {
-            ui.indent("children", |ui| {
-                for child in &node.children {
-                    show_library_folder_node(
-                        ui,
-                        child,
-                        root_folder,
-                        selected_folder,
-                        clipboard,
-                        image_clipboard,
-                        action_in_progress,
-                        expanded_folders,
-                        requested_folder,
-                        requested_action,
-                    );
-                }
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    for child in &node.children {
+                        show_library_folder_node(
+                            ui,
+                            child,
+                            root_folder,
+                            selected_folder,
+                            clipboard,
+                            image_clipboard,
+                            action_in_progress,
+                            expanded_folders,
+                            requested_folder,
+                            requested_action,
+                        );
+                    }
+                });
             });
         }
     });
@@ -8983,209 +8991,218 @@ impl Library {
         let mut requested_android_action = None;
         let mut requested_cloud_action = None;
         let mut requested_cloud_trash = false;
-        // The folder header and Library toolbar share the same dimensions so
-        // their controls and separators stay aligned across the split view.
-        crate::ui::theme::toolbar_row(ui, |ui| {
-            ui.strong("Folders");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::ui::icons::phosphor_icon_button(
-                    ui,
-                    egui_phosphor::regular::X,
-                    crate::ui::theme::toolbar_icon_size(),
-                    "Close folder sidebar",
-                )
-                .clicked()
-                {
-                    app.set_library_folder_sidebar_open(false);
-                }
-                if crate::ui::icons::phosphor_icon_button_enabled(
-                    ui,
-                    folders_available && !action_in_progress,
-                    egui_phosphor::regular::ARROW_CLOCKWISE,
-                    crate::ui::theme::toolbar_icon_size(),
-                    "Refresh folders",
-                )
-                .clicked()
-                {
-                    if app.library.is_cloud_view() {
-                        requested_cloud_action = Some(CloudFolderUiAction::Refresh);
-                    } else {
-                        #[cfg(not(target_os = "android"))]
-                        {
-                            requested_action = Some(LibraryFolderUiAction::Refresh);
-                        }
-                        #[cfg(target_os = "android")]
-                        {
-                            requested_android_action = Some(AndroidLibraryFolderUiAction::Refresh);
-                        }
-                    }
-                }
-                if crate::ui::icons::phosphor_icon_button_enabled(
-                    ui,
-                    can_create_folder && !action_in_progress,
-                    egui_phosphor::regular::FOLDER_PLUS,
-                    crate::ui::theme::toolbar_icon_size(),
-                    "Create folder here",
-                )
-                .clicked()
-                {
-                    if app.library.is_cloud_view() {
-                        requested_cloud_action = Some(CloudFolderUiAction::New(
-                            app.library.cloud_folder_id.clone(),
-                        ));
-                    } else {
-                        #[cfg(not(target_os = "android"))]
-                        if let Some(folder) = app.library.folder.clone() {
-                            requested_action = Some(LibraryFolderUiAction::New(folder));
-                        }
-                        #[cfg(target_os = "android")]
-                        {
-                            requested_android_action = Some(AndroidLibraryFolderUiAction::New(
-                                app.library.android_folder.clone(),
-                            ));
-                        }
-                    }
-                }
-            });
-        });
-
         let cloud_view = app.library.is_cloud_view();
         let mut requested_view = None;
         #[cfg(not(target_os = "android"))]
         let navigation_enabled = true;
         #[cfg(target_os = "android")]
         let navigation_enabled = !action_in_progress;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let width = ((ui.available_width() - 6.0) * 0.5).max(72.0);
-            if ui
-                .add_enabled(
-                    navigation_enabled,
-                    egui::Button::selectable(!cloud_view, "Local")
+
+        crate::ui::theme::content_card(ui, |ui| {
+            // The folder header and Library toolbar share the same dimensions so
+            // their controls stay aligned across the split view.
+            crate::ui::theme::toolbar_row(ui, |ui| {
+                ui.strong("Folders");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::ui::icons::phosphor_icon_button(
+                        ui,
+                        egui_phosphor::regular::X,
+                        crate::ui::theme::toolbar_icon_size(),
+                        "Close folder sidebar",
+                    )
+                    .clicked()
+                    {
+                        app.set_library_folder_sidebar_open(false);
+                    }
+                    if crate::ui::icons::phosphor_icon_button_enabled(
+                        ui,
+                        folders_available && !action_in_progress,
+                        egui_phosphor::regular::ARROW_CLOCKWISE,
+                        crate::ui::theme::toolbar_icon_size(),
+                        "Refresh folders",
+                    )
+                    .clicked()
+                    {
+                        if app.library.is_cloud_view() {
+                            requested_cloud_action = Some(CloudFolderUiAction::Refresh);
+                        } else {
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                requested_action = Some(LibraryFolderUiAction::Refresh);
+                            }
+                            #[cfg(target_os = "android")]
+                            {
+                                requested_android_action =
+                                    Some(AndroidLibraryFolderUiAction::Refresh);
+                            }
+                        }
+                    }
+                    if crate::ui::icons::phosphor_icon_button_enabled(
+                        ui,
+                        can_create_folder && !action_in_progress,
+                        egui_phosphor::regular::FOLDER_PLUS,
+                        crate::ui::theme::toolbar_icon_size(),
+                        "Create folder here",
+                    )
+                    .clicked()
+                    {
+                        if app.library.is_cloud_view() {
+                            requested_cloud_action = Some(CloudFolderUiAction::New(
+                                app.library.cloud_folder_id.clone(),
+                            ));
+                        } else {
+                            #[cfg(not(target_os = "android"))]
+                            if let Some(folder) = app.library.folder.clone() {
+                                requested_action = Some(LibraryFolderUiAction::New(folder));
+                            }
+                            #[cfg(target_os = "android")]
+                            {
+                                requested_android_action = Some(AndroidLibraryFolderUiAction::New(
+                                    app.library.android_folder.clone(),
+                                ));
+                            }
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let width = ((ui.available_width() - 6.0) * 0.5).max(72.0);
+                if ui
+                    .add_enabled(
+                        navigation_enabled,
+                        egui::Button::selectable(!cloud_view, "Local")
+                            .min_size(egui::vec2(width, crate::ui::theme::CONTROL_HEIGHT)),
+                    )
+                    .clicked()
+                    && cloud_view
+                {
+                    requested_view = Some(LibraryView::Local);
+                }
+                let cloud_tab = ui.add_enabled(
+                    app.library.cloud_enabled() && navigation_enabled,
+                    egui::Button::selectable(cloud_view, "Cloud")
                         .min_size(egui::vec2(width, crate::ui::theme::CONTROL_HEIGHT)),
-                )
-                .clicked()
-                && cloud_view
-            {
-                requested_view = Some(LibraryView::Local);
-            }
-            let cloud_tab = ui.add_enabled(
-                app.library.cloud_enabled() && navigation_enabled,
-                egui::Button::selectable(cloud_view, "Cloud")
-                    .min_size(egui::vec2(width, crate::ui::theme::CONTROL_HEIGHT)),
-            );
-            if cloud_tab.clicked() && !cloud_view {
-                requested_view = Some(LibraryView::Cloud);
-            }
-            if !app.library.cloud_enabled() {
-                cloud_tab.on_disabled_hover_text("Enable AuRaw Cloud in Settings first.");
-            }
+                );
+                if cloud_tab.clicked() && !cloud_view {
+                    requested_view = Some(LibraryView::Cloud);
+                }
+                if !app.library.cloud_enabled() {
+                    cloud_tab.on_disabled_hover_text("Enable AuRaw Cloud in Settings first.");
+                }
+            });
         });
         if let Some(view) = requested_view {
             app.show_library_view(view);
         }
 
-        ui.separator();
+        ui.add_space(crate::ui::theme::CARD_GAP);
 
         #[cfg(not(target_os = "android"))]
         let mut requested_folder = None;
-        let tree_height = ui.available_height().max(32.0);
-        if app.library.is_cloud_view() {
-            egui::ScrollArea::both()
-                .max_height(tree_height)
-                .min_scrolled_height(tree_height)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    show_cloud_folder_node(
-                        ui,
-                        None,
-                        &app.library.cloud_folders,
-                        &app.library.cloud_folder_id,
-                        app.library.cloud_clipboard.as_ref(),
-                        app.library.image_clipboard.as_ref(),
-                        action_in_progress,
-                        &mut app.library.cloud_expanded_folders,
-                        &mut requested_cloud_action,
-                    );
-                    if ui
-                        .selectable_label(
-                            app.library.cloud_trash_open,
+        crate::ui::theme::card_frame(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let tree_height = ui.available_height().max(32.0);
+            if app.library.is_cloud_view() {
+                egui::ScrollArea::both()
+                    .max_height(tree_height)
+                    .min_scrolled_height(tree_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        show_cloud_folder_node(
+                            ui,
+                            None,
+                            &app.library.cloud_folders,
+                            &app.library.cloud_folder_id,
+                            app.library.cloud_clipboard.as_ref(),
+                            app.library.image_clipboard.as_ref(),
+                            action_in_progress,
+                            &mut app.library.cloud_expanded_folders,
+                            &mut requested_cloud_action,
+                        );
+                        if crate::ui::theme::navigation_row(
+                            ui,
                             format!("{}  Trash", egui_phosphor::regular::TRASH),
+                            app.library.cloud_trash_open,
+                            Sense::click(),
                         )
                         .clicked()
-                    {
-                        requested_cloud_trash = true;
-                    }
-                });
-        } else {
-            #[cfg(not(target_os = "android"))]
-            {
-                let tree = app.library.folder_tree.as_ref();
-                let root_folder = app.library.root_folder.as_deref();
-                let selected_folder = app.library.folder.as_deref();
-                let clipboard = app.library.folder_clipboard.as_ref();
-                let image_clipboard = app.library.image_clipboard.as_ref();
-                let expanded_folders = &mut app.library.expanded_folders;
-                egui::ScrollArea::both()
-                    .max_height(tree_height)
-                    .min_scrolled_height(tree_height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        if let (Some(tree), Some(root_folder)) = (tree, root_folder) {
-                            show_library_folder_node(
-                                ui,
-                                tree,
-                                root_folder,
-                                selected_folder,
-                                clipboard,
-                                image_clipboard,
-                                action_in_progress,
-                                expanded_folders,
-                                &mut requested_folder,
-                                &mut requested_action,
-                            );
-                        } else {
-                            ui.label(
-                                egui::RichText::new(
-                                    "Open a top-level folder to browse its hierarchy.",
-                                )
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                            );
+                        {
+                            requested_cloud_trash = true;
                         }
                     });
-            }
-            #[cfg(target_os = "android")]
-            {
-                let folders = &app.library.android_folders;
-                let mut children_by_parent =
-                    HashMap::<&str, Vec<&crate::android::LibraryFolder>>::new();
-                for folder in folders {
-                    children_by_parent
-                        .entry(android_folder_parent(&folder.path))
-                        .or_default()
-                        .push(folder);
+            } else {
+                #[cfg(not(target_os = "android"))]
+                {
+                    let tree = app.library.folder_tree.as_ref();
+                    let root_folder = app.library.root_folder.as_deref();
+                    let selected_folder = app.library.folder.as_deref();
+                    let clipboard = app.library.folder_clipboard.as_ref();
+                    let image_clipboard = app.library.image_clipboard.as_ref();
+                    let expanded_folders = &mut app.library.expanded_folders;
+                    egui::ScrollArea::both()
+                        .max_height(tree_height)
+                        .min_scrolled_height(tree_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if let (Some(tree), Some(root_folder)) = (tree, root_folder) {
+                                show_library_folder_node(
+                                    ui,
+                                    tree,
+                                    root_folder,
+                                    selected_folder,
+                                    clipboard,
+                                    image_clipboard,
+                                    action_in_progress,
+                                    expanded_folders,
+                                    &mut requested_folder,
+                                    &mut requested_action,
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Open a top-level folder to browse its hierarchy.",
+                                    )
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                                );
+                            }
+                        });
                 }
-                let selected_folder = &app.library.android_folder;
-                let expanded_folders = &mut app.library.android_expanded_folders;
-                egui::ScrollArea::both()
-                    .max_height(tree_height)
-                    .min_scrolled_height(tree_height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        show_android_library_folder_node(
-                            ui,
-                            "",
-                            "Library",
-                            &children_by_parent,
-                            selected_folder,
-                            action_in_progress,
-                            expanded_folders,
-                            &mut requested_android_action,
-                        );
-                    });
+                #[cfg(target_os = "android")]
+                {
+                    let folders = &app.library.android_folders;
+                    let mut children_by_parent =
+                        HashMap::<&str, Vec<&crate::android::LibraryFolder>>::new();
+                    for folder in folders {
+                        children_by_parent
+                            .entry(android_folder_parent(&folder.path))
+                            .or_default()
+                            .push(folder);
+                    }
+                    let selected_folder = &app.library.android_folder;
+                    let expanded_folders = &mut app.library.android_expanded_folders;
+                    egui::ScrollArea::both()
+                        .max_height(tree_height)
+                        .min_scrolled_height(tree_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            show_android_library_folder_node(
+                                ui,
+                                "",
+                                "Library",
+                                &children_by_parent,
+                                selected_folder,
+                                action_in_progress,
+                                expanded_folders,
+                                &mut requested_android_action,
+                            );
+                        });
+                }
             }
-        }
+        });
 
         #[cfg(not(target_os = "android"))]
         if let Some(folder) = requested_folder {
