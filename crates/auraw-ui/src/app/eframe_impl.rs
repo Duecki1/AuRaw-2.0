@@ -331,6 +331,7 @@ impl eframe::App for AurawApp {
         if let Err(error) = crate::android::clear_background_task_notification(&self.android_app) {
             log::warn!("{error}");
         }
+        self.persist_performance_settings();
         self.flush_sidecar_on_exit();
     }
 }

@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 9;
+const SETTINGS_VERSION: u32 = 10;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,6 +51,10 @@ pub struct PerformanceSettings {
     pub cloud_server_url: String,
     #[serde(default)]
     pub cloud_access_token: String,
+    #[serde(default)]
+    pub(crate) last_library_view: crate::ui::library::LibraryView,
+    #[serde(default = "default_cloud_library_folder")]
+    pub(crate) last_cloud_library_folder: String,
     #[cfg(not(target_os = "android"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_library_folder: Option<PathBuf>,
@@ -77,6 +81,10 @@ fn default_raw_cache_files() -> usize {
 
 fn default_thumbnail_workers() -> usize {
     crate::ui::library::default_thumbnail_worker_count()
+}
+
+fn default_cloud_library_folder() -> String {
+    crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned()
 }
 
 const fn default_camera_profile_auto_detect() -> bool {
@@ -116,6 +124,8 @@ impl Default for PerformanceSettings {
             cloud_enabled: false,
             cloud_server_url: String::new(),
             cloud_access_token: String::new(),
+            last_library_view: crate::ui::library::LibraryView::Local,
+            last_cloud_library_folder: default_cloud_library_folder(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
             #[cfg(not(target_os = "android"))]
@@ -323,6 +333,8 @@ mod tests {
             cloud_enabled: true,
             cloud_server_url: "http://cloud.test:8787".to_owned(),
             cloud_access_token: "test-token".to_owned(),
+            last_library_view: crate::ui::library::LibraryView::Cloud,
+            last_cloud_library_folder: "a".repeat(64),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
             #[cfg(not(target_os = "android"))]
@@ -371,6 +383,11 @@ mod tests {
         assert!(!settings.adjustment_copy_settings.masks);
         assert!(settings.adjustment_copy_settings.ai_masks);
         assert!(!settings.adjustment_copy_settings.lens_correction);
+        assert_eq!(
+            settings.last_library_view,
+            crate::ui::library::LibraryView::Cloud
+        );
+        assert_eq!(settings.last_cloud_library_folder, "a".repeat(64));
     }
 
     #[test]
@@ -440,6 +457,8 @@ mod tests {
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Enormous,
             library_sort_order: crate::ui::library::LibrarySortOrder::SmallestFirst,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
+            last_library_view: crate::ui::library::LibraryView::Cloud,
+            last_cloud_library_folder: "b".repeat(64),
             ..Default::default()
         };
         #[cfg(not(target_os = "android"))]
@@ -465,6 +484,11 @@ mod tests {
             restored.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::High
         );
+        assert_eq!(
+            restored.last_library_view,
+            crate::ui::library::LibraryView::Cloud
+        );
+        assert_eq!(restored.last_cloud_library_folder, "b".repeat(64));
         #[cfg(not(target_os = "android"))]
         {
             assert_eq!(restored.last_library_folder, Some(PathBuf::from("photos")));
@@ -490,5 +514,22 @@ mod tests {
             let settings: PerformanceSettings = serde_json::from_str(&json).unwrap();
             assert_eq!(settings.preview_quality, expected);
         }
+    }
+
+    #[test]
+    fn old_settings_default_to_the_local_library_and_cloud_root() {
+        let settings: PerformanceSettings = serde_json::from_str(
+            r#"{"version":9,"raw_cache_files":1,"thumbnail_workers":1}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.last_library_view,
+            crate::ui::library::LibraryView::Local
+        );
+        assert_eq!(
+            settings.last_cloud_library_folder,
+            crate::cloud::CLOUD_ROOT_FOLDER_ID
+        );
     }
 }

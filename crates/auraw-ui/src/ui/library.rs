@@ -149,7 +149,10 @@ enum LibrarySource {
     Cloud(crate::cloud::CloudAsset),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum LibraryView {
     #[default]
     Local,
@@ -1717,6 +1720,14 @@ impl LibraryState {
         self.view == LibraryView::Cloud
     }
 
+    pub(crate) fn view(&self) -> LibraryView {
+        self.view
+    }
+
+    pub(crate) fn cloud_folder_id(&self) -> &str {
+        &self.cloud_folder_id
+    }
+
     fn cloud_folder(&self, folder_id: &str) -> Option<&crate::cloud::CloudFolder> {
         self.cloud_folders
             .iter()
@@ -1784,7 +1795,11 @@ impl LibraryState {
             .or_else(|| Some(format!("AuRaw Cloud · {path}")));
     }
 
-    fn select_cloud_folder(&mut self, folder_id: String, context: &egui::Context) -> bool {
+    pub(crate) fn select_cloud_folder(
+        &mut self,
+        folder_id: String,
+        context: &egui::Context,
+    ) -> bool {
         if folder_id != crate::cloud::CLOUD_ROOT_FOLDER_ID
             && self.cloud_folder(&folder_id).is_none()
         {
@@ -1860,10 +1875,31 @@ impl LibraryState {
         }
     }
 
-    pub(crate) fn show_cloud(&mut self, context: &egui::Context) {
+    pub(crate) fn restore_navigation(
+        &mut self,
+        view: LibraryView,
+        cloud_folder_id: String,
+        context: &egui::Context,
+    ) {
+        self.cloud_folder_id = if cloud_folder_id == crate::cloud::CLOUD_ROOT_FOLDER_ID
+            || (cloud_folder_id.len() == 64
+                && cloud_folder_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()))
+        {
+            cloud_folder_id
+        } else {
+            crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned()
+        };
+        if view == LibraryView::Cloud && self.cloud_config.enabled {
+            self.show_cloud(context);
+        }
+    }
+
+    pub(crate) fn show_cloud(&mut self, context: &egui::Context) -> bool {
         if !self.cloud_config.enabled {
             self.status = "Enable AuRaw Cloud in Settings first.".to_owned();
-            return;
+            return false;
         }
         let changed_view = self.view != LibraryView::Cloud || self.cloud_trash_open;
         self.cloud_trash_open = false;
@@ -1876,13 +1912,15 @@ impl LibraryState {
             self.catalog_ready = false;
         }
         self.refresh(context);
+        changed_view
     }
 
-    fn show_cloud_trash(&mut self, context: &egui::Context) {
+    pub(crate) fn show_cloud_trash(&mut self, context: &egui::Context) -> bool {
         if !self.cloud_config.enabled {
             self.status = "Enable AuRaw Cloud in Settings first.".to_owned();
-            return;
+            return false;
         }
+        let changed_view = self.view != LibraryView::Cloud || !self.cloud_trash_open;
         self.view = LibraryView::Cloud;
         self.cloud_trash_open = true;
         self.update_cloud_location();
@@ -1891,17 +1929,19 @@ impl LibraryState {
         self.clear_selection();
         self.catalog_ready = false;
         self.refresh(context);
+        changed_view
     }
 
-    pub(crate) fn show_local(&mut self, context: &egui::Context) {
+    pub(crate) fn show_local(&mut self, context: &egui::Context) -> bool {
         if self.cloud_action_receiver.is_some() {
             self.status = "Wait for the current cloud action to finish.".to_owned();
-            return;
+            return false;
         }
         self.cloud_open_receiver = None;
         self.cloud_open_label = None;
         self.cloud_offline_reason = None;
-        if self.view != LibraryView::Local {
+        let changed_view = self.view != LibraryView::Local;
+        if changed_view {
             self.view = LibraryView::Local;
             self.location = self.local_location.clone();
             self.entries.clear();
@@ -1910,6 +1950,17 @@ impl LibraryState {
             self.catalog_ready = false;
         }
         self.refresh(context);
+        changed_view
+    }
+
+    pub(crate) fn remember_cloud_folder_without_refresh(&mut self, folder_id: String) -> bool {
+        if self.cloud_folder_id == folder_id {
+            return false;
+        }
+        self.cloud_folder_id = folder_id;
+        self.cloud_trash_open = false;
+        self.update_cloud_location();
+        true
     }
 
     pub(crate) fn start_cloud_connection_test(&mut self, context: &egui::Context) {
@@ -7075,7 +7126,7 @@ fn apply_cloud_folder_ui_action(
 ) {
     match action {
         CloudFolderUiAction::Select(folder_id) => {
-            app.library.select_cloud_folder(folder_id, context);
+            app.select_cloud_library_folder(folder_id);
         }
         CloudFolderUiAction::New(parent_id) => {
             app.library.cloud_name_dialog = Some(CloudNameDialog {
@@ -7139,7 +7190,7 @@ fn apply_cloud_folder_ui_action(
             if app.library.cloud_trash_open {
                 app.library.refresh(context);
             } else {
-                app.library.show_cloud(context);
+                app.show_library_view(LibraryView::Cloud);
             }
         }
     }
@@ -7769,7 +7820,7 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
             }
         });
         if back {
-            app.library.show_cloud(ui.ctx());
+            app.show_library_view(LibraryView::Cloud);
         } else if refresh {
             app.library.refresh(ui.ctx());
         }
@@ -7902,10 +7953,10 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
         });
     }
     if let Some(folder_id) = navigate_to {
-        app.library.select_cloud_folder(folder_id, ui.ctx());
+        app.select_cloud_library_folder(folder_id);
     }
     if open_trash {
-        app.library.show_cloud_trash(ui.ctx());
+        app.show_cloud_library_trash();
     }
     if create_folder {
         app.library.cloud_name_dialog = Some(CloudNameDialog {
@@ -8338,8 +8389,7 @@ fn show_cloud_dialogs(ui: &mut Ui, app: &mut AurawApp) {
                         &folder.id,
                         &app.library.cloud_folder_id,
                     ) {
-                        app.library.cloud_folder_id = folder.parent_id.clone();
-                        app.library.update_cloud_location();
+                        app.remember_cloud_library_folder(folder.parent_id.clone());
                     }
                     CloudActionRequest::DeleteFolder { folder }
                 }
@@ -8609,6 +8659,38 @@ impl Library {
                 }
             });
         });
+
+        let cloud_view = app.library.is_cloud_view();
+        let mut requested_view = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let width = ((ui.available_width() - 6.0) * 0.5).max(72.0);
+            if ui
+                .add_sized(
+                    [width, 34.0],
+                    egui::Button::selectable(!cloud_view, "Local"),
+                )
+                .clicked()
+                && cloud_view
+            {
+                requested_view = Some(LibraryView::Local);
+            }
+            let cloud_tab = ui.add_enabled(
+                app.library.cloud_enabled(),
+                egui::Button::selectable(cloud_view, "Cloud")
+                    .min_size(egui::vec2(width, 34.0)),
+            );
+            if cloud_tab.clicked() && !cloud_view {
+                requested_view = Some(LibraryView::Cloud);
+            }
+            if !app.library.cloud_enabled() {
+                cloud_tab.on_disabled_hover_text("Enable AuRaw Cloud in Settings first.");
+            }
+        });
+        if let Some(view) = requested_view {
+            app.show_library_view(view);
+        }
+
         let root_label = if app.library.is_cloud_view() {
             "AuRaw Cloud folders".to_owned()
         } else {
@@ -8629,45 +8711,39 @@ impl Library {
         .on_hover_text(root_label);
         ui.separator();
 
-        if app.library.cloud_enabled() {
-            show_cloud_folder_node(
-                ui,
-                None,
-                &app.library.cloud_folders,
-                if app.library.is_cloud_view() {
-                    &app.library.cloud_folder_id
-                } else {
-                    ""
-                },
-                app.library.cloud_clipboard.as_ref(),
-                app.library.image_clipboard.as_ref(),
-                action_in_progress,
-                &mut app.library.cloud_expanded_folders,
-                &mut requested_cloud_action,
-            );
-            if ui
-                .selectable_label(
-                    app.library.cloud_trash_open,
-                    format!("{}  Trash", egui_phosphor::regular::TRASH),
-                )
-                .clicked()
-            {
-                requested_cloud_trash = true;
-            }
-            ui.separator();
-        }
-
         let mut requested_folder = None;
         let tree_height = ui.available_height().max(32.0);
-        {
-            let cloud_view = app.library.is_cloud_view();
+        if app.library.is_cloud_view() {
+            egui::ScrollArea::both()
+                .max_height(tree_height)
+                .min_scrolled_height(tree_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    show_cloud_folder_node(
+                        ui,
+                        None,
+                        &app.library.cloud_folders,
+                        &app.library.cloud_folder_id,
+                        app.library.cloud_clipboard.as_ref(),
+                        app.library.image_clipboard.as_ref(),
+                        action_in_progress,
+                        &mut app.library.cloud_expanded_folders,
+                        &mut requested_cloud_action,
+                    );
+                    if ui
+                        .selectable_label(
+                            app.library.cloud_trash_open,
+                            format!("{}  Trash", egui_phosphor::regular::TRASH),
+                        )
+                        .clicked()
+                    {
+                        requested_cloud_trash = true;
+                    }
+                });
+        } else {
             let tree = app.library.folder_tree.as_ref();
             let root_folder = app.library.root_folder.as_deref();
-            let selected_folder = if cloud_view {
-                None
-            } else {
-                app.library.folder.as_deref()
-            };
+            let selected_folder = app.library.folder.as_deref();
             let clipboard = app.library.folder_clipboard.as_ref();
             let image_clipboard = app.library.image_clipboard.as_ref();
             let expanded_folders = &mut app.library.expanded_folders;
@@ -8709,7 +8785,7 @@ impl Library {
             apply_cloud_folder_ui_action(app, action, ui.ctx());
         }
         if requested_cloud_trash {
-            app.library.show_cloud_trash(ui.ctx());
+            app.show_cloud_library_trash();
         }
         show_library_folder_dialogs(ui, app);
     }
@@ -8844,8 +8920,7 @@ impl Library {
             });
             ui.separator();
             match requested_view {
-                Some(LibraryView::Local) => app.library.show_local(ui.ctx()),
-                Some(LibraryView::Cloud) => app.library.show_cloud(ui.ctx()),
+                Some(view) => app.show_library_view(view),
                 None => {}
             }
         }
@@ -10939,6 +11014,37 @@ mod tests {
         assert!(library.expanded_folders.contains(&selected));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restoring_library_navigation_reopens_the_saved_cloud_folder_and_tab() {
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+        library.cloud_config = crate::cloud::CloudConfig {
+            enabled: true,
+            server_url: "http://127.0.0.1:1".to_owned(),
+            access_token: String::new(),
+        };
+        let folder_id = "a".repeat(64);
+
+        library.restore_navigation(LibraryView::Cloud, folder_id.clone(), &context);
+
+        assert_eq!(library.view(), LibraryView::Cloud);
+        assert_eq!(library.cloud_folder_id(), folder_id);
+    }
+
+    #[test]
+    fn restoring_invalid_cloud_navigation_falls_back_safely() {
+        let context = eframe::egui::Context::default();
+        let mut library = LibraryState::new(&context);
+
+        library.restore_navigation(LibraryView::Cloud, "../outside".to_owned(), &context);
+
+        assert_eq!(library.view(), LibraryView::Local);
+        assert_eq!(
+            library.cloud_folder_id(),
+            crate::cloud::CLOUD_ROOT_FOLDER_ID
+        );
     }
 
     #[cfg(not(target_os = "android"))]
