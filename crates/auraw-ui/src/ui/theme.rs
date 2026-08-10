@@ -24,12 +24,22 @@ pub const TOOL_RAIL_ICON_EDGE: f32 = 40.0;
 pub const CARD_GAP: f32 = 10.0;
 pub const PANEL_TITLE_HEIGHT: f32 = 42.0;
 pub const PANEL_TITLE_TEXT_SIZE: f32 = 18.0;
+pub const FLOATING_ACTION_EDGE: f32 = platform_floating_action_edge(cfg!(target_os = "android"));
+pub const FLOATING_ACTION_MARGIN: f32 = 12.0;
 
 const fn platform_control_height(android: bool) -> f32 {
     if android {
         ANDROID_CONTROL_HEIGHT
     } else {
         DESKTOP_CONTROL_HEIGHT
+    }
+}
+
+const fn platform_floating_action_edge(android: bool) -> f32 {
+    if android {
+        52.0
+    } else {
+        46.0
     }
 }
 
@@ -169,6 +179,41 @@ pub fn action_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> In
     })
 }
 
+/// Place a compact floating action inside the same inset used by AuRaw cards.
+pub fn floating_action_rect(bounds: egui::Rect) -> egui::Rect {
+    let size = Vec2::splat(FLOATING_ACTION_EDGE);
+    let inset = Vec2::splat(FLOATING_ACTION_MARGIN);
+    egui::Rect::from_min_size(bounds.right_bottom() - inset - size, size)
+}
+
+/// A floating action that reuses the active button colors, stroke, and corner
+/// radius instead of introducing a separate circular Material-style control.
+pub fn floating_action_button(
+    ui: &mut Ui,
+    rect: egui::Rect,
+    glyph: &str,
+    tooltip: &str,
+) -> Response {
+    let active = &ui.visuals().widgets.active;
+    let fill = active.weak_bg_fill;
+    let stroke = active.bg_stroke;
+    let corner_radius = active.corner_radius;
+    let icon_color = active.fg_stroke.color;
+    ui.put(
+        rect,
+        egui::Button::new(
+            RichText::new(glyph)
+                .size(FLOATING_ACTION_EDGE * 0.42)
+                .color(icon_color),
+        )
+        .min_size(rect.size())
+        .corner_radius(corner_radius)
+        .fill(fill)
+        .stroke(stroke),
+    )
+    .on_hover_text(tooltip)
+}
+
 /// A consistent form row: descriptive label on the left, fixed-width control
 /// on the right. This avoids egui's default trailing ComboBox labels, which are
 /// difficult to scan when several settings are stacked vertically.
@@ -259,7 +304,8 @@ pub fn install(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::{
-        platform_control_height, ANDROID_CONTROL_HEIGHT, CONTROL_HEIGHT, DESKTOP_CONTROL_HEIGHT,
+        platform_control_height, platform_floating_action_edge, ANDROID_CONTROL_HEIGHT,
+        CONTROL_HEIGHT, DESKTOP_CONTROL_HEIGHT, FLOATING_ACTION_EDGE, FLOATING_ACTION_MARGIN,
         TOOLBAR_HEIGHT, TOOLBAR_ICON_EDGE,
     };
 
@@ -273,6 +319,23 @@ mod tests {
     fn toolbar_geometry_never_understates_its_controls() {
         assert_eq!(TOOLBAR_ICON_EDGE, CONTROL_HEIGHT);
         assert!(TOOLBAR_HEIGHT >= CONTROL_HEIGHT);
+    }
+
+    #[test]
+    fn floating_actions_use_platform_size_and_standard_inset() {
+        assert!(platform_floating_action_edge(true) > ANDROID_CONTROL_HEIGHT);
+        assert!(platform_floating_action_edge(false) > DESKTOP_CONTROL_HEIGHT);
+
+        let bounds = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(10.0, 20.0),
+            eframe::egui::vec2(300.0, 400.0),
+        );
+        let rect = super::floating_action_rect(bounds);
+        assert_eq!(rect.size(), eframe::egui::Vec2::splat(FLOATING_ACTION_EDGE));
+        assert_eq!(
+            rect.right_bottom(),
+            bounds.right_bottom() - eframe::egui::Vec2::splat(FLOATING_ACTION_MARGIN)
+        );
     }
 
     #[test]

@@ -173,11 +173,8 @@ fn desktop_selection_toggle_label(selection_mode: bool) -> &'static str {
     }
 }
 
-const LIBRARY_IMPORT_FAB_EDGE: f32 = 56.0;
-
 fn library_import_fab_rect(bounds: egui::Rect) -> egui::Rect {
-    let size = egui::vec2(LIBRARY_IMPORT_FAB_EDGE, LIBRARY_IMPORT_FAB_EDGE);
-    egui::Rect::from_min_size(bounds.right_bottom() - size, size)
+    crate::ui::theme::floating_action_rect(bounds)
 }
 
 fn library_import_icon() -> &'static str {
@@ -9070,22 +9067,19 @@ impl Library {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let width = ((ui.available_width() - 6.0) * 0.5).max(72.0);
-                if ui
-                    .add_enabled(
-                        navigation_enabled,
-                        egui::Button::selectable(!cloud_view, "Local")
-                            .min_size(egui::vec2(width, crate::ui::theme::CONTROL_HEIGHT)),
-                    )
-                    .clicked()
-                    && cloud_view
-                {
+                let local_tab = ui
+                    .add_enabled_ui(navigation_enabled, |ui| {
+                        crate::ui::theme::segmented_button(ui, "Local", !cloud_view, width)
+                    })
+                    .inner;
+                if local_tab.clicked() && cloud_view {
                     requested_view = Some(LibraryView::Local);
                 }
-                let cloud_tab = ui.add_enabled(
-                    app.library.cloud_enabled() && navigation_enabled,
-                    egui::Button::selectable(cloud_view, "Cloud")
-                        .min_size(egui::vec2(width, crate::ui::theme::CONTROL_HEIGHT)),
-                );
+                let cloud_tab = ui
+                    .add_enabled_ui(app.library.cloud_enabled() && navigation_enabled, |ui| {
+                        crate::ui::theme::segmented_button(ui, "Cloud", cloud_view, width)
+                    })
+                    .inner;
                 if cloud_tab.clicked() && !cloud_view {
                     requested_view = Some(LibraryView::Cloud);
                 }
@@ -10292,23 +10286,20 @@ impl Library {
         let show_import_fab = app.library.is_cloud_view() && !app.library.selection_mode();
         if show_import_fab && !app.library.cloud_upload_in_progress() {
             let cloud_upload = app.library.is_cloud_view();
-            let bounds = ui.max_rect().shrink(16.0);
-            let rect = library_import_fab_rect(bounds);
-            let response = ui.put(
+            let rect = library_import_fab_rect(ui.max_rect());
+            let response = crate::ui::theme::floating_action_button(
+                ui,
                 rect,
-                egui::Button::new(egui::RichText::new(library_import_icon()).size(26.0))
-                    .min_size(rect.size())
-                    .corner_radius(LIBRARY_IMPORT_FAB_EDGE * 0.5)
-                    .fill(ui.visuals().selection.bg_fill),
+                library_import_icon(),
+                if cloud_upload {
+                    "Upload RAW files to AuRaw Cloud"
+                } else {
+                    "Import RAW files"
+                },
             );
             if response.clicked() {
                 import_raw = true;
             }
-            response.on_hover_text(if cloud_upload {
-                "Upload RAW files to AuRaw Cloud"
-            } else {
-                "Import RAW"
-            });
         }
 
         if refresh {
@@ -10945,7 +10936,6 @@ mod tests {
         ImageClipboardContent, ImageClipboardMode, ImagePasteDestination, LibraryFileInfo,
         LibraryFolderOperation, LibraryState, LibraryThumbnailSize, LibraryView, RawImportOutcome,
         ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
-        LIBRARY_IMPORT_FAB_EDGE,
     };
     use crate::pipeline::RawThumbnail;
     use eframe::egui::Color32;
@@ -11236,9 +11226,13 @@ mod tests {
         let rect = library_import_fab_rect(bounds);
         assert_eq!(
             rect.size(),
-            eframe::egui::vec2(LIBRARY_IMPORT_FAB_EDGE, LIBRARY_IMPORT_FAB_EDGE)
+            eframe::egui::Vec2::splat(crate::ui::theme::FLOATING_ACTION_EDGE)
         );
-        assert_eq!(rect.right_bottom(), bounds.right_bottom());
+        assert_eq!(
+            rect.right_bottom(),
+            bounds.right_bottom()
+                - eframe::egui::Vec2::splat(crate::ui::theme::FLOATING_ACTION_MARGIN)
+        );
         assert_eq!(library_import_icon(), egui_phosphor::regular::PLUS);
     }
 
