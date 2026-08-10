@@ -251,6 +251,8 @@ impl AurawApp {
         let cloud_cache_root = crate::cloud::cache_root(performance_settings_path.as_deref());
         let last_library_folder = performance.last_library_folder.clone();
         let last_library_selected_folder = performance.last_library_selected_folder.clone();
+        let last_library_view = performance.last_library_view;
+        let last_cloud_library_folder = performance.last_cloud_library_folder.clone();
         let mut camera_profile_folder = performance.camera_profile_folder.clone();
         let mut camera_profile_folder_label = performance.camera_profile_folder_label.clone();
         if performance.camera_profile_auto_detect
@@ -510,6 +512,11 @@ impl AurawApp {
         }
         app.library
             .configure_cloud(cloud_config, cloud_cache_root, ctx);
+        app.library.restore_navigation(
+            last_library_view,
+            last_cloud_library_folder,
+            ctx,
+        );
         app
     }
 
@@ -558,6 +565,8 @@ impl AurawApp {
             access_token: performance.cloud_access_token.clone(),
         };
         let cloud_cache_root = crate::cloud::cache_root(performance_settings_path.as_deref());
+        let last_library_view = performance.last_library_view;
+        let last_cloud_library_folder = performance.last_cloud_library_folder.clone();
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
         let gpu_export_prewarm = Arc::new(crate::pipeline::GpuProgramPrewarm::new());
         let gpu_preview_prewarm_receiver =
@@ -792,6 +801,11 @@ impl AurawApp {
         };
         app.library
             .configure_cloud(cloud_config, cloud_cache_root, &cc.egui_ctx);
+        app.library.restore_navigation(
+            last_library_view,
+            last_cloud_library_folder,
+            &cc.egui_ctx,
+        );
         app
     }
 
@@ -1466,6 +1480,40 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn show_library_view(&mut self, view: crate::ui::library::LibraryView) {
+        let changed = match view {
+            crate::ui::library::LibraryView::Local => self.library.show_local(&self.egui_ctx),
+            crate::ui::library::LibraryView::Cloud => self.library.show_cloud(&self.egui_ctx),
+        };
+        if changed {
+            self.persist_performance_settings();
+        }
+    }
+
+    pub(crate) fn select_cloud_library_folder(&mut self, folder_id: String) {
+        if self
+            .library
+            .select_cloud_folder(folder_id, &self.egui_ctx)
+        {
+            self.persist_performance_settings();
+        }
+    }
+
+    pub(crate) fn show_cloud_library_trash(&mut self) {
+        if self.library.show_cloud_trash(&self.egui_ctx) {
+            self.persist_performance_settings();
+        }
+    }
+
+    pub(crate) fn remember_cloud_library_folder(&mut self, folder_id: String) {
+        if self
+            .library
+            .remember_cloud_folder_without_refresh(folder_id)
+        {
+            self.persist_performance_settings();
+        }
+    }
+
     #[cfg(not(target_os = "android"))]
     pub(crate) fn set_library_folder_sidebar_open(&mut self, open: bool) {
         if self.library.set_folder_sidebar_open(open) {
@@ -1810,7 +1858,7 @@ impl AurawApp {
             })
     }
 
-    fn persist_performance_settings(&self) -> bool {
+    pub(crate) fn persist_performance_settings(&self) -> bool {
         let settings = crate::performance_settings::PerformanceSettings {
             raw_cache_files: self.raw_cache_limit,
             thumbnail_workers: self.library.thumbnail_worker_count(),
@@ -1831,6 +1879,8 @@ impl AurawApp {
             cloud_enabled: self.library.cloud_config().enabled,
             cloud_server_url: self.library.cloud_config().server_url.clone(),
             cloud_access_token: self.library.cloud_config().access_token.clone(),
+            last_library_view: self.library.view(),
+            last_cloud_library_folder: self.library.cloud_folder_id().to_owned(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: self
                 .library
