@@ -125,12 +125,15 @@ The Library tab's floating **+** button launches Android's Storage Access
 Framework with `ACTION_OPEN_DOCUMENT`. Press and hold a thumbnail to open its
 context menu without also opening the photo; Android offers Open, Reset all
 adjustments, and Delete actions there. Imported RAWs are copied into one
-canonical app-media folder:
+canonical app-media library:
 
 `Android/media/de.duecki.auraw/.library`
 
-The `.library` directory is intentionally hidden and contains both imported RAW
-files and their `<RAW display name>.auraw` sidecars. AuRaw uses
+The `.library` directory is intentionally hidden and may contain user-created
+photo folders. Each RAW and its `<RAW display name>.auraw` sidecar stay together
+inside the selected folder. The Library toolbar's folder button opens a hidden
+drawer for browsing or creating folders; Android Back closes the drawer first.
+New imports are placed in the currently selected local folder. AuRaw uses
 `getExternalMediaDirs()` to reach its own `Android/media` area, so imports do not
 need broad storage permission on Android 8 or newer. The Library scans only this
 canonical directory for new data.
@@ -143,8 +146,9 @@ have been copied successfully; not-yet-migrated entries remain readable as an
 upgrade fallback instead of being discarded. New imports never write to the old
 Downloads collection.
 
-When AuRaw Cloud is enabled in Settings, the Android Library shows **Local**
-and **Cloud** tabs. Cloud cards are small server-provided JPEG previews. Opening
+When AuRaw Cloud is enabled in Settings, the Android folder drawer shows
+**Local** and **Cloud** tabs and the nested hierarchy for each. Cloud cards are
+small server-provided JPEG previews. Opening
 one downloads that RAW and its sidecar to app-private storage on demand; it
 does not import the RAW into the local media library or download the rest of
 the server. A Cloud status label remains visible in Develop, and sidecar saves
@@ -167,9 +171,9 @@ streams the selections directly from Android's system picker to the server,
 shows per-file upload status, and refreshes the cloud catalog when finished;
 it does not create local-library copies.
 
-The Cloud tab also exposes the server's nested folder hierarchy through a
-breadcrumb and child-folder buttons. The current-folder menu creates, copies,
-cuts, renames, or deletes folders, and **Paste here** accepts folders or RAWs.
+The Cloud drawer exposes the server's nested folder hierarchy. Its toolbar and
+folder menus create, copy, cut, rename, or delete folders, and accept pasted
+folders or RAWs.
 Long-press a cloud RAW to enter multi-select; the overflow menu can copy, cut,
 duplicate, rename, reset, delete, or export the selection. Cloud batch export prepares
 only those selected RAWs in app-private cache and publishes the results to
@@ -191,9 +195,10 @@ with SD-card and cloud document providers offered by the system picker during
 import.
 
 Non-destructive Develop settings are stored beside the imported RAW as
-`<RAW display name>.auraw` inside `.library`. Saves are written to a temporary
-sibling first and then atomically replace the previous sidecar where the
-filesystem supports atomic moves, so readers do not observe partial JSON.
+`<RAW display name>.auraw` inside the RAW's selected library folder. Saves are
+written to a temporary sibling first and then atomically replace the previous
+sidecar where the filesystem supports atomic moves, so readers do not observe
+partial JSON.
 
 Exports are deliberately separate from the hidden RAW library. PNG and JPEG
 exports are published to `Pictures/AuRaw`. Android 10 and newer use

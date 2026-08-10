@@ -36,6 +36,8 @@ final class StorageManager {
     private static final int MAX_CLOUD_UPLOAD_FILES = 256;
     private static final long MAX_SIDECAR_BYTES = 32L * 1024L * 1024L;
     private static final int MAX_RAW_LIBRARY_FILES = 20_000;
+    private static final int MAX_RAW_LIBRARY_FOLDERS = 10_000;
+    private static final int MAX_RAW_LIBRARY_FOLDER_DEPTH = 64;
     private static final int MAX_THUMBNAIL_CACHE_ENTRIES = 512;
     private static final long MAX_THUMBNAIL_CACHE_BYTES = 128L * 1024L * 1024L;
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
@@ -63,6 +65,7 @@ final class StorageManager {
 
     private final AuRawActivity activity;
     private final Callbacks callbacks;
+    private volatile String selectedRawLibraryFolder = "";
 
     StorageManager(AuRawActivity activity, Callbacks callbacks) {
         this.activity = activity;
@@ -316,6 +319,46 @@ final class StorageManager {
         }
     }
 
+    /** Lists app-owned folders as URI-encoded relative-path/name records. */
+    String listRawLibraryFolders() {
+        try {
+            File root = rawLibraryDirectory();
+            StringBuilder result = new StringBuilder();
+            appendRawLibraryFolders(root, root, result, 0, new int[]{0});
+            return result.toString();
+        } catch (Exception error) {
+            throw new IllegalStateException("Could not list RAW library folders", error);
+        }
+    }
+
+    /** Selects the app-owned folder used for listing and subsequent imports. */
+    void selectRawLibraryFolder(String relativePath) throws Exception {
+        File folder = AndroidStorageContract.libraryFolder(rawLibraryDirectory(), relativePath);
+        if (!folder.isDirectory()) {
+            throw new IllegalArgumentException("The selected RAW library folder does not exist");
+        }
+        selectedRawLibraryFolder = AndroidStorageContract.relativeLibraryFolder(
+                rawLibraryDirectory(), folder);
+    }
+
+    /** Creates one child folder and returns its normalized relative path. */
+    String createRawLibraryFolder(String parentPath, String requestedName) throws Exception {
+        File root = rawLibraryDirectory();
+        File parent = AndroidStorageContract.libraryFolder(root, parentPath);
+        if (!parent.isDirectory()) {
+            throw new IllegalArgumentException("The parent RAW library folder does not exist");
+        }
+        String name = AndroidStorageContract.safeFolderName(requestedName);
+        File folder = new File(parent, name);
+        if (folder.exists()) {
+            throw new IllegalStateException(name + " already exists");
+        }
+        if (!folder.mkdir()) {
+            throw new IllegalStateException("Android storage could not create folder " + name);
+        }
+        return AndroidStorageContract.relativeLibraryFolder(root, folder);
+    }
+
     /** Returns an owned native descriptor; Rust closes it after thumbnail extraction. */
     int openRawLibraryFd(String uriText) throws Exception {
         Uri uri = Uri.parse(uriText);
@@ -535,16 +578,8 @@ final class StorageManager {
     }
 
     /** Rolls back a cloud-cache import that completed before its server-side move failed. */
-    void deleteImportedRawLibraryDocument(String displayName) throws Exception {
-        String safeName = safeRawName(displayName);
-        if (!safeName.equals(displayName) || !isRawName(displayName)) {
-            throw new IllegalArgumentException("The imported RAW filename is unsafe or unsupported");
-        }
-        File raw = new File(rawLibraryDirectory(), displayName);
-        if (!raw.isFile()) {
-            throw new IllegalStateException("The imported RAW no longer exists");
-        }
-        deleteRawLibraryDocument(Uri.fromFile(raw).toString(), displayName);
+    void deleteImportedRawLibraryDocument(String rawUri, String displayName) throws Exception {
+        deleteRawLibraryDocument(rawUri, displayName);
     }
 
     /** Renames an app-owned library RAW and its matching sidecar as one bundle. */
@@ -1115,7 +1150,7 @@ final class StorageManager {
     }
 
     private StoredRaw storeRawFile(Uri source, String requestedName) throws Exception {
-        File directory = rawLibraryDirectory();
+        File directory = selectedRawLibraryDirectory();
         if (!directory.isDirectory() && !directory.mkdirs()) {
             throw new IllegalStateException("Could not create " + directory);
         }
@@ -1171,17 +1206,21 @@ final class StorageManager {
 
     private String listCombinedRawLibrary() {
         ArrayList<RawLibraryRecord> records = new ArrayList<>();
-        records.addAll(listFileRawLibrary(rawLibraryDirectory()));
-        try {
-            records.addAll(listFileRawLibrary(externalMediaRootDirectory()));
-        } catch (IllegalStateException error) {
-            Log.w(LOG_TAG, "Could not inspect the pre-.library RAW location", error);
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        records.addAll(listFileRawLibrary(selectedRawLibraryDirectory()));
+        // Upgrade-only locations are exposed alongside the canonical root until
+        // migration finishes. They never appear while browsing a child folder.
+        if (selectedRawLibraryFolder.isEmpty()) {
             try {
-                records.addAll(listLegacyMediaStoreRawLibrary());
+                records.addAll(listFileRawLibrary(externalMediaRootDirectory()));
             } catch (IllegalStateException error) {
-                Log.w(LOG_TAG, "Could not inspect the legacy MediaStore RAW library", error);
+                Log.w(LOG_TAG, "Could not inspect the pre-.library RAW location", error);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    records.addAll(listLegacyMediaStoreRawLibrary());
+                } catch (IllegalStateException error) {
+                    Log.w(LOG_TAG, "Could not inspect the legacy MediaStore RAW library", error);
+                }
             }
         }
         records.sort((left, right) -> {
@@ -1209,6 +1248,34 @@ final class StorageManager {
             added++;
         }
         return result.toString();
+    }
+
+    private void appendRawLibraryFolders(
+            File root,
+            File directory,
+            StringBuilder result,
+            int depth,
+            int[] count) throws Exception {
+        if (depth >= MAX_RAW_LIBRARY_FOLDER_DEPTH || count[0] >= MAX_RAW_LIBRARY_FOLDERS) {
+            return;
+        }
+        File[] children = directory.listFiles(file ->
+                file.isDirectory() && !file.getName().startsWith("."));
+        if (children == null) {
+            return;
+        }
+        Arrays.sort(children, (left, right) ->
+                left.getName().compareToIgnoreCase(right.getName()));
+        for (File child : children) {
+            if (count[0] >= MAX_RAW_LIBRARY_FOLDERS) {
+                return;
+            }
+            String relative = AndroidStorageContract.relativeLibraryFolder(root, child);
+            result.append(Uri.encode(relative)).append('\t')
+                    .append(Uri.encode(child.getName())).append('\n');
+            count[0]++;
+            appendRawLibraryFolders(root, child, result, depth + 1, count);
+        }
     }
 
     private ArrayList<RawLibraryRecord> listLegacyMediaStoreRawLibrary() {
@@ -1341,6 +1408,21 @@ final class StorageManager {
             Log.w(LOG_TAG, "Could not create .nomedia marker in " + directory, error);
         }
         return directory;
+    }
+
+    private File selectedRawLibraryDirectory() {
+        try {
+            File directory = AndroidStorageContract.libraryFolder(
+                    rawLibraryDirectory(), selectedRawLibraryFolder);
+            if (!directory.isDirectory()) {
+                throw new IllegalStateException("The selected RAW library folder no longer exists");
+            }
+            return directory;
+        } catch (RuntimeException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new IllegalStateException("The selected RAW library folder is invalid", error);
+        }
     }
 
     void startLegacyRawStorageMigration() {

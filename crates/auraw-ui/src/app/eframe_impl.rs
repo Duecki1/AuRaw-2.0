@@ -33,6 +33,10 @@ impl eframe::App for AurawApp {
                     // Long-running Android operations are modal. Ignore system
                     // Back until the foreground task completes or is cancelled.
                     ui.ctx().request_repaint();
+                } else if self.active_tab == AppTab::Library
+                    && self.library.folder_sidebar_open()
+                {
+                    self.set_library_folder_sidebar_open(false);
                 } else if self.active_tab == AppTab::Library && self.library.has_selection() {
                     self.library.clear_selection();
                     crate::android::set_back_navigation_active(false);
@@ -224,13 +228,22 @@ impl eframe::App for AurawApp {
                 .show(ui, |ui| Develop::show_filmstrip(ui, self, frame));
         }
 
-        #[cfg(not(target_os = "android"))]
         if self.active_tab == AppTab::Library && self.library.folder_sidebar_open() {
+            #[cfg(not(target_os = "android"))]
             egui::Panel::left("library_folder_sidebar")
                 .resizable(true)
                 .min_size(180.0)
                 .max_size((viewport_size.x * 0.45).max(180.0))
                 .default_size(260.0)
+                .show(ui, |ui| Library::show_folder_sidebar(ui, self));
+            #[cfg(target_os = "android")]
+            egui::Panel::left("library_folder_sidebar")
+                .resizable(false)
+                .exact_size(
+                    (viewport_size.x * 0.84)
+                        .clamp(220.0, 380.0)
+                        .min(viewport_size.x.max(1.0)),
+                )
                 .show(ui, |ui| Library::show_folder_sidebar(ui, self));
         }
 
@@ -289,7 +302,7 @@ impl eframe::App for AurawApp {
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
         #[cfg(target_os = "android")]
-        if self.active_tab != AppTab::Library {
+        if self.active_tab != AppTab::Library || self.library.folder_sidebar_open() {
             // JNI back callbacks can arrive while NativeActivity's render loop is
             // idle. Keep a low-frequency wake-up while an in-app Back destination
             // exists so the request is consumed promptly on every device.
@@ -323,7 +336,11 @@ impl eframe::App for AurawApp {
         self.poll_sidecar_save();
         self.poll_developed_thumbnail(frame);
         #[cfg(target_os = "android")]
-        crate::android::set_back_navigation_active(self.active_tab != AppTab::Library);
+        crate::android::set_back_navigation_active(
+            self.active_tab != AppTab::Library
+                || self.library.has_selection()
+                || self.library.folder_sidebar_open(),
+        );
     }
 
     fn on_exit(&mut self) {

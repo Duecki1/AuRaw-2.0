@@ -645,6 +645,7 @@ impl AurawApp {
                 performance.thumbnail_workers,
                 performance.library_thumbnail_size,
                 performance.library_sort_order,
+                performance.last_android_library_folder.clone(),
             ),
             develop_loading_thumbnail: DevelopLoadingThumbnailState::default(),
             adjustment_copy_settings: performance.adjustment_copy_settings,
@@ -1557,11 +1558,25 @@ impl AurawApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn set_library_folder_sidebar_open(&mut self, open: bool) {
         if self.library.set_folder_sidebar_open(open) {
+            #[cfg(not(target_os = "android"))]
             self.persist_performance_settings();
+            #[cfg(target_os = "android")]
+            crate::android::set_back_navigation_active(
+                open || self.library.has_selection() || self.active_tab != AppTab::Library,
+            );
             self.egui_ctx.request_repaint();
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn select_android_library_folder(&mut self, folder: String) {
+        if self
+            .library
+            .select_android_folder(folder, &self.egui_ctx)
+        {
+            self.persist_performance_settings();
         }
     }
 
@@ -1925,6 +1940,8 @@ impl AurawApp {
             cloud_access_token: self.library.cloud_config().access_token.clone(),
             last_library_view: self.library.view(),
             last_cloud_library_folder: self.library.cloud_folder_id().to_owned(),
+            #[cfg(target_os = "android")]
+            last_android_library_folder: self.library.android_folder().to_owned(),
             #[cfg(not(target_os = "android"))]
             last_library_folder: self
                 .library

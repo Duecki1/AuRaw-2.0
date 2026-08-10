@@ -384,6 +384,11 @@ enum ScanEvent {
         generation: u64,
         tree: LibraryFolderNode,
     },
+    #[cfg(target_os = "android")]
+    AndroidFolders {
+        generation: u64,
+        folders: Vec<crate::android::LibraryFolder>,
+    },
     Thumbnail {
         generation: u64,
         source: LibrarySource,
@@ -695,11 +700,9 @@ struct LibraryFolderClipboard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LibraryFolderDrag(PathBuf);
 
-#[cfg(not(target_os = "android"))]
 #[derive(Clone, Debug)]
 struct CloudFolderDrag(String);
 
-#[cfg(not(target_os = "android"))]
 enum CloudFolderUiAction {
     Select(String),
     New(String),
@@ -804,6 +807,21 @@ struct AndroidLibraryRawNameDialog {
     focus_requested: bool,
 }
 
+#[cfg(target_os = "android")]
+struct AndroidLibraryFolderNameDialog {
+    parent: String,
+    name: String,
+    error: Option<String>,
+    focus_requested: bool,
+}
+
+#[cfg(target_os = "android")]
+enum AndroidLibraryFolderUiAction {
+    Select(String),
+    New(String),
+    Refresh,
+}
+
 #[cfg(not(target_os = "android"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LibraryFolderNode {
@@ -874,10 +892,17 @@ pub(crate) struct LibraryState {
     folder_tree: Option<LibraryFolderNode>,
     #[cfg(not(target_os = "android"))]
     expanded_folders: HashSet<PathBuf>,
-    #[cfg(not(target_os = "android"))]
     folder_sidebar_open: bool,
     #[cfg(target_os = "android")]
     android_app: auraw_ffi::AndroidApp,
+    #[cfg(target_os = "android")]
+    android_root_location: String,
+    #[cfg(target_os = "android")]
+    android_folder: String,
+    #[cfg(target_os = "android")]
+    android_folders: Vec<crate::android::LibraryFolder>,
+    #[cfg(target_os = "android")]
+    android_expanded_folders: HashSet<String>,
     entries: Vec<LibraryEntry>,
     entry_indices: HashMap<LibrarySource, usize>,
     event_receiver: Option<mpsc::Receiver<ScanEvent>>,
@@ -910,9 +935,37 @@ pub(crate) struct LibraryState {
     raw_name_dialog: Option<LibraryRawNameDialog>,
     #[cfg(target_os = "android")]
     android_raw_name_dialog: Option<AndroidLibraryRawNameDialog>,
+    #[cfg(target_os = "android")]
+    android_folder_name_dialog: Option<AndroidLibraryFolderNameDialog>,
     export_dialog: Option<LibraryExportDialog>,
     adjustment_paste_dialog: Option<LibraryAdjustmentPasteDialog>,
     ai_mask_refresh_prompt: Option<LibraryAiMaskRefreshPrompt>,
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_library_location_label(root: &str, folder: &str) -> String {
+    if folder.is_empty() {
+        root.to_owned()
+    } else {
+        format!("{root}/{folder}")
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_folder_parent(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_folder_ancestors(path: &str) -> HashSet<String> {
+    let mut expanded = HashSet::from([String::new()]);
+    let mut current = path.to_owned();
+    while !current.is_empty() {
+        let parent = android_folder_parent(&current).to_owned();
+        expanded.insert(parent.clone());
+        current = parent;
+    }
+    expanded
 }
 
 fn cloud_batch_summary(
@@ -1307,6 +1360,7 @@ fn run_image_paste(
                             ) {
                                 let rollback = crate::android::delete_imported_library_document(
                                     android_app,
+                                    &imported.uri,
                                     &imported.display_name,
                                 );
                                 return Err(if let Err(rollback) = rollback {
@@ -1322,6 +1376,7 @@ fn run_image_paste(
                             if let Err(error) = crate::cloud::delete_asset(config, asset) {
                                 let rollback = crate::android::delete_imported_library_document(
                                     android_app,
+                                    &imported.uri,
                                     &imported.display_name,
                                 );
                                 return Err(if let Err(rollback) = rollback {
@@ -1666,11 +1721,26 @@ impl LibraryState {
         workers: usize,
         thumbnail_size: LibraryThumbnailSize,
         sort_order: LibrarySortOrder,
+        selected_folder: String,
     ) -> Self {
-        let location = crate::android::library_location(&android_app).unwrap_or_else(|error| {
+        let root_location = crate::android::library_location(&android_app).unwrap_or_else(|error| {
             log::warn!("{error}");
             "Android/media/de.duecki.auraw/.library".to_owned()
         });
+        let selected_folder = match crate::android::select_library_folder(
+            &android_app,
+            &selected_folder,
+        ) {
+            Ok(()) => selected_folder,
+            Err(error) => {
+                log::warn!("{error}");
+                if let Err(root_error) = crate::android::select_library_folder(&android_app, "") {
+                    log::warn!("{root_error}");
+                }
+                String::new()
+            }
+        };
+        let location = android_library_location_label(&root_location, &selected_folder);
         let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
         crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
         let mut state = Self {
@@ -1703,8 +1773,14 @@ impl LibraryState {
             cloud_trash_receiver: None,
             cloud_trash_selection: HashSet::new(),
             cloud_trash_delete_confirmation: None,
+            folder_sidebar_open: false,
             android_raw_name_dialog: None,
+            android_folder_name_dialog: None,
             android_app,
+            android_root_location: root_location,
+            android_folder: selected_folder.clone(),
+            android_folders: Vec::new(),
+            android_expanded_folders: android_folder_ancestors(&selected_folder),
             entries: Vec::new(),
             entry_indices: HashMap::new(),
             event_receiver: None,
@@ -1783,6 +1859,7 @@ impl LibraryState {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     fn cloud_breadcrumbs(&self) -> Vec<(String, String)> {
         let mut breadcrumbs = vec![(
             crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned(),
@@ -2628,17 +2705,51 @@ impl LibraryState {
         self.root_folder.as_deref()
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn folder_sidebar_open(&self) -> bool {
         self.folder_sidebar_open
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn set_folder_sidebar_open(&mut self, open: bool) -> bool {
         if self.folder_sidebar_open == open {
             return false;
         }
         self.folder_sidebar_open = open;
+        true
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn android_folder(&self) -> &str {
+        &self.android_folder
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn select_android_folder(
+        &mut self,
+        folder: String,
+        context: &egui::Context,
+    ) -> bool {
+        if self.view == LibraryView::Local && self.android_folder == folder {
+            return false;
+        }
+        if let Err(error) = crate::android::select_library_folder(&self.android_app, &folder) {
+            self.status = error;
+            return false;
+        }
+        self.view = LibraryView::Local;
+        self.android_folder = folder;
+        self.android_expanded_folders
+            .extend(android_folder_ancestors(&self.android_folder));
+        let location = android_library_location_label(
+            &self.android_root_location,
+            &self.android_folder,
+        );
+        self.location = Some(location.clone());
+        self.local_location = Some(location);
+        self.entries.clear();
+        self.entry_indices.clear();
+        self.clear_selection();
+        self.catalog_ready = false;
+        self.refresh(context);
         true
     }
 
@@ -3458,6 +3569,22 @@ impl LibraryState {
             std::thread::Builder::new()
                 .name("auraw-library".to_owned())
                 .spawn(move || {
+                    let folders = match crate::android::list_library_folders(&android_app) {
+                        Ok(folders) => folders,
+                        Err(error) => {
+                            send_scan_failure(&event_sender, generation, error, &repaint);
+                            return;
+                        }
+                    };
+                    if event_sender
+                        .send(ScanEvent::AndroidFolders {
+                            generation,
+                            folders,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                     let documents = match crate::android::list_library_documents(&android_app) {
                         Ok(documents) => documents,
                         Err(error) => {
@@ -3736,6 +3863,22 @@ impl LibraryState {
                 {
                     self.folder_tree = Some(tree);
                 }
+                #[cfg(target_os = "android")]
+                ScanEvent::AndroidFolders {
+                    generation,
+                    folders,
+                } if generation == self.generation.load(Ordering::Acquire) => {
+                    self.android_folders = folders;
+                    self.android_expanded_folders.retain(|path| {
+                        path.is_empty()
+                            || self
+                                .android_folders
+                                .iter()
+                                .any(|folder| &folder.path == path)
+                    });
+                    self.android_expanded_folders
+                        .extend(android_folder_ancestors(&self.android_folder));
+                }
                 ScanEvent::Catalog {
                     generation,
                     files,
@@ -3770,20 +3913,25 @@ impl LibraryState {
                     }
                     self.scanning = false;
                     self.catalog_ready = true;
-                    let mut catalog_status =
-                        catalog_status(self.entries.len(), warning_count, truncated);
+                    let mut catalog_status = catalog_status(warning_count, truncated);
                     if self.view == LibraryView::Cloud {
                         if let Some(reason) = &self.cloud_offline_reason {
-                            catalog_status = format!(
-                                "Offline · cached cloud library · {catalog_status}\n{reason}"
-                            );
+                            let prefix = "Offline · cached cloud library";
+                            catalog_status = if catalog_status.is_empty() {
+                                format!("{prefix}\n{reason}")
+                            } else {
+                                format!("{prefix} · {catalog_status}\n{reason}")
+                            };
                         }
                     }
-                    self.status = self
-                        .cloud_upload_completion
-                        .take()
-                        .map(|summary| format!("{summary}\n{catalog_status}"))
-                        .unwrap_or(catalog_status);
+                    self.status = match (
+                        self.cloud_upload_completion.take(),
+                        catalog_status.is_empty(),
+                    ) {
+                        (Some(summary), true) => summary,
+                        (Some(summary), false) => format!("{summary}\n{catalog_status}"),
+                        (None, _) => catalog_status,
+                    };
                 }
                 ScanEvent::Thumbnail {
                     generation,
@@ -4872,21 +5020,18 @@ fn send_scan_failure(
     repaint.request_repaint();
 }
 
-fn catalog_status(count: usize, warning_count: usize, truncated: bool) -> String {
-    let warnings = if warning_count == 0 {
-        String::new()
-    } else {
-        format!(" · {warning_count} unreadable items")
-    };
-    let truncated = if truncated {
-        format!(" · newest {MAX_LIBRARY_FILES} shown")
-    } else {
-        String::new()
-    };
-    format!(
-        "{count} RAW {}{truncated}{warnings}",
-        if count == 1 { "file" } else { "files" }
-    )
+fn catalog_status(warning_count: usize, truncated: bool) -> String {
+    let mut notices = Vec::new();
+    if truncated {
+        notices.push(format!("Newest {MAX_LIBRARY_FILES} RAW files shown"));
+    }
+    if warning_count > 0 {
+        notices.push(format!(
+            "{warning_count} unreadable {}",
+            if warning_count == 1 { "item" } else { "items" }
+        ));
+    }
+    notices.join(" · ")
 }
 
 fn cloud_image_context_menu(
@@ -6960,7 +7105,6 @@ fn cloud_folder_contains(
     ancestor_id == crate::cloud::CLOUD_ROOT_FOLDER_ID
 }
 
-#[cfg(not(target_os = "android"))]
 #[allow(clippy::too_many_arguments)]
 fn show_cloud_folder_node(
     ui: &mut Ui,
@@ -7148,7 +7292,6 @@ fn show_cloud_folder_node(
     });
 }
 
-#[cfg(not(target_os = "android"))]
 fn apply_cloud_folder_ui_action(
     app: &mut AurawApp,
     action: CloudFolderUiAction,
@@ -7172,7 +7315,10 @@ fn apply_cloud_folder_ui_action(
                 content: CloudClipboardContent::Folder(folder.clone()),
             });
             app.library.image_clipboard = None;
-            app.library.folder_clipboard = None;
+            #[cfg(not(target_os = "android"))]
+            {
+                app.library.folder_clipboard = None;
+            }
             app.library.status = format!(
                 "Copied cloud folder {}. Choose Paste in a destination.",
                 folder.name
@@ -7184,7 +7330,10 @@ fn apply_cloud_folder_ui_action(
                 content: CloudClipboardContent::Folder(folder.clone()),
             });
             app.library.image_clipboard = None;
-            app.library.folder_clipboard = None;
+            #[cfg(not(target_os = "android"))]
+            {
+                app.library.folder_clipboard = None;
+            }
             app.library.status = format!(
                 "Cut cloud folder {}. Choose Paste in a destination.",
                 folder.name
@@ -7221,6 +7370,181 @@ fn apply_cloud_folder_ui_action(
                 app.library.refresh(context);
             } else {
                 app.show_library_view(LibraryView::Cloud);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+#[allow(clippy::too_many_arguments)]
+fn show_android_library_folder_node(
+    ui: &mut Ui,
+    path: &str,
+    name: &str,
+    children_by_parent: &HashMap<&str, Vec<&crate::android::LibraryFolder>>,
+    selected_folder: &str,
+    action_in_progress: bool,
+    expanded_folders: &mut HashSet<String>,
+    requested_action: &mut Option<AndroidLibraryFolderUiAction>,
+) {
+    let children = children_by_parent.get(path).map(Vec::as_slice).unwrap_or(&[]);
+    let has_children = !children.is_empty();
+    let expanded = expanded_folders.contains(path);
+    let selected = selected_folder == path;
+
+    ui.push_id(("android-library-folder", path), |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if has_children {
+                let caret = if expanded {
+                    egui_phosphor::regular::CARET_DOWN
+                } else {
+                    egui_phosphor::regular::CARET_RIGHT
+                };
+                if ui
+                    .add_sized(
+                        egui::vec2(34.0, 38.0),
+                        egui::Button::new(egui::RichText::new(caret).size(13.0)).frame(false),
+                    )
+                    .clicked()
+                {
+                    if expanded {
+                        expanded_folders.remove(path);
+                    } else {
+                        expanded_folders.insert(path.to_owned());
+                    }
+                }
+            } else {
+                ui.allocate_space(egui::vec2(34.0, 38.0));
+            }
+
+            let icon = if expanded && has_children {
+                egui_phosphor::regular::FOLDER_OPEN
+            } else {
+                egui_phosphor::regular::FOLDER
+            };
+            let response = ui.add_enabled_ui(!action_in_progress, |ui| {
+                ui.add_sized(
+                    [ui.available_width().max(80.0), 38.0],
+                    egui::Button::selectable(
+                        selected,
+                        egui::RichText::new(format!("{icon}  {name}")),
+                    ),
+                )
+            });
+            if response.inner.clicked() {
+                *requested_action = Some(AndroidLibraryFolderUiAction::Select(path.to_owned()));
+            }
+            response.inner.context_menu(|ui| {
+                if ui.button("New folder here…").clicked() {
+                    *requested_action = Some(AndroidLibraryFolderUiAction::New(path.to_owned()));
+                    ui.close();
+                }
+                if ui.button("Refresh folders").clicked() {
+                    *requested_action = Some(AndroidLibraryFolderUiAction::Refresh);
+                    ui.close();
+                }
+            });
+        });
+
+        if expanded {
+            ui.indent("android-library-children", |ui| {
+                for child in children {
+                    show_android_library_folder_node(
+                        ui,
+                        &child.path,
+                        &child.name,
+                        children_by_parent,
+                        selected_folder,
+                        action_in_progress,
+                        expanded_folders,
+                        requested_action,
+                    );
+                }
+            });
+        }
+    });
+}
+
+#[cfg(target_os = "android")]
+fn apply_android_library_folder_ui_action(
+    app: &mut AurawApp,
+    action: AndroidLibraryFolderUiAction,
+    context: &egui::Context,
+) {
+    match action {
+        AndroidLibraryFolderUiAction::Select(folder) => {
+            app.select_android_library_folder(folder);
+            app.set_library_folder_sidebar_open(false);
+        }
+        AndroidLibraryFolderUiAction::New(parent) => {
+            app.library.android_folder_name_dialog = Some(AndroidLibraryFolderNameDialog {
+                parent,
+                name: String::new(),
+                error: None,
+                focus_requested: false,
+            });
+        }
+        AndroidLibraryFolderUiAction::Refresh => app.library.refresh(context),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn show_android_library_folder_dialog(ui: &mut Ui, app: &mut AurawApp) {
+    let mut close = false;
+    let mut create = None;
+    if let Some(dialog) = app.library.android_folder_name_dialog.as_mut() {
+        crate::ui::responsive_popup(egui::Window::new("New folder"), ui.ctx(), 380.0)
+            .id(egui::Id::new("android-library-folder-name-dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label("Folder name");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut dialog.name)
+                        .desired_width(f32::INFINITY)
+                        .id_source("android-library-folder-name-input"),
+                );
+                if !dialog.focus_requested {
+                    response.request_focus();
+                    dialog.focus_requested = true;
+                }
+                if let Some(error) = dialog.error.as_deref() {
+                    ui.label(
+                        egui::RichText::new(error)
+                            .small()
+                            .color(ui.visuals().error_fg_color),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    let enter = response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui.button("Create").clicked() || enter {
+                        create = Some((dialog.parent.clone(), dialog.name.clone()));
+                    }
+                });
+            });
+    }
+    if close {
+        app.library.android_folder_name_dialog = None;
+    }
+    if let Some((parent, name)) = create {
+        match crate::android::create_library_folder(&app.library.android_app, &parent, &name) {
+            Ok(folder) => {
+                app.library.android_folder_name_dialog = None;
+                app.library.android_expanded_folders.insert(parent);
+                app.library.status = format!("Created folder {folder}");
+                app.library.refresh(ui.ctx());
+            }
+            Err(error) => {
+                if let Some(dialog) = app.library.android_folder_name_dialog.as_mut() {
+                    dialog.error = Some(error);
+                }
             }
         }
     }
@@ -7826,6 +8150,7 @@ fn start_image_clipboard_paste(
     app.library.start_image_paste(destination, context);
 }
 
+#[cfg(not(target_os = "android"))]
 fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
     if !app.library.is_cloud_view() {
         return;
@@ -7872,6 +8197,8 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
         && !app.library.cloud_upload_in_progress()
         && !app.library.image_paste_in_progress()
         && app.library.cloud_open_receiver.is_none();
+    let has_clipboard =
+        app.library.cloud_clipboard.is_some() || app.library.image_clipboard.is_some();
     let mut navigate_to = None;
     let mut create_folder = false;
     let mut paste = false;
@@ -7894,31 +8221,32 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
             }
         }
         ui.separator();
-        if ui
-            .add_enabled(action_enabled, egui::Button::new("New folder…"))
-            .clicked()
-        {
-            create_folder = true;
-        }
-        if ui
-            .add_enabled(
-                action_enabled
-                    && (app.library.cloud_clipboard.is_some()
-                        || app.library.image_clipboard.is_some()),
-                egui::Button::new(
-                    app.library
-                        .image_clipboard
-                        .as_ref()
-                        .map(ImageClipboard::paste_label)
-                        .unwrap_or_else(|| "Paste here".to_owned()),
-                ),
-            )
-            .clicked()
+        if has_clipboard
+            && ui
+                .add_enabled(
+                    action_enabled,
+                    egui::Button::new(
+                        app.library
+                            .image_clipboard
+                            .as_ref()
+                            .map(ImageClipboard::paste_label)
+                            .unwrap_or_else(|| "Paste here".to_owned()),
+                    ),
+                )
+                .clicked()
         {
             paste = true;
         }
-        if let Some(folder) = current_folder.as_ref() {
-            ui.menu_button(egui_phosphor::regular::DOTS_THREE, |ui| {
+        ui.menu_button(egui_phosphor::regular::DOTS_THREE, |ui| {
+            if ui
+                .add_enabled(action_enabled, egui::Button::new("New folder…"))
+                .clicked()
+            {
+                create_folder = true;
+                ui.close();
+            }
+            if let Some(folder) = current_folder.as_ref() {
+                ui.separator();
                 if ui
                     .add_enabled(action_enabled, egui::Button::new("Copy folder"))
                     .clicked()
@@ -7956,8 +8284,8 @@ fn show_cloud_folder_bar(ui: &mut Ui, app: &mut AurawApp) {
                         Some(CloudDeleteTarget::Folder(folder.clone()));
                     ui.close();
                 }
-            });
-        }
+            }
+        });
         if ui
             .button(format!("{} Trash", egui_phosphor::regular::TRASH))
             .clicked()
@@ -8630,10 +8958,28 @@ fn show_android_local_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp) {
 pub struct Library;
 
 impl Library {
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn show_folder_sidebar(ui: &mut Ui, app: &mut AurawApp) {
+        #[cfg(not(target_os = "android"))]
         let action_in_progress = app.library.file_action_in_progress();
+        #[cfg(target_os = "android")]
+        let action_in_progress = app.library.cloud_action_in_progress()
+            || app.library.cloud_upload_in_progress()
+            || app.library.image_paste_in_progress()
+            || app.library.cloud_open_receiver.is_some()
+            || app.picker_pending;
+        #[cfg(not(target_os = "android"))]
+        let folders_available = app.library.root_folder.is_some() || app.library.is_cloud_view();
+        #[cfg(target_os = "android")]
+        let folders_available = true;
+        #[cfg(not(target_os = "android"))]
+        let can_create_folder = app.library.folder.is_some()
+            || (app.library.is_cloud_view() && !app.library.cloud_trash_open);
+        #[cfg(target_os = "android")]
+        let can_create_folder = !app.library.cloud_trash_open;
+        #[cfg(not(target_os = "android"))]
         let mut requested_action = None;
+        #[cfg(target_os = "android")]
+        let mut requested_android_action = None;
         let mut requested_cloud_action = None;
         let mut requested_cloud_trash = false;
         // The folder header and Library toolbar share the same dimensions so
@@ -8654,8 +9000,7 @@ impl Library {
                 }
                 if crate::ui::icons::phosphor_icon_button_enabled(
                     ui,
-                    (app.library.root_folder.is_some() || app.library.is_cloud_view())
-                        && !action_in_progress,
+                    folders_available && !action_in_progress,
                     egui_phosphor::regular::ARROW_CLOCKWISE,
                     crate::ui::theme::toolbar_icon_size(),
                     "Refresh folders",
@@ -8665,14 +9010,20 @@ impl Library {
                     if app.library.is_cloud_view() {
                         requested_cloud_action = Some(CloudFolderUiAction::Refresh);
                     } else {
-                        requested_action = Some(LibraryFolderUiAction::Refresh);
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            requested_action = Some(LibraryFolderUiAction::Refresh);
+                        }
+                        #[cfg(target_os = "android")]
+                        {
+                            requested_android_action =
+                                Some(AndroidLibraryFolderUiAction::Refresh);
+                        }
                     }
                 }
                 if crate::ui::icons::phosphor_icon_button_enabled(
                     ui,
-                    (app.library.folder.is_some()
-                        || (app.library.is_cloud_view() && !app.library.cloud_trash_open))
-                        && !action_in_progress,
+                    can_create_folder && !action_in_progress,
                     egui_phosphor::regular::FOLDER_PLUS,
                     crate::ui::theme::toolbar_icon_size(),
                     "Create folder here",
@@ -8683,8 +9034,19 @@ impl Library {
                         requested_cloud_action = Some(CloudFolderUiAction::New(
                             app.library.cloud_folder_id.clone(),
                         ));
-                    } else if let Some(folder) = app.library.folder.clone() {
-                        requested_action = Some(LibraryFolderUiAction::New(folder));
+                    } else {
+                        #[cfg(not(target_os = "android"))]
+                        if let Some(folder) = app.library.folder.clone() {
+                            requested_action = Some(LibraryFolderUiAction::New(folder));
+                        }
+                        #[cfg(target_os = "android")]
+                        {
+                            requested_android_action = Some(
+                                AndroidLibraryFolderUiAction::New(
+                                    app.library.android_folder.clone(),
+                                ),
+                            );
+                        }
                     }
                 }
             });
@@ -8692,13 +9054,18 @@ impl Library {
 
         let cloud_view = app.library.is_cloud_view();
         let mut requested_view = None;
+        #[cfg(not(target_os = "android"))]
+        let navigation_enabled = true;
+        #[cfg(target_os = "android")]
+        let navigation_enabled = !action_in_progress;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let width = ((ui.available_width() - 6.0) * 0.5).max(72.0);
             if ui
-                .add_sized(
-                    [width, 34.0],
-                    egui::Button::selectable(!cloud_view, "Local"),
+                .add_enabled(
+                    navigation_enabled,
+                    egui::Button::selectable(!cloud_view, "Local")
+                        .min_size(egui::vec2(width, 34.0)),
                 )
                 .clicked()
                 && cloud_view
@@ -8706,7 +9073,7 @@ impl Library {
                 requested_view = Some(LibraryView::Local);
             }
             let cloud_tab = ui.add_enabled(
-                app.library.cloud_enabled(),
+                app.library.cloud_enabled() && navigation_enabled,
                 egui::Button::selectable(cloud_view, "Cloud")
                     .min_size(egui::vec2(width, 34.0)),
             );
@@ -8721,26 +9088,9 @@ impl Library {
             app.show_library_view(view);
         }
 
-        let root_label = if app.library.is_cloud_view() {
-            "AuRaw Cloud folders".to_owned()
-        } else {
-            app.library
-                .root_folder
-                .as_deref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "No top-level folder selected".to_owned())
-        };
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(&root_label)
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            )
-            .truncate(),
-        )
-        .on_hover_text(root_label);
         ui.separator();
 
+        #[cfg(not(target_os = "android"))]
         let mut requested_folder = None;
         let tree_height = ui.available_height().max(32.0);
         if app.library.is_cloud_view() {
@@ -8771,6 +9121,8 @@ impl Library {
                     }
                 });
         } else {
+            #[cfg(not(target_os = "android"))]
+            {
             let tree = app.library.folder_tree.as_ref();
             let root_folder = app.library.root_folder.as_deref();
             let selected_folder = app.library.folder.as_deref();
@@ -8803,20 +9155,68 @@ impl Library {
                         );
                     }
                 });
+            }
+            #[cfg(target_os = "android")]
+            {
+                let folders = &app.library.android_folders;
+                let mut children_by_parent = HashMap::<
+                    &str,
+                    Vec<&crate::android::LibraryFolder>,
+                >::new();
+                for folder in folders {
+                    children_by_parent
+                        .entry(android_folder_parent(&folder.path))
+                        .or_default()
+                        .push(folder);
+                }
+                let selected_folder = &app.library.android_folder;
+                let expanded_folders = &mut app.library.android_expanded_folders;
+                egui::ScrollArea::both()
+                    .max_height(tree_height)
+                    .min_scrolled_height(tree_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        show_android_library_folder_node(
+                            ui,
+                            "",
+                            "Library",
+                            &children_by_parent,
+                            selected_folder,
+                            action_in_progress,
+                            expanded_folders,
+                            &mut requested_android_action,
+                        );
+                    });
+            }
         }
 
+        #[cfg(not(target_os = "android"))]
         if let Some(folder) = requested_folder {
             app.select_library_folder(folder);
         }
+        #[cfg(not(target_os = "android"))]
         if let Some(action) = requested_action {
             apply_library_folder_ui_action(app, action, ui.ctx());
         }
         if let Some(action) = requested_cloud_action {
+            #[cfg(target_os = "android")]
+            let close_drawer = matches!(action, CloudFolderUiAction::Select(_));
             apply_cloud_folder_ui_action(app, action, ui.ctx());
+            #[cfg(target_os = "android")]
+            if close_drawer {
+                app.set_library_folder_sidebar_open(false);
+            }
         }
         if requested_cloud_trash {
             app.show_cloud_library_trash();
+            #[cfg(target_os = "android")]
+            app.set_library_folder_sidebar_open(false);
         }
+        #[cfg(target_os = "android")]
+        if let Some(action) = requested_android_action {
+            apply_android_library_folder_ui_action(app, action, ui.ctx());
+        }
+        #[cfg(not(target_os = "android"))]
         show_library_folder_dialogs(ui, app);
     }
 
@@ -8920,41 +9320,6 @@ impl Library {
             }
         }
 
-        #[cfg(target_os = "android")]
-        if app.library.cloud_enabled() {
-            let cloud_selected = app.library.is_cloud_view();
-            let mut requested_view = None;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let width = ((ui.available_width() - 6.0) * 0.5).max(80.0);
-                if ui
-                    .add_sized(
-                        [width, 38.0],
-                        egui::Button::selectable(!cloud_selected, "Local"),
-                    )
-                    .clicked()
-                    && cloud_selected
-                {
-                    requested_view = Some(LibraryView::Local);
-                }
-                if ui
-                    .add_sized(
-                        [width, 38.0],
-                        egui::Button::selectable(cloud_selected, "Cloud"),
-                    )
-                    .clicked()
-                    && !cloud_selected
-                {
-                    requested_view = Some(LibraryView::Cloud);
-                }
-            });
-            ui.separator();
-            match requested_view {
-                Some(view) => app.show_library_view(view),
-                None => {}
-            }
-        }
-
         let mut refresh = false;
         let mut import_raw = false;
         let mut open_source = None;
@@ -8976,7 +9341,6 @@ impl Library {
             if compact_header {
                 ui.spacing_mut().item_spacing.x = 4.0;
             }
-            #[cfg(not(target_os = "android"))]
             if !app.library.folder_sidebar_open()
                 && crate::ui::icons::phosphor_icon_button(
                     ui,
@@ -9197,13 +9561,32 @@ impl Library {
         });
 
         #[cfg(not(target_os = "android"))]
-        if let Some(location) = app.library.location() {
-            ui.label(
-                egui::RichText::new(location)
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
+        if !app.library.is_cloud_view() {
+            if let Some(location) = app.library.location() {
+                ui.label(
+                    egui::RichText::new(location)
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+        }
+        #[cfg(target_os = "android")]
+        if !app.library.is_cloud_view() {
+            let folder_label = if app.library.android_folder.is_empty() {
+                "Local / Library".to_owned()
+            } else {
+                format!("Local / {}", app.library.android_folder)
+            };
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(folder_label)
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                )
+                .truncate(),
             );
         }
+        #[cfg(not(target_os = "android"))]
         show_cloud_folder_bar(ui, app);
         show_local_image_paste_bar(ui, app);
         if !app.library.status.is_empty() {
@@ -9443,6 +9826,8 @@ impl Library {
         show_local_raw_name_dialog(ui, app, frame);
         #[cfg(target_os = "android")]
         show_android_local_raw_name_dialog(ui, app);
+        #[cfg(target_os = "android")]
+        show_android_library_folder_dialog(ui, app);
 
         #[cfg(target_os = "android")]
         if let Some(action) = library_action {
@@ -10550,8 +10935,10 @@ mod tests {
     #[cfg(not(target_os = "android"))]
     use super::LibrarySource;
     use super::{
-        balanced_justified_row_ranges, cloud_cache_icon, cloud_folder_id_for_catalog,
-        cloud_preview_icon, cloud_preview_label, cloud_preview_notice, cloud_sync_badge,
+        android_folder_ancestors, android_folder_parent, android_library_location_label,
+        balanced_justified_row_ranges, catalog_status, cloud_cache_icon,
+        cloud_folder_id_for_catalog, cloud_preview_icon, cloud_preview_label, cloud_preview_notice,
+        cloud_sync_badge,
         copy_directory_create_new, desktop_selection_toggle_label, duplicate_raw_and_sidecar,
         elide_middle, format_file_size, import_folder_into_library, import_raw_into_folder,
         justified_thumbnail_layout, library_import_fab_rect, library_import_icon,
@@ -10575,6 +10962,27 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{mpsc, Arc, RwLock};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn android_folder_navigation_uses_normalized_relative_paths() {
+        assert_eq!(android_folder_parent("2026/Trip"), "2026");
+        assert_eq!(android_folder_parent("2026"), "");
+        assert_eq!(
+            android_folder_ancestors("2026/Trip"),
+            HashSet::from([String::new(), "2026".to_owned()])
+        );
+        assert_eq!(
+            android_library_location_label("/media/.library", "2026/Trip"),
+            "/media/.library/2026/Trip"
+        );
+    }
+
+    #[test]
+    fn successful_catalog_status_does_not_repeat_the_header_file_count() {
+        assert_eq!(catalog_status(0, false), "");
+        assert_eq!(catalog_status(1, false), "1 unreadable item");
+        assert!(catalog_status(0, true).contains("RAW files shown"));
+    }
 
     #[cfg(not(target_os = "android"))]
     fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {

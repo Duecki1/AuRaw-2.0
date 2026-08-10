@@ -40,16 +40,30 @@ public final class AndroidStorageContractTest {
         File legacy = new File(media, "legacy");
         assertTrue(library.mkdirs());
         assertTrue(legacy.mkdirs());
+        File trip = new File(library, "2026/Trip");
+        assertTrue(trip.mkdirs());
+
+        assertEquals("Trip", AndroidStorageContract.safeFolderName("Trip"));
+        assertEquals(
+                trip.getCanonicalFile(),
+                AndroidStorageContract.libraryFolder(library, "2026/Trip"));
+        assertEquals(
+                "2026/Trip",
+                AndroidStorageContract.relativeLibraryFolder(library, trip));
 
         File currentRaw = new File(library, "capture.dng");
+        File nestedRaw = new File(trip, "trip.dng");
         File legacyRaw = new File(legacy, "old.nef");
         Files.write(currentRaw.toPath(), new byte[] {1});
+        Files.write(nestedRaw.toPath(), new byte[] {2});
         Files.write(legacyRaw.toPath(), new byte[] {2});
 
         assertTrue(AndroidStorageContract.isAllowedRawFile(
                 currentRaw, "capture.dng", library, legacy));
         assertTrue(AndroidStorageContract.isAllowedRawFile(
                 legacyRaw, "old.nef", library, legacy));
+        assertTrue(AndroidStorageContract.isAllowedRawFile(
+                nestedRaw, "trip.dng", library, legacy));
         assertFalse(AndroidStorageContract.isAllowedRawFile(
                 currentRaw, "renamed.dng", library, legacy));
 
@@ -57,6 +71,13 @@ public final class AndroidStorageContractTest {
         Files.write(outside.toPath(), new byte[] {3});
         assertFalse(AndroidStorageContract.isAllowedRawFile(
                 outside, "capture.dng", library, legacy));
+
+        try {
+            AndroidStorageContract.libraryFolder(library, "../outside");
+            fail("folder traversal should be rejected");
+        } catch (IllegalArgumentException expected) {
+            // Expected.
+        }
     }
 
     @Test
