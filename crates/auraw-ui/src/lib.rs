@@ -128,11 +128,10 @@ fn desktop_icon() -> std::sync::Arc<eframe::egui::IconData> {
     static ICON: std::sync::OnceLock<std::sync::Arc<eframe::egui::IconData>> =
         std::sync::OnceLock::new();
     ICON.get_or_init(|| {
-        let image = image::load_from_memory(include_bytes!(
-            "../../../packaging/icons/auraw-256.png"
-        ))
-        .expect("embedded desktop icon must be a valid PNG")
-        .into_rgba8();
+        let image =
+            image::load_from_memory(include_bytes!("../../../packaging/icons/auraw-256.png"))
+                .expect("embedded desktop icon must be a valid PNG")
+                .into_rgba8();
         let (width, height) = image.dimensions();
         std::sync::Arc::new(eframe::egui::IconData {
             rgba: image.into_raw(),

@@ -2222,10 +2222,7 @@ impl Preview {
                             64,
                         );
                         let cursor_painter = ui.painter_at(preview_rect.intersect(image_rect));
-                        cursor_painter.add(Shape::line(
-                            outline,
-                            Stroke::new(1.5, cursor_color),
-                        ));
+                        cursor_painter.add(Shape::line(outline, Stroke::new(1.5, cursor_color)));
                         let inner_size = brush_size
                             * (1.0 - app.masks.subject_refinement.feather.clamp(0.0, 1.0));
                         if inner_size > brush_size * 0.04 {
@@ -4495,11 +4492,7 @@ fn group_coverage_rgba(
 ///
 /// Tool sizes are defined at fit zoom (1x). Screen-relative mode compensates
 /// for preview zoom, while image-relative mode preserves the source footprint.
-fn zoom_scaled_brush_size(
-    tool_size: f32,
-    preview_zoom: f32,
-    image_relative: bool,
-) -> f32 {
+fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32, image_relative: bool) -> f32 {
     let tool_size = tool_size.max(0.0);
     if image_relative {
         tool_size

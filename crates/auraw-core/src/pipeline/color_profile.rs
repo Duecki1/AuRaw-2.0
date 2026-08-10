@@ -6,8 +6,8 @@ use std::path::Path;
 mod dcp;
 mod icc;
 
-use dcp::{profile_from_tags, profile_identity_from_tags, TiffReader};
 use crate::color_math::{rec2020_from_oklab, rec2020_to_oklab};
+use dcp::{profile_from_tags, profile_identity_from_tags, TiffReader};
 #[cfg(target_os = "android")]
 use icc::MatrixShaperProfile;
 

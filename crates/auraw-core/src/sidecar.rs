@@ -319,12 +319,10 @@ pub fn apply_copied_adjustments_with_mode(
 
 fn synchronize_subject_refinement(edits: &mut EditState) {
     let refinement = edits.subject_refinement.clone().or_else(|| {
-        (!edits.masks.subject_refinement.is_empty())
-            .then(|| edits.masks.subject_refinement.clone())
+        (!edits.masks.subject_refinement.is_empty()).then(|| edits.masks.subject_refinement.clone())
     });
     let refinement = refinement.filter(|refinement| !refinement.is_empty());
-    Arc::make_mut(&mut edits.masks).subject_refinement =
-        refinement.clone().unwrap_or_default();
+    Arc::make_mut(&mut edits.masks).subject_refinement = refinement.clone().unwrap_or_default();
     edits.subject_refinement = refinement;
 }
 
@@ -1705,10 +1703,7 @@ fn measure_sidecar_dynamic_bytes<'a>(
         checked_add(&mut measured, escaped_json_string_bound(&mask.name)?)?;
         for component in &mask.components {
             checked_add(&mut measured, COMPONENT_HEADROOM)?;
-            checked_add(
-                &mut measured,
-                escaped_json_string_bound(&component.name)?,
-            )?;
+            checked_add(&mut measured, escaped_json_string_bound(&component.name)?)?;
             match &component.geometry {
                 MaskGeometry::Brush { dabs, .. } => {
                     checked_add_scaled(&mut measured, dabs.len(), BRUSH_DAB_HEADROOM)?
@@ -1730,11 +1725,7 @@ fn measure_sidecar_dynamic_bytes<'a>(
                             &mut image_buckets,
                         )?;
                     }
-                    checked_add_scaled(
-                        &mut measured,
-                        strokes.len(),
-                        OBJECT_STROKE_HEADROOM,
-                    )?;
+                    checked_add_scaled(&mut measured, strokes.len(), OBJECT_STROKE_HEADROOM)?;
                     for stroke in strokes {
                         checked_add_scaled(
                             &mut measured,
@@ -2159,12 +2150,15 @@ mod tests {
             *mask = Some(crate::pipeline::MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap());
         }
         source_masks.subject_refinement.stroke_starts.push(0);
-        source_masks.subject_refinement.dabs.push(crate::pipeline::BrushDab {
-            center: [0.5, 0.5],
-            opacity: 0.6,
-            size: 0.08,
-            feather: 0.4,
-        });
+        source_masks
+            .subject_refinement
+            .dabs
+            .push(crate::pipeline::BrushDab {
+                center: [0.5, 0.5],
+                opacity: 0.6,
+                size: 0.08,
+                feather: 0.4,
+            });
         source.subject_refinement = Some(source_masks.subject_refinement.clone());
         source.masks = Arc::new(source_masks);
 
@@ -2361,12 +2355,15 @@ mod tests {
             masks.subject_refinement.feather = 0.3;
             masks.subject_refinement.flow = 0.45;
             masks.subject_refinement.stroke_starts.push(0);
-            masks.subject_refinement.dabs.push(crate::pipeline::BrushDab {
-                center: [0.25, 0.75],
-                opacity: -0.45,
-                size: 0.07,
-                feather: 0.3,
-            });
+            masks
+                .subject_refinement
+                .dabs
+                .push(crate::pipeline::BrushDab {
+                    center: [0.25, 0.75],
+                    opacity: -0.45,
+                    size: 0.07,
+                    feather: 0.3,
+                });
             masks.subject_refinement.clone()
         };
         edits.subject_refinement = Some(refinement);
@@ -2374,7 +2371,9 @@ mod tests {
         let encoded = encode(edits.clone()).unwrap();
         let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         assert!(document.pointer("/edits/subject_refinement").is_some());
-        assert!(document.pointer("/edits/masks/subject_refinement").is_none());
+        assert!(document
+            .pointer("/edits/masks/subject_refinement")
+            .is_none());
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits, edits);
     }
@@ -2586,9 +2585,11 @@ mod tests {
             vec![255; 16 * 16],
         )
         .unwrap();
-        edits.inpainting = Arc::new(vec![
-            InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap(),
-        ]);
+        edits.inpainting = Arc::new(vec![InpaintStroke::from_result(
+            vec![BrushDab::default()],
+            patch,
+        )
+        .unwrap()]);
 
         let encoded = encode(edits.clone()).unwrap();
         let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -2598,7 +2599,9 @@ mod tests {
             .flat_map(|value| value.to_le_bytes())
             .collect::<Vec<_>>();
         document["edits"]["inpainting"][0]["patch"]["rgba16f"] =
-            base64::engine::general_purpose::STANDARD.encode(rgba_bytes).into();
+            base64::engine::general_purpose::STANDARD
+                .encode(rgba_bytes)
+                .into();
         document["edits"]["inpainting"][0]["patch"]["mask"] =
             base64::engine::general_purpose::STANDARD
                 .encode(vec![255u8; 16 * 16])

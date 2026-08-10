@@ -113,9 +113,8 @@ fn evaluate_math_sample(operation: MathOperation, sample: [f32; 4]) -> Result<[f
     let output = match operation {
         MathOperation::CameraOpponentRoundtrip => {
             let rgb = [sample[0], sample[1], sample[2]];
-            let reconstructed = color_math::camera_from_signal_opponents(
-                color_math::camera_signal_opponents(rgb),
-            );
+            let reconstructed =
+                color_math::camera_from_signal_opponents(color_math::camera_signal_opponents(rgb));
             [reconstructed[0], reconstructed[1], reconstructed[2], 0.0]
         }
         MathOperation::DisplayBlackToeAmount => [
@@ -143,9 +142,7 @@ fn evaluate_math_sample(operation: MathOperation, sample: [f32; 4]) -> Result<[f
         }
     };
     if output.iter().any(|value| !value.is_finite()) {
-        bail!(
-            "math operation {operation:?} produced a non-finite output for sample {sample:?}"
-        );
+        bail!("math operation {operation:?} produced a non-finite output for sample {sample:?}");
     }
     Ok(output)
 }
@@ -298,7 +295,8 @@ fn parse_args() -> Result<Args> {
             "--output" => output = Some(PathBuf::from(next_value(&mut values, "--output")?)),
             "--dcp" => dcp = Some(PathBuf::from(next_value(&mut values, "--dcp")?)),
             "--workgroup-size" => {
-                workgroup_size = parse_workgroup_size(&next_value(&mut values, "--workgroup-size")?)?
+                workgroup_size =
+                    parse_workgroup_size(&next_value(&mut values, "--workgroup-size")?)?
             }
             "--benchmark-json" => {
                 benchmark_json = Some(PathBuf::from(next_value(&mut values, "--benchmark-json")?))
@@ -448,7 +446,10 @@ fn write_benchmark_json(
     render_ms: f64,
     write_ms: f64,
 ) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create benchmark directory {}", parent.display()))?;
     }

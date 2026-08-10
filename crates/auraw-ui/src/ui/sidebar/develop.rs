@@ -14,12 +14,6 @@ impl Sidebar {
         });
 
         Self::adjustment_section(ui, "Lens Corrections", false, foldable, |ui| {
-            ui.label(
-                egui::RichText::new("Lensfun profile correction for distortion, chromatic aberration, and vignetting")
-                    .size(11.5)
-                    .color(ui.visuals().weak_text_color()),
-            );
-
             let lens_correction_busy = app.lens_correction_busy();
             let state = &mut app.lens_correction;
             let has_selection = state.selected_lens().is_some();
@@ -146,19 +140,6 @@ impl Sidebar {
                     rebuild = true;
                 }
             }
-
-            ui.add_space(4.0);
-            let status_color = if state.applied {
-                ui.visuals().selection.bg_fill
-            } else {
-                ui.visuals().weak_text_color()
-            };
-            let status = if state.catalog.status.is_empty() {
-                "Open a RAW file to inspect available lens profiles."
-            } else {
-                state.catalog.status.as_str()
-            };
-            ui.label(egui::RichText::new(status).size(11.5).color(status_color));
         });
         rebuild
     }
@@ -559,11 +540,6 @@ impl Sidebar {
     ) -> bool {
         let mut changed = false;
         let contents = |ui: &mut Ui| {
-            ui.label(
-                egui::RichText::new("Perceptual four-way grading in scene-linear Rec.2020")
-                    .size(11.5)
-                    .color(ui.visuals().weak_text_color()),
-            );
             changed |= color_grading_editor(ui, grading, selected_tab);
         };
         Self::adjustment_section(ui, "Color Grading", false, foldable, contents);
@@ -586,29 +562,13 @@ impl Sidebar {
             ai_response.on_hover_text(
                 "Runs the pinned darktable-ai RawNIND model locally. Bayer uses joint denoise/demosaic; X-Trans uses the linear Rec.2020 variant.",
             );
-            ui.label(
-                egui::RichText::new(if exposure.ai_denoise_enabled {
-                    "Replaces standard luminance and color denoise; their saved values are retained."
-                } else {
-                    "Optional local neural RAW denoise. First use asks before downloading the models."
-                })
-                .size(10.5)
-                .color(ui.visuals().weak_text_color()),
-            );
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.separator();
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new("Sensor-profiled noise reduction")
                     .strong()
                     .size(11.5),
-            );
-            ui.label(
-                egui::RichText::new(
-                    "Profiled luminance filtering and multiscale color wavelets; opening values adapt to each RAW",
-                )
-                .size(10.5)
-                .color(ui.visuals().weak_text_color()),
             );
             ui.add_enabled_ui(!exposure.ai_denoise_enabled, |ui| {
                 changed |= adjustment_slider(
@@ -668,13 +628,6 @@ impl Sidebar {
                     },
                 );
                 changed |= previous_quality != exposure.denoise_quality;
-                ui.label(
-                    egui::RichText::new(
-                        "Fast: fine color scale · Balanced: 4 scales · High: 6 scales",
-                    )
-                    .size(10.0)
-                    .color(ui.visuals().weak_text_color()),
-                );
             });
             ui.add_space(8.0);
             ui.separator();

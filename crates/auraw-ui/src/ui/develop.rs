@@ -36,8 +36,7 @@ impl Develop {
             return;
         }
 
-        let previous =
-            egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::ArrowLeft);
+        let previous = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::ArrowLeft);
         let next = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::ArrowRight);
         let direction = if context.input_mut(|input| input.consume_shortcut(&previous)) {
             -1_i8
@@ -124,8 +123,7 @@ impl Develop {
         // Treat the center gutter as a real drag handle. Using the pointer's
         // absolute x position avoids accumulating `drag_delta()` across frames,
         // and the ratio is retained when the reference image changes.
-        let divider_left =
-            split_rect.left() + usable_width * app.develop_reference.split_ratio;
+        let divider_left = split_rect.left() + usable_width * app.develop_reference.split_ratio;
         let initial_divider_rect = egui::Rect::from_min_max(
             egui::pos2(divider_left, split_rect.top()),
             egui::pos2(divider_left + SPLIT_GAP, split_rect.bottom()),
@@ -148,8 +146,7 @@ impl Develop {
             .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
         if divider_response.dragged() {
             if let Some(pointer) = ui.ctx().input(|input| input.pointer.interact_pos()) {
-                let ratio =
-                    (pointer.x - split_rect.left() - SPLIT_GAP * 0.5) / usable_width;
+                let ratio = (pointer.x - split_rect.left() - SPLIT_GAP * 0.5) / usable_width;
                 app.develop_reference.split_ratio = ratio.clamp(min_ratio, max_ratio);
             }
         }
@@ -269,12 +266,11 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
             // into the viewport's content-relative coordinate space first.
             let items_origin_in_content = items_left - ui.max_rect().left();
             let preload = viewport.expand(FILMSTRIP_PRELOAD_POINTS);
-            let relative_left = (preload.left() - items_origin_in_content)
-                .clamp(0.0, cards_width.max(0.0));
-            let relative_right = (preload.right() - items_origin_in_content)
-                .clamp(0.0, cards_width.max(0.0));
-            let first = ((relative_left / stride).floor() as usize)
-                .min(count.saturating_sub(1));
+            let relative_left =
+                (preload.left() - items_origin_in_content).clamp(0.0, cards_width.max(0.0));
+            let relative_right =
+                (preload.right() - items_origin_in_content).clamp(0.0, cards_width.max(0.0));
+            let first = ((relative_left / stride).floor() as usize).min(count.saturating_sub(1));
             let last = (((relative_right / stride).ceil() as usize) + 1).min(count);
 
             for index in first..last {
@@ -424,9 +420,8 @@ fn start_reference_preview_load(app: &mut AurawApp, context: &egui::Context) {
             app.develop_reference.preview_receiver = Some(receiver);
         }
         Err(error) => {
-            app.develop_reference.error = Some(format!(
-                "could not start reference preview worker: {error}"
-            ));
+            app.develop_reference.error =
+                Some(format!("could not start reference preview worker: {error}"));
         }
     }
 }
@@ -499,7 +494,10 @@ fn sync_reference_texture(app: &mut AurawApp, context: &egui::Context) {
 fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
     egui::Frame::new()
         .fill(Color32::from_rgb(15, 16, 18))
-        .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+        .stroke(Stroke::new(
+            1.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
         .show(ui, |ui| {
             let available = ui.available_size();
             let (rect, _) = ui.allocate_exact_size(available, Sense::hover());
@@ -528,7 +526,8 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
                     FontId::proportional(13.0),
                     ui.visuals().weak_text_color(),
                 );
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(80));
             }
 
             if !app.develop_reference.high_quality
@@ -542,7 +541,8 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
                     FontId::proportional(10.5),
                     Color32::from_white_alpha(180),
                 );
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(80));
             } else if let Some(error) = app.develop_reference.error.as_deref() {
                 painter.text(
                     rect.right_bottom() - egui::vec2(12.0, 12.0),
@@ -666,10 +666,8 @@ fn filmstrip_thumbnail(
     }
 
     if reference {
-        let ref_rect = egui::Rect::from_min_size(
-            rect.min + egui::vec2(5.0, 5.0),
-            egui::vec2(31.0, 17.0),
-        );
+        let ref_rect =
+            egui::Rect::from_min_size(rect.min + egui::vec2(5.0, 5.0), egui::vec2(31.0, 17.0));
         painter.rect_filled(ref_rect, 3.0, Color32::from_black_alpha(190));
         painter.text(
             ref_rect.center(),

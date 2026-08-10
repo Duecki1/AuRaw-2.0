@@ -60,8 +60,7 @@ impl Sidebar {
 
     fn show_masks(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
         if app.ai_masks_need_update() {
-            crate::ui::theme::card_frame(ui).show(ui, |ui| {
-                ui.set_width(ui.available_width());
+            crate::ui::theme::section_card(ui, "Masks need updating", |ui| {
                 ui.label(
                     "The image used by existing masks changed. Refresh masks to rebuild content-aware masks and mask sources without deleting your edits.",
                 );
@@ -75,15 +74,11 @@ impl Sidebar {
                     app.request_update_all_ai_masks(frame);
                 }
             });
-            ui.add_space(6.0);
+            ui.add_space(crate::ui::theme::CARD_GAP);
         }
 
         if app.masks.masks.is_empty() {
-            ui.add_space(16.0);
-            ui.vertical_centered(|ui| {
-                ui.weak("No masks created yet.");
-                ui.weak("Use the + card in the mask strip to create one.");
-            });
+            crate::ui::theme::section_card(ui, "No masks yet", |_| {});
             return;
         }
 
@@ -1310,7 +1305,6 @@ impl Sidebar {
                 );
             });
 
-            ui.add_space(4.0);
             crate::ui::theme::toolbar_row(ui, |ui| {
                 ui.strong("Local Adjustments");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1327,6 +1321,7 @@ impl Sidebar {
                     }
                 });
             });
+            ui.add_space(4.0);
 
             for (section, label, default_open) in [
                 (MaskSection::Light, "Light", true),
@@ -1430,63 +1425,71 @@ impl Sidebar {
 
         {
             let mask = &mut app.masks.masks[mask_index];
+            let section_title = match mask_section {
+                MaskSection::Properties => "Mask Properties",
+                MaskSection::Light => "Light",
+                MaskSection::ToneCurve => "Tone Curve",
+                MaskSection::Color => "Color",
+                MaskSection::ColorGrading => "Color Grading",
+                MaskSection::Effects => "Effects",
+                MaskSection::ColorMixer => "Color Mixer",
+            };
+            crate::ui::theme::toolbar_row(ui, |ui| {
+                ui.strong(section_title);
+                if mask_section != MaskSection::Properties {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::ui::icons::phosphor_icon_button(
+                            ui,
+                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                            crate::ui::theme::toolbar_icon_size(),
+                            "Reset local adjustments",
+                        )
+                        .clicked()
+                        {
+                            mask.adjustments.reset();
+                            adjustments_changed = true;
+                        }
+                    });
+                }
+            });
+            ui.add_space(4.0);
+
             match mask_section {
                 MaskSection::Properties => {
-                    geometry_changed |= Self::show_vertical_mask_properties(
-                        ui,
-                        mask,
-                        component_index,
-                        &mut brush_mode,
-                        (
-                            &mut request_subject,
-                            birefnet_quality,
-                            birefnet_quality_change_enabled,
-                        ),
-                        (
-                            &mut refinement_active,
-                            &mut refinement_size,
-                            &mut refinement_feather,
-                            &mut refinement_flow,
-                            &mut clear_refinement,
-                        ),
-                        &mut request_object,
-                    );
+                    Self::adjustment_section(ui, "Mask Properties", true, false, |ui| {
+                        geometry_changed |= Self::show_vertical_mask_properties(
+                            ui,
+                            mask,
+                            component_index,
+                            &mut brush_mode,
+                            (
+                                &mut request_subject,
+                                birefnet_quality,
+                                birefnet_quality_change_enabled,
+                            ),
+                            (
+                                &mut refinement_active,
+                                &mut refinement_size,
+                                &mut refinement_feather,
+                                &mut refinement_flow,
+                                &mut clear_refinement,
+                            ),
+                            &mut request_object,
+                        );
+                    });
                 }
                 section => {
-                    crate::ui::theme::toolbar_row(ui, |ui| {
-                        ui.strong(match section {
-                            MaskSection::Light => "Light",
-                            MaskSection::ToneCurve => "Tone Curve",
-                            MaskSection::Color => "Color",
-                            MaskSection::ColorGrading => "Color Grading",
-                            MaskSection::Effects => "Effects",
-                            MaskSection::ColorMixer => "Color Mixer",
-                            MaskSection::Properties => "Mask Properties",
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if crate::ui::icons::phosphor_icon_button(
-                                ui,
-                                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                                crate::ui::theme::toolbar_icon_size(),
-                                "Reset local adjustments",
-                            )
-                            .clicked()
-                            {
-                                mask.adjustments.reset();
-                                adjustments_changed = true;
-                            }
-                        });
+                    Self::adjustment_section(ui, section_title, true, false, |ui| {
+                        let (section_changed, _) = Self::show_local_mask_adjustment_section(
+                            ui,
+                            &mut mask.adjustments,
+                            section,
+                            &mut local_curve_tab,
+                            &mut local_color_grade_tab,
+                            &mut local_hsl_mixer_color,
+                        );
+                        adjustments_changed |= section_changed;
                     });
-                    ui.add_space(4.0);
-                    let (section_changed, _) = Self::show_local_mask_adjustment_section(
-                        ui,
-                        &mut mask.adjustments,
-                        section,
-                        &mut local_curve_tab,
-                        &mut local_color_grade_tab,
-                        &mut local_hsl_mixer_color,
-                    );
-                    adjustments_changed |= section_changed;
                 }
             }
         }
@@ -1566,8 +1569,7 @@ impl Sidebar {
         };
 
         ui.add_space(4.0);
-        crate::ui::theme::card_frame(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        ui.scope(|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong(component.name.as_str());
                 ui.weak(component.kind.label());
@@ -1730,9 +1732,7 @@ impl Sidebar {
                         }
                     });
                     if *refinement_active {
-                        crate::ui::theme::card_frame(ui).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.strong("Subject refinement");
+                        crate::ui::theme::section_card(ui, "Subject refinement", |ui| {
                             ui.horizontal(|ui| {
                                 let width = ((ui.available_width()
                                     - ui.spacing().item_spacing.x)

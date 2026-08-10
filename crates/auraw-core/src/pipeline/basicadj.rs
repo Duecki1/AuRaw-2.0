@@ -468,8 +468,7 @@ mod tests {
     use super::{
         sigmoid_contrast_from_percent, temperature_kelvin_from_offset,
         temperature_offset_from_kelvin, DemosaicMode, ExposureParams,
-        HighlightReconstructionMethod, PointCurve, MAX_TEMPERATURE_KELVIN,
-        MIN_TEMPERATURE_KELVIN,
+        HighlightReconstructionMethod, PointCurve, MAX_TEMPERATURE_KELVIN, MIN_TEMPERATURE_KELVIN,
     };
     use crate::pipeline::SigmoidParams;
 
@@ -557,7 +556,8 @@ mod tests {
 
     #[test]
     fn serialization_contains_only_modern_adjustment_fields() {
-        let serialized = serde_json::to_value(ExposureParams::default()).expect("serialize exposure");
+        let serialized =
+            serde_json::to_value(ExposureParams::default()).expect("serialize exposure");
         assert_eq!(serialized["contrast"], 0.0);
         assert_eq!(serialized["hue"], 0.0);
         assert_eq!(serialized["sigmoid"]["contrast"], 1.5);

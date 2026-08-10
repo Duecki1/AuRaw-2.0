@@ -558,13 +558,17 @@ fn post_json<T: Serialize>(
     let url = config.endpoint(suffix)?;
     let bytes = serde_json::to_vec(value)
         .map_err(|error| format!("Could not encode cloud {action}: {error}"))?;
-    let request = agent().post(&url).header("Content-Type", "application/json");
+    let request = agent()
+        .post(&url)
+        .header("Content-Type", "application/json");
     let request = if let Some(value) = authorization(&config) {
         request.header("Authorization", value)
     } else {
         request
     };
-    request.send(&bytes).map_err(|error| mutation_error(error, action))
+    request
+        .send(&bytes)
+        .map_err(|error| mutation_error(error, action))
 }
 
 fn patch_json<T: Serialize>(
@@ -577,13 +581,17 @@ fn patch_json<T: Serialize>(
     let url = config.endpoint(suffix)?;
     let bytes = serde_json::to_vec(value)
         .map_err(|error| format!("Could not encode cloud {action}: {error}"))?;
-    let request = agent().patch(&url).header("Content-Type", "application/json");
+    let request = agent()
+        .patch(&url)
+        .header("Content-Type", "application/json");
     let request = if let Some(value) = authorization(&config) {
         request.header("Authorization", value)
     } else {
         request
     };
-    request.send(&bytes).map_err(|error| mutation_error(error, action))
+    request
+        .send(&bytes)
+        .map_err(|error| mutation_error(error, action))
 }
 
 fn delete_request(
@@ -764,7 +772,8 @@ struct TrashRestoreResponse {
 pub fn list_trash(config: &CloudConfig) -> Result<CloudTrashCatalog, String> {
     let normalized = config.normalized()?;
     let url = normalized.endpoint("/api/v1/trash")?;
-    let mut response = get(&normalized, &url).map_err(|error| mutation_error(error, "load Trash"))?;
+    let mut response =
+        get(&normalized, &url).map_err(|error| mutation_error(error, "load Trash"))?;
     let bytes = response
         .body_mut()
         .with_config()
@@ -899,9 +908,7 @@ fn send_upload_form<'a>(
     };
     let form = form.text("folder_id", folder_id);
     let mut response = request.send(form).map_err(|error| match error {
-        ureq::Error::StatusCode(400) => {
-            "AuRaw Cloud rejected this RAW or its filename.".to_owned()
-        }
+        ureq::Error::StatusCode(400) => "AuRaw Cloud rejected this RAW or its filename.".to_owned(),
         ureq::Error::StatusCode(401) => "AuRaw Cloud rejected the access token.".to_owned(),
         ureq::Error::StatusCode(413) => {
             "AuRaw Cloud rejected an upload because it is too large.".to_owned()
@@ -951,14 +958,11 @@ pub fn upload_asset_path_to_folder(
 
     let sidecar_path = crate::sidecar::sidecar_path_for_raw(raw_path);
     if sidecar_path.is_file() {
-        let sidecar = checked_upload_part(
-            &sidecar_path,
-            crate::sidecar::MAX_SIDECAR_BYTES,
-            "sidecar",
-        )?
-        .file_name(&format!("{display_name}.auraw"))
-        .mime_str("application/vnd.auraw.sidecar")
-        .map_err(|error| format!("Could not prepare the sidecar for upload: {error}"))?;
+        let sidecar =
+            checked_upload_part(&sidecar_path, crate::sidecar::MAX_SIDECAR_BYTES, "sidecar")?
+                .file_name(&format!("{display_name}.auraw"))
+                .mime_str("application/vnd.auraw.sidecar")
+                .map_err(|error| format!("Could not prepare the sidecar for upload: {error}"))?;
         form = form.part("sidecar", sidecar);
 
         match crate::sidecar::developed_thumbnail_cache_is_fresh(raw_path) {
@@ -1050,14 +1054,11 @@ pub fn upload_asset_file_with_sidecar_and_thumbnail_to_folder<'a>(
         .map_err(|error| format!("Could not prepare {display_name} for upload: {error}"))?;
     let mut form = ureq::unversioned::multipart::Form::new().part("raw", raw);
     if let Some(sidecar_path) = sidecar_path {
-        let sidecar = checked_upload_part(
-            sidecar_path,
-            crate::sidecar::MAX_SIDECAR_BYTES,
-            "sidecar",
-        )?
-        .file_name(&format!("{display_name}.auraw"))
-        .mime_str("application/vnd.auraw.sidecar")
-        .map_err(|error| format!("Could not prepare the sidecar for upload: {error}"))?;
+        let sidecar =
+            checked_upload_part(sidecar_path, crate::sidecar::MAX_SIDECAR_BYTES, "sidecar")?
+                .file_name(&format!("{display_name}.auraw"))
+                .mime_str("application/vnd.auraw.sidecar")
+                .map_err(|error| format!("Could not prepare the sidecar for upload: {error}"))?;
         form = form.part("sidecar", sidecar);
     }
     if let Some(thumbnail_path) = thumbnail_path {
@@ -1747,11 +1748,8 @@ pub fn asset_sync_state(
     let Ok(config) = config.normalized() else {
         return CloudSyncState::Failed;
     };
-    let metadata_path = metadata_path_for_directory(&asset_cache_dir(
-        cache_root,
-        &config.server_url,
-        &asset.id,
-    ));
+    let metadata_path =
+        metadata_path_for_directory(&asset_cache_dir(cache_root, &config.server_url, &asset.id));
     let Ok(Some(metadata)) = load_metadata(&metadata_path) else {
         return CloudSyncState::Synced;
     };
@@ -2350,7 +2348,10 @@ mod tests {
         let raw_path = directory.join("original.dng");
 
         save_metadata(&metadata_path, &metadata).unwrap();
-        assert_eq!(asset_sync_state(&config, &root, &asset), CloudSyncState::Queued);
+        assert_eq!(
+            asset_sync_state(&config, &root, &asset),
+            CloudSyncState::Queued
+        );
         assert_eq!(
             cached_asset_sync_state(&raw_path),
             Some((asset.id.clone(), CloudSyncState::Queued))
@@ -2358,7 +2359,10 @@ mod tests {
 
         metadata.sync_issue = Some(CachedSyncIssue::Failed);
         save_metadata(&metadata_path, &metadata).unwrap();
-        assert_eq!(asset_sync_state(&config, &root, &asset), CloudSyncState::Failed);
+        assert_eq!(
+            asset_sync_state(&config, &root, &asset),
+            CloudSyncState::Failed
+        );
         assert_eq!(
             cached_asset_sync_state(&raw_path),
             Some((asset.id.clone(), CloudSyncState::Failed))
@@ -2404,7 +2408,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(sync_sidecar_if_cloud_cached(&raw_path, false).unwrap(), None);
+        assert_eq!(
+            sync_sidecar_if_cloud_cached(&raw_path, false).unwrap(),
+            None
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2755,7 +2762,12 @@ mod tests {
         let expected_id = trash_id.clone();
         let responder = std::thread::spawn(move || {
             for (method, path, status, body) in [
-                ("GET", "/api/v1/trash".to_owned(), "200 OK", catalog.into_bytes()),
+                (
+                    "GET",
+                    "/api/v1/trash".to_owned(),
+                    "200 OK",
+                    catalog.into_bytes(),
+                ),
                 (
                     "POST",
                     format!("/api/v1/trash/{expected_id}/restore"),
@@ -2768,19 +2780,18 @@ mod tests {
                     "204 No Content",
                     Vec::new(),
                 ),
-                ("DELETE", "/api/v1/trash".to_owned(), "204 No Content", Vec::new()),
+                (
+                    "DELETE",
+                    "/api/v1/trash".to_owned(),
+                    "204 No Content",
+                    Vec::new(),
+                ),
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
                 let request = read_test_http_request(&mut stream);
                 assert!(String::from_utf8_lossy(&request)
                     .starts_with(&format!("{method} {path} HTTP/1.1\r\n")));
-                write_test_http_response(
-                    &mut stream,
-                    status,
-                    "application/json",
-                    "",
-                    &body,
-                );
+                write_test_http_response(&mut stream, status, "application/json", "", &body);
             }
         });
         let config = CloudConfig {
@@ -2792,7 +2803,10 @@ mod tests {
         assert_eq!(trash.items.len(), 1);
         assert_eq!(trash.retention_days, 14);
         let item = trash.items[0].clone();
-        assert_eq!(restore_trash_item(&config, &item, None).unwrap(), "deleted.dng");
+        assert_eq!(
+            restore_trash_item(&config, &item, None).unwrap(),
+            "deleted.dng"
+        );
         permanently_delete_trash_item(&config, &item).unwrap();
         empty_trash(&config).unwrap();
         responder.join().unwrap();
@@ -2804,8 +2818,8 @@ mod tests {
         let server_url = std::env::var("AURAW_CLOUD_TEST_URL")
             .expect("set AURAW_CLOUD_TEST_URL for the live cloud integration test");
         let access_token = std::env::var("AURAW_CLOUD_TEST_TOKEN").unwrap_or_default();
-        let raw_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../regression/raw/synthetic-xtrans.dng");
+        let raw_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../regression/raw/synthetic-xtrans.dng");
         let bytes = fs::metadata(&raw_path).unwrap().len();
         let raw = File::open(&raw_path).unwrap();
 

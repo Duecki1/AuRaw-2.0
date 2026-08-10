@@ -30,19 +30,13 @@ impl WorkspaceMetadata {
         let metadata = Self {
             manifest_path,
             android_ndk_version: required_string(&values, "android_ndk_version")?,
-            android_build_tools_version: required_string(
-                &values,
-                "android_build_tools_version",
-            )?,
+            android_build_tools_version: required_string(&values, "android_build_tools_version")?,
             android_compile_sdk: required_u32(&values, "android_compile_sdk")?,
             android_min_sdk: required_u32(&values, "android_min_sdk")?,
             android_target_sdk: required_u32(&values, "android_target_sdk")?,
             libraw_revision: required_string(&values, "libraw_revision")?,
             lensfun_revision: required_string(&values, "lensfun_revision")?,
-            android_use_legacy_packaging: required_bool(
-                &values,
-                "android_use_legacy_packaging",
-            )?,
+            android_use_legacy_packaging: required_bool(&values, "android_use_legacy_packaging")?,
         };
         if metadata.android_min_sdk > metadata.android_target_sdk {
             return Err(
@@ -61,7 +55,10 @@ impl WorkspaceMetadata {
     pub fn emit_cargo_contract(&self) {
         println!("cargo:rerun-if-changed={}", self.manifest_path.display());
         for (name, value) in [
-            ("AURAW_ANDROID_NDK_VERSION", self.android_ndk_version.as_str()),
+            (
+                "AURAW_ANDROID_NDK_VERSION",
+                self.android_ndk_version.as_str(),
+            ),
             (
                 "AURAW_ANDROID_BUILD_TOOLS_VERSION",
                 self.android_build_tools_version.as_str(),

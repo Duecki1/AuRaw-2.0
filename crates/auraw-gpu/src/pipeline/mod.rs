@@ -5,11 +5,11 @@ mod gpu;
 mod gpu_cache;
 
 pub use export::{
-    spawn_tiled_jpeg_export, spawn_tiled_jpeg_export_with_program_prewarm,
-    spawn_tiled_png_export, spawn_tiled_png_export_with_program_prewarm,
-    spawn_tiled_tiff_export, spawn_tiled_tiff_export_with_program_prewarm, ExportBitDepth,
-    ExportColorProfile, ExportEvent, ExportFormat, ExportMetadata, ExportResizeMode, ExportSettings,
-    MAX_EXPORT_EDGE, MAX_EXPORT_PIXELS,
+    spawn_tiled_jpeg_export, spawn_tiled_jpeg_export_with_program_prewarm, spawn_tiled_png_export,
+    spawn_tiled_png_export_with_program_prewarm, spawn_tiled_tiff_export,
+    spawn_tiled_tiff_export_with_program_prewarm, ExportBitDepth, ExportColorProfile, ExportEvent,
+    ExportFormat, ExportMetadata, ExportResizeMode, ExportSettings, MAX_EXPORT_EDGE,
+    MAX_EXPORT_PIXELS,
 };
 pub use gpu::{
     ComputeWorkgroupSize, GpuOutputSnapshot, GpuParams, GpuProgramPrewarm, GpuShaderTuning,

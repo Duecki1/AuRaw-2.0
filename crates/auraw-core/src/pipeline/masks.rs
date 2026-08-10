@@ -629,7 +629,11 @@ fn encode_binary_field(bytes: &[u8]) -> Result<String, std::io::Error> {
     encoder.write_all(bytes)?;
     let compressed = encoder.finish()?;
     let engine = &base64::engine::general_purpose::STANDARD;
-    if compressed.len().saturating_add(COMPRESSED_BINARY_PREFIX.len()) < bytes.len() {
+    if compressed
+        .len()
+        .saturating_add(COMPRESSED_BINARY_PREFIX.len())
+        < bytes.len()
+    {
         Ok(format!(
             "{COMPRESSED_BINARY_PREFIX}{}",
             engine.encode(compressed)
@@ -726,9 +730,8 @@ mod base64_arc_u16 {
         for value in values.iter().copied() {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        serializer.serialize_str(
-            &super::encode_binary_field(&bytes).map_err(serde::ser::Error::custom)?,
-        )
+        serializer
+            .serialize_str(&super::encode_binary_field(&bytes).map_err(serde::ser::Error::custom)?)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u16]>, D::Error>
@@ -1637,12 +1640,11 @@ fn rasterize_component(
                     image_height,
                     subject_refinement,
                 );
-                coverage
-                    .par_iter_mut()
-                    .zip(delta.into_par_iter())
-                    .for_each(|(probability, delta)| {
+                coverage.par_iter_mut().zip(delta.into_par_iter()).for_each(
+                    |(probability, delta)| {
                         *probability = (*probability + delta).clamp(0.0, 1.0);
-                    });
+                    },
+                );
             }
             let grow = if component.kind == MaskKind::Background {
                 -*grow
@@ -2374,13 +2376,7 @@ fn rasterize_subject_refinement_delta(
     }
 
     let (legacy_end, groups) = recorded_brush_groups(&refinement.dabs, &refinement.stroke_starts);
-    let specs = brush_raster_specs(
-        width,
-        height,
-        image_width,
-        image_height,
-        &refinement.dabs,
-    );
+    let specs = brush_raster_specs(width, height, image_width, image_height, &refinement.dabs);
     const ROW_BAND_HEIGHT: usize = 64;
     let row_stride = width as usize;
     let mut out = vec![0.0f32; row_stride * height as usize];
@@ -2407,11 +2403,9 @@ fn rasterize_subject_refinement_delta(
                         if distance >= 1.0 + spec.antialias {
                             continue;
                         }
-                        let coverage =
-                            1.0 - smoothstep(spec.inner, 1.0 + spec.antialias, distance);
+                        let coverage = 1.0 - smoothstep(spec.inner, 1.0 + spec.antialias, distance);
                         let index = row_offset + x as usize;
-                        band[index] = (band[index]
-                            + coverage * spec.opacity.clamp(-1.0, 1.0))
+                        band[index] = (band[index] + coverage * spec.opacity.clamp(-1.0, 1.0))
                             .clamp(-1.0, 1.0);
                     }
                 }
@@ -3124,10 +3118,9 @@ mod tests {
 
     #[test]
     fn legacy_mask_stack_without_subject_refinement_deserializes_empty_layer() {
-        let stack: MaskStack = serde_json::from_str(
-            r#"{"masks":[],"selected_mask":null,"selected_component":null}"#,
-        )
-        .unwrap();
+        let stack: MaskStack =
+            serde_json::from_str(r#"{"masks":[],"selected_mask":null,"selected_component":null}"#)
+                .unwrap();
         assert!(stack.subject_refinement.is_empty());
         assert_eq!(stack.subject_refinement, SubjectRefinement::default());
     }

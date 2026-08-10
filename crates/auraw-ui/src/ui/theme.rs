@@ -81,6 +81,28 @@ pub fn card_frame(ui: &Ui) -> Frame {
         ))
 }
 
+/// Show a full-width card using the same surface treatment as Settings and
+/// Export. Editor tools should use this instead of open-coded `Frame`s so the
+/// padding, border, and background remain consistent as the theme evolves.
+pub fn content_card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    card_frame(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        add_contents(ui)
+    })
+}
+
+/// A content card with the standard compact section title.
+pub fn section_card<R>(
+    ui: &mut Ui,
+    title: impl Into<RichText>,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<R> {
+    content_card(ui, |ui| {
+        ui.strong(title);
+        add_contents(ui)
+    })
+}
+
 pub fn tab_button(ui: &mut Ui, label: &str, selected: bool, width: f32) -> Response {
     segmented_button(ui, RichText::new(label).strong(), selected, width)
 }
@@ -217,10 +239,7 @@ mod tests {
                     .with_layout(
                         eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
                         |ui| {
-                            ui.add_sized(
-                                super::toolbar_icon_size(),
-                                eframe::egui::Button::new("R"),
-                            )
+                            ui.add_sized(super::toolbar_icon_size(), eframe::egui::Button::new("R"))
                         },
                     )
                     .inner;

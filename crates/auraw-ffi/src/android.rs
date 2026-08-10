@@ -1792,10 +1792,13 @@ pub fn load_android(
     else {
         return Ok(None);
     };
-    let result = crate::sidecar::read_bounded(&path)
-        .and_then(|bytes| crate::sidecar::decode(&bytes));
+    let result =
+        crate::sidecar::read_bounded(&path).and_then(|bytes| crate::sidecar::decode(&bytes));
     if let Err(error) = fs::remove_file(&path) {
-        log::warn!("could not remove Android sidecar cache {}: {error}", path.display());
+        log::warn!(
+            "could not remove Android sidecar cache {}: {error}",
+            path.display()
+        );
     }
     result.map(Some)
 }
@@ -1814,7 +1817,10 @@ pub fn save_android(
             .map_err(crate::sidecar::SidecarError::Platform)
     });
     if let Err(error) = fs::remove_file(&path) {
-        log::warn!("could not remove Android sidecar cache {}: {error}", path.display());
+        log::warn!(
+            "could not remove Android sidecar cache {}: {error}",
+            path.display()
+        );
     }
     result
 }

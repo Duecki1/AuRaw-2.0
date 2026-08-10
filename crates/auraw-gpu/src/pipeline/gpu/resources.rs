@@ -356,11 +356,7 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
         )?,
     );
     let rgba32_full_copy = aligned_copy_buffer_bytes(input.width, input.height, 16)?;
-    let rgba32_model_copy = aligned_copy_buffer_bytes(
-        crate::LAMA_EDGE,
-        crate::LAMA_EDGE,
-        16,
-    )?;
+    let rgba32_model_copy = aligned_copy_buffer_bytes(crate::LAMA_EDGE, crate::LAMA_EDGE, 16)?;
     let rgba32_readback = rgba32_full_copy
         .max(rgba32_model_copy)
         .min(MAX_RGBA32_READBACK_CHUNK_BYTES);

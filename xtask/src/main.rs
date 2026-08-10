@@ -13,7 +13,6 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
 
-
 const BENCHMARK_SCENES: [(&str, &str, u32, u32); 2] = [
     (
         "synthetic-bayer-multitarget",
@@ -28,7 +27,6 @@ const BENCHMARK_SCENES: [(&str, &str, u32, u32); 2] = [
         256,
     ),
 ];
-
 
 const CAMERA_PROFILE_TEST_FILTERS: &[&str] = &[
     "pipeline::color_profile::tests",
@@ -74,8 +72,7 @@ const EXPECTED_GRADLE_WRAPPER_JAR_SHA256: &str =
     "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046";
 
 const BINARY_SUFFIXES: [&str; 13] = [
-    "a", "aar", "apk", "class", "dll", "dylib", "exe", "jar", "o", "obj", "rlib",
-    "rmeta", "so",
+    "a", "aar", "apk", "class", "dll", "dylib", "exe", "jar", "o", "obj", "rlib", "rmeta", "so",
 ];
 const ALLOWED_BINARY_PATHS: [&str; 1] = ["gradle/wrapper/gradle-wrapper.jar"];
 const IGNORED_BINARY_ROOTS: [&str; 9] = [
@@ -145,12 +142,14 @@ fn run() -> Result<()> {
             command_icons()
         }
         "build-android" => command_build_android(parse_build_android_args(rest)?),
-        "build-android-libraw" => {
-            command_build_android_dependency(parse_build_dependency_args(rest, "build-android-libraw")?, AndroidDependency::LibRaw)
-        }
-        "build-android-lensfun" => {
-            command_build_android_dependency(parse_build_dependency_args(rest, "build-android-lensfun")?, AndroidDependency::Lensfun)
-        }
+        "build-android-libraw" => command_build_android_dependency(
+            parse_build_dependency_args(rest, "build-android-libraw")?,
+            AndroidDependency::LibRaw,
+        ),
+        "build-android-lensfun" => command_build_android_dependency(
+            parse_build_dependency_args(rest, "build-android-lensfun")?,
+            AndroidDependency::Lensfun,
+        ),
         "build-linux" => {
             ensure_no_extra_args(&rest, "build-linux")?;
             command_build_linux()
@@ -457,7 +456,9 @@ fn parse_bench_args(args: Vec<OsString>) -> Result<BenchArgs> {
             print_help();
             std::process::exit(0);
         } else {
-            return Err(XtaskError::usage(format!("unknown bench option: {argument}")));
+            return Err(XtaskError::usage(format!(
+                "unknown bench option: {argument}"
+            )));
         }
         index += 1;
     }
@@ -526,8 +527,14 @@ fn parse_build_android_args(args: Vec<OsString>) -> Result<BuildAndroidArgs> {
         ));
     }
     Ok(BuildAndroidArgs {
-        abi: positionals.first().cloned().unwrap_or_else(|| "arm64-v8a".to_owned()),
-        profile: positionals.get(1).cloned().unwrap_or_else(|| "release".to_owned()),
+        abi: positionals
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "arm64-v8a".to_owned()),
+        profile: positionals
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "release".to_owned()),
         print_build_contract,
     })
 }
@@ -549,7 +556,9 @@ fn parse_build_dependency_args(args: Vec<OsString>, command: &str) -> Result<Bui
                 std::process::exit(0);
             }
             value if value.starts_with('-') => {
-                return Err(XtaskError::usage(format!("unknown {command} option: {value}")))
+                return Err(XtaskError::usage(format!(
+                    "unknown {command} option: {value}"
+                )))
             }
             _ if abi.is_none() => abi = Some(argument.to_string_lossy().into_owned()),
             _ => {
@@ -611,9 +620,8 @@ fn parse_android_args(args: Vec<OsString>) -> Result<AndroidArgs> {
     }
 
     Ok(AndroidArgs {
-        apk: apk.unwrap_or_else(|| {
-            PathBuf::from("android/app/build/outputs/apk/debug/app-debug.apk")
-        }),
+        apk: apk
+            .unwrap_or_else(|| PathBuf::from("android/app/build/outputs/apk/debug/app-debug.apk")),
         print_build_contract,
         objdump,
         zipalign,
@@ -697,7 +705,10 @@ fn command_validate_math(args: ValidateMathArgs) -> Result<()> {
     }
     let root = workspace_root();
     let mut failed = Vec::new();
-    let total: usize = MATH_TEST_GROUPS.iter().map(|(_, filters)| filters.len()).sum();
+    let total: usize = MATH_TEST_GROUPS
+        .iter()
+        .map(|(_, filters)| filters.len())
+        .sum();
 
     for (group_name, filters) in MATH_TEST_GROUPS {
         let title = group_name
@@ -761,7 +772,10 @@ fn command_validate_math(args: ValidateMathArgs) -> Result<()> {
 fn validate_generated_binaries(root: &Path) -> Result<Vec<String>> {
     fn visit(root: &Path, directory: &Path, errors: &mut Vec<String>) -> Result<()> {
         for entry in fs::read_dir(directory).map_err(|error| {
-            XtaskError::new(format!("cannot read directory {}: {error}", directory.display()))
+            XtaskError::new(format!(
+                "cannot read directory {}: {error}",
+                directory.display()
+            ))
         })? {
             let entry = entry?;
             let path = entry.path();
@@ -801,7 +815,10 @@ fn validate_generated_binaries(root: &Path) -> Result<Vec<String>> {
 
 fn validate_workflow_pins(root: &Path) -> Result<Vec<String>> {
     let mut errors = Vec::new();
-    for workflow_root in [root.join(".github/workflows"), root.join(".gitea/workflows")] {
+    for workflow_root in [
+        root.join(".github/workflows"),
+        root.join(".gitea/workflows"),
+    ] {
         if !workflow_root.is_dir() {
             continue;
         }
@@ -903,7 +920,10 @@ fn validate_gradle_wrapper(root: &Path) -> Result<Vec<String>> {
     let mut errors = Vec::new();
     for path in required {
         if !path.is_file() {
-            errors.push(format!("missing wrapper file: {}", relative_display(root, path)));
+            errors.push(format!(
+                "missing wrapper file: {}",
+                relative_display(root, path)
+            ));
         }
     }
     if !errors.is_empty() {
@@ -937,7 +957,8 @@ fn validate_gradle_wrapper(root: &Path) -> Result<Vec<String>> {
     if properties.get("distributionSha256Sum").map(String::as_str)
         != Some(EXPECTED_GRADLE_DISTRIBUTION_SHA256)
     {
-        errors.push("distributionSha256Sum does not match the pinned Gradle distribution".to_owned());
+        errors
+            .push("distributionSha256Sum does not match the pinned Gradle distribution".to_owned());
     }
     if properties
         .get("validateDistributionUrl")
@@ -970,7 +991,10 @@ fn validate_gradle_wrapper(root: &Path) -> Result<Vec<String>> {
         }
     }
 
-    match (fs::read_to_string(&gradlew), fs::read_to_string(&gradlew_bat)) {
+    match (
+        fs::read_to_string(&gradlew),
+        fs::read_to_string(&gradlew_bat),
+    ) {
         (Ok(shell), Ok(batch)) => {
             if !shell
                 .replace("$APP_HOME/", "")
@@ -1025,7 +1049,10 @@ fn collect_files_with_extensions(
     output: &mut Vec<PathBuf>,
 ) -> Result<()> {
     for entry in fs::read_dir(directory).map_err(|error| {
-        XtaskError::new(format!("cannot read directory {}: {error}", directory.display()))
+        XtaskError::new(format!(
+            "cannot read directory {}: {error}",
+            directory.display()
+        ))
     })? {
         let entry = entry?;
         let path = entry.path();
@@ -1242,9 +1269,7 @@ fn parse_rust_references(source: &str) -> RustReferences {
     let mut index = 0usize;
 
     while index < tokens.len() {
-        if token_is_punct(tokens.get(index), '#')
-            && token_is_punct(tokens.get(index + 1), '[')
-        {
+        if token_is_punct(tokens.get(index), '#') && token_is_punct(tokens.get(index + 1), '[') {
             let mut end = index + 2;
             let mut bracket_depth = 1usize;
             while end < tokens.len() && bracket_depth > 0 {
@@ -1256,9 +1281,7 @@ fn parse_rust_references(source: &str) -> RustReferences {
                 end += 1;
             }
             let attribute = &tokens[index + 2..end.saturating_sub(1)];
-            if token_is_ident(attribute.first(), "path")
-                && token_is_punct(attribute.get(1), '=')
-            {
+            if token_is_ident(attribute.first(), "path") && token_is_punct(attribute.get(1), '=') {
                 if let Some(Token::String(path)) = attribute.get(2) {
                     pending_path = Some(path.clone());
                 }
@@ -1490,12 +1513,12 @@ impl ModuleValidator<'_> {
 
 fn child_module_directory(file: &Path) -> PathBuf {
     if file.file_name() == Some(OsStr::new("mod.rs")) {
-        file.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
-    } else {
-        let stem = file.file_stem().unwrap_or_else(|| OsStr::new("module"));
         file.parent()
             .unwrap_or_else(|| Path::new("."))
-            .join(stem)
+            .to_path_buf()
+    } else {
+        let stem = file.file_stem().unwrap_or_else(|| OsStr::new("module"));
+        file.parent().unwrap_or_else(|| Path::new(".")).join(stem)
     }
 }
 
@@ -1509,7 +1532,10 @@ fn collect_files_with_extension(
     output: &mut Vec<PathBuf>,
 ) -> Result<()> {
     for entry in fs::read_dir(directory).map_err(|error| {
-        XtaskError::new(format!("cannot read directory {}: {error}", directory.display()))
+        XtaskError::new(format!(
+            "cannot read directory {}: {error}",
+            directory.display()
+        ))
     })? {
         let entry = entry?;
         let path = entry.path();
@@ -1524,10 +1550,12 @@ fn collect_files_with_extension(
 }
 
 fn rust_string_literals(source: &str) -> impl Iterator<Item = String> + '_ {
-    lex_rust(source).into_iter().filter_map(|token| match token {
-        Token::String(value) => Some(value),
-        _ => None,
-    })
+    lex_rust(source)
+        .into_iter()
+        .filter_map(|token| match token {
+            Token::String(value) => Some(value),
+            _ => None,
+        })
 }
 
 fn shader_include_str_paths(source: &str) -> Vec<String> {
@@ -1589,10 +1617,14 @@ fn validate_shader_imports(root: &Path) -> Result<Vec<String>> {
         .collect();
 
     for name in shader_names.difference(&watched) {
-        errors.push(format!("WGSL file is not watched by auraw-gpu/build.rs: {name}"));
+        errors.push(format!(
+            "WGSL file is not watched by auraw-gpu/build.rs: {name}"
+        ));
     }
     for name in watched.difference(&shader_names) {
-        errors.push(format!("auraw-gpu/build.rs watches a missing WGSL file: {name}"));
+        errors.push(format!(
+            "auraw-gpu/build.rs watches a missing WGSL file: {name}"
+        ));
     }
 
     let mut imported = BTreeSet::new();
@@ -1636,7 +1668,9 @@ fn collect_shader_imports(
 ) -> Result<()> {
     let path = shader_directory.join(shader_name);
     if !path.is_file() {
-        errors.push(format!("shader #import references missing WGSL file: {shader_name}"));
+        errors.push(format!(
+            "shader #import references missing WGSL file: {shader_name}"
+        ));
         return Ok(());
     }
     let source = fs::read_to_string(&path)?;
@@ -1708,9 +1742,7 @@ fn point_in_polygon(x: f64, y: f64, polygon: &[(f64, f64)]) -> bool {
     for current in 0..polygon.len() {
         let (xi, yi) = polygon[current];
         let (xj, yj) = polygon[previous];
-        if ((yi > y) != (yj > y))
-            && x < (xj - xi) * (y - yi) / (yj - yi) + xi
-        {
+        if ((yi > y) != (yj > y)) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
             inside = !inside;
         }
         previous = current;
@@ -1990,7 +2022,11 @@ where
     S: AsRef<OsStr>,
 {
     std::iter::once(shell_escape(program.as_os_str()))
-        .chain(arguments.into_iter().map(|argument| shell_escape(argument.as_ref())))
+        .chain(
+            arguments
+                .into_iter()
+                .map(|argument| shell_escape(argument.as_ref())),
+        )
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -2036,7 +2072,10 @@ fn command_verify_android_16kb(args: AndroidArgs) -> Result<()> {
                 .join(executable_name("zipalign"))
         });
     if !objdump.is_file() {
-        return Err(XtaskError::new(format!("llvm-objdump not found: {}", objdump.display())));
+        return Err(XtaskError::new(format!(
+            "llvm-objdump not found: {}",
+            objdump.display()
+        )));
     }
     if !zipalign.is_file() {
         return Err(XtaskError::new(format!(
@@ -2125,9 +2164,12 @@ fn load_build_contract() -> Result<BuildContract> {
 fn command_print_metadata(args: MetadataArgs) -> Result<()> {
     let contract = load_build_contract()?;
     if let Some(field) = args.value {
-        println!("{}", contract.value(&field).ok_or_else(|| {
-            XtaskError::usage(format!("unknown build metadata field: {field}"))
-        })?);
+        println!(
+            "{}",
+            contract.value(&field).ok_or_else(|| {
+                XtaskError::usage(format!("unknown build metadata field: {field}"))
+            })?
+        );
     } else {
         match args.format {
             MetadataFormat::Json => println!("{}", serde_json::to_string(&contract)?),
@@ -2138,7 +2180,10 @@ fn command_print_metadata(args: MetadataArgs) -> Result<()> {
                         "AURAW_ANDROID_BUILD_TOOLS_VERSION",
                         contract.build_tools_version.clone(),
                     ),
-                    ("AURAW_ANDROID_COMPILE_SDK", contract.compile_sdk.to_string()),
+                    (
+                        "AURAW_ANDROID_COMPILE_SDK",
+                        contract.compile_sdk.to_string(),
+                    ),
                     ("AURAW_ANDROID_MIN_SDK", contract.min_sdk.to_string()),
                     ("AURAW_ANDROID_TARGET_SDK", contract.target_sdk.to_string()),
                     ("AURAW_LIBRAW_REVISION", contract.libraw_revision.clone()),
@@ -2170,7 +2215,10 @@ fn print_build_contract(contract: &BuildContract) -> Result<()> {
 
 fn android_abi_config(abi: &str, api: u64) -> Result<(String, &'static str)> {
     match abi {
-        "arm64-v8a" => Ok((format!("aarch64-linux-android{api}"), "aarch64-linux-android")),
+        "arm64-v8a" => Ok((
+            format!("aarch64-linux-android{api}"),
+            "aarch64-linux-android",
+        )),
         "x86_64" => Ok((format!("x86_64-linux-android{api}"), "x86_64-linux-android")),
         _ => Err(XtaskError::usage(format!(
             "Unsupported ABI '{abi}' (use arm64-v8a or x86_64)"
@@ -2210,7 +2258,10 @@ fn run_checked(command: &mut Command, description: &str) -> Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(XtaskError::with_code(String::new(), status.code().unwrap_or(1)))
+        Err(XtaskError::with_code(
+            String::new(),
+            status.code().unwrap_or(1),
+        ))
     }
 }
 
@@ -2254,7 +2305,9 @@ fn directory_has_extension(path: &Path, extension: &str) -> Result<bool> {
 }
 
 fn android_sdk_root_with_local_properties(root: &Path) -> Result<Option<PathBuf>> {
-    if let Some(configured) = env::var_os("ANDROID_SDK_ROOT").or_else(|| env::var_os("ANDROID_HOME")) {
+    if let Some(configured) =
+        env::var_os("ANDROID_SDK_ROOT").or_else(|| env::var_os("ANDROID_HOME"))
+    {
         return Ok(Some(rooted(root, configured)));
     }
     let local_properties = root.join("android/local.properties");
@@ -2265,7 +2318,11 @@ fn android_sdk_root_with_local_properties(root: &Path) -> Result<Option<PathBuf>
     Ok(properties.get("sdk.dir").map(|value| rooted(root, value)))
 }
 
-fn android_ndk_root(root: &Path, expected_version: &str, require_toolchain: bool) -> Result<PathBuf> {
+fn android_ndk_root(
+    root: &Path,
+    expected_version: &str,
+    require_toolchain: bool,
+) -> Result<PathBuf> {
     let sdk = android_sdk_root_with_local_properties(root)?;
     let configured = env::var_os("ANDROID_NDK_HOME").or_else(|| env::var_os("ANDROID_NDK_ROOT"));
     let ndk = configured
@@ -2281,14 +2338,24 @@ fn android_ndk_root(root: &Path, expected_version: &str, require_toolchain: bool
     }
     let source_properties = ndk.join("source.properties");
     if !source_properties.is_file() {
-        return Err(XtaskError::new(format!("Android NDK not found at {}", ndk.display())));
+        return Err(XtaskError::new(format!(
+            "Android NDK not found at {}",
+            ndk.display()
+        )));
     }
     let properties = parse_properties_file(&source_properties)?;
-    let revision = properties.get("Pkg.Revision").map(String::as_str).unwrap_or("");
+    let revision = properties
+        .get("Pkg.Revision")
+        .map(String::as_str)
+        .unwrap_or("");
     if revision != expected_version {
         return Err(XtaskError::new(format!(
             "Android NDK {expected_version} is required, found {} at {}",
-            if revision.is_empty() { "unknown" } else { revision },
+            if revision.is_empty() {
+                "unknown"
+            } else {
+                revision
+            },
             ndk.display()
         )));
     }
@@ -2307,7 +2374,10 @@ fn ndk_host_root(ndk: &Path) -> Result<PathBuf> {
     };
     candidates.sort();
     candidates.into_iter().next().ok_or_else(|| {
-        XtaskError::new(format!("The selected NDK has no LLVM toolchain: {}", ndk.display()))
+        XtaskError::new(format!(
+            "The selected NDK has no LLVM toolchain: {}",
+            ndk.display()
+        ))
     })
 }
 
@@ -2344,14 +2414,23 @@ fn find_host_libclang(ndk_host: &Path) -> Option<PathBuf> {
         .and_then(|library| library.parent().map(Path::to_path_buf))
 }
 
-fn run_gradle_android_native_dependencies(root: &Path, abi: &str, profile: &str, min_sdk: u64) -> Result<()> {
+fn run_gradle_android_native_dependencies(
+    root: &Path,
+    abi: &str,
+    profile: &str,
+    min_sdk: u64,
+) -> Result<()> {
     android_abi_config(abi, min_sdk)?;
     if !matches!(profile, "debug" | "release") {
         return Err(XtaskError::usage(format!(
             "Unknown profile '{profile}' (use release or debug)"
         )));
     }
-    let gradlew = root.join(if cfg!(windows) { "gradlew.bat" } else { "gradlew" });
+    let gradlew = root.join(if cfg!(windows) {
+        "gradlew.bat"
+    } else {
+        "gradlew"
+    });
     require_file(&gradlew)?;
     let mut title = profile.to_owned();
     if let Some(first) = title.get_mut(0..1) {
@@ -2384,16 +2463,30 @@ fn release_build_environment(root: &Path, revision: &str) -> Result<BTreeMap<OsS
     let mut environment: BTreeMap<OsString, OsString> = env::vars_os().collect();
     environment.insert("AURAW_REQUIRE_COMMITTED_SOURCE".into(), "1".into());
     environment.insert("AURAW_SOURCE_REVISION".into(), revision.into());
-    environment.insert("SOURCE_DATE_EPOCH".into(), source_date_epoch(root, revision)?.into());
+    environment.insert(
+        "SOURCE_DATE_EPOCH".into(),
+        source_date_epoch(root, revision)?.into(),
+    );
     environment.insert("CARGO_INCREMENTAL".into(), "0".into());
-    environment.insert("CARGO_TARGET_DIR".into(), root.join("target").into_os_string());
-    for key in ["CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "RUSTDOCFLAGS"] {
+    environment.insert(
+        "CARGO_TARGET_DIR".into(),
+        root.join("target").into_os_string(),
+    );
+    for key in [
+        "CARGO_BUILD_TARGET",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+    ] {
         environment.remove(OsStr::new(key));
     }
     Ok(environment)
 }
 
-fn command_build_android_dependency(args: BuildDependencyArgs, dependency: AndroidDependency) -> Result<()> {
+fn command_build_android_dependency(
+    args: BuildDependencyArgs,
+    dependency: AndroidDependency,
+) -> Result<()> {
     let contract = load_build_contract()?;
     if args.print_build_contract {
         return print_build_contract(&contract);
@@ -2405,7 +2498,11 @@ fn command_build_android_dependency(args: BuildDependencyArgs, dependency: Andro
             let staged = root.join("android/native/libraw").join(&args.abi);
             require_file(&staged.join("include/libraw/libraw.h"))?;
             require_file(&staged.join("lib/libraw.a"))?;
-            println!("AGP/CMake staged LibRaw for {} in {}", args.abi, staged.display());
+            println!(
+                "AGP/CMake staged LibRaw for {} in {}",
+                args.abi,
+                staged.display()
+            );
         }
         AndroidDependency::Lensfun => {
             let staged = root.join("android/native/lensfun").join(&args.abi);
@@ -2419,7 +2516,11 @@ fn command_build_android_dependency(args: BuildDependencyArgs, dependency: Andro
                     assets.display()
                 )));
             }
-            println!("AGP/CMake staged Lensfun for {} in {}", args.abi, staged.display());
+            println!(
+                "AGP/CMake staged Lensfun for {} in {}",
+                args.abi,
+                staged.display()
+            );
         }
     }
     Ok(())
@@ -2471,11 +2572,18 @@ fn command_build_android(args: BuildAndroidArgs) -> Result<()> {
             .envs(&base_environment),
         "cargo ndk --version",
     )?;
-    let cargo_ndk_version = version_output.trim().strip_prefix("cargo-ndk ").unwrap_or(version_output.trim());
+    let cargo_ndk_version = version_output
+        .trim()
+        .strip_prefix("cargo-ndk ")
+        .unwrap_or(version_output.trim());
     if cargo_ndk_version != "4.1.2" {
         return Err(XtaskError::new(format!(
             "cargo-ndk 4.1.2 is required, found {}",
-            if cargo_ndk_version.is_empty() { "unknown" } else { cargo_ndk_version }
+            if cargo_ndk_version.is_empty() {
+                "unknown"
+            } else {
+                cargo_ndk_version
+            }
         )));
     }
     if !base_environment.contains_key(OsStr::new("LIBCLANG_PATH")) {
@@ -2495,7 +2603,11 @@ fn command_build_android(args: BuildAndroidArgs) -> Result<()> {
     };
     let mut build_environment = if let Some(revision) = revision.as_deref() {
         let mut release = release_build_environment(&root, revision)?;
-        for key in ["ANDROID_NDK_HOME", "BINDGEN_EXTRA_CLANG_ARGS", "LIBCLANG_PATH"] {
+        for key in [
+            "ANDROID_NDK_HOME",
+            "BINDGEN_EXTRA_CLANG_ARGS",
+            "LIBCLANG_PATH",
+        ] {
             if let Some(value) = base_environment.get(OsStr::new(key)) {
                 release.insert(key.into(), value.clone());
             }
@@ -2505,8 +2617,16 @@ fn command_build_android(args: BuildAndroidArgs) -> Result<()> {
         base_environment
     };
     build_environment.insert("CARGO_INCREMENTAL".into(), "0".into());
-    build_environment.insert("CARGO_TARGET_DIR".into(), root.join("target").into_os_string());
-    for key in ["CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "RUSTDOCFLAGS"] {
+    build_environment.insert(
+        "CARGO_TARGET_DIR".into(),
+        root.join("target").into_os_string(),
+    );
+    for key in [
+        "CARGO_BUILD_TARGET",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+    ] {
         build_environment.remove(OsStr::new(key));
     }
     if env::var_os("AURAW_NATIVE_DEPS_READY").as_deref() != Some(OsStr::new("1")) {
@@ -2515,7 +2635,10 @@ fn command_build_android(args: BuildAndroidArgs) -> Result<()> {
     let libraw_root = root.join("android/native/libraw").join(&args.abi);
     let lensfun_root = root.join("android/native/lensfun").join(&args.abi);
     build_environment.insert("AURAW_LIBRAW_ROOT".into(), libraw_root.into_os_string());
-    build_environment.insert("AURAW_LENSFUN_ROOT".into(), lensfun_root.clone().into_os_string());
+    build_environment.insert(
+        "AURAW_LENSFUN_ROOT".into(),
+        lensfun_root.clone().into_os_string(),
+    );
     let jni_root = root.join("android/app/src/main/jniLibs");
     let abi_jni = jni_root.join(&args.abi);
     remove_path(&abi_jni)?;
@@ -2639,12 +2762,11 @@ fn command_verified_download(args: VerifiedDownloadArgs) -> Result<()> {
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or("download");
-    let temporary = output.with_file_name(format!(
-        "{file_name}.download.{}",
-        std::process::id()
-    ));
+    let temporary = output.with_file_name(format!("{file_name}.download.{}", std::process::id()));
     let cleanup = TemporaryFile::new(temporary.clone());
-    let previous_permissions = fs::metadata(&output).ok().map(|metadata| metadata.permissions());
+    let previous_permissions = fs::metadata(&output)
+        .ok()
+        .map(|metadata| metadata.permissions());
     download_https(&args.url, &temporary, 9, 900)?;
 
     let actual = digest_file(&temporary, algorithm)?;
@@ -2701,9 +2823,14 @@ fn parse_expected_digest(source: &str) -> Result<(DigestAlgorithm, String)> {
         let target = temporary.path().join("checksum.txt");
         download_https(source, &target, 9, 300)?;
         let text = fs::read_to_string(&target).map_err(|error| {
-            XtaskError::new(format!("cannot read checksum response from {source}: {error}"))
+            XtaskError::new(format!(
+                "cannot read checksum response from {source}: {error}"
+            ))
         })?;
-        (DigestAlgorithm::Sha256, first_hex_digest(&text, 64).unwrap_or_default())
+        (
+            DigestAlgorithm::Sha256,
+            first_hex_digest(&text, 64).unwrap_or_default(),
+        )
     } else if let Some(value) = source.strip_prefix("sha256:") {
         (DigestAlgorithm::Sha256, value.to_owned())
     } else if let Some(value) = source.strip_prefix("sha512:") {
@@ -2751,7 +2878,9 @@ fn download_https(
     timeout_seconds: usize,
 ) -> Result<()> {
     if !url.starts_with("https://") {
-        return Err(XtaskError::usage(format!("refusing non-HTTPS download: {url}")));
+        return Err(XtaskError::usage(format!(
+            "refusing non-HTTPS download: {url}"
+        )));
     }
     let retry_count = attempts.saturating_sub(1).to_string();
     let timeout = timeout_seconds.max(1).to_string();
@@ -2853,20 +2982,25 @@ fn verify_source_revision(print_revision: bool) -> Result<String> {
         .status();
     match inside {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(XtaskError::new("git is required to verify the source revision"));
+            return Err(XtaskError::new(
+                "git is required to verify the source revision",
+            ));
         }
         Err(error) => return Err(XtaskError::new(error.to_string())),
         Ok(status) if !status.success() => {
-            return Err(XtaskError::new("release builds must run from a Git checkout"));
+            return Err(XtaskError::new(
+                "release builds must run from a Git checkout",
+            ));
         }
         Ok(_) => {}
     }
 
     let status = run_command_output(
-        Command::new("git")
-            .args(["-C"])
-            .arg(&root)
-            .args(["status", "--porcelain=v1", "--untracked-files=all"]),
+        Command::new("git").args(["-C"]).arg(&root).args([
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ]),
         "git status",
     )?;
     let status = status.trim();
@@ -2910,13 +3044,17 @@ fn run_command_output(command: &mut Command, description: &str) -> Result<String
             output.status.code().unwrap_or(1),
         ));
     }
-    String::from_utf8(output.stdout)
-        .map_err(|error| XtaskError::new(format!("{description} produced non-UTF-8 output: {error}")))
+    String::from_utf8(output.stdout).map_err(|error| {
+        XtaskError::new(format!("{description} produced non-UTF-8 output: {error}"))
+    })
 }
 
 fn read_workspace_metadata(path: &Path) -> Result<BTreeMap<String, Value>> {
     let root = path.parent().ok_or_else(|| {
-        XtaskError::new(format!("workspace manifest has no parent: {}", path.display()))
+        XtaskError::new(format!(
+            "workspace manifest has no parent: {}",
+            path.display()
+        ))
     })?;
     let output = Command::new("cargo")
         .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
@@ -2929,7 +3067,10 @@ fn read_workspace_metadata(path: &Path) -> Result<BTreeMap<String, Value>> {
             if stderr.is_empty() {
                 format!("cannot read [workspace.metadata] from {}", path.display())
             } else {
-                format!("cannot read [workspace.metadata] from {}: {stderr}", path.display())
+                format!(
+                    "cannot read [workspace.metadata] from {}: {stderr}",
+                    path.display()
+                )
             },
             output.status.code().unwrap_or(1),
         ));
@@ -3018,13 +3159,7 @@ impl Sha256 {
     fn new() -> Self {
         Self {
             state: [
-                0x6a09e667,
-                0xbb67ae85,
-                0x3c6ef372,
-                0xa54ff53a,
-                0x510e527f,
-                0x9b05688c,
-                0x1f83d9ab,
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
                 0x5be0cd19,
             ],
             buffer: [0; 64],
@@ -3084,17 +3219,16 @@ impl Sha256 {
 
     fn compress(&mut self, block: &[u8; 64]) {
         const K: [u32; 64] = [
-            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-            0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-            0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-            0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-            0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-            0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-            0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-            0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
         ];
         let mut schedule = [0u32; 64];
         for (index, chunk) in block.chunks_exact(4).take(16).enumerate() {
@@ -3244,9 +3378,14 @@ fn verify_elf_alignment(objdump: &Path, _archive_path: &str, library: &Path) -> 
         .arg("-p")
         .arg(library)
         .output()
-        .map_err(|error| XtaskError::new(format!("could not execute {}: {error}", objdump.display())))?;
+        .map_err(|error| {
+            XtaskError::new(format!("could not execute {}: {error}", objdump.display()))
+        })?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let load_lines: Vec<&str> = stdout.lines().filter(|line| line.contains("LOAD")).collect();
+    let load_lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("LOAD"))
+        .collect();
     let alignments: Vec<u32> = load_lines
         .iter()
         .filter_map(|line| parse_alignment_power(line))
@@ -3293,7 +3432,10 @@ impl TemporaryDirectory {
             .as_nanos();
         let path = env::temp_dir().join(format!("{prefix}-{}-{nonce}", std::process::id()));
         fs::create_dir(&path).map_err(|error| {
-            XtaskError::new(format!("cannot create temporary directory {}: {error}", path.display()))
+            XtaskError::new(format!(
+                "cannot create temporary directory {}: {error}",
+                path.display()
+            ))
         })?;
         Ok(Self { path })
     }
@@ -3326,7 +3468,10 @@ mod tests {
 
     #[test]
     fn parses_llvm_objdump_alignment() {
-        assert_eq!(parse_alignment_power("  LOAD off 0x0 align 2**14"), Some(14));
+        assert_eq!(
+            parse_alignment_power("  LOAD off 0x0 align 2**14"),
+            Some(14)
+        );
         assert_eq!(parse_alignment_power("  LOAD off 0x0 align 4096"), None);
     }
 
@@ -3349,7 +3494,9 @@ mod tests {
         fs::create_dir_all(generated.parent().unwrap()).unwrap();
         fs::write(&generated, b"generated object").unwrap();
 
-        assert!(validate_generated_binaries(directory.path()).unwrap().is_empty());
+        assert!(validate_generated_binaries(directory.path())
+            .unwrap()
+            .is_empty());
 
         let source_binary = directory.path().join("crates/auraw-core/src/accidental.o");
         fs::create_dir_all(source_binary.parent().unwrap()).unwrap();

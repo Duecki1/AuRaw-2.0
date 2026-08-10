@@ -92,10 +92,7 @@ impl Drop for RenderedThumbnailPermit {
     }
 }
 
-pub fn downscale_to_fit(
-    image: image::DynamicImage,
-    maximum_edge: u32,
-) -> image::DynamicImage {
+pub fn downscale_to_fit(image: image::DynamicImage, maximum_edge: u32) -> image::DynamicImage {
     if image.width() > maximum_edge || image.height() > maximum_edge {
         image.thumbnail(maximum_edge, maximum_edge)
     } else {
@@ -354,10 +351,7 @@ pub fn load_desktop_raw_thumbnail(
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn save_desktop_raw_thumbnail(
-    raw_path: &Path,
-    thumbnail: &RawThumbnail,
-) -> Result<(), String> {
+pub fn save_desktop_raw_thumbnail(raw_path: &Path, thumbnail: &RawThumbnail) -> Result<(), String> {
     let expected = desktop_raw_stamp(raw_path)?;
     let cache_path = desktop_raw_thumbnail_path(raw_path);
     let fingerprint_path = desktop_raw_thumbnail_fingerprint_path(raw_path);

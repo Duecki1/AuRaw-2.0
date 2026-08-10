@@ -297,9 +297,7 @@ fn configure_cpu_builder(
                 anyhow::anyhow!("force sequential Windows SAM CPU execution: {error}")
             })?
             .with_intra_threads(1)
-            .map_err(|error| {
-                anyhow::anyhow!("limit Windows SAM CPU inference threads: {error}")
-            })?
+            .map_err(|error| anyhow::anyhow!("limit Windows SAM CPU inference threads: {error}"))?
             .with_optimization_level(GraphOptimizationLevel::Disable)
             .map_err(|error| {
                 anyhow::anyhow!("disable Windows SAM CPU graph optimizations: {error}")
@@ -346,17 +344,12 @@ fn create_accelerated_session(
         .with_context(|| format!("create {} ONNX Runtime session", candidate.name))?;
     let mut builder = configure_common_builder(builder)?;
     if candidate.force_sequential {
-        builder = builder
-            .with_parallel_execution(false)
-            .map_err(|error| {
-                anyhow::anyhow!("configure {} sequential execution: {error}", candidate.name)
-            })?;
+        builder = builder.with_parallel_execution(false).map_err(|error| {
+            anyhow::anyhow!("configure {} sequential execution: {error}", candidate.name)
+        })?;
     }
     let mut builder = builder
-        .with_execution_providers([
-            candidate.provider.error_on_failure(),
-            cpu_provider(options),
-        ])
+        .with_execution_providers([candidate.provider.error_on_failure(), cpu_provider(options)])
         .map_err(|error| {
             anyhow::anyhow!("configure {} execution provider: {error}", candidate.name)
         })?;

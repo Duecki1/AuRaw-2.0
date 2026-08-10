@@ -31,126 +31,118 @@ impl Sidebar {
                 }
             });
         });
-        ui.separator();
+        ui.add_space(4.0);
 
         let before = app.geometry;
         if app.crop_constraint_reference.is_none() {
             app.crop_constraint_reference = Some(app.geometry.crop);
         }
-        let previous_aspect = app.geometry.aspect_ratio;
-        crate::ui::theme::form_combo(
-            ui,
-            "Aspect ratio",
-            "crop-aspect-ratio",
-            app.geometry.aspect_ratio.label(),
-            150.0,
-            |ui| {
-                for aspect in [
-                    CropAspectRatio::Free,
-                    CropAspectRatio::Original,
-                    CropAspectRatio::Square,
-                    CropAspectRatio::FourThree,
-                    CropAspectRatio::ThreeFour,
-                    CropAspectRatio::ThreeTwo,
-                    CropAspectRatio::TwoThree,
-                    CropAspectRatio::SixteenNine,
-                    CropAspectRatio::NineSixteen,
-                ] {
-                    ui.selectable_value(&mut app.geometry.aspect_ratio, aspect, aspect.label());
+        crate::ui::theme::section_card(ui, "Crop", |ui| {
+            let previous_aspect = app.geometry.aspect_ratio;
+            crate::ui::theme::form_combo(
+                ui,
+                "Aspect ratio",
+                "crop-aspect-ratio",
+                app.geometry.aspect_ratio.label(),
+                150.0,
+                |ui| {
+                    for aspect in [
+                        CropAspectRatio::Free,
+                        CropAspectRatio::Original,
+                        CropAspectRatio::Square,
+                        CropAspectRatio::FourThree,
+                        CropAspectRatio::ThreeFour,
+                        CropAspectRatio::ThreeTwo,
+                        CropAspectRatio::TwoThree,
+                        CropAspectRatio::SixteenNine,
+                        CropAspectRatio::NineSixteen,
+                    ] {
+                        ui.selectable_value(&mut app.geometry.aspect_ratio, aspect, aspect.label());
+                    }
+                },
+            );
+            if app.geometry.aspect_ratio != previous_aspect {
+                Self::apply_crop_aspect(app, source_dimensions.0, source_dimensions.1);
+                app.crop_constraint_reference = Some(app.geometry.crop);
+            }
+        });
+
+        ui.add_space(crate::ui::theme::CARD_GAP);
+        crate::ui::theme::section_card(ui, "Rotation", |ui| {
+            ui.horizontal(|ui| {
+                if crate::ui::icons::icon_toggle_button(
+                    ui,
+                    crate::ui::icons::UiIcon::RotateLeft,
+                    false,
+                    crate::ui::theme::toolbar_icon_size(),
+                    "Rotate 90° counter-clockwise",
+                )
+                .clicked()
+                {
+                    app.geometry.rotate_quarter_turn(false);
                 }
-            },
-        );
-        if app.geometry.aspect_ratio != previous_aspect {
-            Self::apply_crop_aspect(app, source_dimensions.0, source_dimensions.1);
-            app.crop_constraint_reference = Some(app.geometry.crop);
-        }
-
-        ui.add_space(4.0);
-        ui.strong("Rotation");
-        ui.horizontal(|ui| {
-            if crate::ui::icons::icon_toggle_button(
+                if crate::ui::icons::icon_toggle_button(
+                    ui,
+                    crate::ui::icons::UiIcon::RotateRight,
+                    false,
+                    crate::ui::theme::toolbar_icon_size(),
+                    "Rotate 90° clockwise",
+                )
+                .clicked()
+                {
+                    app.geometry.rotate_quarter_turn(true);
+                }
+            });
+            adjustment_slider(
                 ui,
-                crate::ui::icons::UiIcon::RotateLeft,
-                false,
-                crate::ui::theme::toolbar_icon_size(),
-                "Rotate 90° counter-clockwise",
-            )
-            .clicked()
+                "Straighten",
+                &mut app.geometry.rotation_degrees,
+                -45.0..=45.0,
+                1,
+                0.1,
+                Some("Fine rotation for leveling the image."),
+            );
+            let straighten_label = if app.straighten_tool_active {
+                "Drawing straighten line…"
+            } else {
+                "Draw straighten line"
+            };
+            if ui
+                .selectable_label(app.straighten_tool_active, straighten_label)
+                .on_hover_text("Drag along a horizon or vertical edge in the Crop preview. AuRaw rotates the image so that line becomes level.")
+                .clicked()
             {
-                app.geometry.rotate_quarter_turn(false);
-            }
-            if crate::ui::icons::icon_toggle_button(
-                ui,
-                crate::ui::icons::UiIcon::RotateRight,
-                false,
-                crate::ui::theme::toolbar_icon_size(),
-                "Rotate 90° clockwise",
-            )
-            .clicked()
-            {
-                app.geometry.rotate_quarter_turn(true);
+                app.straighten_tool_active = !app.straighten_tool_active;
+                app.straighten_drag = None;
+                app.crop_drag = None;
             }
         });
-        adjustment_slider(
-            ui,
-            "Straighten",
-            &mut app.geometry.rotation_degrees,
-            -45.0..=45.0,
-            1,
-            0.1,
-            Some("Fine rotation for leveling the image."),
-        );
-        let straighten_label = if app.straighten_tool_active {
-            "Drawing straighten line…"
-        } else {
-            "Draw straighten line"
-        };
-        if ui
-            .selectable_label(app.straighten_tool_active, straighten_label)
-            .on_hover_text("Drag along a horizon or vertical edge in the Crop preview. AuRaw rotates the image so that line becomes level.")
-            .clicked()
-        {
-            app.straighten_tool_active = !app.straighten_tool_active;
-            app.straighten_drag = None;
-            app.crop_drag = None;
-        }
 
-        ui.separator();
-        ui.strong("Transform");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut app.geometry.flip_horizontal, "Flip horizontal");
-            ui.checkbox(&mut app.geometry.flip_vertical, "Flip vertical");
+        ui.add_space(crate::ui::theme::CARD_GAP);
+        crate::ui::theme::section_card(ui, "Transform", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut app.geometry.flip_horizontal, "Flip horizontal");
+                ui.checkbox(&mut app.geometry.flip_vertical, "Flip vertical");
+            });
+            adjustment_slider(
+                ui,
+                "Horizontal",
+                &mut app.geometry.horizontal_transform,
+                -30.0..=30.0,
+                1,
+                0.1,
+                Some("Correct horizontal perspective."),
+            );
+            adjustment_slider(
+                ui,
+                "Vertical",
+                &mut app.geometry.vertical_transform,
+                -30.0..=30.0,
+                1,
+                0.1,
+                Some("Correct vertical perspective."),
+            );
         });
-        adjustment_slider(
-            ui,
-            "Horizontal",
-            &mut app.geometry.horizontal_transform,
-            -30.0..=30.0,
-            1,
-            0.1,
-            Some("Correct horizontal perspective."),
-        );
-        adjustment_slider(
-            ui,
-            "Vertical",
-            &mut app.geometry.vertical_transform,
-            -30.0..=30.0,
-            1,
-            0.1,
-            Some("Correct vertical perspective."),
-        );
-
-        let (crop_width, crop_height) = app
-            .geometry
-            .crop_pixel_dimensions(source_dimensions.0, source_dimensions.1);
-        ui.separator();
-        ui.label(
-            egui::RichText::new(format!(
-                "Crop: {crop_width} × {crop_height} px before export resize"
-            ))
-            .size(11.5)
-            .color(ui.visuals().weak_text_color()),
-        );
 
         app.geometry = app.geometry.sanitized();
         let containment_transform_changed =
@@ -173,6 +165,7 @@ impl Sidebar {
         if app.geometry != before {
             app.note_geometry_changed();
         }
+
     }
 
     fn apply_crop_aspect(app: &mut AurawApp, source_width: u32, source_height: u32) {

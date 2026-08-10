@@ -9,6 +9,8 @@ use crate::inpainting::{
 };
 #[cfg(target_os = "android")]
 use crate::pipeline::GpuProgramPrewarm;
+#[cfg(not(target_os = "android"))]
+use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
     compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
@@ -20,8 +22,6 @@ use crate::pipeline::{
     ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate, SubjectRefinement, TileSpec,
     EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
-#[cfg(not(target_os = "android"))]
-use crate::pipeline::RawThumbnail;
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
     LensEditState as SidecarLensEditState,
@@ -77,8 +77,7 @@ pub(crate) struct DevelopReferenceState {
     pub(crate) texture_size: Option<[u32; 2]>,
     pub(crate) high_quality: bool,
     pub(crate) loading_path: Option<PathBuf>,
-    pub(crate) preview_receiver:
-        Option<mpsc::Receiver<(PathBuf, Result<RawThumbnail, String>)>>,
+    pub(crate) preview_receiver: Option<mpsc::Receiver<(PathBuf, Result<RawThumbnail, String>)>>,
     pub(crate) error: Option<String>,
     pub(crate) split_ratio: f32,
 }
@@ -657,14 +656,8 @@ struct LibraryBatchExportJob {
 #[cfg(target_os = "android")]
 #[derive(Clone, Debug)]
 pub(crate) enum AndroidLibraryExportTarget {
-    Local {
-        uri: String,
-        display_name: String,
-    },
-    Cloud {
-        path: PathBuf,
-        display_name: String,
-    },
+    Local { uri: String, display_name: String },
+    Cloud { path: PathBuf, display_name: String },
 }
 
 #[cfg(target_os = "android")]

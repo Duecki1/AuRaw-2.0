@@ -7,9 +7,7 @@ pub(crate) fn export_settings_controls(
 ) {
     #[cfg(target_os = "android")]
     let _ = fallback_picker_directory;
-    crate::ui::theme::card_frame(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.strong("Image sizing");
+    crate::ui::theme::section_card(ui, "Image sizing", |ui| {
         crate::ui::theme::form_combo(
             ui,
             "Resize to fit",
@@ -90,9 +88,7 @@ pub(crate) fn export_settings_controls(
     });
 
     ui.add_space(crate::ui::theme::CARD_GAP);
-    crate::ui::theme::card_frame(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.strong("Precision");
+    crate::ui::theme::section_card(ui, "Precision", |ui| {
         crate::ui::theme::form_combo(
             ui,
             "Bit depth",
@@ -109,25 +105,10 @@ pub(crate) fn export_settings_controls(
                 }
             },
         );
-        ui.label(
-            egui::RichText::new(match settings.bit_depth {
-                ExportBitDepth::Eight => "Standard delivery. JPEG is always 8-bit.",
-                ExportBitDepth::Sixteen => {
-                    "High-bit-depth PNG/TIFF for smooth gradients and editing headroom."
-                }
-                ExportBitDepth::Float32Linear => {
-                    "TIFF only. Stores linear Rec.2020 float RGB without output-profile encoding."
-                }
-            })
-            .small()
-            .color(ui.visuals().weak_text_color()),
-        );
     });
 
     ui.add_space(crate::ui::theme::CARD_GAP);
-    crate::ui::theme::card_frame(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.strong("Color profile");
+    crate::ui::theme::section_card(ui, "Color profile", |ui| {
         crate::ui::theme::form_combo(
             ui,
             "Output profile",
@@ -200,9 +181,7 @@ pub(crate) fn export_settings_controls(
     });
 
     ui.add_space(crate::ui::theme::CARD_GAP);
-    crate::ui::theme::card_frame(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.strong("Metadata");
+    crate::ui::theme::section_card(ui, "Metadata", |ui| {
         ui.checkbox(&mut settings.keep_metadata, "Keep metadata")
             .on_hover_text(
                 "Embeds available source, camera, lens, exposure, creator, original-size, software, and normalized-orientation metadata in the exported image.",
@@ -210,9 +189,7 @@ pub(crate) fn export_settings_controls(
     });
 
     ui.add_space(crate::ui::theme::CARD_GAP);
-    crate::ui::theme::card_frame(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.strong("JPEG");
+    crate::ui::theme::section_card(ui, "JPEG", |ui| {
         adjustment_slider(
             ui,
             "Quality",
