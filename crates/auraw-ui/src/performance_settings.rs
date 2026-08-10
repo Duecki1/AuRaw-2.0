@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 10;
+const SETTINGS_VERSION: u32 = 11;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19,6 +19,10 @@ pub struct PerformanceSettings {
     pub library_sort_order: crate::ui::library::LibrarySortOrder,
     #[serde(default)]
     pub preview_quality: crate::app::PreviewQuality,
+    /// Keep newly painted brush dabs fixed to the source image instead of
+    /// compensating for preview zoom to maintain a constant screen footprint.
+    #[serde(default)]
+    pub image_relative_brush_size: bool,
     #[serde(default)]
     pub birefnet_quality: crate::ai_masks::BiRefNetQuality,
     #[serde(default)]
@@ -110,6 +114,7 @@ impl Default for PerformanceSettings {
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::default(),
             library_sort_order: crate::ui::library::LibrarySortOrder::default(),
             preview_quality: crate::app::PreviewQuality::default(),
+            image_relative_brush_size: false,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
             camera_profile_mode: CameraProfileMode::default(),
             camera_profile_folder: None,
@@ -311,6 +316,7 @@ mod tests {
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Large,
             library_sort_order: crate::ui::library::LibrarySortOrder::NameAscending,
             preview_quality: crate::app::PreviewQuality::High,
+            image_relative_brush_size: true,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             camera_profile_mode: CameraProfileMode::DcpProfiles,
             camera_profile_folder: Some(PathBuf::from("profiles")),
@@ -360,6 +366,7 @@ mod tests {
             crate::ui::library::LibrarySortOrder::NameAscending
         );
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::High);
+        assert!(settings.image_relative_brush_size);
         assert_eq!(
             settings.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::High
@@ -428,6 +435,7 @@ mod tests {
                 .expect("legacy settings should remain readable");
 
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
+        assert!(!settings.image_relative_brush_size);
         assert_eq!(
             settings.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::Medium
@@ -457,6 +465,7 @@ mod tests {
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Enormous,
             library_sort_order: crate::ui::library::LibrarySortOrder::SmallestFirst,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
+            image_relative_brush_size: true,
             last_library_view: crate::ui::library::LibraryView::Cloud,
             last_cloud_library_folder: "b".repeat(64),
             ..Default::default()
@@ -484,6 +493,7 @@ mod tests {
             restored.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::High
         );
+        assert!(restored.image_relative_brush_size);
         assert_eq!(
             restored.last_library_view,
             crate::ui::library::LibraryView::Cloud

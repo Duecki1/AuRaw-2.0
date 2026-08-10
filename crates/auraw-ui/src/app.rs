@@ -542,6 +542,7 @@ struct SidecarSaveJob {
 
 struct SidecarSaveEvent {
     job: SidecarSaveJob,
+    raw_path: Option<PathBuf>,
     result: Result<String, String>,
 }
 
@@ -871,6 +872,7 @@ pub struct AurawApp {
     #[cfg(target_os = "android")]
     gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
     pub(crate) preview_quality: PreviewQuality,
+    pub(crate) image_relative_brush_size: bool,
     pub(crate) preview_zoom: f32,
     pub(crate) preview_center: [f32; 2],
     pub(crate) preview_visible_uv: PreviewUvRect,

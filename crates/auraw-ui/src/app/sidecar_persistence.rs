@@ -236,6 +236,10 @@ impl AurawApp {
             Some(Err(mpsc::TryRecvError::Empty)) | None => return,
         };
         self.sidecar_conflict_receiver = None;
+        self.library.update_cloud_sync_state_for_cached_raw(
+            &event.raw_path,
+            &self.egui_ctx,
+        );
 
         let location = match event.result {
             Ok(location) => location,
@@ -686,6 +690,11 @@ impl AurawApp {
         };
         let repaint = self.egui_ctx.clone();
         let (sender, receiver) = mpsc::channel();
+        let raw_path = match &request.target {
+            crate::sidecar::SidecarTarget::Desktop { raw_path } => Some(raw_path.clone()),
+            #[cfg(target_os = "android")]
+            crate::sidecar::SidecarTarget::Android { .. } => None,
+        };
         #[cfg(target_os = "android")]
         let android_app = self.android_app.clone();
 
@@ -697,7 +706,11 @@ impl AurawApp {
                     #[cfg(target_os = "android")]
                     &android_app,
                 );
-                let _ = sender.send(SidecarSaveEvent { job, result });
+                let _ = sender.send(SidecarSaveEvent {
+                    job,
+                    raw_path,
+                    result,
+                });
                 repaint.request_repaint();
             });
 
@@ -760,6 +773,10 @@ impl AurawApp {
     fn finish_sidecar_save(&mut self, event: SidecarSaveEvent) {
         self.sidecar_receiver = None;
         self.sidecar_in_flight = None;
+        if let Some(raw_path) = event.raw_path.as_deref() {
+            self.library
+                .update_cloud_sync_state_for_cached_raw(raw_path, &self.egui_ctx);
+        }
         if event.job.generation == self.sidecar_generation {
             match event.result {
                 Ok(location) => {
@@ -893,6 +910,13 @@ impl AurawApp {
             Some(Ok(event)) => {
                 self.developed_thumbnail_receiver = None;
                 self.developed_thumbnail_in_flight = None;
+                match &event.job.target {
+                    crate::sidecar::SidecarTarget::Desktop { raw_path } => self
+                        .library
+                        .update_cloud_sync_state_for_cached_raw(raw_path, &self.egui_ctx),
+                    #[cfg(target_os = "android")]
+                    crate::sidecar::SidecarTarget::Android { .. } => {}
+                }
                 match event.result {
                     Ok(thumbnail) => self.install_developed_thumbnail_result(
                         &event.job.target,

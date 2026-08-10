@@ -1104,6 +1104,21 @@ pub fn cached_asset_id_for_raw(raw_path: &Path) -> Option<String> {
         .map(|metadata| metadata.asset_id)
 }
 
+/// Reads the current local sync state for a cached cloud RAW without network
+/// access. Save workers use this to update the matching library badge as soon
+/// as their metadata changes.
+pub fn cached_asset_sync_state(raw_path: &Path) -> Option<(String, CloudSyncState)> {
+    let metadata_path = metadata_path_for_raw(raw_path)?;
+    let metadata = load_metadata(&metadata_path).ok().flatten()?;
+    let state = match metadata.sync_issue {
+        Some(CachedSyncIssue::Conflict) => CloudSyncState::Conflict,
+        Some(CachedSyncIssue::Failed) => CloudSyncState::Failed,
+        None if metadata.pending_sidecar_upload => CloudSyncState::Queued,
+        None => CloudSyncState::Synced,
+    };
+    Some((metadata.asset_id, state))
+}
+
 fn load_metadata(path: &Path) -> Result<Option<CachedAssetMetadata>, String> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_METADATA_BYTES => metadata,
@@ -2332,19 +2347,32 @@ mod tests {
             pending_sidecar_upload: true,
             sync_issue: None,
         };
+        let raw_path = directory.join("original.dng");
 
         save_metadata(&metadata_path, &metadata).unwrap();
         assert_eq!(asset_sync_state(&config, &root, &asset), CloudSyncState::Queued);
+        assert_eq!(
+            cached_asset_sync_state(&raw_path),
+            Some((asset.id.clone(), CloudSyncState::Queued))
+        );
 
         metadata.sync_issue = Some(CachedSyncIssue::Failed);
         save_metadata(&metadata_path, &metadata).unwrap();
         assert_eq!(asset_sync_state(&config, &root, &asset), CloudSyncState::Failed);
+        assert_eq!(
+            cached_asset_sync_state(&raw_path),
+            Some((asset.id.clone(), CloudSyncState::Failed))
+        );
 
         metadata.sync_issue = Some(CachedSyncIssue::Conflict);
         save_metadata(&metadata_path, &metadata).unwrap();
         assert_eq!(
             asset_sync_state(&config, &root, &asset),
             CloudSyncState::Conflict
+        );
+        assert_eq!(
+            cached_asset_sync_state(&raw_path),
+            Some((asset.id.clone(), CloudSyncState::Conflict))
         );
         fs::remove_dir_all(root).unwrap();
     }

@@ -107,6 +107,28 @@ impl Settings {
             );
 
             ui.separator();
+            if ui
+                .checkbox(
+                    &mut app.image_relative_brush_size,
+                    "Keep brush size fixed to the image",
+                )
+                .on_hover_text(
+                    "When enabled, zooming changes the brush's on-screen size while it continues to cover the same area of the image. When disabled, the brush stays the same size on screen.",
+                )
+                .changed()
+            {
+                app.persist_performance_settings();
+            }
+            ui.add(
+                egui::Label::new(if app.image_relative_brush_size {
+                    "Brushes keep the same image footprint at every zoom level."
+                } else {
+                    "Brushes keep the same on-screen footprint at every zoom level."
+                })
+                .wrap(),
+            );
+
+            ui.separator();
             ui.strong("Library performance");
             let mut raw_cache_files = app.raw_cache_limit();
             if adjustment_slider(

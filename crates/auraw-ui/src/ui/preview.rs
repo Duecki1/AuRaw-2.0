@@ -1089,7 +1089,11 @@ impl Preview {
             previous,
         );
         let distance_px = pointer.distance(previous_screen);
-        let dab_size = zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom);
+        let dab_size = zoom_scaled_brush_size(
+            app.inpaint_brush_size,
+            app.preview_zoom,
+            app.image_relative_brush_size,
+        );
         let radius_px = geometry_brush_radius_screen(
             image_rect,
             app.geometry,
@@ -1338,7 +1342,11 @@ impl Preview {
                     source_width,
                     source_height,
                     uv,
-                    zoom_scaled_brush_size(app.inpaint_brush_size, app.preview_zoom),
+                    zoom_scaled_brush_size(
+                        app.inpaint_brush_size,
+                        app.preview_zoom,
+                        app.image_relative_brush_size,
+                    ),
                     64,
                 );
                 painter.add(Shape::line(outline, Stroke::new(1.5, Color32::WHITE)));
@@ -1493,7 +1501,11 @@ impl Preview {
                 previous,
             );
             let distance_px = pointer.distance(previous_screen);
-            let dab_size = zoom_scaled_brush_size(refinement.size, app.preview_zoom);
+            let dab_size = zoom_scaled_brush_size(
+                refinement.size,
+                app.preview_zoom,
+                app.image_relative_brush_size,
+            );
             let radius_px = geometry_brush_radius_screen(
                 image_rect,
                 app.geometry,
@@ -1606,7 +1618,11 @@ impl Preview {
                         previous,
                     );
                     let distance_px = pointer.distance(previous_screen);
-                    let dab_size = zoom_scaled_brush_size(*size, app.preview_zoom);
+                    let dab_size = zoom_scaled_brush_size(
+                        *size,
+                        app.preview_zoom,
+                        app.image_relative_brush_size,
+                    );
                     let radius_px = geometry_brush_radius_screen(
                         image_rect,
                         app.geometry,
@@ -1810,7 +1826,11 @@ impl Preview {
                         previous,
                     );
                     let distance_px = pointer.distance(previous_screen);
-                    let stroke_brush_size = zoom_scaled_brush_size(*brush_size, app.preview_zoom);
+                    let stroke_brush_size = zoom_scaled_brush_size(
+                        *brush_size,
+                        app.preview_zoom,
+                        app.image_relative_brush_size,
+                    );
                     let radius_px = geometry_brush_radius_screen(
                         image_rect,
                         app.geometry,
@@ -2189,6 +2209,7 @@ impl Preview {
                         let brush_size = zoom_scaled_brush_size(
                             app.masks.subject_refinement.size,
                             app.preview_zoom,
+                            app.image_relative_brush_size,
                         );
                         let outline = brush_outline_geometry_screen_points(
                             image_rect,
@@ -2243,7 +2264,11 @@ impl Preview {
                                     source_width,
                                     source_height,
                                     uv,
-                                    zoom_scaled_brush_size(*size, app.preview_zoom),
+                                    zoom_scaled_brush_size(
+                                        *size,
+                                        app.preview_zoom,
+                                        app.image_relative_brush_size,
+                                    ),
                                     64,
                                 );
                                 painter.add(Shape::line(outline, Stroke::new(1.5, cursor_color)));
@@ -2266,7 +2291,11 @@ impl Preview {
                                     source_width,
                                     source_height,
                                     uv,
-                                    zoom_scaled_brush_size(*brush_size, app.preview_zoom),
+                                    zoom_scaled_brush_size(
+                                        *brush_size,
+                                        app.preview_zoom,
+                                        app.image_relative_brush_size,
+                                    ),
                                     64,
                                 );
                                 painter.add(Shape::line(outline, Stroke::new(1.5, cursor_color)));
@@ -4464,11 +4493,19 @@ fn group_coverage_rgba(
 
 /// Converts a brush tool size into the image-relative radius captured by a dab.
 ///
-/// Tool sizes are defined at fit zoom (1x). Dividing by the current preview
-/// zoom keeps the brush footprint constant in screen space: zooming in paints
-/// fewer source pixels for detail work, while zooming out covers more.
-fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32) -> f32 {
-    tool_size.max(0.0) / preview_zoom.max(MIN_PREVIEW_ZOOM)
+/// Tool sizes are defined at fit zoom (1x). Screen-relative mode compensates
+/// for preview zoom, while image-relative mode preserves the source footprint.
+fn zoom_scaled_brush_size(
+    tool_size: f32,
+    preview_zoom: f32,
+    image_relative: bool,
+) -> f32 {
+    let tool_size = tool_size.max(0.0);
+    if image_relative {
+        tool_size
+    } else {
+        tool_size / preview_zoom.max(MIN_PREVIEW_ZOOM)
+    }
 }
 
 fn inpaint_stroke_geometry_screen_bounds(
@@ -4585,5 +4622,15 @@ mod white_balance_picker_tests {
         let cropped = crop_overlay_dabs(&[dab], region, 6000, 4000);
         assert_eq!(cropped[0].center, [0.5, 0.5]);
         assert!((cropped[0].size - 0.04).abs() < 1e-6);
+    }
+
+    #[test]
+    fn screen_relative_brush_compensates_for_zoom() {
+        assert!((zoom_scaled_brush_size(0.08, 4.0, false) - 0.02).abs() < 1e-6);
+    }
+
+    #[test]
+    fn image_relative_brush_ignores_zoom() {
+        assert!((zoom_scaled_brush_size(0.08, 4.0, true) - 0.08).abs() < 1e-6);
     }
 }
