@@ -228,8 +228,8 @@ impl eframe::App for AurawApp {
             #[cfg(not(target_os = "android"))]
             egui::Panel::left("library_folder_sidebar")
                 .resizable(true)
-                .min_size(180.0)
-                .max_size((viewport_size.x * 0.45).max(180.0))
+                .min_size(220.0)
+                .max_size((viewport_size.x * 0.45).max(220.0))
                 .default_size(260.0)
                 .show(ui, |ui| Library::show_folder_sidebar(ui, self));
             #[cfg(target_os = "android")]
