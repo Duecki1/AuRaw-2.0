@@ -34,8 +34,9 @@ pub use masks::{
     export_mask_atlas_edge_limit, mask_atlas_edge, rasterize_brush_dabs,
     rasterize_inpaint_dabs_binary, BrushDab, BrushMode, InpaintLayer, InpaintPatch, InpaintStroke,
     LocalAdjustments, LocalMask, MaskCombineMode, MaskComponent, MaskEffect,
-    MaskEffectCategory, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, ObjectStroke,
-    SubjectRefinement, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    MaskEffectCategory, MaskEffectSettings, MaskGeometry, MaskImage, MaskKind, MaskRgbImage,
+    MaskStack, NeonEffectSettings, ObjectStroke, SubjectRefinement, MAX_LOCAL_MASKS,
+    MAX_MASK_COMPONENTS,
 };
 pub use noise::{AdaptiveDetailDefaults, DenoiseQuality, NoiseProfile};
 pub use processing::{

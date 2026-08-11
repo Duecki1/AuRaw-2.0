@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 9;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 10;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
-pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0004;
+pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0005;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg";
@@ -1036,7 +1036,8 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     // and changed inpainting binary fields to lossless compressed Base64
     // strings. Schema 7 adds the optional shared Subject refinement field;
     // schema 8 adds the defaulted mask-effect selector; schema 9 adds the
-    // Fullscreen mask geometry. Serde defaults keep every earlier sidecar
+    // Fullscreen mask geometry; schema 10 adds non-destructive settings for
+    // implemented mask effects. Serde defaults keep every earlier sidecar
     // backward-compatible.
     if original_schema >= 5 {
         restore_mask_assets(
@@ -1235,6 +1236,7 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
             return invalid("mask opacity is outside 0..1");
         }
         validate_local_adjustments(&mask.adjustments)?;
+        validate_neon_effect(&mask.effect_settings.neon)?;
         if mask.name.len() > MAX_EDIT_NAME_BYTES {
             return invalid("mask name is unreasonably long");
         }
@@ -1965,6 +1967,31 @@ fn validate_local_adjustments(
     validate_grading(&adjustments.color_grading, "local color grading")
 }
 
+fn validate_neon_effect(neon: &crate::pipeline::NeonEffectSettings) -> Result<(), SidecarError> {
+    finite(
+        "Neon mask effect",
+        &[
+            neon.amount,
+            neon.edge_width,
+            neon.detail,
+            neon.glow,
+            neon.background,
+            neon.color[0],
+            neon.color[1],
+            neon.color[2],
+        ],
+    )?;
+    bounded("Neon amount", neon.amount, 0.0, 100.0)?;
+    bounded("Neon edge width", neon.edge_width, 0.5, 8.0)?;
+    bounded("Neon detail", neon.detail, 0.0, 100.0)?;
+    bounded("Neon glow", neon.glow, 0.0, 100.0)?;
+    bounded("Neon background", neon.background, 0.0, 100.0)?;
+    for channel in neon.color {
+        bounded("Neon color channel", channel, 0.0, 1.0)?;
+    }
+    Ok(())
+}
+
 fn validate_curves(
     curves: &[&crate::pipeline::PointCurve],
     label: &str,
@@ -2369,6 +2396,29 @@ mod tests {
             MaskGeometry::Fullscreen
         ));
         assert_eq!(fullscreen.effect, crate::pipeline::MaskEffect::Cartoon);
+    }
+
+    #[test]
+    fn neon_mask_settings_round_trip_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        let neon_mask = masks.masks.last_mut().unwrap();
+        neon_mask.effect = crate::pipeline::MaskEffect::Neon;
+        neon_mask.effect_settings.neon.amount = 48.0;
+        neon_mask.effect_settings.neon.edge_width = 4.5;
+        neon_mask.effect_settings.neon.color = [1.0, 0.15, 0.65];
+        neon_mask.adjustments.exposure = 1.0;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let neon_mask = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(neon_mask.effect, crate::pipeline::MaskEffect::Neon);
+        assert_eq!(neon_mask.effect_settings.neon.amount, 48.0);
+        assert_eq!(neon_mask.effect_settings.neon.edge_width, 4.5);
+        assert_eq!(neon_mask.effect_settings.neon.color, [1.0, 0.15, 0.65]);
+        assert_eq!(neon_mask.adjustments.exposure, 1.0);
     }
 
     #[test]

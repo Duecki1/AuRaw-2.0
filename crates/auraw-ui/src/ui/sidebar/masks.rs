@@ -1349,6 +1349,9 @@ impl Sidebar {
                         adjustments_changed |= section_changed;
                     });
                 }
+            } else if mask.effect == MaskEffect::Neon {
+                adjustments_changed |=
+                    mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
             } else {
                 Self::show_mask_effect_placeholder(ui, mask.effect);
             }
@@ -1539,7 +1542,12 @@ impl Sidebar {
                         &mut request_object,
                     );
                 });
-                Self::show_mask_effect_placeholder(ui, mask.effect);
+                if mask.effect == MaskEffect::Neon {
+                    adjustments_changed |=
+                        mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
+                } else {
+                    Self::show_mask_effect_placeholder(ui, mask.effect);
+                }
             }
         }
 
@@ -1602,11 +1610,17 @@ impl Sidebar {
                             if candidate.category() != Some(category) {
                                 continue;
                             }
-                            if ui
-                                .selectable_label(*effect == candidate, candidate.label())
-                                .on_hover_text("Placeholder effect; processing controls are coming later.")
-                                .clicked()
-                            {
+                            let implemented = candidate.is_implemented();
+                            let response = ui
+                                .add_enabled(
+                                    implemented,
+                                    egui::Button::selectable(
+                                        *effect == candidate,
+                                        candidate.label(),
+                                    ),
+                                )
+                                .on_disabled_hover_text("This effect is not implemented yet.");
+                            if response.clicked() {
                                 *effect = candidate;
                                 ui.close();
                             }

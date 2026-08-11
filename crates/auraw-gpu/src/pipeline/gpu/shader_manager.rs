@@ -1,9 +1,9 @@
 use super::{
     specialize_compute_workgroup_size, work_shader_source, ComputeWorkgroupSize,
     SHADER_BASIC_ADJUSTMENTS, SHADER_COLOR, SHADER_COMMON, SHADER_CREATIVE_EFFECTS,
-    SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_NOISE, SHADER_NOISE_CA_FINISH,
-    SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS, SHADER_TONEMAP,
-    SHADER_TONE_COMMON,
+    SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_MASK_NEON, SHADER_NOISE,
+    SHADER_NOISE_CA_FINISH, SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS,
+    SHADER_TONEMAP, SHADER_TONE_COMMON,
 };
 use anyhow::{anyhow, Context, Result};
 use naga_oil::compose::{
@@ -14,6 +14,12 @@ use std::borrow::Cow;
 
 const SHADER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders/");
 const SCENE_ADJUSTMENTS_IMPORT: &str = "auraw::scene_adjustments";
+
+fn creative_effects_source() -> String {
+    // Effect implementations stay in dedicated files, while the composed
+    // creative stage owns the shared resource imports and render entry point.
+    format!("{SHADER_CREATIVE_EFFECTS}\n{SHADER_MASK_NEON}")
+}
 
 /// Owns AuRaw's reusable WGSL module registry and composes validated Naga IR
 /// for each concrete compute-shader source.
@@ -78,12 +84,12 @@ impl ShaderManager {
             "detail_scale_space.wgsl",
             SHADER_DETAIL_SCALE_SPACE,
         )?;
+        let creative_effects = creative_effects_source();
         manager.register(
             "auraw::creative_effects",
             "creative_effects.wgsl",
-            SHADER_CREATIVE_EFFECTS,
+            &creative_effects,
         )?;
-
         Ok(manager)
     }
 
@@ -110,6 +116,13 @@ impl ShaderManager {
         file_name: &str,
     ) -> Result<wgpu::naga::Module> {
         let file_path = format!("{SHADER_ROOT}{file_name}");
+        let creative_effects;
+        let source = if source == SHADER_CREATIVE_EFFECTS {
+            creative_effects = creative_effects_source();
+            creative_effects.as_str()
+        } else {
+            source
+        };
         let source = specialize_compute_workgroup_size(source, self.workgroup_size);
         let result = self.composer.make_naga_module(NagaModuleDescriptor {
             source: source.as_ref(),
