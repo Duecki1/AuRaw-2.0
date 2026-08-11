@@ -2105,6 +2105,8 @@ impl Preview {
             crate::pipeline::MaskEffect::LightRays => !mask.effect_settings.light_rays.is_active(),
             crate::pipeline::MaskEffect::Neon => !mask.effect_settings.neon.is_active(),
             crate::pipeline::MaskEffect::Pixelate => !mask.effect_settings.pixelate.is_active(),
+            crate::pipeline::MaskEffect::Fog => !mask.effect_settings.fog.is_active(),
+            crate::pipeline::MaskEffect::Smoke => !mask.effect_settings.smoke.is_active(),
             _ => true,
         };
         let accent = selected_component

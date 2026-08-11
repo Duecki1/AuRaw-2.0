@@ -6,10 +6,10 @@ use std::sync::Arc;
 mod effects;
 
 pub use effects::{
-    BlurEffectSettings, EdgeGlowEffectSettings, GlowEffectSettings, LensBlurEffectSettings,
-    LightRaysEffectSettings, MaskEffect, MaskEffectCategory, MaskEffectSettings,
-    MotionBlurEffectSettings, NeonEffectSettings, PixelateEffectSettings, RadialBlurEffectSettings,
-    RadialBlurMode, TiltShiftEffectSettings,
+    BlurEffectSettings, EdgeGlowEffectSettings, FogEffectSettings, GlowEffectSettings,
+    LensBlurEffectSettings, LightRaysEffectSettings, MaskEffect, MaskEffectCategory,
+    MaskEffectSettings, MotionBlurEffectSettings, NeonEffectSettings, PixelateEffectSettings,
+    RadialBlurEffectSettings, RadialBlurMode, SmokeEffectSettings, TiltShiftEffectSettings,
 };
 
 pub const MAX_LOCAL_MASKS: usize = 32;
@@ -3332,6 +3332,8 @@ mod tests {
         assert!(MaskEffect::TiltShift.is_implemented());
         assert!(MaskEffect::EdgeGlow.is_implemented());
         assert!(MaskEffect::Pixelate.is_implemented());
+        assert!(MaskEffect::Fog.is_implemented());
+        assert!(MaskEffect::Smoke.is_implemented());
         assert!(MaskEffect::ALL
             .iter()
             .copied()
@@ -3349,6 +3351,8 @@ mod tests {
                         | MaskEffect::TiltShift
                         | MaskEffect::EdgeGlow
                         | MaskEffect::Pixelate
+                        | MaskEffect::Fog
+                        | MaskEffect::Smoke
                 )
             })
             .all(|effect| !effect.is_implemented()));
@@ -3484,6 +3488,33 @@ mod tests {
         assert_eq!(decoded.effect_settings.tilt_shift.center, [48.0, 61.0]);
         assert_eq!(decoded.effect_settings.tilt_shift.angle, 17.0);
         assert_eq!(decoded.effect_settings.tilt_shift.focus_width, 31.0);
+    }
+
+    #[test]
+    fn atmosphere_settings_round_trip_without_touching_local_adjustments() {
+        let mut mask = LocalMask::new(MaskKind::Fullscreen, 1);
+        mask.effect = MaskEffect::Smoke;
+        mask.effect_settings.fog.density = 73.0;
+        mask.effect_settings.fog.seed = 217.0;
+        mask.effect_settings.fog.color = [0.72, 0.81, 0.93];
+        mask.effect_settings.smoke.turbulence = 84.0;
+        mask.effect_settings.smoke.angle = 32.0;
+        mask.effect_settings.smoke.seed = 491.0;
+        mask.effect_settings.smoke.color = [0.18, 0.21, 0.24];
+        mask.adjustments.exposure = 1.25;
+
+        let encoded = serde_json::to_string(&mask).expect("serialize atmosphere effects");
+        let decoded: LocalMask =
+            serde_json::from_str(&encoded).expect("deserialize atmosphere effects");
+        assert_eq!(decoded.effect, MaskEffect::Smoke);
+        assert_eq!(decoded.effect_settings.fog.density, 73.0);
+        assert_eq!(decoded.effect_settings.fog.seed, 217.0);
+        assert_eq!(decoded.effect_settings.fog.color, [0.72, 0.81, 0.93]);
+        assert_eq!(decoded.effect_settings.smoke.turbulence, 84.0);
+        assert_eq!(decoded.effect_settings.smoke.angle, 32.0);
+        assert_eq!(decoded.effect_settings.smoke.seed, 491.0);
+        assert_eq!(decoded.effect_settings.smoke.color, [0.18, 0.21, 0.24]);
+        assert_eq!(decoded.adjustments.exposure, 1.25);
     }
 
     #[test]

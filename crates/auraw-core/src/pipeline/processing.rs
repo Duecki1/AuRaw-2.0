@@ -597,9 +597,10 @@ pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_RECONSTRUCTION_SUPPORT
 
 /// Returns the halo actually required by the current edit. Neutral global or
 /// masked spatial effects should not force every tile to process their full
-/// support radius. Light Rays samples its own full-image emission atlas and
-/// therefore needs no RAW-pixel halo. This is especially important on Android,
-/// where a wide halo around a 768 px core can nearly triple the processed area.
+/// support radius. Light Rays samples its own full-image emission atlas, while
+/// Fog and Smoke evaluate full-image procedural coordinates; none of them need
+/// a RAW-pixel halo. This is especially important on Android, where a wide halo
+/// around a 768 px core can nearly triple the processed area.
 pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -> u32 {
     let mut support = HIGHLIGHT_RECONSTRUCTION_SUPPORT
         + DEMOSAIC_CHAIN_SUPPORT
@@ -1124,6 +1125,19 @@ mod tests {
         light_rays_masks.masks[0].effect = MaskEffect::LightRays;
         assert_eq!(
             required_export_tile_halo(&exposure, &light_rays_masks),
+            MIN_EXPORT_TILE_HALO
+        );
+
+        let mut atmosphere_masks = MaskStack::default();
+        atmosphere_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+        atmosphere_masks.masks[0].effect = MaskEffect::Fog;
+        assert_eq!(
+            required_export_tile_halo(&exposure, &atmosphere_masks),
+            MIN_EXPORT_TILE_HALO
+        );
+        atmosphere_masks.masks[0].effect = MaskEffect::Smoke;
+        assert_eq!(
+            required_export_tile_halo(&exposure, &atmosphere_masks),
             MIN_EXPORT_TILE_HALO
         );
 
