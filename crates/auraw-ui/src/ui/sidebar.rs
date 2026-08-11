@@ -4,12 +4,13 @@ use crate::app::{
 };
 use crate::pipeline::{
     BlurEffectSettings, BrushMode, DemosaicMode, DenoiseQuality, EdgeGlowEffectSettings,
-    ExportBitDepth, ExportColorProfile, ExportResizeMode, ExposureParams, GlowEffectSettings,
-    InpaintStrokeKind, LensBlurEffectSettings, LightRaysEffectSettings, LoadedRaw, LocalMask,
-    MaskCombineMode, MaskComponent, MaskEffect, MaskEffectCategory, MaskGeometry, MaskKind,
-    MotionBlurEffectSettings, NeonEffectSettings, PixelateEffectSettings, RadialBlurEffectSettings,
-    RadialBlurMode, SigmoidColorProcessing, TiltShiftEffectSettings, MAX_EXPORT_EDGE,
-    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS, MAX_WHITE_BALANCE_TINT, MIN_WHITE_BALANCE_TINT,
+    ExportBitDepth, ExportColorProfile, ExportResizeMode, ExposureParams, FogEffectSettings,
+    GlowEffectSettings, InpaintStrokeKind, LensBlurEffectSettings, LightRaysEffectSettings,
+    LoadedRaw, LocalMask, MaskCombineMode, MaskComponent, MaskEffect, MaskEffectCategory,
+    MaskGeometry, MaskKind, MotionBlurEffectSettings, NeonEffectSettings, PixelateEffectSettings,
+    RadialBlurEffectSettings, RadialBlurMode, SigmoidColorProcessing, SmokeEffectSettings,
+    TiltShiftEffectSettings, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    MAX_WHITE_BALANCE_TINT, MIN_WHITE_BALANCE_TINT,
 };
 use crate::ui::components::adjustment_slider::{
     adjustment_slider, adjustment_slider_with_reset, hue_adjustment_slider, slider_scroll_locked,

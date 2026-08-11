@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 10;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 11;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0005;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
@@ -1042,8 +1042,8 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     // strings. Schema 7 adds the optional shared Subject refinement field;
     // schema 8 adds the defaulted mask-effect selector; schema 9 adds the
     // Fullscreen mask geometry; schema 10 adds non-destructive settings for
-    // implemented mask effects. Serde defaults keep every earlier sidecar
-    // backward-compatible.
+    // implemented mask effects; schema 11 adds procedural Fog and Smoke mask
+    // effects. Serde defaults keep every earlier sidecar backward-compatible.
     if original_schema >= 5 {
         restore_mask_assets(
             &mut document.edits,
@@ -1251,6 +1251,8 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
         validate_light_rays_effect(&mask.effect_settings.light_rays)?;
         validate_neon_effect(&mask.effect_settings.neon)?;
         validate_pixelate_effect(&mask.effect_settings.pixelate)?;
+        validate_fog_effect(&mask.effect_settings.fog)?;
+        validate_smoke_effect(&mask.effect_settings.smoke)?;
         if mask.name.len() > MAX_EDIT_NAME_BYTES {
             return invalid("mask name is unreasonably long");
         }
@@ -2157,6 +2159,62 @@ fn validate_pixelate_effect(
     bounded("Pixelate block size", pixelate.block_size, 2.0, 32.0)
 }
 
+fn validate_fog_effect(fog: &crate::pipeline::FogEffectSettings) -> Result<(), SidecarError> {
+    finite(
+        "Fog mask effect",
+        &[
+            fog.amount,
+            fog.density,
+            fog.scale,
+            fog.softness,
+            fog.variation,
+            fog.seed,
+            fog.color[0],
+            fog.color[1],
+            fog.color[2],
+        ],
+    )?;
+    bounded("Fog amount", fog.amount, 0.0, 100.0)?;
+    bounded("Fog density", fog.density, 0.0, 100.0)?;
+    bounded("Fog scale", fog.scale, 1.0, 100.0)?;
+    bounded("Fog softness", fog.softness, 0.0, 100.0)?;
+    bounded("Fog variation", fog.variation, 0.0, 100.0)?;
+    bounded("Fog seed", fog.seed, 0.0, 1_000.0)?;
+    for channel in fog.color {
+        bounded("Fog color channel", channel, 0.0, 1.0)?;
+    }
+    Ok(())
+}
+
+fn validate_smoke_effect(smoke: &crate::pipeline::SmokeEffectSettings) -> Result<(), SidecarError> {
+    finite(
+        "Smoke mask effect",
+        &[
+            smoke.amount,
+            smoke.density,
+            smoke.scale,
+            smoke.turbulence,
+            smoke.softness,
+            smoke.angle,
+            smoke.seed,
+            smoke.color[0],
+            smoke.color[1],
+            smoke.color[2],
+        ],
+    )?;
+    bounded("Smoke amount", smoke.amount, 0.0, 100.0)?;
+    bounded("Smoke density", smoke.density, 0.0, 100.0)?;
+    bounded("Smoke scale", smoke.scale, 1.0, 100.0)?;
+    bounded("Smoke turbulence", smoke.turbulence, 0.0, 100.0)?;
+    bounded("Smoke softness", smoke.softness, 0.0, 100.0)?;
+    bounded("Smoke angle", smoke.angle, -180.0, 180.0)?;
+    bounded("Smoke seed", smoke.seed, 0.0, 1_000.0)?;
+    for channel in smoke.color {
+        bounded("Smoke color channel", channel, 0.0, 1.0)?;
+    }
+    Ok(())
+}
+
 fn validate_glow_effect(glow: &crate::pipeline::GlowEffectSettings) -> Result<(), SidecarError> {
     finite(
         "Glow mask effect",
@@ -2758,6 +2816,37 @@ mod tests {
             crate::pipeline::RadialBlurMode::Spin
         );
         assert_eq!(mask.effect_settings.tilt_shift.center, [51.0, 58.0]);
+    }
+
+    #[test]
+    fn atmosphere_settings_round_trip_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        let mask = masks.masks.last_mut().unwrap();
+        mask.effect = crate::pipeline::MaskEffect::Smoke;
+        mask.effect_settings.fog.amount = 67.0;
+        mask.effect_settings.fog.seed = 241.0;
+        mask.effect_settings.fog.color = [0.73, 0.84, 0.96];
+        mask.effect_settings.smoke.turbulence = 79.0;
+        mask.effect_settings.smoke.angle = 34.0;
+        mask.effect_settings.smoke.seed = 613.0;
+        mask.effect_settings.smoke.color = [0.16, 0.19, 0.23];
+        mask.adjustments.exposure = 1.0;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let mask = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(mask.effect, crate::pipeline::MaskEffect::Smoke);
+        assert_eq!(mask.effect_settings.fog.amount, 67.0);
+        assert_eq!(mask.effect_settings.fog.seed, 241.0);
+        assert_eq!(mask.effect_settings.fog.color, [0.73, 0.84, 0.96]);
+        assert_eq!(mask.effect_settings.smoke.turbulence, 79.0);
+        assert_eq!(mask.effect_settings.smoke.angle, 34.0);
+        assert_eq!(mask.effect_settings.smoke.seed, 613.0);
+        assert_eq!(mask.effect_settings.smoke.color, [0.16, 0.19, 0.23]);
+        assert_eq!(mask.adjustments.exposure, 1.0);
     }
 
     #[test]

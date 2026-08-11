@@ -33,13 +33,13 @@ pub use masks::{
     build_retouch_patch, compose_inpaint_strokes, ellipse_outline_points, export_mask_atlas_edge,
     export_mask_atlas_edge_limit, mask_atlas_edge, rasterize_brush_dabs,
     rasterize_inpaint_dabs_binary, BlurEffectSettings, BrushDab, BrushMode, EdgeGlowEffectSettings,
-    GlowEffectSettings, InpaintLayer, InpaintPatch, InpaintStroke, InpaintStrokeKind,
-    LandscapeCategory, LensBlurEffectSettings, LightRaysEffectSettings, LocalAdjustments,
-    LocalMask, MaskCombineMode, MaskComponent, MaskEffect, MaskEffectCategory, MaskEffectSettings,
-    MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, MotionBlurEffectSettings,
-    NeonEffectSettings, ObjectStroke, PixelateEffectSettings, RadialBlurEffectSettings,
-    RadialBlurMode, SubjectRefinement, TiltShiftEffectSettings, MAX_LOCAL_MASKS,
-    MAX_MASK_COMPONENTS,
+    FogEffectSettings, GlowEffectSettings, InpaintLayer, InpaintPatch, InpaintStroke,
+    InpaintStrokeKind, LandscapeCategory, LensBlurEffectSettings, LightRaysEffectSettings,
+    LocalAdjustments, LocalMask, MaskCombineMode, MaskComponent, MaskEffect, MaskEffectCategory,
+    MaskEffectSettings, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
+    MotionBlurEffectSettings, NeonEffectSettings, ObjectStroke, PixelateEffectSettings,
+    RadialBlurEffectSettings, RadialBlurMode, SmokeEffectSettings, SubjectRefinement,
+    TiltShiftEffectSettings, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 pub use noise::{AdaptiveDetailDefaults, DenoiseQuality, NoiseProfile};
 pub use processing::{
