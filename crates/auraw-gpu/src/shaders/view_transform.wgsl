@@ -238,7 +238,7 @@ fn apply_local_hue_rotations(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
-        if state.x == 0u || (state.w & 4u) == 0u { continue; }
+        if state.x == 0u || Common::mask_effect_id(state) != 0u || (state.w & 4u) == 0u { continue; }
         let degrees = Common::mask_data[index].grade_options.z;
         if abs(degrees) < 1e-7 { continue; }
         let weight = SceneAdjustments::local_mask_weight(pos, index);
@@ -350,7 +350,7 @@ fn apply_local_color_grading(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
-        if state.x == 0u || (state.w & 2u) == 0u { continue; }
+        if state.x == 0u || Common::mask_effect_id(state) != 0u || (state.w & 2u) == 0u { continue; }
         let weight = SceneAdjustments::local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
         let adjusted = apply_color_grading_wheels(
@@ -442,7 +442,7 @@ fn apply_local_color_mixer(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
-        if state.x == 0u || (state.w & 1u) == 0u { continue; }
+        if state.x == 0u || Common::mask_effect_id(state) != 0u || (state.w & 1u) == 0u { continue; }
         let weight = SceneAdjustments::local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
 
@@ -479,7 +479,7 @@ fn apply_local_display_blacks(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32>
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
-        if state.x == 0u || state.y == 0u { continue; }
+        if state.x == 0u || state.y == 0u || Common::mask_effect_id(state) != 0u { continue; }
         let value = Common::mask_data[index].adjust_1_field.y;
         if abs(value) < 1e-7 { continue; }
         let weight = SceneAdjustments::local_mask_weight(pos, index);

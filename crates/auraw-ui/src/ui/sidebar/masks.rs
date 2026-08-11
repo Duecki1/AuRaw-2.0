@@ -616,6 +616,7 @@ impl Sidebar {
     fn mask_kind_menu(ui: &mut Ui, unavailable_message: &str) -> Option<MaskKind> {
         let mut selected = None;
         for kind in [
+            MaskKind::Fullscreen,
             MaskKind::Brush,
             MaskKind::Radial,
             MaskKind::Linear,
@@ -1258,6 +1259,7 @@ impl Sidebar {
 
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
+        let mut effect_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
         let mut brush_mode = app.brush_mode;
@@ -1282,6 +1284,9 @@ impl Sidebar {
 
         {
             let mask = &mut app.masks.masks[mask_index];
+
+            effect_changed |= Self::show_mask_effect_picker(ui, &mut mask.effect);
+            ui.add_space(crate::ui::theme::CARD_GAP);
 
             Self::adjustment_section(ui, "Mask Properties", true, true, |ui| {
                 geometry_changed |= Self::show_vertical_mask_properties(
@@ -1305,43 +1310,53 @@ impl Sidebar {
                 );
             });
 
-            crate::ui::theme::toolbar_row(ui, |ui| {
-                ui.strong("Local Adjustments");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if crate::ui::icons::phosphor_icon_button(
-                        ui,
-                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                        crate::ui::theme::toolbar_icon_size(),
-                        "Reset local adjustments",
-                    )
-                    .clicked()
-                    {
-                        mask.adjustments.reset();
-                        adjustments_changed = true;
-                    }
+            if mask.effect.uses_adjustments() {
+                crate::ui::theme::toolbar_row(ui, |ui| {
+                    ui.strong("Local Adjustments");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::ui::icons::phosphor_icon_button(
+                            ui,
+                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                            crate::ui::theme::toolbar_icon_size(),
+                            "Reset local adjustments",
+                        )
+                        .clicked()
+                        {
+                            mask.adjustments.reset();
+                            adjustments_changed = true;
+                        }
+                    });
                 });
-            });
-            ui.add_space(4.0);
+                ui.add_space(4.0);
 
-            for (section, label, default_open) in [
-                (MaskSection::Light, "Light", true),
-                (MaskSection::ToneCurve, "Tone Curve", false),
-                (MaskSection::Color, "Color", false),
-                (MaskSection::ColorGrading, "Color Grading", false),
-                (MaskSection::Effects, "Effects", false),
-                (MaskSection::ColorMixer, "Color Mixer", false),
-            ] {
-                Self::adjustment_section(ui, label, default_open, true, |ui| {
-                    let (section_changed, _) = Self::show_local_mask_adjustment_section(
-                        ui,
-                        &mut mask.adjustments,
-                        section,
-                        &mut local_curve_tab,
-                        &mut local_color_grade_tab,
-                        &mut local_hsl_mixer_color,
-                    );
-                    adjustments_changed |= section_changed;
-                });
+                for (section, label, default_open) in [
+                    (MaskSection::Light, "Light", true),
+                    (MaskSection::ToneCurve, "Tone Curve", false),
+                    (MaskSection::Color, "Color", false),
+                    (MaskSection::ColorGrading, "Color Grading", false),
+                    (MaskSection::Effects, "Effects", false),
+                    (MaskSection::ColorMixer, "Color Mixer", false),
+                ] {
+                    Self::adjustment_section(ui, label, default_open, true, |ui| {
+                        let (section_changed, _) = Self::show_local_mask_adjustment_section(
+                            ui,
+                            &mut mask.adjustments,
+                            section,
+                            &mut local_curve_tab,
+                            &mut local_color_grade_tab,
+                            &mut local_hsl_mixer_color,
+                        );
+                        adjustments_changed |= section_changed;
+                    });
+                }
+            } else if mask.effect == MaskEffect::Glow {
+                adjustments_changed |=
+                    mask_effects::glow::show(ui, &mut mask.effect_settings.glow);
+            } else if mask.effect == MaskEffect::Neon {
+                adjustments_changed |=
+                    mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
+            } else {
+                Self::show_mask_effect_placeholder(ui, mask.effect);
             }
         }
 
@@ -1370,7 +1385,10 @@ impl Sidebar {
         }
         }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
-        if adjustments_changed {
+        if effect_changed {
+            app.mask_section = MaskSection::Properties;
+        }
+        if adjustments_changed || effect_changed {
             app.mark_mask_adjustments_dirty();
         }
     }
@@ -1390,6 +1408,14 @@ impl Sidebar {
         );
         ui.add_space(5.0);
 
+        if app
+            .masks
+            .masks
+            .get(mask_index)
+            .is_some_and(|mask| !mask.effect.uses_adjustments())
+        {
+            app.mask_section = MaskSection::Properties;
+        }
         let mask_section = app.mask_section;
         let component_index = app.masks.selected_component.unwrap_or(0).min(
             app.masks.masks[mask_index]
@@ -1401,6 +1427,7 @@ impl Sidebar {
 
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
+        let mut effect_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
         let mut brush_mode = app.brush_mode;
@@ -1425,6 +1452,9 @@ impl Sidebar {
 
         {
             let mask = &mut app.masks.masks[mask_index];
+            effect_changed |= Self::show_mask_effect_picker(ui, &mut mask.effect);
+            ui.add_space(crate::ui::theme::CARD_GAP);
+
             let section_title = match mask_section {
                 MaskSection::Properties => "Mask Properties",
                 MaskSection::Light => "Light",
@@ -1434,62 +1464,95 @@ impl Sidebar {
                 MaskSection::Effects => "Effects",
                 MaskSection::ColorMixer => "Color Mixer",
             };
-            crate::ui::theme::toolbar_row(ui, |ui| {
-                ui.strong(section_title);
-                if mask_section != MaskSection::Properties {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::ui::icons::phosphor_icon_button(
-                            ui,
-                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                            crate::ui::theme::toolbar_icon_size(),
-                            "Reset local adjustments",
-                        )
-                        .clicked()
-                        {
-                            mask.adjustments.reset();
-                            adjustments_changed = true;
-                        }
-                    });
-                }
-            });
-            ui.add_space(4.0);
+            if mask.effect.uses_adjustments() {
+                crate::ui::theme::toolbar_row(ui, |ui| {
+                    ui.strong(section_title);
+                    if mask_section != MaskSection::Properties {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::ui::icons::phosphor_icon_button(
+                                ui,
+                                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                crate::ui::theme::toolbar_icon_size(),
+                                "Reset local adjustments",
+                            )
+                            .clicked()
+                            {
+                                mask.adjustments.reset();
+                                adjustments_changed = true;
+                            }
+                        });
+                    }
+                });
+                ui.add_space(4.0);
 
-            match mask_section {
-                MaskSection::Properties => {
-                    Self::adjustment_section(ui, "Mask Properties", true, false, |ui| {
-                        geometry_changed |= Self::show_vertical_mask_properties(
-                            ui,
-                            mask,
-                            component_index,
-                            &mut brush_mode,
-                            (
-                                &mut request_subject,
-                                birefnet_quality,
-                                birefnet_quality_change_enabled,
-                            ),
-                            (
-                                &mut refinement_active,
-                                &mut refinement_size,
-                                &mut refinement_feather,
-                                &mut refinement_flow,
-                                &mut clear_refinement,
-                            ),
-                            &mut request_object,
-                        );
-                    });
+                match mask_section {
+                    MaskSection::Properties => {
+                        Self::adjustment_section(ui, "Mask Properties", true, false, |ui| {
+                            geometry_changed |= Self::show_vertical_mask_properties(
+                                ui,
+                                mask,
+                                component_index,
+                                &mut brush_mode,
+                                (
+                                    &mut request_subject,
+                                    birefnet_quality,
+                                    birefnet_quality_change_enabled,
+                                ),
+                                (
+                                    &mut refinement_active,
+                                    &mut refinement_size,
+                                    &mut refinement_feather,
+                                    &mut refinement_flow,
+                                    &mut clear_refinement,
+                                ),
+                                &mut request_object,
+                            );
+                        });
+                    }
+                    section => {
+                        Self::adjustment_section(ui, section_title, true, false, |ui| {
+                            let (section_changed, _) = Self::show_local_mask_adjustment_section(
+                                ui,
+                                &mut mask.adjustments,
+                                section,
+                                &mut local_curve_tab,
+                                &mut local_color_grade_tab,
+                                &mut local_hsl_mixer_color,
+                            );
+                            adjustments_changed |= section_changed;
+                        });
+                    }
                 }
-                section => {
-                    Self::adjustment_section(ui, section_title, true, false, |ui| {
-                        let (section_changed, _) = Self::show_local_mask_adjustment_section(
-                            ui,
-                            &mut mask.adjustments,
-                            section,
-                            &mut local_curve_tab,
-                            &mut local_color_grade_tab,
-                            &mut local_hsl_mixer_color,
-                        );
-                        adjustments_changed |= section_changed;
-                    });
+            } else {
+                Self::adjustment_section(ui, "Mask Properties", true, false, |ui| {
+                    geometry_changed |= Self::show_vertical_mask_properties(
+                        ui,
+                        mask,
+                        component_index,
+                        &mut brush_mode,
+                        (
+                            &mut request_subject,
+                            birefnet_quality,
+                            birefnet_quality_change_enabled,
+                        ),
+                        (
+                            &mut refinement_active,
+                            &mut refinement_size,
+                            &mut refinement_feather,
+                            &mut refinement_flow,
+                            &mut clear_refinement,
+                        ),
+                        &mut request_object,
+                    );
+                });
+                if mask.effect == MaskEffect::Glow {
+                    adjustments_changed |=
+                        mask_effects::glow::show(ui, &mut mask.effect_settings.glow);
+                } else if mask.effect == MaskEffect::Neon {
+                    adjustments_changed |=
+                        mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
+                } else {
+                    Self::show_mask_effect_placeholder(ui, mask.effect);
                 }
             }
         }
@@ -1519,9 +1582,72 @@ impl Sidebar {
         }
         }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
-        if adjustments_changed {
+        if effect_changed {
+            app.mask_section = MaskSection::Properties;
+        }
+        if adjustments_changed || effect_changed {
             app.mark_mask_adjustments_dirty();
         }
+    }
+
+    fn show_mask_effect_picker(ui: &mut Ui, effect: &mut MaskEffect) -> bool {
+        let before = *effect;
+        crate::ui::theme::section_card(ui, "Mask type", |ui| {
+            ui.add_space(4.0);
+            let button = egui::Button::new(effect.label())
+                .right_text(egui_phosphor::regular::CARET_DOWN)
+                .min_size(egui::vec2(ui.available_width(), crate::ui::theme::CONTROL_HEIGHT));
+            egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+                ui.set_min_width(190.0);
+                if ui
+                    .selectable_label(*effect == MaskEffect::Adjustment, "Adjustment")
+                    .on_hover_text("Use the mask with the existing local adjustment controls.")
+                    .clicked()
+                {
+                    *effect = MaskEffect::Adjustment;
+                    ui.close();
+                }
+
+                ui.separator();
+                for category in MaskEffectCategory::ALL {
+                    ui.menu_button(category.label(), |ui| {
+                        ui.set_min_width(180.0);
+                        for candidate in MaskEffect::ALL {
+                            if candidate.category() != Some(category) {
+                                continue;
+                            }
+                            let implemented = candidate.is_implemented();
+                            let response = ui
+                                .add_enabled(
+                                    implemented,
+                                    egui::Button::selectable(
+                                        *effect == candidate,
+                                        candidate.label(),
+                                    ),
+                                )
+                                .on_disabled_hover_text("This effect is not implemented yet.");
+                            if response.clicked() {
+                                *effect = candidate;
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+            });
+        });
+        before != *effect
+    }
+
+    fn show_mask_effect_placeholder(ui: &mut Ui, effect: MaskEffect) {
+        Self::adjustment_section(ui, effect.label(), true, false, |ui| {
+            ui.label(egui::RichText::new("Placeholder").strong());
+            ui.label(format!(
+                "{} is saved as this mask's type, but its image-processing controls are not implemented yet.",
+                effect.label()
+            ));
+            ui.add_space(3.0);
+            ui.weak("You can keep editing the mask coverage or switch back to Adjustment without losing its local adjustments.");
+        });
     }
 
     fn apply_mask_geometry_change(ui: &Ui, app: &mut AurawApp, mask_index: usize, changed: bool) {
@@ -1561,7 +1687,7 @@ impl Sidebar {
             0.0..=1.0,
             2,
             0.01,
-            Some("Controls the strength of the entire mask before local adjustments."),
+            Some("Controls the strength of the entire mask before its selected type is applied."),
         );
 
         let Some(component) = mask.components.get_mut(component_index) else {
@@ -1592,6 +1718,9 @@ impl Sidebar {
             });
 
             match &mut component.geometry {
+                MaskGeometry::Fullscreen => {
+                    ui.label("Covers the complete image with uniform mask strength.");
+                }
                 MaskGeometry::Brush {
                     size,
                     feather,

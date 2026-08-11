@@ -72,12 +72,10 @@ fn selected_picker_directory(path: &std::path::Path) -> Option<std::path::PathBu
     }
 }
 
-#[cfg(any(target_os = "android", test))]
 fn gpu_preview_prewarm_cfa_kind() -> crate::pipeline::CfaKind {
     crate::pipeline::CfaKind::Bayer
 }
 
-#[cfg(target_os = "android")]
 fn spawn_gpu_preview_prewarm(
     cc: &eframe::CreationContext<'_>,
     cache_root: Option<std::path::PathBuf>,
@@ -289,6 +287,8 @@ impl AurawApp {
             gpu_pipeline: None,
             preview_program_template: None,
             retired_egui_textures: Vec::new(),
+            gpu_preview_prewarm_receiver: None,
+            gpu_export_prewarm: None,
             preview_quality: performance.preview_quality,
             image_relative_brush_size: performance.image_relative_brush_size,
             preview_zoom: 1.0,
@@ -525,9 +525,21 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            auraw_gpu::install_uncaptured_gpu_error_handler(&render_state.device);
+        }
         crate::ui::theme::install(&cc.egui_ctx);
         crate::diagnostics::record("AuRaw desktop UI initialized");
-        Self::empty(&cc.egui_ctx)
+        let gpu_export_prewarm = Arc::new(crate::pipeline::GpuProgramPrewarm::new());
+        let gpu_preview_prewarm_receiver = spawn_gpu_preview_prewarm(
+            cc,
+            Some(crate::thumbnail_cache::desktop_app_cache_root()),
+            Arc::clone(&gpu_export_prewarm),
+        );
+        let mut app = Self::empty(&cc.egui_ctx);
+        app.gpu_preview_prewarm_receiver = gpu_preview_prewarm_receiver;
+        app.gpu_export_prewarm = Some(gpu_export_prewarm);
+        app
     }
 
     #[cfg(target_os = "android")]
@@ -535,6 +547,9 @@ impl AurawApp {
         cc: &eframe::CreationContext<'_>,
         android_app: auraw_ffi::AndroidApp,
     ) -> Self {
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            auraw_gpu::install_uncaptured_gpu_error_handler(&render_state.device);
+        }
         crate::android::install_context(&cc.egui_ctx);
         // Share AuRaw's palette, typography, icon font, and widget styling with
         crate::ui::theme::install(&cc.egui_ctx);
@@ -2243,7 +2258,6 @@ impl AurawApp {
         let retained_preview_program_template = self.preview_program_template.clone();
         #[cfg(target_os = "android")]
         let export_active_while_opening = self.export_receiver.is_some();
-        #[cfg(target_os = "android")]
         let startup_gpu_prewarm_receiver = self.gpu_preview_prewarm_receiver.take();
         self.original_raw = None;
         self.loaded_raw = None;
@@ -2715,9 +2729,7 @@ impl AurawApp {
                     // surfaces on every platform. Full-float remains mandatory
                     // for regression rendering and tiled export readback.
                     let preview_quality = ProcessingQuality::Preview;
-                    #[cfg(target_os = "android")]
                     let mut startup_gpu_prewarm_template = None;
-                    #[cfg(target_os = "android")]
                     if reusable_preview_pipeline.is_none()
                         && retained_preview_program_template.is_none()
                     {
@@ -2743,16 +2755,9 @@ impl AurawApp {
                         .map(RawGpuPipeline::program_template)
                         .or(retained_preview_program_template)
                         .or_else(|| {
-                            #[cfg(target_os = "android")]
-                            {
-                                startup_gpu_prewarm_template
-                                    .as_ref()
-                                    .map(RawGpuPipeline::program_template)
-                            }
-                            #[cfg(not(target_os = "android"))]
-                            {
-                                None
-                            }
+                            startup_gpu_prewarm_template
+                                .as_ref()
+                                .map(RawGpuPipeline::program_template)
                         });
                     let pipeline_started = Instant::now();
                     let pipeline = if let Some(template) = reusable_program_template.as_ref() {
@@ -2803,7 +2808,6 @@ impl AurawApp {
                     // Program handles have been cloned into `pipeline`; release the old
                     // preview textures before doing any readback from the new preview.
                     drop(reusable_preview_pipeline);
-                    #[cfg(target_os = "android")]
                     drop(startup_gpu_prewarm_template);
 
                     let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);

@@ -244,7 +244,7 @@ impl AurawApp {
 
     pub(crate) fn activate_mask_tool(&mut self, kind: MaskKind) {
         self.finish_mask_geometry_interaction();
-        self.active_mask_tool = kind.is_available().then_some(kind);
+        self.active_mask_tool = (kind.is_available() && kind != MaskKind::Fullscreen).then_some(kind);
         self.mask_drag = None;
         self.last_brush_point = None;
         self.mask_touch_gesture_backup = None;
@@ -258,7 +258,7 @@ impl AurawApp {
 
     pub(crate) fn select_mask_tool(&mut self, kind: MaskKind) {
         self.finish_mask_geometry_interaction();
-        self.active_mask_tool = kind.is_available().then_some(kind);
+        self.active_mask_tool = (kind.is_available() && kind != MaskKind::Fullscreen).then_some(kind);
         self.mask_drag = None;
         self.last_brush_point = None;
         self.mask_touch_gesture_backup = None;
