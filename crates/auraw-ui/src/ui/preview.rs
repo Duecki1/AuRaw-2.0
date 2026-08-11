@@ -5,8 +5,9 @@ use crate::app::{
     SidebarTab, StraightenDragState,
 };
 use crate::pipeline::{
-    rasterize_inpaint_dabs_binary, BrushDab, BrushMode, GeometryTransform, LensGeometryMap,
-    MaskCombineMode, MaskGeometry, MaskKind, ObjectStroke,
+    rasterize_brush_dabs, rasterize_inpaint_dabs_binary, BrushDab, BrushMode, GeometryTransform,
+    InpaintStrokeKind, LensGeometryMap, MaskCombineMode, MaskGeometry, MaskKind, MaskRgbImage,
+    ObjectStroke,
 };
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui};
@@ -1027,14 +1028,56 @@ impl Preview {
         let pointer = response
             .interact_pointer_pos()
             .filter(|position| preview_rect.contains(*position));
-        let (primary_is_down, primary_released) = ui.input(|input| {
+        let (primary_is_down, primary_released, alt_down) = ui.input(|input| {
             (
                 input.pointer.primary_down(),
                 input.pointer.primary_released(),
+                input.modifiers.alt,
             )
         });
         let primary_down =
             pointer.is_some() && response.is_pointer_button_down_on() && primary_is_down;
+        if app.inpaint_busy() {
+            return;
+        }
+
+        if app.inpaint_tool.requires_source()
+            && (app.inpaint_source_pick_active || (alt_down && primary_down))
+        {
+            if alt_down && primary_down {
+                app.inpaint_source_pick_active = true;
+            }
+            app.inpaint_stroke.clear();
+            app.last_inpaint_brush_point = None;
+            app.inpaint_stroke_texture = None;
+            app.inpaint_stroke_texture_key = None;
+            if primary_down {
+                if let Some(pointer) = pointer {
+                    let source_uv = final_geometry_screen_to_native_source(
+                        image_rect,
+                        app.geometry,
+                        lens_geometry.as_deref(),
+                        source_width,
+                        source_height,
+                        pointer,
+                    );
+                    if let Some(uv) = editable_source_uv(source_uv) {
+                        app.inpaint_source_anchor = Some(uv);
+                        app.inpaint_source_offset = None;
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+            if primary_released {
+                app.inpaint_source_pick_active = false;
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
+        if app.inpaint_tool.requires_source() && app.inpaint_source_anchor.is_none() {
+            app.inpaint_source_pick_active = true;
+            return;
+        }
         if !primary_down {
             if primary_released {
                 // `last_inpaint_brush_point` is intentionally cleared when a
@@ -1051,9 +1094,6 @@ impl Preview {
                 // never jumps across hidden/pasteboard space.
                 app.last_inpaint_brush_point = None;
             }
-            return;
-        }
-        if app.inpaint_busy() {
             return;
         }
         let Some(pointer) = pointer else {
@@ -1078,6 +1118,7 @@ impl Preview {
             return;
         };
 
+        let starting_stroke = app.inpaint_stroke.is_empty();
         let first_dab = app.last_inpaint_brush_point.is_none();
         let previous = app.last_inpaint_brush_point.unwrap_or(uv);
         let previous_screen = final_geometry_native_source_to_screen(
@@ -1107,6 +1148,14 @@ impl Preview {
         let mut changed = false;
         if first_dab {
             if app.inpaint_stroke.len() < 8192 {
+                if starting_stroke && app.inpaint_tool.requires_source() {
+                    if app.inpaint_source_offset.is_none() {
+                        app.inpaint_source_offset = app
+                            .inpaint_source_anchor
+                            .map(|source| [source[0] - uv[0], source[1] - uv[1]]);
+                    }
+                    app.prepare_live_retouch_preview(frame);
+                }
                 app.inpaint_stroke.push(BrushDab {
                     center: uv,
                     opacity: 1.0,
@@ -1254,11 +1303,49 @@ impl Preview {
                     painter.text(
                         bounds.left_top() + egui::vec2(4.0, -6.0),
                         egui::Align2::LEFT_BOTTOM,
-                        format!("Stroke {}", index + 1),
+                        format!("{} {}", app.inpaint_strokes[index].kind.label(), index + 1),
                         egui::FontId::proportional(11.0),
                         color,
                     );
                 }
+            }
+            let stroke = &app.inpaint_strokes[index];
+            if let (Some(first_dab), Some(offset)) = (stroke.dabs.first(), stroke.source_offset) {
+                let source_uv = [
+                    first_dab.center[0] + offset[0],
+                    first_dab.center[1] + offset[1],
+                ];
+                let destination_screen = final_geometry_native_source_to_screen(
+                    image_rect,
+                    app.geometry,
+                    lens_geometry.as_deref(),
+                    source_width,
+                    source_height,
+                    first_dab.center,
+                );
+                let source_screen = final_geometry_native_source_to_screen(
+                    image_rect,
+                    app.geometry,
+                    lens_geometry.as_deref(),
+                    source_width,
+                    source_height,
+                    source_uv,
+                );
+                painter.line_segment(
+                    [destination_screen, source_screen],
+                    Stroke::new(1.0, Color32::from_rgb(95, 225, 155)),
+                );
+                paint_retouch_source_marker(
+                    &painter,
+                    image_rect,
+                    app.geometry,
+                    lens_geometry.as_deref(),
+                    source_width,
+                    source_height,
+                    source_uv,
+                    first_dab.size,
+                    "Source",
+                );
             }
         }
 
@@ -1266,26 +1353,57 @@ impl Preview {
             if app.gpu_pipeline.is_none() {
                 return;
             }
-            let region = overlay_raster_region(
+            let region = inpaint_live_overlay_region(
+                &app.inpaint_stroke,
                 app.preview_visible_uv,
                 source_width,
                 source_height,
                 preview_rect,
                 physical_pixels_per_point(ui.ctx()),
-                2,
             );
             let key = (app.inpaint_stroke.len(), region);
             if app.inpaint_stroke_texture_key != Some(key) {
                 let dabs =
                     crop_overlay_dabs(&app.inpaint_stroke, region, source_width, source_height);
-                let coverage = rasterize_inpaint_dabs_binary(
-                    region.texture_width,
-                    region.texture_height,
-                    region.source_width,
-                    region.source_height,
-                    &dabs,
-                );
-                let rgba = coverage_rgba(coverage, Color32::from_rgb(255, 94, 94));
+                let rgba = if app.inpaint_tool.requires_source() {
+                    let coverage = rasterize_brush_dabs(
+                        region.texture_width,
+                        region.texture_height,
+                        region.source_width,
+                        region.source_height,
+                        &dabs,
+                    );
+                    app.live_retouch_preview()
+                        .and_then(|source| {
+                            live_retouch_rgba(
+                                source,
+                                region,
+                                source_width,
+                                source_height,
+                                &app.inpaint_stroke,
+                                &coverage,
+                                app.inpaint_tool,
+                                app.inpaint_source_offset?,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            let color = match app.inpaint_tool {
+                                InpaintStrokeKind::Heal => Color32::from_rgb(75, 205, 145),
+                                InpaintStrokeKind::Clone => Color32::from_rgb(185, 120, 255),
+                                InpaintStrokeKind::Remove => Color32::from_rgb(255, 94, 94),
+                            };
+                            coverage_rgba(coverage, color)
+                        })
+                } else {
+                    let coverage = rasterize_inpaint_dabs_binary(
+                        region.texture_width,
+                        region.texture_height,
+                        region.source_width,
+                        region.source_height,
+                        &dabs,
+                    );
+                    coverage_rgba(coverage, Color32::from_rgb(255, 94, 94))
+                };
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [
                         region.texture_width as usize,
@@ -1335,6 +1453,11 @@ impl Preview {
                 pointer,
             );
             if let Some(uv) = editable_source_uv(source_uv) {
+                let dab_size = zoom_scaled_brush_size(
+                    app.inpaint_brush_size,
+                    app.preview_zoom,
+                    app.image_relative_brush_size,
+                );
                 let outline = brush_outline_geometry_screen_points(
                     image_rect,
                     app.geometry,
@@ -1342,14 +1465,52 @@ impl Preview {
                     source_width,
                     source_height,
                     uv,
-                    zoom_scaled_brush_size(
-                        app.inpaint_brush_size,
-                        app.preview_zoom,
-                        app.image_relative_brush_size,
-                    ),
+                    dab_size,
                     64,
                 );
-                painter.add(Shape::line(outline, Stroke::new(1.5, Color32::WHITE)));
+                let cursor_color = if app.inpaint_source_pick_active {
+                    Color32::from_rgb(95, 225, 155)
+                } else {
+                    Color32::WHITE
+                };
+                painter.add(Shape::line(outline, Stroke::new(1.5, cursor_color)));
+                if app.inpaint_source_pick_active {
+                    painter.text(
+                        pointer + egui::vec2(10.0, 10.0),
+                        egui::Align2::LEFT_TOP,
+                        "Set source",
+                        egui::FontId::proportional(11.0),
+                        cursor_color,
+                    );
+                } else if app.inpaint_tool.requires_source() {
+                    if let Some(anchor) = app.inpaint_source_anchor {
+                        let source_cursor =
+                            aligned_retouch_source_uv(uv, anchor, app.inpaint_source_offset);
+                        let source_screen = final_geometry_native_source_to_screen(
+                            image_rect,
+                            app.geometry,
+                            lens_geometry.as_deref(),
+                            source_width,
+                            source_height,
+                            source_cursor,
+                        );
+                        painter.line_segment(
+                            [pointer, source_screen],
+                            Stroke::new(1.0, Color32::from_rgb(95, 225, 155)),
+                        );
+                        paint_retouch_source_marker(
+                            &painter,
+                            image_rect,
+                            app.geometry,
+                            lens_geometry.as_deref(),
+                            source_width,
+                            source_height,
+                            source_cursor,
+                            dab_size,
+                            "Source",
+                        );
+                    }
+                }
             }
         }
     }
@@ -3326,6 +3487,271 @@ fn overlay_raster_region(
     }
 }
 
+fn inpaint_live_overlay_region(
+    dabs: &[BrushDab],
+    visible: crate::app::PreviewUvRect,
+    source_width: u32,
+    source_height: u32,
+    preview_rect: Rect,
+    pixels_per_point: f32,
+) -> OverlayRasterKey {
+    let viewport = overlay_raster_region(
+        visible,
+        source_width,
+        source_height,
+        preview_rect,
+        pixels_per_point,
+        0,
+    );
+    let image_min = source_width.min(source_height).max(1) as f32;
+    let mut bounds = crate::app::PreviewUvRect {
+        min: [1.0, 1.0],
+        max: [0.0, 0.0],
+    };
+    for dab in dabs {
+        let radius = dab.size.max(0.0) * image_min + 4.0;
+        bounds.min[0] = bounds.min[0].min(dab.center[0] - radius / source_width.max(1) as f32);
+        bounds.min[1] = bounds.min[1].min(dab.center[1] - radius / source_height.max(1) as f32);
+        bounds.max[0] = bounds.max[0].max(dab.center[0] + radius / source_width.max(1) as f32);
+        bounds.max[1] = bounds.max[1].max(dab.center[1] + radius / source_height.max(1) as f32);
+    }
+    bounds.min[0] = bounds.min[0].max(visible.min[0]);
+    bounds.min[1] = bounds.min[1].max(visible.min[1]);
+    bounds.max[0] = bounds.max[0].min(visible.max[0]);
+    bounds.max[1] = bounds.max[1].min(visible.max[1]);
+    if bounds.max[0] <= bounds.min[0] || bounds.max[1] <= bounds.min[1] {
+        return viewport;
+    }
+    let mut region = overlay_raster_region(
+        bounds,
+        source_width,
+        source_height,
+        preview_rect,
+        pixels_per_point,
+        2,
+    );
+    let scale_x = viewport.texture_width as f32 / viewport.source_width.max(1) as f32;
+    let scale_y = viewport.texture_height as f32 / viewport.source_height.max(1) as f32;
+    region.texture_width = (region.source_width as f32 * scale_x).ceil().max(1.0) as u32;
+    region.texture_height = (region.source_height as f32 * scale_y).ceil().max(1.0) as u32;
+    region
+}
+
+fn live_retouch_rgba(
+    source: &MaskRgbImage,
+    region: OverlayRasterKey,
+    full_width: u32,
+    full_height: u32,
+    dabs: &[BrushDab],
+    coverage: &[u8],
+    kind: InpaintStrokeKind,
+    source_offset: [f32; 2],
+) -> Option<Vec<u8>> {
+    if !kind.requires_source() || source.width == 0 || source.height == 0 {
+        return None;
+    }
+    let first = dabs.first()?;
+    let expected = region.texture_width as usize * region.texture_height as usize;
+    if coverage.len() != expected {
+        return None;
+    }
+    let source_anchor = [
+        first.center[0] + source_offset[0],
+        first.center[1] + source_offset[1],
+    ];
+    let color_delta = if kind == InpaintStrokeKind::Heal {
+        let source_average =
+            preview_brush_average(source, source_anchor, first.size, full_width, full_height)?;
+        let destination_average =
+            preview_brush_average(source, first.center, first.size, full_width, full_height)?;
+        std::array::from_fn(|channel| destination_average[channel] - source_average[channel])
+    } else {
+        [0.0; 3]
+    };
+
+    let mut rgba = Vec::with_capacity(expected * 4);
+    for y in 0..region.texture_height {
+        let destination_v = (region.source_y as f32
+            + (y as f32 + 0.5) * region.source_height as f32 / region.texture_height as f32)
+            / full_height.max(1) as f32;
+        for x in 0..region.texture_width {
+            let index = (y * region.texture_width + x) as usize;
+            let destination_u = (region.source_x as f32
+                + (x as f32 + 0.5) * region.source_width as f32 / region.texture_width as f32)
+                / full_width.max(1) as f32;
+            let source_uv = [
+                destination_u + source_offset[0],
+                destination_v + source_offset[1],
+            ];
+            if let Some(sample) = sample_preview_rgb(source, source_uv) {
+                rgba.extend_from_slice(&[
+                    (sample[0] + color_delta[0]).round().clamp(0.0, 255.0) as u8,
+                    (sample[1] + color_delta[1]).round().clamp(0.0, 255.0) as u8,
+                    (sample[2] + color_delta[2]).round().clamp(0.0, 255.0) as u8,
+                    coverage[index],
+                ]);
+            } else {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+    Some(rgba)
+}
+
+fn aligned_retouch_source_uv(
+    destination: [f32; 2],
+    source_anchor: [f32; 2],
+    source_offset: Option<[f32; 2]>,
+) -> [f32; 2] {
+    source_offset.map_or(source_anchor, |offset| {
+        [destination[0] + offset[0], destination[1] + offset[1]]
+    })
+}
+
+fn preview_brush_average(
+    source: &MaskRgbImage,
+    center: [f32; 2],
+    brush_size: f32,
+    full_width: u32,
+    full_height: u32,
+) -> Option<[f32; 3]> {
+    let image_min = full_width.min(full_height).max(1) as f32;
+    let radius = brush_size.max(0.0) * image_min;
+    let radius_uv = [
+        radius / full_width.max(1) as f32,
+        radius / full_height.max(1) as f32,
+    ];
+    let mut sum = [0.0f32; 3];
+    let mut count = 0.0f32;
+    for grid_y in -3i32..=3 {
+        for grid_x in -3i32..=3 {
+            if grid_x * grid_x + grid_y * grid_y > 9 {
+                continue;
+            }
+            let uv = [
+                center[0] + grid_x as f32 / 3.0 * radius_uv[0] * 0.75,
+                center[1] + grid_y as f32 / 3.0 * radius_uv[1] * 0.75,
+            ];
+            if let Some(sample) = sample_preview_rgb(source, uv) {
+                for channel in 0..3 {
+                    sum[channel] += sample[channel];
+                }
+                count += 1.0;
+            }
+        }
+    }
+    (count > 0.0).then(|| sum.map(|value| value / count))
+}
+
+fn sample_preview_rgb(source: &MaskRgbImage, uv: [f32; 2]) -> Option<[f32; 3]> {
+    if source.width == 0
+        || source.height == 0
+        || source.rgba.len() != source.width as usize * source.height as usize * 4
+        || !uv.iter().all(|value| value.is_finite())
+        || uv[0] < 0.0
+        || uv[0] > 1.0
+        || uv[1] < 0.0
+        || uv[1] > 1.0
+    {
+        return None;
+    }
+    let x = (uv[0] * source.width as f32 - 0.5).clamp(0.0, source.width.saturating_sub(1) as f32);
+    let y = (uv[1] * source.height as f32 - 0.5).clamp(0.0, source.height.saturating_sub(1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(source.width - 1);
+    let y1 = (y0 + 1).min(source.height - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let sample = |sample_x: u32, sample_y: u32, channel: usize| {
+        source.rgba[((sample_y * source.width + sample_x) * 4) as usize + channel] as f32
+    };
+    Some(std::array::from_fn(|channel| {
+        let top =
+            sample(x0, y0, channel) + (sample(x1, y0, channel) - sample(x0, y0, channel)) * tx;
+        let bottom =
+            sample(x0, y1, channel) + (sample(x1, y1, channel) - sample(x0, y1, channel)) * tx;
+        top + (bottom - top) * ty
+    }))
+}
+
+#[cfg(test)]
+mod live_retouch_preview_tests {
+    use super::*;
+
+    #[test]
+    fn clone_preview_samples_the_offset_source_while_dragging() {
+        let mut rgba = Vec::new();
+        for _y in 0..2 {
+            for x in 0..4u8 {
+                rgba.extend_from_slice(&[x * 10, 0, 0, 255]);
+            }
+        }
+        let source = MaskRgbImage::new(4, 2, rgba).unwrap();
+        let region = OverlayRasterKey {
+            source_x: 0,
+            source_y: 0,
+            source_width: 4,
+            source_height: 2,
+            texture_width: 4,
+            texture_height: 2,
+        };
+        let dabs = [BrushDab {
+            center: [0.25, 0.5],
+            opacity: 1.0,
+            size: 0.2,
+            feather: 0.0,
+        }];
+        let preview = live_retouch_rgba(
+            &source,
+            region,
+            4,
+            2,
+            &dabs,
+            &[255; 8],
+            InpaintStrokeKind::Clone,
+            [0.5, 0.0],
+        )
+        .unwrap();
+        assert_eq!(&preview[0..4], &[20, 0, 0, 255]);
+        assert_eq!(&preview[12..16], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn aligned_source_marker_follows_the_idle_brush() {
+        let offset = Some([-0.2, 0.1]);
+        let first = aligned_retouch_source_uv([0.6, 0.3], [0.1, 0.1], offset);
+        let second = aligned_retouch_source_uv([0.8, 0.6], [0.1, 0.1], offset);
+        assert!((first[0] - 0.4).abs() < 1e-6 && (first[1] - 0.4).abs() < 1e-6);
+        assert!((second[0] - 0.6).abs() < 1e-6 && (second[1] - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn live_overlay_raster_is_limited_to_the_active_stroke() {
+        let dabs = [BrushDab {
+            center: [0.5, 0.5],
+            opacity: 1.0,
+            size: 0.02,
+            feather: 0.0,
+        }];
+        let region = inpaint_live_overlay_region(
+            &dabs,
+            crate::app::PreviewUvRect {
+                min: [0.0, 0.0],
+                max: [1.0, 1.0],
+            },
+            1000,
+            1000,
+            Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 1000.0)),
+            1.0,
+        );
+        assert!(region.source_width < 64);
+        assert!(region.source_height < 64);
+        assert!(region.texture_width < 64);
+        assert!(region.texture_height < 64);
+    }
+}
+
 fn overlay_source_uv(region: OverlayRasterKey, source_width: u32, source_height: u32) -> [f32; 4] {
     let width = source_width.max(1) as f32;
     let height = source_height.max(1) as f32;
@@ -4524,6 +4950,58 @@ fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32, image_relative: boo
     } else {
         tool_size / preview_zoom.max(MIN_PREVIEW_ZOOM)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_retouch_source_marker(
+    painter: &egui::Painter,
+    image_rect: Rect,
+    geometry: GeometryTransform,
+    lens_geometry: Option<&LensGeometryMap>,
+    source_width: u32,
+    source_height: u32,
+    source_uv: [f32; 2],
+    brush_size: f32,
+    label: &str,
+) {
+    if !source_uv.iter().all(|value| value.is_finite()) {
+        return;
+    }
+    let outline = brush_outline_geometry_screen_points(
+        image_rect,
+        geometry,
+        lens_geometry,
+        source_width,
+        source_height,
+        source_uv,
+        brush_size,
+        64,
+    );
+    let color = Color32::from_rgb(95, 225, 155);
+    painter.add(Shape::line(outline, Stroke::new(1.5, color)));
+    let center = final_geometry_native_source_to_screen(
+        image_rect,
+        geometry,
+        lens_geometry,
+        source_width,
+        source_height,
+        source_uv,
+    );
+    painter.line_segment(
+        [center - egui::vec2(5.0, 0.0), center + egui::vec2(5.0, 0.0)],
+        Stroke::new(1.2, color),
+    );
+    painter.line_segment(
+        [center - egui::vec2(0.0, 5.0), center + egui::vec2(0.0, 5.0)],
+        Stroke::new(1.2, color),
+    );
+    painter.text(
+        center + egui::vec2(7.0, -7.0),
+        egui::Align2::LEFT_BOTTOM,
+        label,
+        egui::FontId::proportional(10.0),
+        color,
+    );
 }
 
 fn inpaint_stroke_geometry_screen_bounds(
