@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 8;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 9;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0004;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
@@ -151,7 +151,10 @@ pub fn default_edit_state() -> EditState {
 }
 
 fn is_manual_mask_kind(kind: MaskKind) -> bool {
-    matches!(kind, MaskKind::Brush | MaskKind::Radial | MaskKind::Linear)
+    matches!(
+        kind,
+        MaskKind::Brush | MaskKind::Fullscreen | MaskKind::Radial | MaskKind::Linear
+    )
 }
 
 fn filtered_mask_stack(masks: &MaskStack, include_manual: bool, include_ai: bool) -> MaskStack {
@@ -1032,8 +1035,9 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     // Schema 5 introduced extracted PNG mask assets. Schema 6 kept that layout
     // and changed inpainting binary fields to lossless compressed Base64
     // strings. Schema 7 adds the optional shared Subject refinement field;
-    // schema 8 adds the defaulted mask-effect selector. Serde defaults keep
-    // every earlier sidecar backward-compatible.
+    // schema 8 adds the defaulted mask-effect selector; schema 9 adds the
+    // Fullscreen mask geometry. Serde defaults keep every earlier sidecar
+    // backward-compatible.
     if original_schema >= 5 {
         restore_mask_assets(
             &mut document.edits,
@@ -1845,7 +1849,8 @@ fn base64_json_string_bytes(byte_count: usize) -> Result<u64, SidecarError> {
 fn geometry_matches_kind(kind: MaskKind, geometry: &MaskGeometry) -> bool {
     matches!(
         (kind, geometry),
-        (MaskKind::Brush, MaskGeometry::Brush { .. })
+        (MaskKind::Fullscreen, MaskGeometry::Fullscreen)
+            | (MaskKind::Brush, MaskGeometry::Brush { .. })
             | (MaskKind::Radial, MaskGeometry::Radial { .. })
             | (MaskKind::Linear, MaskGeometry::Linear { .. })
             | (
@@ -2345,6 +2350,25 @@ mod tests {
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits, edits);
         assert!(!loaded.migrated);
+    }
+
+    #[test]
+    fn fullscreen_effect_mask_round_trips_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        masks.masks.last_mut().unwrap().effect = crate::pipeline::MaskEffect::Cartoon;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let fullscreen = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(fullscreen.components[0].kind, MaskKind::Fullscreen);
+        assert!(matches!(
+            fullscreen.components[0].geometry,
+            MaskGeometry::Fullscreen
+        ));
+        assert_eq!(fullscreen.effect, crate::pipeline::MaskEffect::Cartoon);
     }
 
     #[test]
