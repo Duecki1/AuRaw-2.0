@@ -157,22 +157,6 @@ pub(crate) enum LibraryView {
     Cloud,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(any(target_os = "android", test))]
-enum TouchThumbnailAction {
-    Open,
-    SelectionChanged { back_navigation_active: bool },
-}
-
-#[cfg(any(not(target_os = "android"), test))]
-fn desktop_selection_toggle_label(selection_mode: bool) -> &'static str {
-    if selection_mode {
-        "Cancel"
-    } else {
-        "Select"
-    }
-}
-
 fn library_import_fab_rect(bounds: egui::Rect) -> egui::Rect {
     crate::ui::theme::floating_action_rect(bounds)
 }
@@ -582,7 +566,7 @@ enum CloudDeleteTarget {
 }
 
 #[derive(Clone, Debug)]
-enum CloudLibraryCardAction {
+pub(crate) enum CloudLibraryCardAction {
     Export(Vec<crate::cloud::CloudAsset>),
     CopyAdjustments(crate::cloud::CloudAsset),
     PasteAdjustments(Vec<crate::cloud::CloudAsset>),
@@ -2660,33 +2644,15 @@ impl LibraryState {
     }
 
     #[cfg(any(target_os = "android", test))]
-    fn handle_touch_thumbnail_activation(
-        &mut self,
-        source: &LibrarySource,
-        secondary_clicked: bool,
-    ) -> TouchThumbnailAction {
-        if secondary_clicked {
-            self.begin_selection();
-            self.selected_sources.insert(source.clone());
-            return TouchThumbnailAction::SelectionChanged {
-                back_navigation_active: true,
-            };
-        }
-
-        if !self.selection_mode() {
-            return TouchThumbnailAction::Open;
-        }
-
+    fn toggle_thumbnail_selection(&mut self, source: &LibrarySource) -> bool {
+        self.begin_selection();
         if !self.selected_sources.remove(source) {
             self.selected_sources.insert(source.clone());
         }
         if self.selected_sources.is_empty() {
             self.clear_selection();
         }
-
-        TouchThumbnailAction::SelectionChanged {
-            back_navigation_active: self.selection_mode(),
-        }
+        self.selection_mode()
     }
 
     #[cfg(not(target_os = "android"))]
@@ -5033,7 +4999,7 @@ fn catalog_status(warning_count: usize, truncated: bool) -> String {
     notices.join(" · ")
 }
 
-fn cloud_image_context_menu(
+pub(crate) fn cloud_image_context_menu(
     ui: &mut Ui,
     app: &AurawApp,
     assets: &[crate::cloud::CloudAsset],
@@ -5201,7 +5167,7 @@ fn detach_current_cloud_asset_if_inside_folder(app: &mut AurawApp, folder_id: &s
     }
 }
 
-fn apply_cloud_image_action(
+pub(crate) fn apply_cloud_image_action(
     app: &mut AurawApp,
     action: CloudLibraryCardAction,
     context: &egui::Context,
@@ -9410,8 +9376,6 @@ impl Library {
             let desktop_selection_mode = app.library.selection_mode();
             #[cfg(not(target_os = "android"))]
             let desktop_selection_count = app.library.selected_sources.len();
-            #[cfg(not(target_os = "android"))]
-            let desktop_selection_available = true;
 
             #[cfg(not(target_os = "android"))]
             if app.library.cloud_trash_open {
@@ -9485,21 +9449,14 @@ impl Library {
                             ui.set_min_width(220.0);
                             #[cfg(not(target_os = "android"))]
                             {
-                                if desktop_selection_available
-                                    && ui
-                                        .button(desktop_selection_toggle_label(
-                                            desktop_selection_mode,
-                                        ))
-                                        .clicked()
+                                if desktop_selection_mode && ui.button("Cancel selection").clicked()
                                 {
-                                    if desktop_selection_mode {
-                                        app.library.clear_selection();
-                                    } else {
-                                        app.library.begin_selection();
-                                    }
+                                    app.library.clear_selection();
                                     ui.close();
                                 }
-                                ui.separator();
+                                if desktop_selection_mode {
+                                    ui.separator();
+                                }
                             }
 
                             ui.strong("Thumbnail size");
@@ -9525,19 +9482,10 @@ impl Library {
                     .on_hover_text("Library view options");
                 } else {
                     #[cfg(not(target_os = "android"))]
-                    if desktop_selection_available
-                        && crate::ui::theme::toolbar_button(
-                            ui,
-                            desktop_selection_toggle_label(desktop_selection_mode),
-                            76.0,
-                        )
-                        .clicked()
+                    if desktop_selection_mode
+                        && crate::ui::theme::toolbar_button(ui, "Cancel", 76.0).clicked()
                     {
-                        if desktop_selection_mode {
-                            app.library.clear_selection();
-                        } else {
-                            app.library.begin_selection();
-                        }
+                        app.library.clear_selection();
                     }
 
                     egui::ComboBox::from_id_salt("library-sort-order")
@@ -9713,24 +9661,22 @@ impl Library {
 
                         #[cfg(target_os = "android")]
                         {
-                            // egui maps a touch long-press to a secondary click. Enter
-                            // selection mode instead of opening a per-thumbnail menu.
-                            if response.secondary_clicked() || response.clicked() {
-                                match app.library.handle_touch_thumbnail_activation(
-                                    &source,
-                                    response.secondary_clicked(),
-                                ) {
-                                    TouchThumbnailAction::Open => {
-                                        open_source = Some((source.clone(), name.clone()));
-                                    }
-                                    TouchThumbnailAction::SelectionChanged {
-                                        back_navigation_active,
-                                    } => {
-                                        crate::android::set_back_navigation_active(
-                                            back_navigation_active,
-                                        );
-                                    }
-                                }
+                            let checkbox =
+                                thumbnail_selection_checkbox(ui, entry, item_rect, selected);
+                            // The checkbox and thumbnail deliberately overlap. Some input
+                            // backends award the primary click to the larger thumbnail
+                            // response, so also route a thumbnail click by pointer position.
+                            let checkbox_clicked = checkbox.clicked()
+                                || (response.clicked()
+                                    && response
+                                        .interact_pointer_pos()
+                                        .is_some_and(|pointer| checkbox.rect.contains(pointer)));
+                            if checkbox_clicked {
+                                let back_navigation_active =
+                                    app.library.toggle_thumbnail_selection(&source);
+                                crate::android::set_back_navigation_active(back_navigation_active);
+                            } else if response.clicked() && !response.secondary_clicked() {
+                                open_source = Some((source.clone(), name.clone()));
                             }
                         }
 
@@ -9798,25 +9744,40 @@ impl Library {
                                     LibrarySource::File(_) => Vec::new(),
                                 }
                             };
-                            response.context_menu(|ui| match &source {
-                                LibrarySource::File(context_source_path) => {
-                                    if let Some(action) = desktop_image_context_menu(
-                                        ui,
-                                        app,
-                                        context_source_path,
-                                        &context_paths,
-                                    ) {
-                                        library_action = Some(action);
+                            let mut select_from_context_menu = false;
+                            response.context_menu(|ui| {
+                                if !app.library.selection_mode() {
+                                    if ui.button("Select").clicked() {
+                                        select_from_context_menu = true;
+                                        ui.close();
                                     }
+                                    ui.separator();
                                 }
-                                LibrarySource::Cloud(_) => {
-                                    if let Some(action) =
-                                        cloud_image_context_menu(ui, app, &context_assets)
-                                    {
-                                        cloud_library_action = Some(action);
+
+                                match &source {
+                                    LibrarySource::File(context_source_path) => {
+                                        if let Some(action) = desktop_image_context_menu(
+                                            ui,
+                                            app,
+                                            context_source_path,
+                                            &context_paths,
+                                        ) {
+                                            library_action = Some(action);
+                                        }
+                                    }
+                                    LibrarySource::Cloud(_) => {
+                                        if let Some(action) =
+                                            cloud_image_context_menu(ui, app, &context_assets)
+                                        {
+                                            cloud_library_action = Some(action);
+                                        }
                                     }
                                 }
                             });
+                            if select_from_context_menu {
+                                app.library.begin_selection();
+                                app.library.selected_sources.insert(source.clone());
+                            }
                         }
                     }
                 });
@@ -10625,8 +10586,16 @@ fn thumbnail_tile(
             color,
         );
         if let Some(icon) = cloud_preview_icon(asset.thumbnail_kind) {
+            // Android reserves the top-left corner for the always-visible
+            // selection checkbox, so keep cloud preview metadata immediately
+            // below it instead of painting the two controls on top of each other.
+            let preview_badge_top = if cfg!(target_os = "android") {
+                rect.top() + 37.0
+            } else {
+                rect.top() + 7.0
+            };
             let preview_badge = egui::Rect::from_min_size(
-                egui::pos2(rect.left() + 7.0, rect.top() + 7.0),
+                egui::pos2(rect.left() + 7.0, preview_badge_top),
                 egui::vec2(29.0, 25.0),
             );
             ui.painter()
@@ -10643,8 +10612,13 @@ fn thumbnail_tile(
             let label_width =
                 (label.chars().count() as f32 * 6.4 + 14.0).min((rect.width() - 53.0).max(0.0));
             if label_width >= 58.0 {
+                let preview_badge_top = if cfg!(target_os = "android") {
+                    rect.top() + 37.0
+                } else {
+                    rect.top() + 7.0
+                };
                 let preview_badge = egui::Rect::from_min_size(
-                    egui::pos2(rect.left() + 7.0, rect.top() + 7.0),
+                    egui::pos2(rect.left() + 7.0, preview_badge_top),
                     egui::vec2(label_width, 25.0),
                 );
                 ui.painter()
@@ -10676,6 +10650,70 @@ fn thumbnail_tile(
         tooltip.push_str(error);
     }
     response.on_hover_text(tooltip)
+}
+
+#[cfg(target_os = "android")]
+fn thumbnail_selection_checkbox(
+    ui: &mut Ui,
+    entry: &LibraryEntry,
+    thumbnail_rect: egui::Rect,
+    selected: bool,
+) -> egui::Response {
+    const HIT_EDGE: f32 = 42.0;
+    const BOX_EDGE: f32 = 23.0;
+    const BOX_INSET: f32 = 7.0;
+
+    let hit_rect = egui::Rect::from_min_size(
+        thumbnail_rect.min,
+        egui::vec2(
+            HIT_EDGE.min(thumbnail_rect.width()),
+            HIT_EDGE.min(thumbnail_rect.height()),
+        ),
+    );
+    let response = ui
+        .interact(
+            hit_rect,
+            ui.make_persistent_id((
+                "library-thumbnail-selection-checkbox",
+                entry.info.display_path.as_str(),
+            )),
+            Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let box_rect = egui::Rect::from_min_size(
+        thumbnail_rect.min + egui::vec2(BOX_INSET, BOX_INSET),
+        egui::Vec2::splat(BOX_EDGE),
+    );
+    let visuals = ui.visuals();
+    let fill = if selected {
+        visuals.selection.bg_fill
+    } else if response.hovered() {
+        Color32::from_black_alpha(220)
+    } else {
+        Color32::from_black_alpha(180)
+    };
+    ui.painter().rect_filled(box_rect, 4.0, fill);
+    ui.painter().rect_stroke(
+        box_rect,
+        4.0,
+        Stroke::new(1.5, Color32::WHITE),
+        StrokeKind::Inside,
+    );
+    if selected {
+        let left = egui::pos2(box_rect.left() + 5.0, box_rect.center().y);
+        let middle = egui::pos2(box_rect.left() + 9.5, box_rect.bottom() - 5.5);
+        let right = egui::pos2(box_rect.right() - 4.5, box_rect.top() + 5.5);
+        ui.painter()
+            .line_segment([left, middle], Stroke::new(2.2, Color32::WHITE));
+        ui.painter()
+            .line_segment([middle, right], Stroke::new(2.2, Color32::WHITE));
+    }
+
+    response.on_hover_text(if selected {
+        "Deselect RAW"
+    } else {
+        "Select RAW"
+    })
 }
 
 #[cfg(not(target_os = "android"))]
@@ -10930,16 +10968,16 @@ mod tests {
         android_folder_ancestors, android_folder_parent, android_library_location_label,
         balanced_justified_row_ranges, catalog_status, cloud_cache_icon,
         cloud_folder_id_for_catalog, cloud_preview_icon, cloud_preview_label, cloud_preview_notice,
-        cloud_sync_badge, copy_directory_create_new, desktop_selection_toggle_label,
-        duplicate_raw_and_sidecar, elide_middle, format_file_size, import_folder_into_library,
-        import_raw_into_folder, justified_thumbnail_layout, library_import_fab_rect,
-        library_import_icon, loaded_library_thumbnail, make_resident_thumbnail, new_library_entry,
-        rename_raw_bundle, run_folder_operation, run_image_paste, run_thumbnail_workers,
-        scan_folder, scan_folder_tree, scan_folder_with_limit, trash_age_label,
-        trash_remaining_label, trash_size_label, validate_folder_name, ImageClipboard,
-        ImageClipboardContent, ImageClipboardMode, ImagePasteDestination, LibraryFileInfo,
-        LibraryFolderOperation, LibraryState, LibraryThumbnailSize, LibraryView, RawImportOutcome,
-        ScanEvent, ThumbnailRequest, ThumbnailWorker, TouchThumbnailAction,
+        cloud_sync_badge, copy_directory_create_new, duplicate_raw_and_sidecar, elide_middle,
+        format_file_size, import_folder_into_library, import_raw_into_folder,
+        justified_thumbnail_layout, library_import_fab_rect, library_import_icon,
+        loaded_library_thumbnail, make_resident_thumbnail, new_library_entry, rename_raw_bundle,
+        run_folder_operation, run_image_paste, run_thumbnail_workers, scan_folder,
+        scan_folder_tree, scan_folder_with_limit, trash_age_label, trash_remaining_label,
+        trash_size_label, validate_folder_name, ImageClipboard, ImageClipboardContent,
+        ImageClipboardMode, ImagePasteDestination, LibraryFileInfo, LibraryFolderOperation,
+        LibraryState, LibraryThumbnailSize, LibraryView, RawImportOutcome, ScanEvent,
+        ThumbnailRequest, ThumbnailWorker,
     };
     use crate::pipeline::RawThumbnail;
     use eframe::egui::Color32;
@@ -11115,12 +11153,6 @@ mod tests {
     }
 
     #[test]
-    fn desktop_selection_toggle_label_matches_the_next_action() {
-        assert_eq!(desktop_selection_toggle_label(false), "Select");
-        assert_eq!(desktop_selection_toggle_label(true), "Cancel");
-    }
-
-    #[test]
     fn thumbnail_size_defaults_to_average_with_small_preserving_the_old_scale() {
         assert_eq!(
             LibraryThumbnailSize::default(),
@@ -11134,35 +11166,18 @@ mod tests {
 
     #[cfg(not(target_os = "android"))]
     #[test]
-    fn touch_thumbnail_activation_enters_toggles_and_exits_selection() {
+    fn thumbnail_checkbox_enters_toggles_and_exits_selection() {
         let context = eframe::egui::Context::default();
         let mut library = LibraryState::new(&context);
         let source = LibrarySource::File(PathBuf::from("selection.dng"));
 
-        let action = library.handle_touch_thumbnail_activation(&source, true);
-        assert_eq!(
-            action,
-            TouchThumbnailAction::SelectionChanged {
-                back_navigation_active: true
-            }
-        );
+        assert!(library.toggle_thumbnail_selection(&source));
         assert!(library.selection_mode());
         assert!(library.selected_sources.contains(&source));
 
-        let action = library.handle_touch_thumbnail_activation(&source, false);
-        assert_eq!(
-            action,
-            TouchThumbnailAction::SelectionChanged {
-                back_navigation_active: false
-            }
-        );
+        assert!(!library.toggle_thumbnail_selection(&source));
         assert!(!library.selection_mode());
         assert!(library.selected_sources.is_empty());
-
-        assert_eq!(
-            library.handle_touch_thumbnail_activation(&source, false),
-            TouchThumbnailAction::Open
-        );
     }
 
     #[cfg(not(target_os = "android"))]
@@ -11212,12 +11227,7 @@ mod tests {
             folder_id: "b".repeat(64),
         };
         let source = LibrarySource::Cloud(asset);
-        assert!(matches!(
-            library.handle_touch_thumbnail_activation(&source, true),
-            TouchThumbnailAction::SelectionChanged {
-                back_navigation_active: true
-            }
-        ));
+        assert!(library.toggle_thumbnail_selection(&source));
         assert!(library.selected_sources.contains(&source));
     }
 
