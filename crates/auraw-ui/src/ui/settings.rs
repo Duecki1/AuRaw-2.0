@@ -560,7 +560,29 @@ impl Settings {
         {
             ui.add_space(8.0);
             Self::group(ui, content_width, |ui| {
-                ui.heading("AI subject masks");
+                ui.heading("AI models");
+                let mut acceleration = app.ai_gpu_acceleration;
+                if ui
+                    .checkbox(
+                        &mut acceleration,
+                        "Use GPU acceleration when available",
+                    )
+                    .on_hover_text(
+                        "Allow AI masks, inpainting, and AI denoise to use a supported GPU execution provider. CPU fallback remains automatic.",
+                    )
+                    .changed()
+                {
+                    app.set_ai_gpu_acceleration(acceleration);
+                }
+                ui.add(
+                    egui::Label::new(
+                        "Enabled by default. Turn this off if GPU-backed AI inference causes driver errors, instability, or incorrect results; AI tools will then run on CPU.",
+                    )
+                    .wrap(),
+                );
+
+                ui.separator();
+                ui.strong("Subject masks");
                 let previous_quality = app.birefnet_quality;
                 let mut quality = previous_quality;
                 ui.add_enabled_ui(app.birefnet_quality_change_enabled(), |ui| {
@@ -588,7 +610,7 @@ impl Settings {
                 ui.separator();
                 ui.strong("ONNX Runtime");
                 let runtime_help = if cfg!(target_os = "windows") {
-                    "Choose a trusted ONNX Runtime 1.18 or newer onnxruntime.dll that matches this AuRaw build's CPU architecture. AuRaw validates the DLL in an isolated helper process before AI tools use it. Windows AI masks currently use the core CPU execution provider for stability with user-selected runtimes."
+                    "Choose a trusted ONNX Runtime 1.18 or newer onnxruntime.dll that matches this AuRaw build's CPU architecture. AuRaw validates the DLL in an isolated helper process before AI tools use it. GPU provider libraries and their dependencies must remain beside it."
                 } else {
                     "Choose a trusted ONNX Runtime 1.18 or newer shared library built for your hardware. AuRaw never downloads or dynamically loads a native runtime without this explicit selection. GPU provider libraries and their dependencies must remain beside it."
                 };
