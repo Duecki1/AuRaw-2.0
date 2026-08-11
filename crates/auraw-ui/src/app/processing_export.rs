@@ -35,6 +35,20 @@ fn batch_export_overall_fraction(
         .clamp(0.0, EXPORT_MAX_INCOMPLETE_FRACTION)
 }
 
+fn export_source_stem(current_path: Option<&std::path::Path>, current_label: Option<&str>) -> String {
+    current_label
+        .and_then(|label| std::path::Path::new(label).file_stem())
+        .and_then(std::ffi::OsStr::to_str)
+        .or_else(|| {
+            current_path
+                .and_then(std::path::Path::file_stem)
+                .and_then(std::ffi::OsStr::to_str)
+        })
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("auraw-export")
+        .to_owned()
+}
+
 fn aligned_detail_axis(
     min_uv: f32,
     max_uv: f32,
@@ -2551,13 +2565,10 @@ impl AurawApp {
             return;
         }
 
-        let default_name = self
-            .current_path
-            .as_ref()
-            .and_then(|path| path.file_stem())
-            .and_then(|name| name.to_str())
-            .map(|name| format!("{name}-auraw.png"))
-            .unwrap_or_else(|| "auraw-export.png".to_owned());
+        let default_name = format!(
+            "{}-auraw.png",
+            export_source_stem(self.current_path.as_deref(), self.current_label.as_deref())
+        );
         let mut dialog = rfd::FileDialog::new()
             .add_filter("PNG image", &["png"])
             .set_file_name(default_name);
@@ -2589,13 +2600,10 @@ impl AurawApp {
             return;
         }
 
-        let default_name = self
-            .current_path
-            .as_ref()
-            .and_then(|path| path.file_stem())
-            .and_then(|name| name.to_str())
-            .map(|name| format!("{name}-auraw.jpg"))
-            .unwrap_or_else(|| "auraw-export.jpg".to_owned());
+        let default_name = format!(
+            "{}-auraw.jpg",
+            export_source_stem(self.current_path.as_deref(), self.current_label.as_deref())
+        );
         let mut dialog = rfd::FileDialog::new()
             .add_filter("JPEG image", &["jpg", "jpeg"])
             .set_file_name(default_name);
@@ -2629,13 +2637,10 @@ impl AurawApp {
             return;
         }
 
-        let default_name = self
-            .current_path
-            .as_ref()
-            .and_then(|path| path.file_stem())
-            .and_then(|name| name.to_str())
-            .map(|name| format!("{name}-auraw.tif"))
-            .unwrap_or_else(|| "auraw-export.tif".to_owned());
+        let default_name = format!(
+            "{}-auraw.tif",
+            export_source_stem(self.current_path.as_deref(), self.current_label.as_deref())
+        );
         let mut dialog = rfd::FileDialog::new()
             .add_filter("TIFF image", &["tif", "tiff"])
             .set_file_name(default_name);
@@ -3701,7 +3706,16 @@ impl AurawApp {
 
 #[cfg(test)]
 mod batch_export_progress_tests {
-    use super::batch_export_overall_fraction;
+    use super::{batch_export_overall_fraction, export_source_stem};
+    use std::path::Path;
+
+    #[test]
+    fn cloud_label_overrides_the_cached_original_filename_for_exports() {
+        assert_eq!(
+            export_source_stem(Some(Path::new("/cache/asset/original.dng")), Some("IMG_1234.DNG")),
+            "IMG_1234"
+        );
+    }
 
     #[test]
     fn completed_images_do_not_reach_full_progress_early() {
