@@ -6,8 +6,10 @@ use std::sync::Arc;
 mod effects;
 
 pub use effects::{
-    BlurEffectSettings, EdgeGlowEffectSettings, GlowEffectSettings, LightRaysEffectSettings,
-    MaskEffect, MaskEffectCategory, MaskEffectSettings, NeonEffectSettings, PixelateEffectSettings,
+    BlurEffectSettings, EdgeGlowEffectSettings, GlowEffectSettings, LensBlurEffectSettings,
+    LightRaysEffectSettings, MaskEffect, MaskEffectCategory, MaskEffectSettings,
+    MotionBlurEffectSettings, NeonEffectSettings, PixelateEffectSettings, RadialBlurEffectSettings,
+    RadialBlurMode, TiltShiftEffectSettings,
 };
 
 pub const MAX_LOCAL_MASKS: usize = 32;
@@ -2742,6 +2744,10 @@ mod tests {
         assert!(MaskEffect::LightRays.is_implemented());
         assert!(MaskEffect::Neon.is_implemented());
         assert!(MaskEffect::Blur.is_implemented());
+        assert!(MaskEffect::LensBlur.is_implemented());
+        assert!(MaskEffect::MotionBlur.is_implemented());
+        assert!(MaskEffect::RadialBlur.is_implemented());
+        assert!(MaskEffect::TiltShift.is_implemented());
         assert!(MaskEffect::EdgeGlow.is_implemented());
         assert!(MaskEffect::Pixelate.is_implemented());
         assert!(MaskEffect::ALL
@@ -2755,6 +2761,10 @@ mod tests {
                         | MaskEffect::LightRays
                         | MaskEffect::Neon
                         | MaskEffect::Blur
+                        | MaskEffect::LensBlur
+                        | MaskEffect::MotionBlur
+                        | MaskEffect::RadialBlur
+                        | MaskEffect::TiltShift
                         | MaskEffect::EdgeGlow
                         | MaskEffect::Pixelate
                 )
@@ -2858,6 +2868,40 @@ mod tests {
         assert_eq!(decoded.effect_settings.pixelate.amount, 82.0);
         assert_eq!(decoded.effect_settings.pixelate.block_size, 23.0);
         assert_eq!(decoded.adjustments.exposure, 1.25);
+    }
+
+    #[test]
+    fn focus_blur_settings_round_trip_independently() {
+        let mut mask = LocalMask::new(MaskKind::Fullscreen, 1);
+        mask.effect = MaskEffect::TiltShift;
+        mask.effect_settings.lens_blur.radius = 21.5;
+        mask.effect_settings.lens_blur.blades = 7.0;
+        mask.effect_settings.motion_blur.distance = 54.0;
+        mask.effect_settings.motion_blur.angle = -32.0;
+        mask.effect_settings.radial_blur.mode = RadialBlurMode::Spin;
+        mask.effect_settings.radial_blur.center = [42.0, 63.0];
+        mask.effect_settings.tilt_shift.radius = 18.5;
+        mask.effect_settings.tilt_shift.center = [48.0, 61.0];
+        mask.effect_settings.tilt_shift.angle = 17.0;
+        mask.effect_settings.tilt_shift.focus_width = 31.0;
+
+        let encoded = serde_json::to_string(&mask).expect("serialize focus blur effects");
+        let decoded: LocalMask =
+            serde_json::from_str(&encoded).expect("deserialize focus blur effects");
+        assert_eq!(decoded.effect, MaskEffect::TiltShift);
+        assert_eq!(decoded.effect_settings.lens_blur.radius, 21.5);
+        assert_eq!(decoded.effect_settings.lens_blur.blades, 7.0);
+        assert_eq!(decoded.effect_settings.motion_blur.distance, 54.0);
+        assert_eq!(decoded.effect_settings.motion_blur.angle, -32.0);
+        assert_eq!(
+            decoded.effect_settings.radial_blur.mode,
+            RadialBlurMode::Spin
+        );
+        assert_eq!(decoded.effect_settings.radial_blur.center, [42.0, 63.0]);
+        assert_eq!(decoded.effect_settings.tilt_shift.radius, 18.5);
+        assert_eq!(decoded.effect_settings.tilt_shift.center, [48.0, 61.0]);
+        assert_eq!(decoded.effect_settings.tilt_shift.angle, 17.0);
+        assert_eq!(decoded.effect_settings.tilt_shift.focus_width, 31.0);
     }
 
     #[test]

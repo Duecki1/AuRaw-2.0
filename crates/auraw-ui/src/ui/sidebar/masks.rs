@@ -1355,6 +1355,22 @@ impl Sidebar {
             } else if mask.effect == MaskEffect::Blur {
                 adjustments_changed |=
                     mask_effects::blur::show(ui, &mut mask.effect_settings.blur);
+            } else if mask.effect == MaskEffect::LensBlur {
+                adjustments_changed |=
+                    mask_effects::lens_blur::show(ui, &mut mask.effect_settings.lens_blur);
+            } else if mask.effect == MaskEffect::MotionBlur {
+                adjustments_changed |=
+                    mask_effects::motion_blur::show(ui, &mut mask.effect_settings.motion_blur);
+            } else if mask.effect == MaskEffect::RadialBlur {
+                adjustments_changed |=
+                    mask_effects::radial_blur::show(ui, &mut mask.effect_settings.radial_blur);
+            } else if mask.effect == MaskEffect::TiltShift {
+                let is_fullscreen_mask = Self::is_plain_fullscreen_mask(mask);
+                adjustments_changed |= mask_effects::tilt_shift::show(
+                    ui,
+                    &mut mask.effect_settings.tilt_shift,
+                    is_fullscreen_mask,
+                );
             } else if mask.effect == MaskEffect::EdgeGlow {
                 adjustments_changed |=
                     mask_effects::edge_glow::show(ui, &mut mask.effect_settings.edge_glow);
@@ -1571,6 +1587,26 @@ impl Sidebar {
                 if mask.effect == MaskEffect::Blur {
                     adjustments_changed |=
                         mask_effects::blur::show(ui, &mut mask.effect_settings.blur);
+                } else if mask.effect == MaskEffect::LensBlur {
+                    adjustments_changed |=
+                        mask_effects::lens_blur::show(ui, &mut mask.effect_settings.lens_blur);
+                } else if mask.effect == MaskEffect::MotionBlur {
+                    adjustments_changed |= mask_effects::motion_blur::show(
+                        ui,
+                        &mut mask.effect_settings.motion_blur,
+                    );
+                } else if mask.effect == MaskEffect::RadialBlur {
+                    adjustments_changed |= mask_effects::radial_blur::show(
+                        ui,
+                        &mut mask.effect_settings.radial_blur,
+                    );
+                } else if mask.effect == MaskEffect::TiltShift {
+                    let is_fullscreen_mask = Self::is_plain_fullscreen_mask(mask);
+                    adjustments_changed |= mask_effects::tilt_shift::show(
+                        ui,
+                        &mut mask.effect_settings.tilt_shift,
+                        is_fullscreen_mask,
+                    );
                 } else if mask.effect == MaskEffect::EdgeGlow {
                     adjustments_changed |= mask_effects::edge_glow::show(
                         ui,
@@ -1692,6 +1728,17 @@ impl Sidebar {
             ui.add_space(3.0);
             ui.weak("You can keep editing the mask coverage or switch back to Adjustment without losing its local adjustments.");
         });
+    }
+
+    fn is_plain_fullscreen_mask(mask: &LocalMask) -> bool {
+        !mask.invert
+            && matches!(
+                mask.components.as_slice(),
+                [component]
+                    if component.enabled
+                        && !component.invert
+                        && component.kind == MaskKind::Fullscreen
+            )
     }
 
     fn apply_mask_geometry_change(ui: &Ui, app: &mut AurawApp, mask_index: usize, changed: bool) {

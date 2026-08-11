@@ -34,10 +34,11 @@ pub use masks::{
     export_mask_atlas_edge_limit, mask_atlas_edge, rasterize_brush_dabs,
     rasterize_inpaint_dabs_binary, BlurEffectSettings, BrushDab, BrushMode, EdgeGlowEffectSettings,
     GlowEffectSettings, InpaintLayer, InpaintPatch, InpaintStroke, LandscapeCategory,
-    LightRaysEffectSettings, LocalAdjustments, LocalMask, MaskCombineMode, MaskComponent,
-    MaskEffect, MaskEffectCategory, MaskEffectSettings, MaskGeometry, MaskImage, MaskKind,
-    MaskRgbImage, MaskStack, NeonEffectSettings, ObjectStroke, PixelateEffectSettings,
-    SubjectRefinement, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    LensBlurEffectSettings, LightRaysEffectSettings, LocalAdjustments, LocalMask, MaskCombineMode,
+    MaskComponent, MaskEffect, MaskEffectCategory, MaskEffectSettings, MaskGeometry, MaskImage,
+    MaskKind, MaskRgbImage, MaskStack, MotionBlurEffectSettings, NeonEffectSettings, ObjectStroke,
+    PixelateEffectSettings, RadialBlurEffectSettings, RadialBlurMode, SubjectRefinement,
+    TiltShiftEffectSettings, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 pub use noise::{AdaptiveDetailDefaults, DenoiseQuality, NoiseProfile};
 pub use processing::{

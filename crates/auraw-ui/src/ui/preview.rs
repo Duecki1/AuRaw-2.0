@@ -1931,6 +1931,14 @@ impl Preview {
         let neutral = match mask.effect {
             crate::pipeline::MaskEffect::Adjustment => mask.adjustments.is_neutral(),
             crate::pipeline::MaskEffect::Blur => !mask.effect_settings.blur.is_active(),
+            crate::pipeline::MaskEffect::LensBlur => !mask.effect_settings.lens_blur.is_active(),
+            crate::pipeline::MaskEffect::MotionBlur => {
+                !mask.effect_settings.motion_blur.is_active()
+            }
+            crate::pipeline::MaskEffect::RadialBlur => {
+                !mask.effect_settings.radial_blur.is_active()
+            }
+            crate::pipeline::MaskEffect::TiltShift => !mask.effect_settings.tilt_shift.is_active(),
             crate::pipeline::MaskEffect::EdgeGlow => !mask.effect_settings.edge_glow.is_active(),
             crate::pipeline::MaskEffect::Glow => !mask.effect_settings.glow.is_active(),
             crate::pipeline::MaskEffect::LightRays => !mask.effect_settings.light_rays.is_active(),

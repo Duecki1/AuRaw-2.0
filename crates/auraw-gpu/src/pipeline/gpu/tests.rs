@@ -1642,10 +1642,94 @@ fn blur_mask_effect_packs_independent_settings_and_schedules_rendering() {
     assert_eq!(packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT, 4);
     assert_eq!(packed.adjust_0, [72.0, 11.5, 0.0, 0.0]);
     assert!(params.needs_intermediate_adjustment_passes());
+    assert!(params.needs_progressive_blur_passes());
 
     masks.masks[0].effect_settings.blur.radius = 0.0;
     let neutral = super::GpuParams::new(&exposure, &masks, &raw);
     assert_eq!(neutral.mask_data[0].metadata[0], 0);
+    assert!(!neutral.needs_intermediate_adjustment_passes());
+}
+
+#[test]
+fn focus_blur_effects_pack_independent_settings_and_schedule_the_blur_chain() {
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams::default();
+    let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
+
+    {
+        let mask = &mut masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::LensBlur;
+        mask.effect_settings.lens_blur.amount = 71.0;
+        mask.effect_settings.lens_blur.radius = 23.0;
+        mask.effect_settings.lens_blur.blades = 7.0;
+        mask.effect_settings.lens_blur.rotation = -18.0;
+        mask.effect_settings.lens_blur.highlight_boost = 44.0;
+    }
+    let lens = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(
+        lens.mask_data[0].metadata[3] >> super::MASK_EFFECT_ID_SHIFT,
+        7
+    );
+    assert_eq!(lens.mask_data[0].adjust_0, [71.0, 23.0, 7.0, -18.0]);
+    assert_eq!(lens.mask_data[0].adjust_1, [44.0, 0.0, 0.0, 0.0]);
+    assert!(lens.needs_blur_passes());
+    assert!(!lens.needs_progressive_blur_passes());
+
+    {
+        let mask = &mut masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::MotionBlur;
+        mask.effect_settings.motion_blur.amount = 64.0;
+        mask.effect_settings.motion_blur.distance = 58.0;
+        mask.effect_settings.motion_blur.angle = 112.0;
+    }
+    let motion = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(
+        motion.mask_data[0].metadata[3] >> super::MASK_EFFECT_ID_SHIFT,
+        8
+    );
+    assert_eq!(motion.mask_data[0].adjust_0, [64.0, 58.0, 112.0, 0.0]);
+    assert!(motion.needs_blur_passes());
+
+    {
+        let mask = &mut masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::RadialBlur;
+        mask.effect_settings.radial_blur.amount = 83.0;
+        mask.effect_settings.radial_blur.strength = 47.0;
+        mask.effect_settings.radial_blur.center = [35.0, 72.0];
+        mask.effect_settings.radial_blur.mode = crate::pipeline::RadialBlurMode::Spin;
+    }
+    let radial = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(
+        radial.mask_data[0].metadata[3] >> super::MASK_EFFECT_ID_SHIFT,
+        9
+    );
+    assert_eq!(radial.mask_data[0].adjust_0, [83.0, 47.0, 35.0, 72.0]);
+    assert_eq!(radial.mask_data[0].adjust_1, [1.0, 0.0, 0.0, 0.0]);
+    assert!(radial.needs_blur_passes());
+
+    {
+        let mask = &mut masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::TiltShift;
+        mask.effect_settings.tilt_shift.amount = 76.0;
+        mask.effect_settings.tilt_shift.radius = 21.0;
+        mask.effect_settings.tilt_shift.center = [49.0, 57.0];
+        mask.effect_settings.tilt_shift.angle = -9.0;
+        mask.effect_settings.tilt_shift.focus_width = 28.0;
+        mask.effect_settings.tilt_shift.feather = 17.0;
+    }
+    let tilt_shift = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(
+        tilt_shift.mask_data[0].metadata[3] >> super::MASK_EFFECT_ID_SHIFT,
+        10
+    );
+    assert_eq!(tilt_shift.mask_data[0].adjust_0, [76.0, 21.0, 49.0, 57.0]);
+    assert_eq!(tilt_shift.mask_data[0].adjust_1, [-9.0, 28.0, 17.0, 0.0]);
+    assert!(tilt_shift.needs_blur_passes());
+
+    masks.masks[0].effect_settings.tilt_shift.radius = 0.0;
+    let neutral = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(neutral.mask_data[0].metadata[0], 0);
+    assert!(!neutral.needs_blur_passes());
     assert!(!neutral.needs_intermediate_adjustment_passes());
 }
 
@@ -1705,6 +1789,96 @@ fn reused_program_layouts_render_progressive_mask_blur() {
         .read_display_linear_region_blocking(&device, &queue, 0, 0, 32, 32)
         .unwrap();
     assert!(pixels.iter().all(|value| value.is_finite()));
+}
+
+#[test]
+fn focus_blur_effects_change_pixels_without_mutating_the_source_path() {
+    let _gpu_guard = gpu_resource_test_guard();
+    use super::RawGpuPipeline;
+
+    let instance = wgpu::Instance::default();
+    let Ok(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        return;
+    };
+    let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("auraw focus Blur behavior test device"),
+        ..Default::default()
+    })) else {
+        return;
+    };
+
+    const EDGE: u32 = 64;
+    let raw = local_mask_scheduling_fixture(EDGE, EDGE);
+    let exposure = super::ExposureParams {
+        sharpen_amount: 0.0,
+        ..Default::default()
+    };
+    let neutral_masks = crate::pipeline::MaskStack::default();
+    let neutral_params = super::GpuParams::new(&exposure, &neutral_masks, &raw);
+    let template = RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+        &device,
+        &queue,
+        &raw,
+        &neutral_params,
+        ProcessingQuality::High,
+        EDGE,
+    )
+    .unwrap();
+    template.recompute(&queue, &device, &neutral_params);
+    let neutral = template
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, EDGE, EDGE)
+        .unwrap();
+
+    for effect in [
+        crate::pipeline::MaskEffect::LensBlur,
+        crate::pipeline::MaskEffect::MotionBlur,
+        crate::pipeline::MaskEffect::RadialBlur,
+        crate::pipeline::MaskEffect::TiltShift,
+    ] {
+        let mut masks = crate::pipeline::MaskStack::default();
+        masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+        masks.masks[0].effect = effect;
+        masks.masks[0].effect_settings.lens_blur.amount = 100.0;
+        masks.masks[0].effect_settings.lens_blur.radius = 24.0;
+        masks.masks[0].effect_settings.motion_blur.amount = 100.0;
+        masks.masks[0].effect_settings.motion_blur.distance = 64.0;
+        masks.masks[0].effect_settings.radial_blur.amount = 100.0;
+        masks.masks[0].effect_settings.radial_blur.strength = 64.0;
+        masks.masks[0].effect_settings.tilt_shift.amount = 100.0;
+        masks.masks[0].effect_settings.tilt_shift.radius = 24.0;
+        masks.masks[0].effect_settings.tilt_shift.focus_width = 12.0;
+        masks.masks[0].effect_settings.tilt_shift.feather = 8.0;
+        let params = super::GpuParams::new(&exposure, &masks, &raw);
+        let pipeline = RawGpuPipeline::new_headless_reusing_programs_with_mask_edge(
+            &device,
+            &queue,
+            &raw,
+            &params,
+            ProcessingQuality::High,
+            &template,
+            EDGE,
+        )
+        .unwrap();
+        let full_mask = vec![half::f16::from_f32(1.0).to_bits(); (EDGE * EDGE) as usize];
+        pipeline.update_mask_layer(&queue, 0, &full_mask).unwrap();
+        pipeline.recompute(&queue, &device, &params);
+        let adjusted = pipeline
+            .read_display_linear_region_blocking(&device, &queue, 0, 0, EDGE, EDGE)
+            .unwrap();
+        assert!(adjusted.iter().all(|value| value.is_finite()));
+        let max_delta = neutral
+            .iter()
+            .zip(&adjusted)
+            .map(|(before, after)| (before - after).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_delta > 1e-4,
+            "{} did not change rendered pixels: max delta {max_delta}",
+            effect.label()
+        );
+    }
 }
 
 #[test]

@@ -556,6 +556,10 @@ const LOCAL_EFFECTS_SUPPORT: u32 = 28;
 const NEON_SUPPORT: u32 = 48;
 // Five adjacent mask-Blur B3 stages reach +/-2*(1+1+2+3+5) reference pixels.
 const MASK_BLUR_SUPPORT: u32 = 72;
+// Lens and Tilt-Shift gather a radius of at most 48 reference pixels. Motion
+// and Radial Blur gather half of a 96-pixel trail. At the capped 3x reference
+// scale every path therefore reaches at most 144 pixels from its destination.
+const FOCUS_BLUR_SUPPORT: u32 = 144;
 // Edge Glow samples an inner radius capped at 24 pixels and an outer radius at
 // twice that distance.
 const EDGE_GLOW_SUPPORT: u32 = 48;
@@ -574,6 +578,7 @@ const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_RECONSTRUCTION_SUPPORT
     + LOCAL_EFFECTS_SUPPORT
     + NEON_SUPPORT
     + MASK_BLUR_SUPPORT
+    + FOCUS_BLUR_SUPPORT
     + PIXELATE_SUPPORT
     + GLOW_SUPPORT
     + COLOR_MIXER_SUPPORT;
@@ -636,6 +641,20 @@ pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -
     });
     if mask_blur_active {
         support += MASK_BLUR_SUPPORT;
+    }
+
+    let focus_blur_active = masks.masks.iter().any(|mask| {
+        mask.enabled
+            && match mask.effect {
+                MaskEffect::LensBlur => mask.effect_settings.lens_blur.is_active(),
+                MaskEffect::MotionBlur => mask.effect_settings.motion_blur.is_active(),
+                MaskEffect::RadialBlur => mask.effect_settings.radial_blur.is_active(),
+                MaskEffect::TiltShift => mask.effect_settings.tilt_shift.is_active(),
+                _ => false,
+            }
+    });
+    if focus_blur_active {
+        support += FOCUS_BLUR_SUPPORT;
     }
 
     let post_blur_creative_support = masks
@@ -1113,6 +1132,15 @@ mod tests {
         creative_masks.masks[0].effect = MaskEffect::Blur;
         let blur_halo = required_export_tile_halo(&exposure, &creative_masks);
         assert!(blur_halo > MIN_EXPORT_TILE_HALO);
+        creative_masks.masks[0].effect = MaskEffect::LensBlur;
+        let focus_blur_halo = required_export_tile_halo(&exposure, &creative_masks);
+        assert!(focus_blur_halo > blur_halo);
+        creative_masks.masks[0].effect_settings.lens_blur.amount = 0.0;
+        assert_eq!(
+            required_export_tile_halo(&exposure, &creative_masks),
+            MIN_EXPORT_TILE_HALO
+        );
+        creative_masks.masks[0].effect_settings.lens_blur.amount = 50.0;
         creative_masks.masks[0].effect = MaskEffect::Pixelate;
         assert!(required_export_tile_halo(&exposure, &creative_masks) > blur_halo);
         creative_masks.masks[0].effect_settings.pixelate.amount = 0.0;
@@ -1131,6 +1159,8 @@ mod tests {
         neon_masks.masks[1].effect = MaskEffect::Pixelate;
         neon_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
         neon_masks.masks[2].effect = MaskEffect::Blur;
+        neon_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+        neon_masks.masks[3].effect = MaskEffect::LensBlur;
         assert_eq!(
             required_export_tile_halo(&exposure, &neon_masks),
             EXPORT_TILE_HALO

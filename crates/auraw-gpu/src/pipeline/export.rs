@@ -3122,14 +3122,19 @@ fn checked_rgb_len(width: u32, height: u32) -> Result<usize> {
 
 fn validate_tile_spec(spec: TileSpec) -> Result<()> {
     let maximum_core = 1024;
+    // The focus-blur gather can add 144 pixels of support to the pre-existing
+    // worst-case creative chain. Ordinary edits still resolve to a much
+    // smaller dynamic halo; this ceiling only keeps fully stacked effects
+    // correct instead of rejecting them before GPU resource admission.
+    let maximum_halo = 768;
     let scale = if cfg!(target_os = "android") { 8 } else { 4 };
     anyhow::ensure!(
         (64..=maximum_core).contains(&spec.core_edge),
         "export tile core must be between 64 and {maximum_core} pixels"
     );
     anyhow::ensure!(
-        (MIN_EXPORT_TILE_HALO..=512).contains(&spec.halo),
-        "export halo must be between {MIN_EXPORT_TILE_HALO} and 512 pixels"
+        (MIN_EXPORT_TILE_HALO..=maximum_halo).contains(&spec.halo),
+        "export halo must be between {MIN_EXPORT_TILE_HALO} and {maximum_halo} pixels"
     );
     anyhow::ensure!(
         spec.core_edge.is_multiple_of(scale) && spec.halo.is_multiple_of(scale),

@@ -86,10 +86,50 @@ fn apply_mask_blur_stage(
         retained_source = retained_source * (1.0 - stage_amount);
     }
     let combined_amount = 1.0 - retained_source;
-    if combined_amount <= 1e-6 {
-        return source_rgb;
+    var rgb = source_rgb;
+    if combined_amount > 1e-6 {
+        rgb = mix(source_rgb, mask_blur_diffused_at(pos, stage), combined_amount);
     }
-    return mix(source_rgb, mask_blur_diffused_at(pos, stage), combined_amount);
+
+    // The aperture and path gathers are intentionally evaluated once at the
+    // first stage. The remaining passes run only when an ordinary progressive
+    // Blur mask is also active in the same stack.
+    if stage != 0u {
+        return rgb;
+    }
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = Common::mask_data[index].metadata;
+        if state.x == 0u || state.y == 0u { continue; }
+        let effect_id = Common::mask_effect_id(state);
+        if effect_id != MASK_EFFECT_LENS_BLUR_ID
+            && effect_id != MASK_EFFECT_MOTION_BLUR_ID
+            && effect_id != MASK_EFFECT_RADIAL_BLUR_ID
+            && effect_id != MASK_EFFECT_TILT_SHIFT_ID {
+            continue;
+        }
+
+        let primary = Common::mask_data[index].adjust_0_field;
+        let secondary = Common::mask_data[index].adjust_1_field;
+        var amount = clamp(primary.x / 100.0, 0.0, 1.0)
+            * SceneAdjustments::local_mask_weight(pos, index);
+        if effect_id == MASK_EFFECT_TILT_SHIFT_ID {
+            amount = amount * mask_tilt_shift_weight(pos, primary, secondary);
+        }
+        if amount <= 1e-6 { continue; }
+
+        var adjusted = source_rgb;
+        if effect_id == MASK_EFFECT_LENS_BLUR_ID {
+            adjusted = mask_lens_blur_at(pos, primary, secondary);
+        } else if effect_id == MASK_EFFECT_MOTION_BLUR_ID {
+            adjusted = mask_motion_blur_at(pos, primary);
+        } else if effect_id == MASK_EFFECT_RADIAL_BLUR_ID {
+            adjusted = mask_radial_blur_at(pos, primary, secondary);
+        } else if effect_id == MASK_EFFECT_TILT_SHIFT_ID {
+            adjusted = mask_tilt_shift_at(pos, primary);
+        }
+        rgb = mix(rgb, adjusted, amount);
+    }
+    return rgb;
 }
 
 fn store_mask_blur_stage(gid: vec3<u32>, stage: u32) {

@@ -243,9 +243,13 @@ const SHADER_MASK_EFFECTS_SHARED: &str = include_str!("../shaders/mask_effects/s
 const SHADER_MASK_BLUR: &str = include_str!("../shaders/mask_effects/blur.wgsl");
 const SHADER_MASK_EDGE_GLOW: &str = include_str!("../shaders/mask_effects/edge_glow.wgsl");
 const SHADER_MASK_GLOW: &str = include_str!("../shaders/mask_effects/glow.wgsl");
+const SHADER_MASK_LENS_BLUR: &str = include_str!("../shaders/mask_effects/lens_blur.wgsl");
 const SHADER_MASK_LIGHT_RAYS: &str = include_str!("../shaders/mask_effects/light_rays.wgsl");
+const SHADER_MASK_MOTION_BLUR: &str = include_str!("../shaders/mask_effects/motion_blur.wgsl");
 const SHADER_MASK_NEON: &str = include_str!("../shaders/mask_effects/neon.wgsl");
 const SHADER_MASK_PIXELATE: &str = include_str!("../shaders/mask_effects/pixelate.wgsl");
+const SHADER_MASK_RADIAL_BLUR: &str = include_str!("../shaders/mask_effects/radial_blur.wgsl");
+const SHADER_MASK_TILT_SHIFT: &str = include_str!("../shaders/mask_effects/tilt_shift.wgsl");
 const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
 const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
 
@@ -833,6 +837,94 @@ impl GpuParams {
                         blur.amount.clamp(0.0, 100.0),
                         blur.radius.clamp(0.0, 16.0),
                         0.0,
+                        0.0,
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
+            if mask.effect == MaskEffect::LensBlur {
+                let lens_blur = mask.effect_settings.lens_blur;
+                let active = mask.enabled && lens_blur.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        lens_blur.amount.clamp(0.0, 100.0),
+                        lens_blur.radius.clamp(0.0, 48.0),
+                        lens_blur.blades.clamp(3.0, 12.0).round(),
+                        lens_blur.rotation.clamp(-180.0, 180.0),
+                    ],
+                    adjust_1: [lens_blur.highlight_boost.clamp(0.0, 100.0), 0.0, 0.0, 0.0],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
+            if mask.effect == MaskEffect::MotionBlur {
+                let motion_blur = mask.effect_settings.motion_blur;
+                let active = mask.enabled && motion_blur.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        motion_blur.amount.clamp(0.0, 100.0),
+                        motion_blur.distance.clamp(0.0, 96.0),
+                        motion_blur.angle.clamp(-180.0, 180.0),
+                        0.0,
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
+            if mask.effect == MaskEffect::RadialBlur {
+                let radial_blur = mask.effect_settings.radial_blur;
+                let active = mask.enabled && radial_blur.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        radial_blur.amount.clamp(0.0, 100.0),
+                        radial_blur.strength.clamp(0.0, 96.0),
+                        radial_blur.center[0].clamp(-50.0, 150.0),
+                        radial_blur.center[1].clamp(-50.0, 150.0),
+                    ],
+                    adjust_1: [radial_blur.mode.shader_value(), 0.0, 0.0, 0.0],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
+            if mask.effect == MaskEffect::TiltShift {
+                let tilt_shift = mask.effect_settings.tilt_shift;
+                let active = mask.enabled && tilt_shift.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        tilt_shift.amount.clamp(0.0, 100.0),
+                        tilt_shift.radius.clamp(0.0, 48.0),
+                        tilt_shift.center[0].clamp(-50.0, 150.0),
+                        tilt_shift.center[1].clamp(-50.0, 150.0),
+                    ],
+                    adjust_1: [
+                        tilt_shift.angle.clamp(-180.0, 180.0),
+                        tilt_shift.focus_width.clamp(0.0, 100.0),
+                        tilt_shift.feather.clamp(0.1, 100.0),
                         0.0,
                     ],
                     ..MaskData::zeroed()
@@ -1511,6 +1603,10 @@ impl GpuParams {
                 || effect_id == MaskEffect::Glow.shader_id()
                 || effect_id == MaskEffect::LightRays.shader_id()
                 || effect_id == MaskEffect::Blur.shader_id()
+                || effect_id == MaskEffect::LensBlur.shader_id()
+                || effect_id == MaskEffect::MotionBlur.shader_id()
+                || effect_id == MaskEffect::RadialBlur.shader_id()
+                || effect_id == MaskEffect::TiltShift.shader_id()
                 || effect_id == MaskEffect::EdgeGlow.shader_id()
                 || effect_id == MaskEffect::Pixelate.shader_id()
             {
@@ -1546,6 +1642,23 @@ impl GpuParams {
     }
 
     fn needs_blur_passes(&self) -> bool {
+        let local_count = (self.scene_tone.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
+        self.mask_data[..local_count].iter().any(|mask| {
+            if mask.metadata[0] == 0 {
+                return false;
+            }
+            matches!(
+                mask.metadata[3] >> MASK_EFFECT_ID_SHIFT,
+                id if id == MaskEffect::Blur.shader_id()
+                    || id == MaskEffect::LensBlur.shader_id()
+                    || id == MaskEffect::MotionBlur.shader_id()
+                    || id == MaskEffect::RadialBlur.shader_id()
+                    || id == MaskEffect::TiltShift.shader_id()
+            )
+        })
+    }
+
+    fn needs_progressive_blur_passes(&self) -> bool {
         let local_count = (self.scene_tone.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
         self.mask_data[..local_count].iter().any(|mask| {
             mask.metadata[0] != 0
@@ -5924,11 +6037,18 @@ impl RawGpuPipeline {
             self.encode_pass(encoder, self.adjustment_effects_pass_index);
             self.encode_pass(encoder, self.adjustment_effects_pass_index + 1);
             if blur_active {
-                self.encode_pass_range(
-                    encoder,
-                    self.mask_blur_start_index,
-                    self.mask_blur_end_index,
-                );
+                if params.needs_progressive_blur_passes() {
+                    self.encode_pass_range(
+                        encoder,
+                        self.mask_blur_start_index,
+                        self.mask_blur_end_index,
+                    );
+                } else {
+                    // Lens, Motion, Radial, and Tilt-Shift all finish in the
+                    // first gather pass, which already writes the tex2 base
+                    // consumed by every post-blur binding variant.
+                    self.encode_pass(encoder, self.mask_blur_start_index);
+                }
             }
             if params.needs_glow_passes() {
                 if blur_active {

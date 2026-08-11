@@ -1242,6 +1242,10 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
         }
         validate_local_adjustments(&mask.adjustments)?;
         validate_blur_effect(&mask.effect_settings.blur)?;
+        validate_lens_blur_effect(&mask.effect_settings.lens_blur)?;
+        validate_motion_blur_effect(&mask.effect_settings.motion_blur)?;
+        validate_radial_blur_effect(&mask.effect_settings.radial_blur)?;
+        validate_tilt_shift_effect(&mask.effect_settings.tilt_shift)?;
         validate_edge_glow_effect(&mask.effect_settings.edge_glow)?;
         validate_glow_effect(&mask.effect_settings.glow)?;
         validate_light_rays_effect(&mask.effect_settings.light_rays)?;
@@ -2028,6 +2032,85 @@ fn validate_blur_effect(blur: &crate::pipeline::BlurEffectSettings) -> Result<()
     bounded("Blur radius", blur.radius, 0.0, 16.0)
 }
 
+fn validate_lens_blur_effect(
+    lens_blur: &crate::pipeline::LensBlurEffectSettings,
+) -> Result<(), SidecarError> {
+    finite(
+        "Lens Blur mask effect",
+        &[
+            lens_blur.amount,
+            lens_blur.radius,
+            lens_blur.blades,
+            lens_blur.rotation,
+            lens_blur.highlight_boost,
+        ],
+    )?;
+    bounded("Lens Blur amount", lens_blur.amount, 0.0, 100.0)?;
+    bounded("Lens Blur radius", lens_blur.radius, 0.0, 48.0)?;
+    bounded("Lens Blur blades", lens_blur.blades, 3.0, 12.0)?;
+    bounded("Lens Blur rotation", lens_blur.rotation, -180.0, 180.0)?;
+    bounded(
+        "Lens Blur highlight boost",
+        lens_blur.highlight_boost,
+        0.0,
+        100.0,
+    )
+}
+
+fn validate_motion_blur_effect(
+    motion_blur: &crate::pipeline::MotionBlurEffectSettings,
+) -> Result<(), SidecarError> {
+    finite(
+        "Motion Blur mask effect",
+        &[motion_blur.amount, motion_blur.distance, motion_blur.angle],
+    )?;
+    bounded("Motion Blur amount", motion_blur.amount, 0.0, 100.0)?;
+    bounded("Motion Blur distance", motion_blur.distance, 0.0, 96.0)?;
+    bounded("Motion Blur angle", motion_blur.angle, -180.0, 180.0)
+}
+
+fn validate_radial_blur_effect(
+    radial_blur: &crate::pipeline::RadialBlurEffectSettings,
+) -> Result<(), SidecarError> {
+    finite(
+        "Radial Blur mask effect",
+        &[
+            radial_blur.amount,
+            radial_blur.strength,
+            radial_blur.center[0],
+            radial_blur.center[1],
+        ],
+    )?;
+    bounded("Radial Blur amount", radial_blur.amount, 0.0, 100.0)?;
+    bounded("Radial Blur strength", radial_blur.strength, 0.0, 96.0)?;
+    bounded("Radial Blur center X", radial_blur.center[0], -50.0, 150.0)?;
+    bounded("Radial Blur center Y", radial_blur.center[1], -50.0, 150.0)
+}
+
+fn validate_tilt_shift_effect(
+    tilt_shift: &crate::pipeline::TiltShiftEffectSettings,
+) -> Result<(), SidecarError> {
+    finite(
+        "Tilt-Shift mask effect",
+        &[
+            tilt_shift.amount,
+            tilt_shift.radius,
+            tilt_shift.center[0],
+            tilt_shift.center[1],
+            tilt_shift.angle,
+            tilt_shift.focus_width,
+            tilt_shift.feather,
+        ],
+    )?;
+    bounded("Tilt-Shift amount", tilt_shift.amount, 0.0, 100.0)?;
+    bounded("Tilt-Shift radius", tilt_shift.radius, 0.0, 48.0)?;
+    bounded("Tilt-Shift center X", tilt_shift.center[0], -50.0, 150.0)?;
+    bounded("Tilt-Shift center Y", tilt_shift.center[1], -50.0, 150.0)?;
+    bounded("Tilt-Shift angle", tilt_shift.angle, -180.0, 180.0)?;
+    bounded("Tilt-Shift focus width", tilt_shift.focus_width, 0.0, 100.0)?;
+    bounded("Tilt-Shift feather", tilt_shift.feather, 0.1, 100.0)
+}
+
 fn validate_edge_glow_effect(
     edge_glow: &crate::pipeline::EdgeGlowEffectSettings,
 ) -> Result<(), SidecarError> {
@@ -2634,6 +2717,37 @@ mod tests {
         assert_eq!(mask.effect_settings.edge_glow.color, [0.15, 0.7, 1.0]);
         assert_eq!(mask.effect_settings.pixelate.block_size, 24.0);
         assert_eq!(mask.adjustments.exposure, 1.0);
+    }
+
+    #[test]
+    fn focus_blur_settings_round_trip_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        let mask = masks.masks.last_mut().unwrap();
+        mask.effect = crate::pipeline::MaskEffect::TiltShift;
+        mask.effect_settings.lens_blur.radius = 22.0;
+        mask.effect_settings.lens_blur.blades = 8.0;
+        mask.effect_settings.motion_blur.distance = 62.0;
+        mask.effect_settings.motion_blur.angle = -27.0;
+        mask.effect_settings.radial_blur.mode = crate::pipeline::RadialBlurMode::Spin;
+        mask.effect_settings.radial_blur.center = [37.0, 64.0];
+        mask.effect_settings.tilt_shift.radius = 19.0;
+        mask.effect_settings.tilt_shift.center = [51.0, 58.0];
+        mask.effect_settings.tilt_shift.angle = 13.0;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let mask = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(mask.effect, crate::pipeline::MaskEffect::TiltShift);
+        assert_eq!(mask.effect_settings.lens_blur.radius, 22.0);
+        assert_eq!(mask.effect_settings.motion_blur.distance, 62.0);
+        assert_eq!(
+            mask.effect_settings.radial_blur.mode,
+            crate::pipeline::RadialBlurMode::Spin
+        );
+        assert_eq!(mask.effect_settings.tilt_shift.center, [51.0, 58.0]);
     }
 
     #[test]
