@@ -6,6 +6,7 @@
 
 mod blur;
 mod edge_glow;
+mod fog;
 mod glow;
 mod lens_blur;
 mod light_rays;
@@ -13,10 +14,12 @@ mod motion_blur;
 mod neon;
 mod pixelate;
 mod radial_blur;
+mod smoke;
 mod tilt_shift;
 
 pub use blur::BlurEffectSettings;
 pub use edge_glow::EdgeGlowEffectSettings;
+pub use fog::FogEffectSettings;
 pub use glow::GlowEffectSettings;
 pub use lens_blur::LensBlurEffectSettings;
 pub use light_rays::LightRaysEffectSettings;
@@ -24,6 +27,7 @@ pub use motion_blur::MotionBlurEffectSettings;
 pub use neon::NeonEffectSettings;
 pub use pixelate::PixelateEffectSettings;
 pub use radial_blur::{RadialBlurEffectSettings, RadialBlurMode};
+pub use smoke::SmokeEffectSettings;
 pub use tilt_shift::TiltShiftEffectSettings;
 
 /// The operation driven by a mask group's combined coverage.
@@ -65,12 +69,14 @@ pub enum MaskEffect {
     Pixelate,
     Posterize,
     FilmGrain,
+    Fog,
     Noise,
+    Smoke,
     TextureOverlay,
 }
 
 impl MaskEffect {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 36] = [
         Self::Adjustment,
         Self::Blur,
         Self::LensBlur,
@@ -103,7 +109,9 @@ impl MaskEffect {
         Self::Pixelate,
         Self::Posterize,
         Self::FilmGrain,
+        Self::Fog,
         Self::Noise,
+        Self::Smoke,
         Self::TextureOverlay,
     ];
 
@@ -141,7 +149,9 @@ impl MaskEffect {
             Self::Pixelate => "Pixelate",
             Self::Posterize => "Posterize",
             Self::FilmGrain => "Film Grain",
+            Self::Fog => "Fog",
             Self::Noise => "Noise",
+            Self::Smoke => "Smoke",
             Self::TextureOverlay => "Texture Overlay",
         }
     }
@@ -172,7 +182,7 @@ impl MaskEffect {
             | Self::Outline
             | Self::Pixelate
             | Self::Posterize => Some(MaskEffectCategory::Stylize),
-            Self::FilmGrain | Self::Noise | Self::TextureOverlay => {
+            Self::FilmGrain | Self::Fog | Self::Noise | Self::Smoke | Self::TextureOverlay => {
                 Some(MaskEffectCategory::Texture)
             }
         }
@@ -192,6 +202,8 @@ impl MaskEffect {
                 | Self::Neon
                 | Self::EdgeGlow
                 | Self::Pixelate
+                | Self::Fog
+                | Self::Smoke
         )
     }
 
@@ -213,6 +225,8 @@ impl MaskEffect {
             Self::MotionBlur => 8,
             Self::RadialBlur => 9,
             Self::TiltShift => 10,
+            Self::Fog => 11,
+            Self::Smoke => 12,
             _ => 0,
         }
     }
@@ -279,6 +293,10 @@ pub struct MaskEffectSettings {
     pub neon: NeonEffectSettings,
     #[serde(default, skip_serializing_if = "PixelateEffectSettings::is_default")]
     pub pixelate: PixelateEffectSettings,
+    #[serde(default, skip_serializing_if = "FogEffectSettings::is_default")]
+    pub fog: FogEffectSettings,
+    #[serde(default, skip_serializing_if = "SmokeEffectSettings::is_default")]
+    pub smoke: SmokeEffectSettings,
 }
 
 impl MaskEffectSettings {

@@ -240,6 +240,7 @@ const SHADER_REGRESSION_SCENE: &str = include_str!("../shaders/regression_scene.
 
 const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
 const SHADER_MASK_EFFECTS_SHARED: &str = include_str!("../shaders/mask_effects/shared.wgsl");
+const SHADER_MASK_ATMOSPHERE: &str = include_str!("../shaders/mask_effects/atmosphere.wgsl");
 const SHADER_MASK_BLUR: &str = include_str!("../shaders/mask_effects/blur.wgsl");
 const SHADER_MASK_EDGE_GLOW: &str = include_str!("../shaders/mask_effects/edge_glow.wgsl");
 const SHADER_MASK_GLOW: &str = include_str!("../shaders/mask_effects/glow.wgsl");
@@ -1061,6 +1062,65 @@ impl GpuParams {
                 };
                 continue;
             }
+            if mask.effect == MaskEffect::Fog {
+                let fog = mask.effect_settings.fog;
+                let active = mask.enabled && fog.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        fog.amount.clamp(0.0, 100.0),
+                        fog.density.clamp(0.0, 100.0),
+                        fog.scale.clamp(1.0, 100.0),
+                        fog.softness.clamp(0.0, 100.0),
+                    ],
+                    adjust_1: [
+                        fog.color[0].clamp(0.0, 1.0),
+                        fog.color[1].clamp(0.0, 1.0),
+                        fog.color[2].clamp(0.0, 1.0),
+                        fog.variation.clamp(0.0, 100.0),
+                    ],
+                    adjust_2: [fog.seed.clamp(0.0, 1_000.0), 0.0, 0.0, 0.0],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
+            if mask.effect == MaskEffect::Smoke {
+                let smoke = mask.effect_settings.smoke;
+                let active = mask.enabled && smoke.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        smoke.amount.clamp(0.0, 100.0),
+                        smoke.density.clamp(0.0, 100.0),
+                        smoke.scale.clamp(1.0, 100.0),
+                        smoke.turbulence.clamp(0.0, 100.0),
+                    ],
+                    adjust_1: [
+                        smoke.color[0].clamp(0.0, 1.0),
+                        smoke.color[1].clamp(0.0, 1.0),
+                        smoke.color[2].clamp(0.0, 1.0),
+                        smoke.angle.clamp(-180.0, 180.0),
+                    ],
+                    adjust_2: [
+                        smoke.softness.clamp(0.0, 100.0),
+                        smoke.seed.clamp(0.0, 1_000.0),
+                        0.0,
+                        0.0,
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
             let adjustment = mask.adjustments;
             // Placeholder effect types retain any adjustment values so a user
             // can switch back without losing work, but they must not apply
@@ -1609,6 +1669,8 @@ impl GpuParams {
                 || effect_id == MaskEffect::TiltShift.shader_id()
                 || effect_id == MaskEffect::EdgeGlow.shader_id()
                 || effect_id == MaskEffect::Pixelate.shader_id()
+                || effect_id == MaskEffect::Fog.shader_id()
+                || effect_id == MaskEffect::Smoke.shader_id()
             {
                 return true;
             }
