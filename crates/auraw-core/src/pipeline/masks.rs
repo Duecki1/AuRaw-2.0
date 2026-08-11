@@ -762,37 +762,6 @@ pub fn build_retouch_patch(
         }
     }
 
-    let generated = if kind == InpaintStrokeKind::Heal {
-        // A healing brush transfers high-frequency texture while retaining the
-        // destination's illumination and color field. Subtracting the source's
-        // local low frequencies and adding the destination's is stable in
-        // scene-linear space and continues to respond naturally to later RAW
-        // exposure/white-balance edits.
-        let image_min = full_width.min(full_height).max(1) as f32;
-        let average_radius = dabs
-            .iter()
-            .map(|dab| dab.size.max(0.0) * image_min)
-            .sum::<f32>()
-            / dabs.len().max(1) as f32;
-        let raster_scale = (raster_width as f32 / destination_extent[0] as f32)
-            .min(raster_height as f32 / destination_extent[1] as f32);
-        let blur_radius = (average_radius * raster_scale * 0.55)
-            .round()
-            .clamp(3.0, 24.0) as usize;
-        let source_low = box_blur_rgb(&sampled_source, raster_width, raster_height, blur_radius);
-        let destination_low =
-            box_blur_rgb(destination_rgb, raster_width, raster_height, blur_radius);
-        sampled_source
-            .iter()
-            .zip(source_low.iter().zip(destination_low.iter()))
-            .map(|(detail, (source_base, destination_base))| {
-                (detail + destination_base - source_base).clamp(-65_504.0, 65_504.0)
-            })
-            .collect::<Vec<_>>()
-    } else {
-        sampled_source
-    };
-
     let full_min = full_width.min(full_height).max(1) as f32;
     let destination_min = destination_extent[0].min(destination_extent[1]).max(1) as f32;
     let local_dabs = dabs
@@ -816,6 +785,56 @@ pub fn build_retouch_patch(
     if local_dabs.is_empty() {
         return None;
     }
+
+    let heal_delta = if kind == InpaintStrokeKind::Heal {
+        // A healing brush transfers high-frequency texture while retaining the
+        // destination's illumination and color field. Subtracting the source's
+        // local low frequencies and adding the destination's is stable in
+        // scene-linear space and continues to respond naturally to later RAW
+        // exposure/white-balance edits.
+        let image_min = full_width.min(full_height).max(1) as f32;
+        let average_radius = dabs
+            .iter()
+            .map(|dab| dab.size.max(0.0) * image_min)
+            .sum::<f32>()
+            / dabs.len().max(1) as f32;
+        let raster_scale = (raster_width as f32 / destination_extent[0] as f32)
+            .min(raster_height as f32 / destination_extent[1] as f32);
+        let blur_radius = (average_radius * raster_scale * 0.55)
+            .round()
+            .clamp(3.0, 24.0) as usize;
+        let source_low = box_blur_rgb(&sampled_source, raster_width, raster_height, blur_radius);
+        let destination_low =
+            box_blur_rgb(destination_rgb, raster_width, raster_height, blur_radius);
+        source_low
+            .iter()
+            .zip(destination_low.iter())
+            .map(|(source_base, destination_base)| destination_base - source_base)
+            .collect::<Vec<_>>()
+    } else {
+        vec![0.0; expected_values]
+    };
+    let static_generated = sampled_source
+        .iter()
+        .zip(&heal_delta)
+        .map(|(sample, delta)| (sample + delta).clamp(-65_504.0, 65_504.0))
+        .collect::<Vec<_>>();
+    let generated = if retouch_source_may_cross_active_stroke(dabs, source_offset, full_dimensions)
+    {
+        apply_retouch_dabs_causally(
+            destination_rgb,
+            &sampled_source,
+            &heal_delta,
+            raster_dimensions,
+            destination_origin,
+            destination_extent,
+            full_dimensions,
+            source_offset,
+            &local_dabs,
+        )?
+    } else {
+        static_generated
+    };
     let painted_mask = rasterize_inpaint_dabs_binary(
         raster_width,
         raster_height,
@@ -922,6 +941,199 @@ pub fn build_retouch_patch(
         rgba16f,
         mask,
     )
+}
+
+fn retouch_source_may_cross_active_stroke(
+    dabs: &[BrushDab],
+    source_offset: [f32; 2],
+    full_dimensions: [u32; 2],
+) -> bool {
+    let image_min = full_dimensions[0].min(full_dimensions[1]).max(1) as f32;
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for dab in dabs {
+        let radius = dab.size.max(0.0) * image_min;
+        let center = [
+            dab.center[0] * full_dimensions[0] as f32,
+            dab.center[1] * full_dimensions[1] as f32,
+        ];
+        bounds[0] = bounds[0].min(center[0] - radius);
+        bounds[1] = bounds[1].min(center[1] - radius);
+        bounds[2] = bounds[2].max(center[0] + radius);
+        bounds[3] = bounds[3].max(center[1] + radius);
+    }
+    if !bounds.iter().all(|value| value.is_finite()) {
+        return false;
+    }
+    let offset = [
+        source_offset[0] * full_dimensions[0] as f32,
+        source_offset[1] * full_dimensions[1] as f32,
+    ];
+    let source_bounds = [
+        bounds[0] + offset[0],
+        bounds[1] + offset[1],
+        bounds[2] + offset[0],
+        bounds[3] + offset[1],
+    ];
+    source_bounds[0] < bounds[2]
+        && source_bounds[2] > bounds[0]
+        && source_bounds[1] < bounds[3]
+        && source_bounds[3] > bounds[1]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_retouch_dabs_causally(
+    destination_rgb: &[f32],
+    sampled_source: &[f32],
+    heal_delta: &[f32],
+    raster_dimensions: [u32; 2],
+    destination_origin: [u32; 2],
+    destination_extent: [u32; 2],
+    full_dimensions: [u32; 2],
+    source_offset: [f32; 2],
+    local_dabs: &[BrushDab],
+) -> Option<Vec<f32>> {
+    let [width, height] = raster_dimensions;
+    let expected = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(3)?;
+    if width == 0
+        || height == 0
+        || destination_rgb.len() != expected
+        || sampled_source.len() != expected
+        || heal_delta.len() != expected
+    {
+        return None;
+    }
+    let mut canvas = destination_rgb.to_vec();
+    let mut painted = vec![0.0f32; width as usize * height as usize];
+    let mut generated = sampled_source
+        .iter()
+        .zip(heal_delta)
+        .map(|(sample, delta)| (sample + delta).clamp(-65_504.0, 65_504.0))
+        .collect::<Vec<_>>();
+    let offset_pixels = [
+        source_offset[0] * full_dimensions[0] as f32,
+        source_offset[1] * full_dimensions[1] as f32,
+    ];
+
+    // A dab reads from one stable version of the canvas, then publishes all of
+    // its pixels together. The next dab can therefore sample those pixels when
+    // an aligned Heal/Clone source crosses the stroke currently being painted.
+    for dab in local_dabs {
+        let spec = brush_raster_specs(width, height, width, height, std::slice::from_ref(dab))
+            .into_iter()
+            .next()?;
+        let mut updates = Vec::new();
+        for y in spec.min_y..=spec.max_y {
+            let dy = (y as f32 + 0.5 - spec.center_y) / spec.radius_y.max(0.5);
+            for x in spec.min_x..=spec.max_x {
+                let dx = (x as f32 + 0.5 - spec.center_x) / spec.radius_x.max(0.5);
+                let distance = (dx * dx + dy * dy).sqrt();
+                if distance >= 1.0 + spec.antialias {
+                    continue;
+                }
+                let coverage = 1.0 - smoothstep(spec.inner, 1.0 + spec.antialias, distance);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let destination_x = destination_origin[0] as f32
+                    + (x as f32 + 0.5) * destination_extent[0] as f32 / width as f32
+                    - 0.5;
+                let destination_y = destination_origin[1] as f32
+                    + (y as f32 + 0.5) * destination_extent[1] as f32 / height as f32
+                    - 0.5;
+                let source_raster_x =
+                    ((destination_x + offset_pixels[0] - destination_origin[0] as f32 + 0.5)
+                        * width as f32
+                        / destination_extent[0] as f32)
+                        - 0.5;
+                let source_raster_y =
+                    ((destination_y + offset_pixels[1] - destination_origin[1] as f32 + 0.5)
+                        * height as f32
+                        / destination_extent[1] as f32)
+                        - 0.5;
+                let pixel = (y as usize * width as usize + x as usize) * 3;
+                let static_sample = [
+                    sampled_source[pixel],
+                    sampled_source[pixel + 1],
+                    sampled_source[pixel + 2],
+                ];
+                let dynamic_sample = sample_retouch_rgb_bilinear(
+                    &canvas,
+                    width,
+                    height,
+                    source_raster_x,
+                    source_raster_y,
+                );
+                let dynamic_alpha = sample_retouch_alpha_bilinear(
+                    &painted,
+                    width,
+                    height,
+                    source_raster_x,
+                    source_raster_y,
+                )
+                .unwrap_or(0.0);
+                let sampled = dynamic_sample.map_or(static_sample, |dynamic| {
+                    std::array::from_fn(|channel| {
+                        static_sample[channel]
+                            + (dynamic[channel] - static_sample[channel]) * dynamic_alpha
+                    })
+                });
+                let target: [f32; 3] = std::array::from_fn(|channel| {
+                    (sampled[channel] + heal_delta[pixel + channel]).clamp(-65_504.0, 65_504.0)
+                });
+                updates.push((pixel, target, coverage));
+            }
+        }
+        for (pixel, target, coverage) in updates {
+            for channel in 0..3 {
+                canvas[pixel + channel] += (target[channel] - canvas[pixel + channel]) * coverage;
+                generated[pixel + channel] = target[channel];
+            }
+            let mask_pixel = pixel / 3;
+            painted[mask_pixel] += (1.0 - painted[mask_pixel]) * coverage;
+        }
+    }
+    Some(generated)
+}
+
+fn sample_retouch_alpha_bilinear(
+    alpha: &[f32],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+) -> Option<f32> {
+    if width == 0
+        || height == 0
+        || alpha.len() != width as usize * height as usize
+        || !x.is_finite()
+        || !y.is_finite()
+        || x < -0.5
+        || y < -0.5
+        || x > width as f32 - 0.5
+        || y > height as f32 - 0.5
+    {
+        return None;
+    }
+    let x = x.clamp(0.0, width.saturating_sub(1) as f32);
+    let y = y.clamp(0.0, height.saturating_sub(1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let sample = |sample_x: u32, sample_y: u32| alpha[(sample_y * width + sample_x) as usize];
+    let top = sample(x0, y0) + (sample(x1, y0) - sample(x0, y0)) * tx;
+    let bottom = sample(x0, y1) + (sample(x1, y1) - sample(x0, y1)) * tx;
+    Some(top + (bottom - top) * ty)
 }
 
 fn sample_retouch_rgb_bilinear(
@@ -4224,6 +4436,45 @@ mod tests {
         let rgb = patch.linear_rgba16f_at(center).unwrap();
         assert!((f16::from_bits(rgb[0]).to_f32() - 0.6).abs() < 0.08);
         assert!((f16::from_bits(rgb[2]).to_f32() - 0.75).abs() < 0.01);
+    }
+
+    #[test]
+    fn clone_patch_can_sample_pixels_painted_by_earlier_dabs() {
+        let mut image = Vec::new();
+        for x in 0..8 {
+            image.extend_from_slice(&[x as f32 / 10.0, 0.0, 0.0]);
+        }
+        let dabs = [
+            BrushDab {
+                center: [2.5 / 8.0, 0.5],
+                opacity: 1.0,
+                size: 0.49,
+                feather: 0.0,
+            },
+            BrushDab {
+                center: [3.5 / 8.0, 0.5],
+                opacity: 1.0,
+                size: 0.49,
+                feather: 0.0,
+            },
+        ];
+        let patch = build_retouch_patch(
+            InpaintStrokeKind::Clone,
+            [8, 1],
+            [0, 0],
+            [8, 1],
+            &image,
+            [0, 0],
+            [8, 1],
+            &image,
+            [8, 1],
+            [-1.0 / 8.0, 0.0],
+            &dabs,
+        )
+        .unwrap();
+        let (sample, alpha) = patch.sample_linear_rec2020_bilinear(3.0, 0.0).unwrap();
+        assert!(alpha > 0.99);
+        assert!((sample[0] - 0.1).abs() < 0.01, "sample was {sample:?}");
     }
 
     #[test]

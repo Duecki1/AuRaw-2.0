@@ -3569,33 +3569,223 @@ fn live_retouch_rgba(
         [0.0; 3]
     };
 
-    let mut rgba = Vec::with_capacity(expected * 4);
+    // Keep a small working canvas for the active destination region. Dabs are
+    // applied in pointer order, and source samples that land in this canvas see
+    // the result of all earlier dabs. This is what makes an aligned source that
+    // crosses the active stroke follow the pixels being painted right now,
+    // rather than the snapshot captured at pointer-down.
+    let mut canvas = Vec::with_capacity(expected);
     for y in 0..region.texture_height {
         let destination_v = (region.source_y as f32
             + (y as f32 + 0.5) * region.source_height as f32 / region.texture_height as f32)
             / full_height.max(1) as f32;
         for x in 0..region.texture_width {
-            let index = (y * region.texture_width + x) as usize;
             let destination_u = (region.source_x as f32
                 + (x as f32 + 0.5) * region.source_width as f32 / region.texture_width as f32)
                 / full_width.max(1) as f32;
-            let source_uv = [
-                destination_u + source_offset[0],
-                destination_v + source_offset[1],
-            ];
-            if let Some(sample) = sample_preview_rgb(source, source_uv) {
-                rgba.extend_from_slice(&[
-                    (sample[0] + color_delta[0]).round().clamp(0.0, 255.0) as u8,
-                    (sample[1] + color_delta[1]).round().clamp(0.0, 255.0) as u8,
-                    (sample[2] + color_delta[2]).round().clamp(0.0, 255.0) as u8,
-                    coverage[index],
-                ]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            }
+            canvas.push(sample_preview_rgb(source, [destination_u, destination_v])?);
         }
     }
+    let mut painted = vec![false; expected];
+    for dab in dabs {
+        let Some(bounds) = live_dab_texture_bounds(*dab, region, full_width, full_height) else {
+            continue;
+        };
+        let mut updates = Vec::new();
+        for y in bounds[1]..bounds[3] {
+            for x in bounds[0]..bounds[2] {
+                let dab_coverage = live_dab_coverage(x, y, *dab, region, full_width, full_height);
+                if dab_coverage <= 0.0 {
+                    continue;
+                }
+                let destination_uv =
+                    overlay_texture_pixel_uv(x, y, region, full_width, full_height);
+                let source_uv = [
+                    destination_uv[0] + source_offset[0],
+                    destination_uv[1] + source_offset[1],
+                ];
+                let sample = sample_live_retouch_rgb(
+                    source,
+                    &canvas,
+                    region,
+                    full_width,
+                    full_height,
+                    source_uv,
+                )?;
+                updates.push((
+                    (y * region.texture_width + x) as usize,
+                    std::array::from_fn(|channel| sample[channel] + color_delta[channel]),
+                    dab_coverage,
+                ));
+            }
+        }
+        for (index, mut sample, dab_coverage) in updates {
+            for channel in 0..3 {
+                sample[channel] = (canvas[index][channel]
+                    + (sample[channel] - canvas[index][channel]) * dab_coverage)
+                    .clamp(0.0, 255.0);
+            }
+            canvas[index] = sample;
+            painted[index] = true;
+        }
+    }
+
+    let mut rgba = Vec::with_capacity(expected * 4);
+    for (index, sample) in canvas.into_iter().enumerate() {
+        rgba.extend_from_slice(&[
+            sample[0].round().clamp(0.0, 255.0) as u8,
+            sample[1].round().clamp(0.0, 255.0) as u8,
+            sample[2].round().clamp(0.0, 255.0) as u8,
+            if painted[index] && coverage[index] > 0 {
+                255
+            } else {
+                0
+            },
+        ]);
+    }
     Some(rgba)
+}
+
+fn overlay_texture_pixel_uv(
+    x: u32,
+    y: u32,
+    region: OverlayRasterKey,
+    full_width: u32,
+    full_height: u32,
+) -> [f32; 2] {
+    [
+        (region.source_x as f32
+            + (x as f32 + 0.5) * region.source_width as f32 / region.texture_width.max(1) as f32)
+            / full_width.max(1) as f32,
+        (region.source_y as f32
+            + (y as f32 + 0.5) * region.source_height as f32 / region.texture_height.max(1) as f32)
+            / full_height.max(1) as f32,
+    ]
+}
+
+fn live_dab_texture_bounds(
+    dab: BrushDab,
+    region: OverlayRasterKey,
+    full_width: u32,
+    full_height: u32,
+) -> Option<[u32; 4]> {
+    let image_min = full_width.min(full_height).max(1) as f32;
+    let radius = dab.size.max(0.0) * image_min;
+    let center_x = (dab.center[0] * full_width as f32 - region.source_x as f32)
+        * region.texture_width as f32
+        / region.source_width.max(1) as f32;
+    let center_y = (dab.center[1] * full_height as f32 - region.source_y as f32)
+        * region.texture_height as f32
+        / region.source_height.max(1) as f32;
+    let radius_x = radius * region.texture_width as f32 / region.source_width.max(1) as f32;
+    let radius_y = radius * region.texture_height as f32 / region.source_height.max(1) as f32;
+    if ![center_x, center_y, radius_x, radius_y]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return None;
+    }
+    let x0 = (center_x - radius_x - 2.0)
+        .floor()
+        .clamp(0.0, region.texture_width as f32) as u32;
+    let y0 = (center_y - radius_y - 2.0)
+        .floor()
+        .clamp(0.0, region.texture_height as f32) as u32;
+    let x1 = (center_x + radius_x + 2.0)
+        .ceil()
+        .clamp(0.0, region.texture_width as f32) as u32;
+    let y1 = (center_y + radius_y + 2.0)
+        .ceil()
+        .clamp(0.0, region.texture_height as f32) as u32;
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
+}
+
+fn live_dab_coverage(
+    x: u32,
+    y: u32,
+    dab: BrushDab,
+    region: OverlayRasterKey,
+    full_width: u32,
+    full_height: u32,
+) -> f32 {
+    let image_min = full_width.min(full_height).max(1) as f32;
+    let radius = dab.size.clamp(f32::EPSILON, 0.5) * image_min;
+    let center_x = (dab.center[0] * full_width as f32 - region.source_x as f32)
+        * region.texture_width as f32
+        / region.source_width.max(1) as f32;
+    let center_y = (dab.center[1] * full_height as f32 - region.source_y as f32)
+        * region.texture_height as f32
+        / region.source_height.max(1) as f32;
+    let radius_x = radius * region.texture_width as f32 / region.source_width.max(1) as f32;
+    let radius_y = radius * region.texture_height as f32 / region.source_height.max(1) as f32;
+    let dx = (x as f32 + 0.5 - center_x) / radius_x.max(0.5);
+    let dy = (y as f32 + 0.5 - center_y) / radius_y.max(0.5);
+    let distance = (dx * dx + dy * dy).sqrt();
+    let antialias = (1.0 / radius_x.max(radius_y).max(1.0)).clamp(0.002, 0.25);
+    let inner = 1.0 - antialias;
+    1.0 - smoothstep_preview(inner, 1.0 + antialias, distance)
+}
+
+fn smoothstep_preview(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn sample_live_retouch_rgb(
+    source: &MaskRgbImage,
+    canvas: &[[f32; 3]],
+    region: OverlayRasterKey,
+    full_width: u32,
+    full_height: u32,
+    uv: [f32; 2],
+) -> Option<[f32; 3]> {
+    let x = (uv[0] * full_width.max(1) as f32 - region.source_x as f32)
+        * region.texture_width as f32
+        / region.source_width.max(1) as f32
+        - 0.5;
+    let y = (uv[1] * full_height.max(1) as f32 - region.source_y as f32)
+        * region.texture_height as f32
+        / region.source_height.max(1) as f32
+        - 0.5;
+    sample_live_canvas_rgb(canvas, region.texture_width, region.texture_height, x, y)
+        .or_else(|| sample_preview_rgb(source, uv))
+}
+
+fn sample_live_canvas_rgb(
+    canvas: &[[f32; 3]],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+) -> Option<[f32; 3]> {
+    if width == 0
+        || height == 0
+        || canvas.len() != width as usize * height as usize
+        || x < -0.5
+        || y < -0.5
+        || x > width as f32 - 0.5
+        || y > height as f32 - 0.5
+    {
+        return None;
+    }
+    let x = x.clamp(0.0, width.saturating_sub(1) as f32);
+    let y = y.clamp(0.0, height.saturating_sub(1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let sample = |sample_x: u32, sample_y: u32| canvas[(sample_y * width + sample_x) as usize];
+    let top_left = sample(x0, y0);
+    let top_right = sample(x1, y0);
+    let bottom_left = sample(x0, y1);
+    let bottom_right = sample(x1, y1);
+    Some(std::array::from_fn(|channel| {
+        let top = top_left[channel] + (top_right[channel] - top_left[channel]) * tx;
+        let bottom = bottom_left[channel] + (bottom_right[channel] - bottom_left[channel]) * tx;
+        top + (bottom - top) * ty
+    }))
 }
 
 fn aligned_retouch_source_uv(
@@ -3699,7 +3889,7 @@ mod live_retouch_preview_tests {
         let dabs = [BrushDab {
             center: [0.25, 0.5],
             opacity: 1.0,
-            size: 0.2,
+            size: 0.5,
             feather: 0.0,
         }];
         let preview = live_retouch_rgba(
@@ -3714,7 +3904,7 @@ mod live_retouch_preview_tests {
         )
         .unwrap();
         assert_eq!(&preview[0..4], &[20, 0, 0, 255]);
-        assert_eq!(&preview[12..16], &[0, 0, 0, 0]);
+        assert_eq!(preview[15], 0);
     }
 
     #[test]
@@ -3724,6 +3914,51 @@ mod live_retouch_preview_tests {
         let second = aligned_retouch_source_uv([0.8, 0.6], [0.1, 0.1], offset);
         assert!((first[0] - 0.4).abs() < 1e-6 && (first[1] - 0.4).abs() < 1e-6);
         assert!((second[0] - 0.6).abs() < 1e-6 && (second[1] - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn clone_preview_samples_pixels_from_earlier_active_dabs() {
+        let mut rgba = Vec::new();
+        for x in 0..8u8 {
+            rgba.extend_from_slice(&[x * 10, 0, 0, 255]);
+        }
+        let source = MaskRgbImage::new(8, 1, rgba).unwrap();
+        let region = OverlayRasterKey {
+            source_x: 0,
+            source_y: 0,
+            source_width: 8,
+            source_height: 1,
+            texture_width: 8,
+            texture_height: 1,
+        };
+        let dabs = [
+            BrushDab {
+                center: [2.5 / 8.0, 0.5],
+                opacity: 1.0,
+                size: 0.49,
+                feather: 0.0,
+            },
+            BrushDab {
+                center: [3.5 / 8.0, 0.5],
+                opacity: 1.0,
+                size: 0.49,
+                feather: 0.0,
+            },
+        ];
+        let coverage = rasterize_brush_dabs(8, 1, 8, 1, &dabs);
+        let preview = live_retouch_rgba(
+            &source,
+            region,
+            8,
+            1,
+            &dabs,
+            &coverage,
+            InpaintStrokeKind::Clone,
+            [-1.0 / 8.0, 0.0],
+        )
+        .unwrap();
+        assert_eq!(&preview[2 * 4..2 * 4 + 4], &[10, 0, 0, 255]);
+        assert_eq!(&preview[3 * 4..3 * 4 + 4], &[10, 0, 0, 255]);
     }
 
     #[test]
