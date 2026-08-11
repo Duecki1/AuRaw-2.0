@@ -1242,6 +1242,7 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
         }
         validate_local_adjustments(&mask.adjustments)?;
         validate_glow_effect(&mask.effect_settings.glow)?;
+        validate_light_rays_effect(&mask.effect_settings.light_rays)?;
         validate_neon_effect(&mask.effect_settings.neon)?;
         if mask.name.len() > MAX_EDIT_NAME_BYTES {
             return invalid("mask name is unreasonably long");
@@ -2039,6 +2040,41 @@ fn validate_glow_effect(glow: &crate::pipeline::GlowEffectSettings) -> Result<()
     Ok(())
 }
 
+fn validate_light_rays_effect(
+    light_rays: &crate::pipeline::LightRaysEffectSettings,
+) -> Result<(), SidecarError> {
+    finite(
+        "Light Rays mask effect",
+        &[
+            light_rays.amount,
+            light_rays.length,
+            light_rays.source[0],
+            light_rays.source[1],
+            light_rays.spread,
+            light_rays.fade,
+            light_rays.ray_count,
+            light_rays.variation,
+            light_rays.softness,
+            light_rays.color[0],
+            light_rays.color[1],
+            light_rays.color[2],
+        ],
+    )?;
+    bounded("Light Rays amount", light_rays.amount, 0.0, 100.0)?;
+    bounded("Light Rays length", light_rays.length, 0.0, 200.0)?;
+    bounded("Light Rays source X", light_rays.source[0], -50.0, 150.0)?;
+    bounded("Light Rays source Y", light_rays.source[1], -50.0, 150.0)?;
+    bounded("Light Rays spread", light_rays.spread, 0.0, 45.0)?;
+    bounded("Light Rays fade", light_rays.fade, 0.0, 100.0)?;
+    bounded("Light Rays ray count", light_rays.ray_count, 4.0, 96.0)?;
+    bounded("Light Rays variation", light_rays.variation, 0.0, 100.0)?;
+    bounded("Light Rays softness", light_rays.softness, 0.0, 100.0)?;
+    for channel in light_rays.color {
+        bounded("Light Rays color channel", channel, 0.0, 1.0)?;
+    }
+    Ok(())
+}
+
 fn validate_curves(
     curves: &[&crate::pipeline::PointCurve],
     label: &str,
@@ -2491,6 +2527,40 @@ mod tests {
         assert_eq!(glow_mask.effect_settings.glow.core, 81.0);
         assert_eq!(glow_mask.effect_settings.glow.color, [0.1, 0.55, 1.0]);
         assert_eq!(glow_mask.adjustments.exposure, 1.0);
+    }
+
+    #[test]
+    fn light_rays_mask_settings_round_trip_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        let light_rays_mask = masks.masks.last_mut().unwrap();
+        light_rays_mask.effect = crate::pipeline::MaskEffect::LightRays;
+        light_rays_mask.effect_settings.light_rays.amount = 76.0;
+        light_rays_mask.effect_settings.light_rays.length = 165.0;
+        light_rays_mask.effect_settings.light_rays.source = [22.0, -15.0];
+        light_rays_mask.effect_settings.light_rays.color = [1.0, 0.68, 0.25];
+        light_rays_mask.adjustments.exposure = 1.0;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let light_rays_mask = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(
+            light_rays_mask.effect,
+            crate::pipeline::MaskEffect::LightRays
+        );
+        assert_eq!(light_rays_mask.effect_settings.light_rays.amount, 76.0);
+        assert_eq!(light_rays_mask.effect_settings.light_rays.length, 165.0);
+        assert_eq!(
+            light_rays_mask.effect_settings.light_rays.source,
+            [22.0, -15.0]
+        );
+        assert_eq!(
+            light_rays_mask.effect_settings.light_rays.color,
+            [1.0, 0.68, 0.25]
+        );
+        assert_eq!(light_rays_mask.adjustments.exposure, 1.0);
     }
 
     #[test]

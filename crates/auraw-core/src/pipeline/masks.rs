@@ -6,7 +6,8 @@ use std::sync::Arc;
 mod effects;
 
 pub use effects::{
-    GlowEffectSettings, MaskEffect, MaskEffectCategory, MaskEffectSettings, NeonEffectSettings,
+    GlowEffectSettings, LightRaysEffectSettings, MaskEffect, MaskEffectCategory,
+    MaskEffectSettings, NeonEffectSettings,
 };
 
 pub const MAX_LOCAL_MASKS: usize = 32;
@@ -2738,6 +2739,7 @@ mod tests {
             assert!(labels.iter().all(|label| !label.is_empty()));
         }
         assert!(MaskEffect::Glow.is_implemented());
+        assert!(MaskEffect::LightRays.is_implemented());
         assert!(MaskEffect::Neon.is_implemented());
         assert!(MaskEffect::ALL
             .iter()
@@ -2745,7 +2747,10 @@ mod tests {
             .filter(|effect| {
                 !matches!(
                     effect,
-                    MaskEffect::Adjustment | MaskEffect::Glow | MaskEffect::Neon
+                    MaskEffect::Adjustment
+                        | MaskEffect::Glow
+                        | MaskEffect::LightRays
+                        | MaskEffect::Neon
                 )
             })
             .all(|effect| !effect.is_implemented()));
@@ -2798,6 +2803,27 @@ mod tests {
         assert_eq!(decoded.effect_settings.glow.radius, 84.0);
         assert_eq!(decoded.effect_settings.glow.core, 55.0);
         assert_eq!(decoded.effect_settings.glow.color, [0.2, 0.8, 1.0]);
+        assert_eq!(decoded.adjustments.exposure, 1.25);
+    }
+
+    #[test]
+    fn light_rays_settings_round_trip_without_touching_local_adjustments() {
+        let mut mask = LocalMask::new(MaskKind::Fullscreen, 1);
+        mask.effect = MaskEffect::LightRays;
+        mask.effect_settings.light_rays.amount = 68.0;
+        mask.effect_settings.light_rays.length = 145.0;
+        mask.effect_settings.light_rays.source = [24.0, -12.0];
+        mask.effect_settings.light_rays.color = [1.0, 0.72, 0.35];
+        mask.adjustments.exposure = 1.25;
+
+        let encoded = serde_json::to_string(&mask).expect("serialize Light Rays mask");
+        let decoded: LocalMask =
+            serde_json::from_str(&encoded).expect("deserialize Light Rays mask");
+        assert_eq!(decoded.effect, MaskEffect::LightRays);
+        assert_eq!(decoded.effect_settings.light_rays.amount, 68.0);
+        assert_eq!(decoded.effect_settings.light_rays.length, 145.0);
+        assert_eq!(decoded.effect_settings.light_rays.source, [24.0, -12.0]);
+        assert_eq!(decoded.effect_settings.light_rays.color, [1.0, 0.72, 0.35]);
         assert_eq!(decoded.adjustments.exposure, 1.25);
     }
 

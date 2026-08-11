@@ -1392,6 +1392,9 @@ impl AurawApp {
                 raster_elapsed.as_secs_f64()
             ));
         }
+        pipeline
+            .update_light_rays_mask_layers(queue, masks, raw.width, raw.height)
+            .map_err(|error| format!("Could not update Light Rays mask: {error:#}"))?;
         Ok(())
     }
 
@@ -1428,6 +1431,14 @@ impl AurawApp {
                 .update_mask_layer_region(queue, layer, extent[0], extent[1], &bytes)
                 .map_err(|error| format!("Could not update zoomed local mask: {error:#}"))?;
         }
+        pipeline
+            .update_light_rays_mask_layers(
+                queue,
+                masks,
+                full_raw.width,
+                full_raw.height,
+            )
+            .map_err(|error| format!("Could not update zoomed Light Rays mask: {error:#}"))?;
         Ok(())
     }
 
@@ -2237,6 +2248,17 @@ impl AurawApp {
                 }
                 self.navigation_dirty_mask_layers[layer] = false;
             }
+            if let Err(error) = preview.pipeline.update_light_rays_mask_layers(
+                &render_state.queue,
+                &self.masks,
+                preview.raw.width,
+                preview.raw.height,
+            ) {
+                self.notice = Some(format!(
+                    "Could not update the navigation Light Rays mask: {error:#}"
+                ));
+                return;
+            }
         }
 
         if let Err(error) = preview.pipeline.update_inpaint_layer(
@@ -2480,6 +2502,15 @@ impl AurawApp {
             }
             if let Some(error) = upload_error {
                 self.notice = Some(error);
+                return;
+            }
+            if let Err(error) = pipeline.update_light_rays_mask_layers(
+                &render_state.queue,
+                &self.masks,
+                raw.width,
+                raw.height,
+            ) {
+                self.notice = Some(format!("Could not update Light Rays mask: {error:#}"));
                 return;
             }
         }

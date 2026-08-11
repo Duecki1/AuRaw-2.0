@@ -1154,6 +1154,9 @@ where
         export_mask_edge,
         export_mask_edge
     ));
+    tile_pipeline
+        .update_light_rays_mask_layers(queue, masks, raw.width, raw.height)
+        .context("upload full-image Light Rays emission masks")?;
 
     // Count each native source pixel once; exclude halo pixels from tone statistics.
     let tone_analysis_started = Instant::now();

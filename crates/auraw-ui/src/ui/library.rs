@@ -4666,6 +4666,9 @@ fn render_uncached_developed_thumbnail(
             .update_mask_layer(&gpu.queue, layer, &values)
             .map_err(|error| format!("could not apply thumbnail local mask: {error:#}"))?;
     }
+    pipeline
+        .update_light_rays_mask_layers(&gpu.queue, &masks, preview_raw.width, preview_raw.height)
+        .map_err(|error| format!("could not apply thumbnail Light Rays mask: {error:#}"))?;
     let params =
         GpuParams::new(&edits.exposure, &masks, &preview_raw).with_vignette_geometry(geometry);
     pipeline.recompute(&gpu.queue, &gpu.device, &params);

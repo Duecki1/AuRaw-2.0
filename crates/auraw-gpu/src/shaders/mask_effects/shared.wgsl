@@ -3,6 +3,7 @@
 
 const MASK_EFFECT_NEON_ID: u32 = 1u;
 const MASK_EFFECT_GLOW_ID: u32 = 2u;
+const MASK_EFFECT_LIGHT_RAYS_ID: u32 = 3u;
 
 fn mask_effect_srgb_component_to_linear(value: f32) -> f32 {
     let encoded = clamp(value, 0.0, 1.0);

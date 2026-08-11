@@ -29,6 +29,11 @@ mod tests;
 
 const GPU_PARAMS_ABI_VERSION: u32 = 5;
 const MASK_EFFECT_ID_SHIFT: u32 = 8;
+pub(super) const LIGHT_RAYS_MASK_ATLAS_EDGE: u32 = if cfg!(target_os = "android") {
+    256
+} else {
+    512
+};
 // The public ABI marker retains the historical monolithic payload size while
 // the runtime uses independently allocated stage uniforms.
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
@@ -236,6 +241,7 @@ const SHADER_REGRESSION_SCENE: &str = include_str!("../shaders/regression_scene.
 const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
 const SHADER_MASK_EFFECTS_SHARED: &str = include_str!("../shaders/mask_effects/shared.wgsl");
 const SHADER_MASK_GLOW: &str = include_str!("../shaders/mask_effects/glow.wgsl");
+const SHADER_MASK_LIGHT_RAYS: &str = include_str!("../shaders/mask_effects/light_rays.wgsl");
 const SHADER_MASK_NEON: &str = include_str!("../shaders/mask_effects/neon.wgsl");
 const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
 const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
@@ -862,6 +868,38 @@ impl GpuParams {
                 };
                 continue;
             }
+            if mask.effect == MaskEffect::LightRays {
+                let light_rays = mask.effect_settings.light_rays;
+                let active = mask.enabled && light_rays.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        light_rays.amount.clamp(0.0, 100.0),
+                        light_rays.length.clamp(0.0, 200.0),
+                        light_rays.source[0].clamp(-50.0, 150.0),
+                        light_rays.source[1].clamp(-50.0, 150.0),
+                    ],
+                    adjust_1: [
+                        light_rays.color[0].clamp(0.0, 1.0),
+                        light_rays.color[1].clamp(0.0, 1.0),
+                        light_rays.color[2].clamp(0.0, 1.0),
+                        light_rays.fade.clamp(0.0, 100.0),
+                    ],
+                    adjust_2: [
+                        light_rays.spread.clamp(0.0, 45.0),
+                        light_rays.ray_count.clamp(4.0, 96.0),
+                        light_rays.variation.clamp(0.0, 100.0),
+                        light_rays.softness.clamp(0.0, 100.0),
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
             let adjustment = mask.adjustments;
             // Placeholder effect types retain any adjustment values so a user
             // can switch back without losing work, but they must not apply
@@ -1402,6 +1440,7 @@ impl GpuParams {
             let effect_id = state[3] >> MASK_EFFECT_ID_SHIFT;
             if effect_id == MaskEffect::Neon.shader_id()
                 || effect_id == MaskEffect::Glow.shader_id()
+                || effect_id == MaskEffect::LightRays.shader_id()
             {
                 return true;
             }
@@ -1556,6 +1595,7 @@ pub struct RawGpuPipeline {
     _tone_guide_a: wgpu::Texture,
     _tone_guide_b: wgpu::Texture,
     mask_texture: wgpu::Texture,
+    light_rays_mask_texture: wgpu::Texture,
     mask_layer_capacity: usize,
     inpaint_texture: wgpu::Texture,
     legacy_inpaint_camera_to_working: [[f32; 4]; 3],
@@ -2254,6 +2294,24 @@ impl RawGpuPipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[wgpu::TextureFormat::R16Float],
         });
+        // Light Rays needs the same full-image emission field in the fit
+        // preview, zoom-detail crops, and independently processed export tiles.
+        // A compact dedicated atlas is sufficient because shafts intentionally
+        // integrate and soften their source over a long distance.
+        let light_rays_mask_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("auraw full-image Light Rays emission atlas"),
+            size: wgpu::Extent3d {
+                width: LIGHT_RAYS_MASK_ATLAS_EDGE,
+                height: LIGHT_RAYS_MASK_ATLAS_EDGE,
+                depth_or_array_layers: mask_layer_capacity as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[wgpu::TextureFormat::R16Float],
+        });
         // Do not upload an all-zero atlas here. With 32 supported layers that would
         // create a very large temporary CPU allocation. Every active layer is uploaded
         // before the first recompute, and shaders never sample layers beyond mask_counts.x.
@@ -2314,6 +2372,12 @@ impl RawGpuPipeline {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
+        let light_rays_mask_view =
+            light_rays_mask_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("auraw full-image Light Rays mask array view"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
         let mask_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("auraw local-mask linear sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -2855,6 +2919,10 @@ impl RawGpuPipeline {
                         ),
                         sampler_entry(28),
                         storage_buffer_entry(33, true),
+                        texture_array_entry(
+                            34,
+                            wgpu::TextureSampleType::Float { filterable: true },
+                        ),
                     ],
                 })
             });
@@ -3722,6 +3790,10 @@ impl RawGpuPipeline {
                     binding: 33,
                     resource: mask_data_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 34,
+                    resource: wgpu::BindingResource::TextureView(&light_rays_mask_view),
+                },
             ],
         });
 
@@ -4373,6 +4445,7 @@ impl RawGpuPipeline {
             _tone_guide_a: tone_guide_a,
             _tone_guide_b: tone_guide_b,
             mask_texture,
+            light_rays_mask_texture,
             mask_layer_capacity,
             inpaint_texture,
             legacy_inpaint_camera_to_working: raw.cam_to_srgb,
@@ -4499,6 +4572,78 @@ impl RawGpuPipeline {
                 depth_or_array_layers: 1,
             },
         );
+        Ok(())
+    }
+
+    pub(crate) fn update_light_rays_mask_layer(
+        &self,
+        queue: &wgpu::Queue,
+        layer: usize,
+        values: &[u16],
+    ) -> Result<()> {
+        if layer >= self.mask_layer_capacity {
+            return Err(anyhow!(
+                "Light Rays mask layer {layer} exceeds atlas capacity {}",
+                self.mask_layer_capacity
+            ));
+        }
+        let edge = LIGHT_RAYS_MASK_ATLAS_EDGE;
+        let expected = edge as usize * edge as usize;
+        if values.len() != expected {
+            return Err(anyhow!(
+                "Light Rays mask layer has {} samples, expected {expected}",
+                values.len()
+            ));
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.light_rays_mask_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(values),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(edge * 2),
+                rows_per_image: Some(edge),
+            },
+            wgpu::Extent3d {
+                width: edge,
+                height: edge,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
+    }
+
+    /// Uploads full-image mask coverage used only as the Light Rays emission
+    /// field. Its fixed normalized resolution deliberately does not change for
+    /// zoom-detail or tiled-export pipelines, preventing view-dependent rays.
+    pub fn update_light_rays_mask_layers(
+        &self,
+        queue: &wgpu::Queue,
+        masks: &MaskStack,
+        image_width: u32,
+        image_height: u32,
+    ) -> Result<()> {
+        let edge = LIGHT_RAYS_MASK_ATLAS_EDGE;
+        for (layer, mask) in masks
+            .masks
+            .iter()
+            .take(self.mask_layer_capacity)
+            .enumerate()
+        {
+            if mask.effect != MaskEffect::LightRays {
+                continue;
+            }
+            let values = masks.rasterize_layer_f16(layer, edge, edge, image_width, image_height);
+            self.update_light_rays_mask_layer(queue, layer, &values)?;
+        }
         Ok(())
     }
 

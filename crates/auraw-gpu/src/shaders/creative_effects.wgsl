@@ -532,5 +532,6 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rgb = SceneAdjustments::local_effects_at(pos);
     rgb = apply_glow(pos, rgb);
     rgb = apply_mask_glow_cores(pos, rgb);
+    rgb = apply_light_rays(pos, rgb);
     textureStore(SceneAdjustments::creative_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
