@@ -1064,10 +1064,13 @@ fn adjustment_modules_expose_the_render_graph_controls() {
     for function in [
         "apply_creative_effects",
         "apply_glow",
+        "apply_mask_blur",
         "apply_mask_glow_cores",
         "apply_light_rays",
+        "apply_edge_glow",
         "apply_vignette",
         "apply_neon",
+        "apply_pixelate",
     ] {
         assert!(
             has_function(&creative, function) || has_function(&view, function),
@@ -1622,6 +1625,82 @@ fn light_rays_mask_effect_packs_independent_settings_and_schedules_rendering() {
     assert!(!neutral.needs_intermediate_adjustment_passes());
 }
 
+#[test]
+fn blur_mask_effect_packs_independent_settings_and_schedules_rendering() {
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams::default();
+    let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
+    let mask = &mut masks.masks[0];
+    mask.effect = crate::pipeline::MaskEffect::Blur;
+    mask.effect_settings.blur.amount = 72.0;
+    mask.effect_settings.blur.radius = 11.5;
+
+    let params = super::GpuParams::new(&exposure, &masks, &raw);
+    let packed = params.mask_data[0];
+    assert_eq!(packed.metadata[0], 1);
+    assert_eq!(packed.metadata[1], 1);
+    assert_eq!(packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT, 4);
+    assert_eq!(packed.adjust_0, [72.0, 11.5, 0.0, 0.0]);
+    assert!(params.needs_intermediate_adjustment_passes());
+
+    masks.masks[0].effect_settings.blur.radius = 0.0;
+    let neutral = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(neutral.mask_data[0].metadata[0], 0);
+    assert!(!neutral.needs_intermediate_adjustment_passes());
+}
+
+#[test]
+fn edge_glow_mask_effect_packs_independent_settings_and_schedules_rendering() {
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams::default();
+    let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
+    let mask = &mut masks.masks[0];
+    mask.effect = crate::pipeline::MaskEffect::EdgeGlow;
+    mask.effect_settings.edge_glow.amount = 63.0;
+    mask.effect_settings.edge_glow.edge_width = 3.5;
+    mask.effect_settings.edge_glow.detail = 72.0;
+    mask.effect_settings.edge_glow.glow = 44.0;
+    mask.effect_settings.edge_glow.color = [0.9, 0.3, 0.1];
+
+    let params = super::GpuParams::new(&exposure, &masks, &raw);
+    let packed = params.mask_data[0];
+    assert_eq!(packed.metadata[0], 1);
+    assert_eq!(packed.metadata[1], 1);
+    assert_eq!(packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT, 5);
+    assert_eq!(packed.adjust_0, [63.0, 3.5, 72.0, 44.0]);
+    assert_eq!(packed.adjust_1, [0.9, 0.3, 0.1, 0.0]);
+    assert!(params.needs_intermediate_adjustment_passes());
+
+    masks.masks[0].effect_settings.edge_glow.amount = 0.0;
+    let neutral = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(neutral.mask_data[0].metadata[0], 0);
+    assert!(!neutral.needs_intermediate_adjustment_passes());
+}
+
+#[test]
+fn pixelate_mask_effect_packs_independent_settings_and_schedules_rendering() {
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams::default();
+    let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
+    let mask = &mut masks.masks[0];
+    mask.effect = crate::pipeline::MaskEffect::Pixelate;
+    mask.effect_settings.pixelate.amount = 84.0;
+    mask.effect_settings.pixelate.block_size = 23.0;
+
+    let params = super::GpuParams::new(&exposure, &masks, &raw);
+    let packed = params.mask_data[0];
+    assert_eq!(packed.metadata[0], 1);
+    assert_eq!(packed.metadata[1], 1);
+    assert_eq!(packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT, 6);
+    assert_eq!(packed.adjust_0, [84.0, 23.0, 0.0, 0.0]);
+    assert!(params.needs_intermediate_adjustment_passes());
+
+    masks.masks[0].effect_settings.pixelate.amount = 0.0;
+    let neutral = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(neutral.mask_data[0].metadata[0], 0);
+    assert!(!neutral.needs_intermediate_adjustment_passes());
+}
+
 fn assert_max_delta(
     adjustment: &str,
     comparison: &str,
@@ -2068,7 +2147,7 @@ fn reused_gpu_program_layouts_match_fresh_glow_for_bayer_and_xtrans() {
 }
 
 #[test]
-fn presence_glow_and_light_rays_have_real_gpu_behavior_when_an_adapter_exists() {
+fn presence_and_mask_effects_have_real_gpu_behavior_when_an_adapter_exists() {
     let _gpu_guard = gpu_resource_test_guard();
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
     use crate::pipeline::{HighlightReconstructionMethod, MaskStack};
@@ -2585,6 +2664,124 @@ fn presence_glow_and_light_rays_have_real_gpu_behavior_when_an_adapter_exists() 
         "mask Glow reached remote pixels: halo={masked_halo_lift}, remote={masked_remote_lift}"
     );
 
+    // Blur, Pixelate, and Edge Glow all use the ordinary mask as a final,
+    // non-destructive blend. A full mask lets this test isolate each image
+    // operation from coverage rasterization.
+    let full_mask_values = vec![half::f16::from_f32(1.0).to_bits(); mask_values.len()];
+    pipeline
+        .update_mask_layer(&queue, 0, &full_mask_values)
+        .unwrap();
+
+    let blur_source = fixture(WIDTH, HEIGHT, |x, _| if x < 64 { 0.08 } else { 0.72 });
+    let blur_neutral = render(&blur_source, &neutral);
+    {
+        let mask = &mut glow_masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::Blur;
+        mask.effect_settings.blur.amount = 100.0;
+        mask.effect_settings.blur.radius = 12.0;
+    }
+    pipeline.upload_raw_tile(&queue, &blur_source).unwrap();
+    let blur_params = super::GpuParams::new(&neutral, &glow_masks, &blur_source);
+    pipeline.recompute(&queue, &device, &blur_params);
+    let blurred = pipeline
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, WIDTH, HEIGHT)
+        .unwrap();
+    let dark_edge = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            (58.0..63.0).contains(&x) && (24.0..104.0).contains(&y)
+        })
+    };
+    let bright_edge = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            (65.0..70.0).contains(&x) && (24.0..104.0).contains(&y)
+        })
+    };
+    assert!(
+        dark_edge(&blurred) > dark_edge(&blur_neutral) + 1e-3
+            && bright_edge(&blurred) < bright_edge(&blur_neutral) - 1e-3,
+        "Blur did not diffuse across a hard edge"
+    );
+
+    let pixel_source = fixture(WIDTH, HEIGHT, |x, y| {
+        0.08 + 0.62 * x as f32 / (WIDTH - 1) as f32 + if (x + y) % 2 == 0 { 0.025 } else { -0.025 }
+    });
+    let pixel_neutral = render(&pixel_source, &neutral);
+    {
+        let mask = &mut glow_masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::Pixelate;
+        mask.effect_settings.pixelate.amount = 100.0;
+        mask.effect_settings.pixelate.block_size = 16.0;
+    }
+    pipeline.upload_raw_tile(&queue, &pixel_source).unwrap();
+    let pixel_params = super::GpuParams::new(&neutral, &glow_masks, &pixel_source);
+    pipeline.recompute(&queue, &device, &pixel_params);
+    let pixelated = pipeline
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, WIDTH, HEIGHT)
+        .unwrap();
+    let cell_range = |pixels: &[f32]| {
+        let mut minimum = f32::INFINITY;
+        let mut maximum = f32::NEG_INFINITY;
+        for y in 55..62u32 {
+            for x in 55..62u32 {
+                let index = ((y * WIDTH + x) * 3) as usize;
+                let value = luma(&pixels[index..index + 3]);
+                minimum = minimum.min(value);
+                maximum = maximum.max(value);
+            }
+        }
+        maximum - minimum
+    };
+    let neutral_cell_range = cell_range(&pixel_neutral);
+    let pixelated_cell_range = cell_range(&pixelated);
+    assert!(
+        pixelated_cell_range < neutral_cell_range * 0.08,
+        "Pixelate did not flatten a full-image-anchored cell: {neutral_cell_range} -> {pixelated_cell_range}"
+    );
+
+    let edge_source = fixture(WIDTH, HEIGHT, |x, y| {
+        if (38..90).contains(&x) && (38..90).contains(&y) {
+            0.62
+        } else {
+            0.06
+        }
+    });
+    let edge_neutral = render(&edge_source, &neutral);
+    {
+        let mask = &mut glow_masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::EdgeGlow;
+        mask.effect_settings.edge_glow.amount = 100.0;
+        mask.effect_settings.edge_glow.edge_width = 2.0;
+        mask.effect_settings.edge_glow.detail = 70.0;
+        mask.effect_settings.edge_glow.glow = 65.0;
+        mask.effect_settings.edge_glow.color = [1.0, 0.35, 0.05];
+    }
+    pipeline.upload_raw_tile(&queue, &edge_source).unwrap();
+    let edge_params = super::GpuParams::new(&neutral, &glow_masks, &edge_source);
+    pipeline.recompute(&queue, &device, &edge_params);
+    let edge_glow = pipeline
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, WIDTH, HEIGHT)
+        .unwrap();
+    let edge_band = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            let near_vertical = (35.0..42.0).contains(&x) || (87.0..94.0).contains(&x);
+            let near_horizontal = (35.0..42.0).contains(&y) || (87.0..94.0).contains(&y);
+            (near_vertical && (32.0..96.0).contains(&y))
+                || (near_horizontal && (32.0..96.0).contains(&x))
+        })
+    };
+    let flat_regions = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            ((50.0..78.0).contains(&x) && (50.0..78.0).contains(&y))
+                || ((8.0..28.0).contains(&x) && (8.0..28.0).contains(&y))
+        })
+    };
+    let edge_lift = edge_band(&edge_glow) - edge_band(&edge_neutral);
+    let flat_lift = (flat_regions(&edge_glow) - flat_regions(&edge_neutral)).abs();
+    assert!(
+        edge_lift > 1e-3 && edge_lift > flat_lift * 4.0,
+        "Edge Glow was not localized to detected edges: edge={edge_lift}, flat={flat_lift}"
+    );
+
     // Light Rays also treats coverage as an emitter, but its shafts converge
     // on a separately controlled source point. Two vertical openings above and
     // below that point must project in opposite radial directions rather than
@@ -2602,6 +2799,7 @@ fn presence_glow_and_light_rays_have_real_gpu_behavior_when_an_adapter_exists() 
         light_rays_mask.effect_settings.light_rays.softness = 50.0;
         light_rays_mask.effect_settings.light_rays.color = [1.0, 0.85, 0.62];
     }
+    pipeline.upload_raw_tile(&queue, &masked_source).unwrap();
     let light_rays_edge = super::LIGHT_RAYS_MASK_ATLAS_EDGE;
     let mut light_rays_values =
         vec![half::f16::from_f32(0.0).to_bits(); (light_rays_edge * light_rays_edge) as usize];

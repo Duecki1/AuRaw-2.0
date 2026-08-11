@@ -6,8 +6,8 @@ use std::sync::Arc;
 mod effects;
 
 pub use effects::{
-    GlowEffectSettings, LightRaysEffectSettings, MaskEffect, MaskEffectCategory,
-    MaskEffectSettings, NeonEffectSettings,
+    BlurEffectSettings, EdgeGlowEffectSettings, GlowEffectSettings, LightRaysEffectSettings,
+    MaskEffect, MaskEffectCategory, MaskEffectSettings, NeonEffectSettings, PixelateEffectSettings,
 };
 
 pub const MAX_LOCAL_MASKS: usize = 32;
@@ -2741,6 +2741,9 @@ mod tests {
         assert!(MaskEffect::Glow.is_implemented());
         assert!(MaskEffect::LightRays.is_implemented());
         assert!(MaskEffect::Neon.is_implemented());
+        assert!(MaskEffect::Blur.is_implemented());
+        assert!(MaskEffect::EdgeGlow.is_implemented());
+        assert!(MaskEffect::Pixelate.is_implemented());
         assert!(MaskEffect::ALL
             .iter()
             .copied()
@@ -2751,6 +2754,9 @@ mod tests {
                         | MaskEffect::Glow
                         | MaskEffect::LightRays
                         | MaskEffect::Neon
+                        | MaskEffect::Blur
+                        | MaskEffect::EdgeGlow
+                        | MaskEffect::Pixelate
                 )
             })
             .all(|effect| !effect.is_implemented()));
@@ -2824,6 +2830,33 @@ mod tests {
         assert_eq!(decoded.effect_settings.light_rays.length, 145.0);
         assert_eq!(decoded.effect_settings.light_rays.source, [24.0, -12.0]);
         assert_eq!(decoded.effect_settings.light_rays.color, [1.0, 0.72, 0.35]);
+        assert_eq!(decoded.adjustments.exposure, 1.25);
+    }
+
+    #[test]
+    fn blur_edge_glow_and_pixelate_settings_round_trip_independently() {
+        let mut mask = LocalMask::new(MaskKind::Fullscreen, 1);
+        mask.effect = MaskEffect::Pixelate;
+        mask.effect_settings.blur.amount = 37.0;
+        mask.effect_settings.blur.radius = 11.5;
+        mask.effect_settings.edge_glow.amount = 64.0;
+        mask.effect_settings.edge_glow.edge_width = 3.25;
+        mask.effect_settings.edge_glow.color = [0.2, 0.7, 1.0];
+        mask.effect_settings.pixelate.amount = 82.0;
+        mask.effect_settings.pixelate.block_size = 23.0;
+        mask.adjustments.exposure = 1.25;
+
+        let encoded = serde_json::to_string(&mask).expect("serialize creative mask effects");
+        let decoded: LocalMask =
+            serde_json::from_str(&encoded).expect("deserialize creative mask effects");
+        assert_eq!(decoded.effect, MaskEffect::Pixelate);
+        assert_eq!(decoded.effect_settings.blur.amount, 37.0);
+        assert_eq!(decoded.effect_settings.blur.radius, 11.5);
+        assert_eq!(decoded.effect_settings.edge_glow.amount, 64.0);
+        assert_eq!(decoded.effect_settings.edge_glow.edge_width, 3.25);
+        assert_eq!(decoded.effect_settings.edge_glow.color, [0.2, 0.7, 1.0]);
+        assert_eq!(decoded.effect_settings.pixelate.amount, 82.0);
+        assert_eq!(decoded.effect_settings.pixelate.block_size, 23.0);
         assert_eq!(decoded.adjustments.exposure, 1.25);
     }
 

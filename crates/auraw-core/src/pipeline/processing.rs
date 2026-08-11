@@ -554,6 +554,11 @@ const LOCAL_EFFECTS_SUPPORT: u32 = 28;
 // Neon samples an inner edge radius capped at 24 pixels and a second halo
 // radius at twice that distance.
 const NEON_SUPPORT: u32 = 48;
+// Mask Blur and Edge Glow sample at most 48 pixels from the output location.
+const MASK_BLUR_EDGE_SUPPORT: u32 = 48;
+// Pixelate's scale-aware 32-reference-pixel cells can reach this distance at
+// the maximum reference scale.
+const PIXELATE_SUPPORT: u32 = 96;
 // Glow cascades five B3 diffusion stages. At the capped 3x reference scale the
 // steps are 3+3+6+12+24, and each 5x5 stage reaches +/-2*step. Support therefore
 // accumulates to 96 pixels from the extracted highlight source.
@@ -565,6 +570,7 @@ const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_RECONSTRUCTION_SUPPORT
     + TONE_GUIDE_SUPPORT
     + LOCAL_EFFECTS_SUPPORT
     + NEON_SUPPORT
+    + PIXELATE_SUPPORT
     + GLOW_SUPPORT
     + COLOR_MIXER_SUPPORT;
 
@@ -581,11 +587,10 @@ pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_RECONSTRUCTION_SUPPORT
     * 8;
 
 /// Returns the halo actually required by the current edit. Neutral global or
-/// masked Glow, Neon, and local spatial controls should not force every tile to
-/// process their full support radius. Light Rays samples its own full-image
-/// emission atlas and therefore needs no RAW-pixel halo. This is especially
-/// important on Android, where a wide halo around a 768 px core can nearly
-/// triple the processed area.
+/// masked spatial effects should not force every tile to process their full
+/// support radius. Light Rays samples its own full-image emission atlas and
+/// therefore needs no RAW-pixel halo. This is especially important on Android,
+/// where a wide halo around a 768 px core can nearly triple the processed area.
 pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -> u32 {
     let mut support = HIGHLIGHT_RECONSTRUCTION_SUPPORT
         + DEMOSAIC_CHAIN_SUPPORT
@@ -621,6 +626,22 @@ pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -
     if neon_active {
         support += NEON_SUPPORT;
     }
+
+    let creative_mask_support = masks
+        .masks
+        .iter()
+        .filter(|mask| mask.enabled)
+        .map(|mask| match mask.effect {
+            MaskEffect::Blur if mask.effect_settings.blur.is_active() => MASK_BLUR_EDGE_SUPPORT,
+            MaskEffect::EdgeGlow if mask.effect_settings.edge_glow.is_active() => {
+                MASK_BLUR_EDGE_SUPPORT
+            }
+            MaskEffect::Pixelate if mask.effect_settings.pixelate.is_active() => PIXELATE_SUPPORT,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    support += creative_mask_support;
 
     let mask_glow_active = masks.masks.iter().any(|mask| {
         mask.enabled && mask.effect == MaskEffect::Glow && mask.effect_settings.glow.is_active()
@@ -1079,12 +1100,27 @@ mod tests {
             MIN_EXPORT_TILE_HALO
         );
 
+        let mut creative_masks = MaskStack::default();
+        creative_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+        creative_masks.masks[0].effect = MaskEffect::Blur;
+        let blur_halo = required_export_tile_halo(&exposure, &creative_masks);
+        assert!(blur_halo > MIN_EXPORT_TILE_HALO);
+        creative_masks.masks[0].effect = MaskEffect::Pixelate;
+        assert!(required_export_tile_halo(&exposure, &creative_masks) > blur_halo);
+        creative_masks.masks[0].effect_settings.pixelate.amount = 0.0;
+        assert_eq!(
+            required_export_tile_halo(&exposure, &creative_masks),
+            MIN_EXPORT_TILE_HALO
+        );
+
         exposure.glow_amount = 1.0;
         assert!(required_export_tile_halo(&exposure, &masks) > MIN_EXPORT_TILE_HALO);
         exposure.clarity = 1.0;
         exposure.chroma_denoise = 1.0;
         exposure.denoise_quality = DenoiseQuality::High;
         neon_masks.masks[0].effect_settings.neon.amount = 50.0;
+        neon_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+        neon_masks.masks[1].effect = MaskEffect::Pixelate;
         assert_eq!(
             required_export_tile_halo(&exposure, &neon_masks),
             EXPORT_TILE_HALO

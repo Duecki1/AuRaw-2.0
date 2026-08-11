@@ -240,9 +240,12 @@ const SHADER_REGRESSION_SCENE: &str = include_str!("../shaders/regression_scene.
 
 const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
 const SHADER_MASK_EFFECTS_SHARED: &str = include_str!("../shaders/mask_effects/shared.wgsl");
+const SHADER_MASK_BLUR: &str = include_str!("../shaders/mask_effects/blur.wgsl");
+const SHADER_MASK_EDGE_GLOW: &str = include_str!("../shaders/mask_effects/edge_glow.wgsl");
 const SHADER_MASK_GLOW: &str = include_str!("../shaders/mask_effects/glow.wgsl");
 const SHADER_MASK_LIGHT_RAYS: &str = include_str!("../shaders/mask_effects/light_rays.wgsl");
 const SHADER_MASK_NEON: &str = include_str!("../shaders/mask_effects/neon.wgsl");
+const SHADER_MASK_PIXELATE: &str = include_str!("../shaders/mask_effects/pixelate.wgsl");
 const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
 const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
 
@@ -816,6 +819,52 @@ impl GpuParams {
         // middle-grey slope without switching view operators.
         let mut mask_data = [MaskData::zeroed(); MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
+            if mask.effect == MaskEffect::Blur {
+                let blur = mask.effect_settings.blur;
+                let active = mask.enabled && blur.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        blur.amount.clamp(0.0, 100.0),
+                        blur.radius.clamp(0.0, 16.0),
+                        0.0,
+                        0.0,
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
+            if mask.effect == MaskEffect::EdgeGlow {
+                let edge_glow = mask.effect_settings.edge_glow;
+                let active = mask.enabled && edge_glow.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        edge_glow.amount.clamp(0.0, 100.0),
+                        edge_glow.edge_width.clamp(0.5, 8.0),
+                        edge_glow.detail.clamp(0.0, 100.0),
+                        edge_glow.glow.clamp(0.0, 100.0),
+                    ],
+                    adjust_1: [
+                        edge_glow.color[0].clamp(0.0, 1.0),
+                        edge_glow.color[1].clamp(0.0, 1.0),
+                        edge_glow.color[2].clamp(0.0, 1.0),
+                        0.0,
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
             if mask.effect == MaskEffect::Glow {
                 let glow = mask.effect_settings.glow;
                 let active = mask.enabled && glow.is_active();
@@ -895,6 +944,26 @@ impl GpuParams {
                         light_rays.ray_count.clamp(4.0, 96.0),
                         light_rays.variation.clamp(0.0, 100.0),
                         light_rays.softness.clamp(0.0, 100.0),
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
+            if mask.effect == MaskEffect::Pixelate {
+                let pixelate = mask.effect_settings.pixelate;
+                let active = mask.enabled && pixelate.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        pixelate.amount.clamp(0.0, 100.0),
+                        pixelate.block_size.clamp(2.0, 32.0),
+                        0.0,
+                        0.0,
                     ],
                     ..MaskData::zeroed()
                 };
@@ -1441,6 +1510,9 @@ impl GpuParams {
             if effect_id == MaskEffect::Neon.shader_id()
                 || effect_id == MaskEffect::Glow.shader_id()
                 || effect_id == MaskEffect::LightRays.shader_id()
+                || effect_id == MaskEffect::Blur.shader_id()
+                || effect_id == MaskEffect::EdgeGlow.shader_id()
+                || effect_id == MaskEffect::Pixelate.shader_id()
             {
                 return true;
             }

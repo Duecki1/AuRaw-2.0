@@ -4,13 +4,19 @@
 //! serialization. Actual implementations get their own module only when they
 //! exist; placeholder modules are deliberately not created.
 
+mod blur;
+mod edge_glow;
 mod glow;
 mod light_rays;
 mod neon;
+mod pixelate;
 
+pub use blur::BlurEffectSettings;
+pub use edge_glow::EdgeGlowEffectSettings;
 pub use glow::GlowEffectSettings;
 pub use light_rays::LightRaysEffectSettings;
 pub use neon::NeonEffectSettings;
+pub use pixelate::PixelateEffectSettings;
 
 /// The operation driven by a mask group's combined coverage.
 ///
@@ -167,7 +173,13 @@ impl MaskEffect {
     pub const fn is_implemented(self) -> bool {
         matches!(
             self,
-            Self::Adjustment | Self::Glow | Self::LightRays | Self::Neon
+            Self::Adjustment
+                | Self::Blur
+                | Self::Glow
+                | Self::LightRays
+                | Self::Neon
+                | Self::EdgeGlow
+                | Self::Pixelate
         )
     }
 
@@ -182,6 +194,9 @@ impl MaskEffect {
             Self::Neon => 1,
             Self::Glow => 2,
             Self::LightRays => 3,
+            Self::Blur => 4,
+            Self::EdgeGlow => 5,
+            Self::Pixelate => 6,
             _ => 0,
         }
     }
@@ -228,12 +243,18 @@ impl MaskEffectCategory {
 /// type switch is reversible and never resets another effect's edit state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MaskEffectSettings {
+    #[serde(default, skip_serializing_if = "BlurEffectSettings::is_default")]
+    pub blur: BlurEffectSettings,
+    #[serde(default, skip_serializing_if = "EdgeGlowEffectSettings::is_default")]
+    pub edge_glow: EdgeGlowEffectSettings,
     #[serde(default, skip_serializing_if = "GlowEffectSettings::is_default")]
     pub glow: GlowEffectSettings,
     #[serde(default, skip_serializing_if = "LightRaysEffectSettings::is_default")]
     pub light_rays: LightRaysEffectSettings,
     #[serde(default, skip_serializing_if = "NeonEffectSettings::is_default")]
     pub neon: NeonEffectSettings,
+    #[serde(default, skip_serializing_if = "PixelateEffectSettings::is_default")]
+    pub pixelate: PixelateEffectSettings,
 }
 
 impl MaskEffectSettings {

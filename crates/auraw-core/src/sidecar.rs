@@ -1241,9 +1241,12 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
             return invalid("mask opacity is outside 0..1");
         }
         validate_local_adjustments(&mask.adjustments)?;
+        validate_blur_effect(&mask.effect_settings.blur)?;
+        validate_edge_glow_effect(&mask.effect_settings.edge_glow)?;
         validate_glow_effect(&mask.effect_settings.glow)?;
         validate_light_rays_effect(&mask.effect_settings.light_rays)?;
         validate_neon_effect(&mask.effect_settings.neon)?;
+        validate_pixelate_effect(&mask.effect_settings.pixelate)?;
         if mask.name.len() > MAX_EDIT_NAME_BYTES {
             return invalid("mask name is unreasonably long");
         }
@@ -2019,6 +2022,48 @@ fn validate_neon_effect(neon: &crate::pipeline::NeonEffectSettings) -> Result<()
     Ok(())
 }
 
+fn validate_blur_effect(blur: &crate::pipeline::BlurEffectSettings) -> Result<(), SidecarError> {
+    finite("Blur mask effect", &[blur.amount, blur.radius])?;
+    bounded("Blur amount", blur.amount, 0.0, 100.0)?;
+    bounded("Blur radius", blur.radius, 0.0, 16.0)
+}
+
+fn validate_edge_glow_effect(
+    edge_glow: &crate::pipeline::EdgeGlowEffectSettings,
+) -> Result<(), SidecarError> {
+    finite(
+        "Edge Glow mask effect",
+        &[
+            edge_glow.amount,
+            edge_glow.edge_width,
+            edge_glow.detail,
+            edge_glow.glow,
+            edge_glow.color[0],
+            edge_glow.color[1],
+            edge_glow.color[2],
+        ],
+    )?;
+    bounded("Edge Glow amount", edge_glow.amount, 0.0, 100.0)?;
+    bounded("Edge Glow edge width", edge_glow.edge_width, 0.5, 8.0)?;
+    bounded("Edge Glow detail", edge_glow.detail, 0.0, 100.0)?;
+    bounded("Edge Glow glow", edge_glow.glow, 0.0, 100.0)?;
+    for channel in edge_glow.color {
+        bounded("Edge Glow color channel", channel, 0.0, 1.0)?;
+    }
+    Ok(())
+}
+
+fn validate_pixelate_effect(
+    pixelate: &crate::pipeline::PixelateEffectSettings,
+) -> Result<(), SidecarError> {
+    finite(
+        "Pixelate mask effect",
+        &[pixelate.amount, pixelate.block_size],
+    )?;
+    bounded("Pixelate amount", pixelate.amount, 0.0, 100.0)?;
+    bounded("Pixelate block size", pixelate.block_size, 2.0, 32.0)
+}
+
 fn validate_glow_effect(glow: &crate::pipeline::GlowEffectSettings) -> Result<(), SidecarError> {
     finite(
         "Glow mask effect",
@@ -2561,6 +2606,34 @@ mod tests {
             [1.0, 0.68, 0.25]
         );
         assert_eq!(light_rays_mask.adjustments.exposure, 1.0);
+    }
+
+    #[test]
+    fn blur_edge_glow_and_pixelate_settings_round_trip_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        let mask = masks.masks.last_mut().unwrap();
+        mask.effect = crate::pipeline::MaskEffect::EdgeGlow;
+        mask.effect_settings.blur.amount = 36.0;
+        mask.effect_settings.blur.radius = 12.0;
+        mask.effect_settings.edge_glow.amount = 71.0;
+        mask.effect_settings.edge_glow.edge_width = 3.5;
+        mask.effect_settings.edge_glow.color = [0.15, 0.7, 1.0];
+        mask.effect_settings.pixelate.amount = 88.0;
+        mask.effect_settings.pixelate.block_size = 24.0;
+        mask.adjustments.exposure = 1.0;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let mask = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(mask.effect, crate::pipeline::MaskEffect::EdgeGlow);
+        assert_eq!(mask.effect_settings.blur.radius, 12.0);
+        assert_eq!(mask.effect_settings.edge_glow.amount, 71.0);
+        assert_eq!(mask.effect_settings.edge_glow.color, [0.15, 0.7, 1.0]);
+        assert_eq!(mask.effect_settings.pixelate.block_size, 24.0);
+        assert_eq!(mask.adjustments.exposure, 1.0);
     }
 
     #[test]
