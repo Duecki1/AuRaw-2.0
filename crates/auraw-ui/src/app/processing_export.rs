@@ -205,11 +205,8 @@ fn spawn_export_request(
         settings,
         metadata,
         display_name: _,
-        #[cfg(target_os = "android")]
         gpu_export_prewarm,
     } = request;
-    #[cfg(not(target_os = "android"))]
-    let gpu_export_prewarm = None;
     match format {
         ExportFormat::Png => spawn_tiled_png_export_with_program_prewarm(
             device,
@@ -583,6 +580,7 @@ fn prepare_desktop_library_export_request(
         format,
         settings: settings.clone(),
         display_name,
+        gpu_export_prewarm: None,
     })
 }
 
@@ -2766,7 +2764,6 @@ impl AurawApp {
             format,
             settings: self.export_settings.clone(),
             display_name,
-            #[cfg(target_os = "android")]
             gpu_export_prewarm: self.gpu_export_prewarm.as_ref().map(Arc::clone),
         })
     }

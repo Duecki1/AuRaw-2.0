@@ -89,7 +89,6 @@ fn native_options() -> eframe::NativeOptions {
                 eframe::wgpu::Limits::default()
             };
             required_limits.max_texture_dimension_2d = adapter_limits.max_texture_dimension_2d;
-            #[cfg(target_os = "android")]
             let required_features = {
                 let mut features = eframe::wgpu::Features::empty();
                 if adapter
@@ -100,8 +99,6 @@ fn native_options() -> eframe::NativeOptions {
                 }
                 features
             };
-            #[cfg(not(target_os = "android"))]
-            let required_features = eframe::wgpu::Features::empty();
             eframe::wgpu::DeviceDescriptor {
                 label: Some("AuRaw wgpu device"),
                 required_features,

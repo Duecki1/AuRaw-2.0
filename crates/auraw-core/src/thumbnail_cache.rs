@@ -428,10 +428,13 @@ fn desktop_raw_thumbnail_fingerprint_path(raw_path: &Path) -> PathBuf {
 /// Returns AuRaw's private per-user thumbnail-cache root. Library previews are
 /// deliberately never written beside a user's photos.
 #[cfg(not(target_os = "android"))]
+pub fn desktop_app_cache_root() -> PathBuf {
+    desktop_platform_cache_root().join("auraw")
+}
+
+#[cfg(not(target_os = "android"))]
 pub fn desktop_thumbnail_cache_root() -> PathBuf {
-    desktop_platform_cache_root()
-        .join("auraw")
-        .join(DESKTOP_THUMBNAIL_CACHE_DIR)
+    desktop_app_cache_root().join(DESKTOP_THUMBNAIL_CACHE_DIR)
 }
 
 /// Removes every generated library preview. Both unedited RAW thumbnails and
@@ -764,6 +767,7 @@ mod tests {
     fn desktop_cache_path_is_private_and_not_sibling_scoped() {
         let raw = Path::new("photos/a.CR3");
         let cache = desktop_raw_thumbnail_path(raw);
+        assert!(desktop_thumbnail_cache_root().starts_with(desktop_app_cache_root()));
         assert!(cache.starts_with(desktop_thumbnail_cache_root()));
         assert!(cache.to_string_lossy().ends_with(RAW_THUMBNAIL_SUFFIX));
         assert_ne!(cache.parent(), raw.parent());
