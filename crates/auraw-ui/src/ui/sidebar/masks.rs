@@ -1388,6 +1388,12 @@ impl Sidebar {
             } else if mask.effect == MaskEffect::Pixelate {
                 adjustments_changed |=
                     mask_effects::pixelate::show(ui, &mut mask.effect_settings.pixelate);
+            } else if mask.effect == MaskEffect::Fog {
+                adjustments_changed |=
+                    mask_effects::fog::show(ui, &mut mask.effect_settings.fog);
+            } else if mask.effect == MaskEffect::Smoke {
+                adjustments_changed |=
+                    mask_effects::smoke::show(ui, &mut mask.effect_settings.smoke);
             } else {
                 Self::show_mask_effect_placeholder(ui, mask.effect);
             }
@@ -1628,6 +1634,12 @@ impl Sidebar {
                         ui,
                         &mut mask.effect_settings.pixelate,
                     );
+                } else if mask.effect == MaskEffect::Fog {
+                    adjustments_changed |=
+                        mask_effects::fog::show(ui, &mut mask.effect_settings.fog);
+                } else if mask.effect == MaskEffect::Smoke {
+                    adjustments_changed |=
+                        mask_effects::smoke::show(ui, &mut mask.effect_settings.smoke);
                 } else {
                     Self::show_mask_effect_placeholder(ui, mask.effect);
                 }

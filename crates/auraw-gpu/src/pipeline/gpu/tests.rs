@@ -1071,6 +1071,8 @@ fn adjustment_modules_expose_the_render_graph_controls() {
         "apply_vignette",
         "apply_neon",
         "apply_pixelate",
+        "apply_fog",
+        "apply_smoke",
     ] {
         assert!(
             has_function(&creative, function) || has_function(&view, function),
@@ -1928,6 +1930,63 @@ fn pixelate_mask_effect_packs_independent_settings_and_schedules_rendering() {
     assert!(params.needs_intermediate_adjustment_passes());
 
     masks.masks[0].effect_settings.pixelate.amount = 0.0;
+    let neutral = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(neutral.mask_data[0].metadata[0], 0);
+    assert!(!neutral.needs_intermediate_adjustment_passes());
+}
+
+#[test]
+fn atmosphere_mask_effects_pack_independent_settings_and_schedule_rendering() {
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams::default();
+    let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
+
+    {
+        let mask = &mut masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::Fog;
+        mask.effect_settings.fog.amount = 74.0;
+        mask.effect_settings.fog.density = 61.0;
+        mask.effect_settings.fog.scale = 83.0;
+        mask.effect_settings.fog.softness = 47.0;
+        mask.effect_settings.fog.variation = 69.0;
+        mask.effect_settings.fog.seed = 312.0;
+        mask.effect_settings.fog.color = [0.71, 0.82, 0.94];
+    }
+    let fog = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(fog.mask_data[0].metadata[0], 1);
+    assert_eq!(
+        fog.mask_data[0].metadata[3] >> super::MASK_EFFECT_ID_SHIFT,
+        11
+    );
+    assert_eq!(fog.mask_data[0].adjust_0, [74.0, 61.0, 83.0, 47.0]);
+    assert_eq!(fog.mask_data[0].adjust_1, [0.71, 0.82, 0.94, 69.0]);
+    assert_eq!(fog.mask_data[0].adjust_2, [312.0, 0.0, 0.0, 0.0]);
+    assert!(fog.needs_intermediate_adjustment_passes());
+
+    {
+        let mask = &mut masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::Smoke;
+        mask.effect_settings.smoke.amount = 82.0;
+        mask.effect_settings.smoke.density = 58.0;
+        mask.effect_settings.smoke.scale = 46.0;
+        mask.effect_settings.smoke.turbulence = 77.0;
+        mask.effect_settings.smoke.softness = 38.0;
+        mask.effect_settings.smoke.angle = -27.0;
+        mask.effect_settings.smoke.seed = 904.0;
+        mask.effect_settings.smoke.color = [0.17, 0.2, 0.24];
+    }
+    let smoke = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(smoke.mask_data[0].metadata[0], 1);
+    assert_eq!(
+        smoke.mask_data[0].metadata[3] >> super::MASK_EFFECT_ID_SHIFT,
+        12
+    );
+    assert_eq!(smoke.mask_data[0].adjust_0, [82.0, 58.0, 46.0, 77.0]);
+    assert_eq!(smoke.mask_data[0].adjust_1, [0.17, 0.2, 0.24, -27.0]);
+    assert_eq!(smoke.mask_data[0].adjust_2, [38.0, 904.0, 0.0, 0.0]);
+    assert!(smoke.needs_intermediate_adjustment_passes());
+
+    masks.masks[0].effect_settings.smoke.density = 0.0;
     let neutral = super::GpuParams::new(&exposure, &masks, &raw);
     assert_eq!(neutral.mask_data[0].metadata[0], 0);
     assert!(!neutral.needs_intermediate_adjustment_passes());
