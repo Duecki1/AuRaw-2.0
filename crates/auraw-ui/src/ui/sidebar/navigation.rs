@@ -29,7 +29,7 @@ impl Sidebar {
                 SidebarTab::Adjustments => "Edit",
                 SidebarTab::Crop => "Crop & Straighten",
                 SidebarTab::Masks => "Masking",
-                SidebarTab::Inpainting => "Remove & Heal",
+                SidebarTab::Inpainting => "Retouch",
                 SidebarTab::Export => "Export",
             },
         );
@@ -117,7 +117,7 @@ impl Sidebar {
                     SidebarTab::Inpainting,
                     regular::BANDAIDS,
                     "Heal",
-                    "Remove and heal",
+                    "Remove, heal, and clone",
                 ),
                 (SidebarTab::Export, regular::EXPORT, "Export", "Export"),
             ] {
@@ -341,7 +341,11 @@ impl Sidebar {
                 (SidebarTab::Adjustments, UiIcon::Adjustments, "Edit"),
                 (SidebarTab::Crop, UiIcon::Crop, "Crop and straighten"),
                 (SidebarTab::Masks, UiIcon::Mask, "Masking"),
-                (SidebarTab::Inpainting, UiIcon::Heal, "Remove and heal"),
+                (
+                    SidebarTab::Inpainting,
+                    UiIcon::Heal,
+                    "Remove, heal, and clone",
+                ),
                 (SidebarTab::Export, UiIcon::Export, "Export"),
             ] {
                 if icon_toggle_button(
@@ -430,7 +434,7 @@ impl Sidebar {
                     SidebarTab::Inpainting,
                     regular::BANDAIDS,
                     "Heal",
-                    "Remove and heal",
+                    "Remove, heal, and clone",
                 ),
                 (SidebarTab::Export, regular::EXPORT, "Export", "Export"),
             ] {

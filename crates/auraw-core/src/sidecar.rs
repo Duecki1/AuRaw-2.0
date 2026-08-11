@@ -1467,6 +1467,16 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
         if inpaint_dabs > MAX_INPAINT_DABS {
             return invalid("sidecar contains too many inpainting brush dabs");
         }
+        if stroke.kind.requires_source() {
+            let Some(source_offset) = stroke.source_offset else {
+                return invalid("source-based inpainting stroke has no source offset");
+            };
+            finite("inpainting source offset", &source_offset)?;
+            bounded("inpainting source offset x", source_offset[0], -16.0, 16.0)?;
+            bounded("inpainting source offset y", source_offset[1], -16.0, 16.0)?;
+        } else if stroke.source_offset.is_some() {
+            return invalid("remove stroke unexpectedly contains a source offset");
+        }
         for dab in &stroke.dabs {
             finite(
                 "inpainting brush dab",
@@ -2981,6 +2991,10 @@ mod tests {
 
         let encoded = encode(edits.clone()).unwrap();
         let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(document["edits"]["inpainting"][0].get("kind").is_none());
+        assert!(document["edits"]["inpainting"][0]
+            .get("source_offset")
+            .is_none());
         assert!(document["edits"]["inpainting"][0]["patch"]["rgba16f"]
             .as_str()
             .unwrap()
@@ -2991,6 +3005,41 @@ mod tests {
             .starts_with("z1:"));
         let loaded = decode(&encoded).unwrap();
         assert_eq!(loaded.edits.inpainting, edits.inpainting);
+    }
+
+    #[test]
+    fn source_based_inpainting_round_trip_preserves_tool_and_offset() {
+        use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke, InpaintStrokeKind};
+        use half::f16;
+
+        let mut edits = sample_edits();
+        let patch = InpaintPatch::new_linear(
+            32,
+            32,
+            8,
+            8,
+            2,
+            2,
+            vec![f16::from_f32(0.5).to_bits(); 16],
+            vec![255; 4],
+        )
+        .unwrap();
+        edits.inpainting = Arc::new(vec![InpaintStroke::from_tool_result(
+            InpaintStrokeKind::Heal,
+            Some([0.25, -0.125]),
+            vec![BrushDab::default()],
+            patch,
+        )
+        .unwrap()]);
+
+        let encoded = encode(edits.clone()).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(document["edits"]["inpainting"][0]["kind"], "Heal");
+        assert_eq!(
+            document["edits"]["inpainting"][0]["source_offset"],
+            serde_json::json!([0.25, -0.125])
+        );
+        assert_eq!(decode(&encoded).unwrap().edits, edits);
     }
 
     #[test]

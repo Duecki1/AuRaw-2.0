@@ -13,29 +13,90 @@ impl AurawApp {
         self.inpaint_inferencing
     }
 
-    pub(crate) fn clear_inpainting(&mut self) {
+    pub(crate) fn prepare_live_retouch_preview(&mut self, frame: &eframe::Frame) {
+        self.inpaint_source_cache = None;
+        if !self.inpaint_tool.requires_source() {
+            return;
+        }
+        let result = (|| -> Result<MaskRgbImage, String> {
+            let render_state = frame
+                .wgpu_render_state()
+                .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
+            let raw = self
+                .preview_raw
+                .as_ref()
+                .ok_or_else(|| "Open an image before using Heal or Clone.".to_owned())?;
+            let pipeline = self
+                .gpu_pipeline
+                .as_ref()
+                .ok_or_else(|| "Open an image before using Heal or Clone.".to_owned())?;
+
+            // A completed retouch stroke is queued for the normal incremental
+            // preview scheduler. A user can start the next stroke before that
+            // scheduler reaches its Output stage, so render the current CPU
+            // inpaint layer here before taking the live brush snapshot. The
+            // blocking readback below also guarantees these queued GPU commands
+            // have completed in submission order.
+            pipeline
+                .update_inpaint_layer(
+                    &render_state.queue,
+                    self.inpaint_layer.as_ref(),
+                    0,
+                    0,
+                    raw.width,
+                    raw.height,
+                )
+                .map_err(|error| {
+                    format!("Could not update the live retouch source: {error:#}")
+                })?;
+            let params = GpuParams::new(&self.target_exposure, &self.masks, raw)
+                .with_vignette_geometry(self.geometry);
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            let rgba = pipeline
+                .read_output_region_blocking(
+                    &render_state.device,
+                    &render_state.queue,
+                    0,
+                    0,
+                    pipeline.width,
+                    pipeline.height,
+                )
+                .map_err(|error| format!("Could not capture the live retouch preview: {error:#}"))?;
+            MaskRgbImage::new(pipeline.width, pipeline.height, rgba)
+                .ok_or_else(|| "The live retouch preview has invalid dimensions.".to_owned())
+        })();
+        match result {
+            Ok(source) => self.inpaint_source_cache = Some(source),
+            Err(error) => self.notice = Some(error),
+        }
+    }
+
+    pub(crate) fn live_retouch_preview(&self) -> Option<&MaskRgbImage> {
+        self.inpaint_source_cache.as_ref()
+    }
+
+    pub(crate) fn clear_inpainting_tool(&mut self, kind: InpaintStrokeKind) {
         if self.inpaint_receiver.is_some() {
             return;
         }
         self.inpaint_stroke.clear();
-        self.inpaint_strokes.clear();
+        let previous_len = self.inpaint_strokes.len();
+        self.inpaint_strokes.retain(|stroke| stroke.kind != kind);
+        if self.inpaint_strokes.len() == previous_len {
+            return;
+        }
         self.inpaint_replace_index = None;
         self.note_inpainting_edit_changed();
         self.last_inpaint_brush_point = None;
-        self.inpaint_layer = None;
-        self.inpaint_texture = None;
-        self.inpaint_texture_key = None;
+        self.rebuild_inpaint_layer();
         self.inpaint_stroke_texture = None;
         self.inpaint_stroke_texture_key = None;
         self.inpaint_hovered_stroke = None;
         self.inpaint_selected_stroke = None;
-        self.inpaint_focus_texture = None;
-        self.inpaint_focus_texture_key = None;
-        self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
         self.note_inpainting_changed_for_ai_masks();
         self.queue_preview_processing(ProcessingStage::Tone);
-        self.notice = Some("Inpainting cleared.".to_owned());
+        self.notice = Some(format!("All {} strokes cleared.", kind.label()));
         self.egui_ctx.request_repaint();
     }
 
@@ -50,6 +111,9 @@ impl AurawApp {
         self.inpaint_stroke.clear();
         self.inpaint_strokes.clear();
         self.last_inpaint_brush_point = None;
+        self.inpaint_source_anchor = None;
+        self.inpaint_source_offset = None;
+        self.inpaint_source_pick_active = self.inpaint_tool.requires_source();
         self.inpaint_layer = None;
         self.inpaint_texture = None;
         self.inpaint_texture_key = None;
@@ -81,6 +145,10 @@ impl AurawApp {
         self.inpaint_selected_stroke = None;
         self.inpaint_focus_texture = None;
         self.inpaint_focus_texture_key = None;
+        if self.inpaint_tool.requires_source() {
+            self.request_source_retouch(frame, self.inpaint_tool, None);
+            return;
+        }
         #[cfg(not(target_os = "android"))]
         if !self.validate_onnx_runtime_for_ai() {
             self.inpaint_stroke.clear();
@@ -97,6 +165,7 @@ impl AurawApp {
         let source = match self.capture_inpaint_source(frame, &self.inpaint_stroke, None) {
             Ok(source) => source,
             Err(error) => {
+                self.inpaint_source_cache = None;
                 self.notice = Some(error);
                 self.inpaint_stroke.clear();
                 self.last_inpaint_brush_point = None;
@@ -120,12 +189,19 @@ impl AurawApp {
         self.inpaint_selected_stroke = None;
         self.inpaint_focus_texture = None;
         self.inpaint_focus_texture_key = None;
+        let existing = self.inpaint_strokes[index].clone();
+        if existing.kind.requires_source() {
+            self.inpaint_stroke = existing.dabs;
+            self.last_inpaint_brush_point = None;
+            self.request_source_retouch(frame, existing.kind, Some(index));
+            return;
+        }
         #[cfg(not(target_os = "android"))]
         if !self.validate_onnx_runtime_for_ai() {
             return;
         }
 
-        let dabs = self.inpaint_strokes[index].dabs.clone();
+        let dabs = existing.dabs;
         let source = match self.capture_inpaint_source(frame, &dabs, Some(index)) {
             Ok(source) => source,
             Err(error) => {
@@ -153,6 +229,31 @@ impl AurawApp {
         dabs: &[BrushDab],
         excluded_stroke: Option<usize>,
     ) -> Result<PreparedInpaintSource, String> {
+        let full_raw = self
+            .loaded_raw
+            .as_ref()
+            .ok_or_else(|| "Open an image before using Inpainting.".to_owned())?;
+        let patch = inpaint_patch_rect(dabs, full_raw.width, full_raw.height)
+            .ok_or_else(|| "The erase stroke does not cover the image.".to_owned())?;
+        let rgb_rec2020 = self.capture_inpaint_scene_square(frame, patch, excluded_stroke)?;
+
+        Ok(PreparedInpaintSource {
+            rgb_rec2020,
+            width: patch.size,
+            height: patch.size,
+            origin_x: patch.x,
+            origin_y: patch.y,
+            full_width: full_raw.width,
+            full_height: full_raw.height,
+        })
+    }
+
+    fn capture_inpaint_scene_square(
+        &self,
+        frame: &eframe::Frame,
+        patch: InpaintPatchRect,
+        excluded_stroke: Option<usize>,
+    ) -> Result<Vec<f32>, String> {
         let render_state = frame
             .wgpu_render_state()
             .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
@@ -164,12 +265,37 @@ impl AurawApp {
             .gpu_pipeline
             .as_ref()
             .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-        let patch = inpaint_patch_rect(dabs, full_raw.width, full_raw.height)
-            .ok_or_else(|| "The erase stroke does not cover the image.".to_owned())?;
-        let rect = inpaint_capture_rect(dabs, full_raw.width, full_raw.height)
-            .ok_or_else(|| "The erase stroke does not cover the image.".to_owned())?;
-
-        let local_raw = crop_raw(full_raw, rect.x, rect.y, rect.width, rect.height);
+        if patch.size == 0
+            || patch.x.checked_add(patch.size).is_none_or(|right| right > full_raw.width)
+            || patch.y.checked_add(patch.size).is_none_or(|bottom| bottom > full_raw.height)
+        {
+            return Err("The inpainting source region falls outside the image.".to_owned());
+        }
+        let halo = 32u32;
+        let capture_x = patch.x.saturating_sub(halo);
+        let capture_y = patch.y.saturating_sub(halo);
+        let capture_right = patch
+            .x
+            .saturating_add(patch.size)
+            .saturating_add(halo)
+            .min(full_raw.width);
+        let capture_bottom = patch
+            .y
+            .saturating_add(patch.size)
+            .saturating_add(halo)
+            .min(full_raw.height);
+        let capture_width = capture_right.saturating_sub(capture_x);
+        let capture_height = capture_bottom.saturating_sub(capture_y);
+        if capture_width == 0 || capture_height == 0 {
+            return Err("The inpainting source region is empty.".to_owned());
+        }
+        let local_raw = crop_raw(
+            full_raw,
+            capture_x,
+            capture_y,
+            capture_width,
+            capture_height,
+        );
         let empty_masks = MaskStack::default();
         let mut neutral_exposure = self.exposure;
         neutral_exposure.temperature = 0.0;
@@ -178,8 +304,8 @@ impl AurawApp {
             &neutral_exposure,
             &empty_masks,
             &local_raw,
-            rect.x as i32,
-            rect.y as i32,
+            capture_x as i32,
+            capture_y as i32,
             full_raw.width,
             full_raw.height,
         );
@@ -194,8 +320,8 @@ impl AurawApp {
         .map_err(|error| {
             format!("Could not prepare the full-resolution inpainting crop: {error:#}")
         })?;
-        let patch_local_x = patch.x.saturating_sub(rect.x);
-        let patch_local_y = patch.y.saturating_sub(rect.y);
+        let patch_local_x = patch.x.saturating_sub(capture_x);
+        let patch_local_y = patch.y.saturating_sub(capture_y);
         let scene = pipeline
             .render_inpaint_working_scene_region_resized_blocking(
                 &render_state.device,
@@ -241,15 +367,153 @@ impl AurawApp {
             scene
         };
 
-        Ok(PreparedInpaintSource {
-            rgb_rec2020,
-            width: patch.size,
-            height: patch.size,
-            origin_x: patch.x,
-            origin_y: patch.y,
-            full_width: full_raw.width,
-            full_height: full_raw.height,
-        })
+        Ok(rgb_rec2020)
+    }
+
+    fn request_source_retouch(
+        &mut self,
+        frame: &eframe::Frame,
+        kind: InpaintStrokeKind,
+        replace_index: Option<usize>,
+    ) {
+        let dabs = std::mem::take(&mut self.inpaint_stroke);
+        self.last_inpaint_brush_point = None;
+        self.inpaint_stroke_texture = None;
+        self.inpaint_stroke_texture_key = None;
+        let result = (|| -> Result<InpaintStroke, String> {
+            if !kind.requires_source() || dabs.is_empty() {
+                return Err("The retouch stroke is empty.".to_owned());
+            }
+            let full_raw = self
+                .loaded_raw
+                .as_ref()
+                .ok_or_else(|| "Open an image before using Heal or Clone.".to_owned())?;
+            let source_offset = if let Some(index) = replace_index {
+                self.inpaint_strokes
+                    .get(index)
+                    .and_then(|stroke| stroke.source_offset)
+                    .ok_or_else(|| "The retouch stroke has no saved source point.".to_owned())?
+            } else {
+                let source = self.inpaint_source_anchor.ok_or_else(|| {
+                    "Set a source point before painting with Heal or Clone.".to_owned()
+                })?;
+                self.inpaint_source_offset.unwrap_or([
+                    source[0] - dabs[0].center[0],
+                    source[1] - dabs[0].center[1],
+                ])
+            };
+            if replace_index.is_none() {
+                self.inpaint_source_offset = Some(source_offset);
+            }
+            let full_min = full_raw.width.min(full_raw.height).max(1) as f32;
+            let source_is_valid = dabs.iter().all(|dab| {
+                let radius = dab.size.max(0.0) * full_min + 4.0;
+                let x = (dab.center[0] + source_offset[0]) * full_raw.width as f32;
+                let y = (dab.center[1] + source_offset[1]) * full_raw.height as f32;
+                x - radius >= 0.0
+                    && y - radius >= 0.0
+                    && x + radius < full_raw.width as f32
+                    && y + radius < full_raw.height as f32
+            });
+            if !source_is_valid {
+                return Err(
+                    "The Heal/Clone source crosses the image edge. Choose a source farther inside the image."
+                        .to_owned(),
+                );
+            }
+            let destination_patch = inpaint_patch_rect(&dabs, full_raw.width, full_raw.height)
+                .ok_or_else(|| "The retouch stroke does not cover the image.".to_owned())?;
+            let offset_pixels = [
+                source_offset[0] * full_raw.width as f32,
+                source_offset[1] * full_raw.height as f32,
+            ];
+            let max_source_x = full_raw.width.saturating_sub(destination_patch.size);
+            let max_source_y = full_raw.height.saturating_sub(destination_patch.size);
+            let source_patch = InpaintPatchRect {
+                x: (destination_patch.x as f32 + offset_pixels[0])
+                    .round()
+                    .clamp(0.0, max_source_x as f32) as u32,
+                y: (destination_patch.y as f32 + offset_pixels[1])
+                    .round()
+                    .clamp(0.0, max_source_y as f32) as u32,
+                size: destination_patch.size,
+            };
+            let destination_rgb =
+                self.capture_inpaint_scene_square(frame, destination_patch, replace_index)?;
+            let source_rgb = if source_patch == destination_patch {
+                destination_rgb.clone()
+            } else {
+                self.capture_inpaint_scene_square(frame, source_patch, replace_index)?
+            };
+            let patch = build_retouch_patch(
+                kind,
+                [full_raw.width, full_raw.height],
+                [destination_patch.x, destination_patch.y],
+                [destination_patch.size, destination_patch.size],
+                &destination_rgb,
+                [source_patch.x, source_patch.y],
+                [source_patch.size, source_patch.size],
+                &source_rgb,
+                [LAMA_EDGE, LAMA_EDGE],
+                source_offset,
+                &dabs,
+            )
+            .ok_or_else(|| format!("Could not build the {} result.", kind.label()))?;
+            InpaintStroke::from_tool_result(kind, Some(source_offset), dabs.clone(), patch)
+                .ok_or_else(|| format!("The {} result is invalid.", kind.label()))
+        })();
+
+        let stroke = match result {
+            Ok(stroke) => stroke,
+            Err(error) => {
+                self.notice = Some(error);
+                if self.inpaint_source_anchor.is_none() {
+                    self.inpaint_source_pick_active = true;
+                }
+                self.egui_ctx.request_repaint();
+                return;
+            }
+        };
+        let preflight = if let Some(index) = replace_index {
+            if index >= self.inpaint_strokes.len() {
+                Err(crate::sidecar::SidecarError::Invalid(
+                    "retouch replacement target no longer exists".to_owned(),
+                ))
+            } else {
+                let previous = std::mem::replace(&mut self.inpaint_strokes[index], stroke);
+                let result =
+                    crate::sidecar::preflight_mask_change(&self.masks, &self.inpaint_strokes);
+                if result.is_err() {
+                    self.inpaint_strokes[index] = previous;
+                }
+                result
+            }
+        } else {
+            crate::sidecar::preflight_inpaint_addition(&self.masks, &self.inpaint_strokes, &stroke)
+                .map(|_| self.inpaint_strokes.push(stroke))
+        };
+        match preflight {
+            Ok(()) => {
+                self.note_inpainting_edit_changed();
+                self.rebuild_inpaint_layer();
+                self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+                self.note_inpainting_changed_for_ai_masks();
+                self.queue_preview_processing(ProcessingStage::Tone);
+                self.notice = Some(if replace_index.is_some() {
+                    format!("{} stroke regenerated.", kind.label())
+                } else {
+                    format!("{} stroke applied.", kind.label())
+                });
+            }
+            Err(error) => {
+                self.notice = Some(format!(
+                    "{} result was not applied because the edit cannot fit in the platform sidecar: {error}. Delete an existing mask or retouch result and try again.",
+                    kind.label()
+                ));
+            }
+        }
+        self.inpaint_source_cache = None;
+        self.egui_ctx.request_repaint();
     }
 
     fn start_inpaint_worker(&mut self, model_path: PathBuf) {

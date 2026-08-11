@@ -5,21 +5,21 @@ use crate::ai_masks::{
     SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
 };
 use crate::inpainting::{
-    inpaint_capture_rect, inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintRequest,
+    inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintPatchRect, InpaintRequest,
     PreparedInpaintSource, LAMA_EDGE, LAMA_MODEL_BYTES,
 };
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
-    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
+    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, build_retouch_patch,
     compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
     spawn_tiled_jpeg_export_with_program_prewarm, spawn_tiled_png_export_with_program_prewarm,
     spawn_tiled_tiff_export_with_program_prewarm, BrushDab, BrushMode, CameraProfileMode,
     ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
-    GpuParams, GpuProgramPrewarm, InpaintLayer, InpaintStroke, LandscapeCategory, LensfunCatalog,
-    LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
-    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate,
-    SubjectRefinement, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    GpuParams, GpuProgramPrewarm, InpaintLayer, InpaintStroke, InpaintStrokeKind,
+    LandscapeCategory, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind,
+    MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
+    RawGpuProgramTemplate, SubjectRefinement, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
@@ -1087,6 +1087,10 @@ pub struct AurawApp {
     landscape_job_category: Option<LandscapeCategory>,
 
     pub(crate) inpaint_brush_size: f32,
+    pub(crate) inpaint_tool: InpaintStrokeKind,
+    pub(crate) inpaint_source_anchor: Option<[f32; 2]>,
+    pub(crate) inpaint_source_offset: Option<[f32; 2]>,
+    pub(crate) inpaint_source_pick_active: bool,
     pub(crate) inpaint_stroke: Vec<crate::pipeline::BrushDab>,
     pub(crate) inpaint_strokes: Vec<InpaintStroke>,
     pub(crate) last_inpaint_brush_point: Option<[f32; 2]>,
