@@ -44,7 +44,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
 
       - name: Install Python test dependencies
         run: python3 -m pip install --disable-pip-version-check pytest -r requirements-regression.txt
@@ -87,7 +87,7 @@ jobs:
           toolchain: 1.92.0
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
 
       - name: Install regression dependencies
         run: python3 -m pip install --disable-pip-version-check -r requirements-regression.txt
