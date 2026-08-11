@@ -1352,6 +1352,11 @@ impl Sidebar {
             } else if mask.effect == MaskEffect::Glow {
                 adjustments_changed |=
                     mask_effects::glow::show(ui, &mut mask.effect_settings.glow);
+            } else if mask.effect == MaskEffect::LightRays {
+                adjustments_changed |= mask_effects::light_rays::show(
+                    ui,
+                    &mut mask.effect_settings.light_rays,
+                );
             } else if mask.effect == MaskEffect::Neon {
                 adjustments_changed |=
                     mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
@@ -1387,6 +1392,7 @@ impl Sidebar {
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if effect_changed {
             app.mask_section = MaskSection::Properties;
+            app.mark_mask_geometry_dirty(mask_index);
         }
         if adjustments_changed || effect_changed {
             app.mark_mask_adjustments_dirty();
@@ -1548,6 +1554,11 @@ impl Sidebar {
                 if mask.effect == MaskEffect::Glow {
                     adjustments_changed |=
                         mask_effects::glow::show(ui, &mut mask.effect_settings.glow);
+                } else if mask.effect == MaskEffect::LightRays {
+                    adjustments_changed |= mask_effects::light_rays::show(
+                        ui,
+                        &mut mask.effect_settings.light_rays,
+                    );
                 } else if mask.effect == MaskEffect::Neon {
                     adjustments_changed |=
                         mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
@@ -1584,6 +1595,7 @@ impl Sidebar {
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if effect_changed {
             app.mask_section = MaskSection::Properties;
+            app.mark_mask_geometry_dirty(mask_index);
         }
         if adjustments_changed || effect_changed {
             app.mark_mask_adjustments_dirty();

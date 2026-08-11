@@ -5,9 +5,11 @@
 //! exist; placeholder modules are deliberately not created.
 
 mod glow;
+mod light_rays;
 mod neon;
 
 pub use glow::GlowEffectSettings;
+pub use light_rays::LightRaysEffectSettings;
 pub use neon::NeonEffectSettings;
 
 /// The operation driven by a mask group's combined coverage.
@@ -163,7 +165,10 @@ impl MaskEffect {
     }
 
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::Adjustment | Self::Glow | Self::Neon)
+        matches!(
+            self,
+            Self::Adjustment | Self::Glow | Self::LightRays | Self::Neon
+        )
     }
 
     pub const fn uses_adjustments(self) -> bool {
@@ -176,6 +181,7 @@ impl MaskEffect {
         match self {
             Self::Neon => 1,
             Self::Glow => 2,
+            Self::LightRays => 3,
             _ => 0,
         }
     }
@@ -224,6 +230,8 @@ impl MaskEffectCategory {
 pub struct MaskEffectSettings {
     #[serde(default, skip_serializing_if = "GlowEffectSettings::is_default")]
     pub glow: GlowEffectSettings,
+    #[serde(default, skip_serializing_if = "LightRaysEffectSettings::is_default")]
+    pub light_rays: LightRaysEffectSettings,
     #[serde(default, skip_serializing_if = "NeonEffectSettings::is_default")]
     pub neon: NeonEffectSettings,
 }

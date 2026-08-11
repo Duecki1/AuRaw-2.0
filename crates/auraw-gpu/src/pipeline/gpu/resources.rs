@@ -295,6 +295,18 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
     );
     push_entry(
         &mut entries,
+        "Light Rays emission atlas",
+        GpuResourceResidency::Persistent,
+        texture_allocation_bytes(
+            LIGHT_RAYS_MASK_ATLAS_EDGE,
+            LIGHT_RAYS_MASK_ATLAS_EDGE,
+            input.mask_layers,
+            1,
+            wgpu::TextureFormat::R16Float,
+        )?,
+    );
+    push_entry(
+        &mut entries,
         "inpaint texture",
         GpuResourceResidency::Persistent,
         full(wgpu::TextureFormat::Rgba16Float)?,
@@ -1116,6 +1128,10 @@ mod resource_plan_tests {
     fn plan_includes_mask_atlas_and_full_resolution_inpaint() {
         let plan = build_gpu_resource_plan(input()).unwrap();
         assert_eq!(entry_bytes(&plan, "local-mask atlas"), 256 * 256 * 4 * 2);
+        assert_eq!(
+            entry_bytes(&plan, "Light Rays emission atlas"),
+            u64::from(LIGHT_RAYS_MASK_ATLAS_EDGE) * u64::from(LIGHT_RAYS_MASK_ATLAS_EDGE) * 4 * 2
+        );
         assert_eq!(entry_bytes(&plan, "inpaint texture"), 640 * 480 * 8);
     }
 
@@ -1235,6 +1251,7 @@ mod resource_plan_tests {
             "tone guide A",
             "tone guide B",
             "local-mask atlas",
+            "Light Rays emission atlas",
             "inpaint texture",
             "camera/output profile buffer",
             "stage uniform buffers",

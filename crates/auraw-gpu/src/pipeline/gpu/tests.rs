@@ -1065,6 +1065,7 @@ fn adjustment_modules_expose_the_render_graph_controls() {
         "apply_creative_effects",
         "apply_glow",
         "apply_mask_glow_cores",
+        "apply_light_rays",
         "apply_vignette",
         "apply_neon",
     ] {
@@ -1585,6 +1586,42 @@ fn glow_mask_effect_packs_independent_settings_and_schedules_diffusion() {
     assert!(!neutral.needs_glow_passes());
 }
 
+#[test]
+fn light_rays_mask_effect_packs_independent_settings_and_schedules_rendering() {
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams::default();
+    let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
+    {
+        let mask = &mut masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::LightRays;
+        mask.effect_settings.light_rays.amount = 63.0;
+        mask.effect_settings.light_rays.length = 178.0;
+        mask.effect_settings.light_rays.source = [18.0, -12.0];
+        mask.effect_settings.light_rays.spread = 12.5;
+        mask.effect_settings.light_rays.fade = 41.0;
+        mask.effect_settings.light_rays.ray_count = 47.0;
+        mask.effect_settings.light_rays.variation = 72.0;
+        mask.effect_settings.light_rays.softness = 27.0;
+        mask.effect_settings.light_rays.color = [1.0, 0.7, 0.3];
+    }
+
+    let params = super::GpuParams::new(&exposure, &masks, &raw);
+    let packed = params.mask_data[0];
+    assert_eq!(packed.metadata[0], 1);
+    assert_eq!(packed.metadata[1], 1);
+    assert_eq!(packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT, 3);
+    assert_eq!(packed.adjust_0, [63.0, 178.0, 18.0, -12.0]);
+    assert_eq!(packed.adjust_1, [1.0, 0.7, 0.3, 41.0]);
+    assert_eq!(packed.adjust_2, [12.5, 47.0, 72.0, 27.0]);
+    assert!(params.needs_intermediate_adjustment_passes());
+    assert!(!params.needs_glow_passes());
+
+    masks.masks[0].effect_settings.light_rays.length = 0.0;
+    let neutral = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(neutral.mask_data[0].metadata[0], 0);
+    assert!(!neutral.needs_intermediate_adjustment_passes());
+}
+
 fn assert_max_delta(
     adjustment: &str,
     comparison: &str,
@@ -2031,7 +2068,7 @@ fn reused_gpu_program_layouts_match_fresh_glow_for_bayer_and_xtrans() {
 }
 
 #[test]
-fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
+fn presence_glow_and_light_rays_have_real_gpu_behavior_when_an_adapter_exists() {
     let _gpu_guard = gpu_resource_test_guard();
     use super::{CfaKind, ExposureParams, LoadedRaw, ProcessingQuality, RawGpuPipeline};
     use crate::pipeline::{HighlightReconstructionMethod, MaskStack};
@@ -2546,6 +2583,129 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
     assert!(
         masked_remote_lift < masked_halo_lift * 0.12 + 2e-5,
         "mask Glow reached remote pixels: halo={masked_halo_lift}, remote={masked_remote_lift}"
+    );
+
+    // Light Rays also treats coverage as an emitter, but its shafts converge
+    // on a separately controlled source point. Two vertical openings above and
+    // below that point must project in opposite radial directions rather than
+    // behaving like one screen-space directional blur.
+    {
+        let light_rays_mask = &mut glow_masks.masks[0];
+        light_rays_mask.effect = crate::pipeline::MaskEffect::LightRays;
+        light_rays_mask.effect_settings.light_rays.amount = 100.0;
+        light_rays_mask.effect_settings.light_rays.length = 100.0;
+        light_rays_mask.effect_settings.light_rays.source = [50.0, 50.0];
+        light_rays_mask.effect_settings.light_rays.spread = 4.0;
+        light_rays_mask.effect_settings.light_rays.fade = 20.0;
+        light_rays_mask.effect_settings.light_rays.ray_count = 24.0;
+        light_rays_mask.effect_settings.light_rays.variation = 0.0;
+        light_rays_mask.effect_settings.light_rays.softness = 50.0;
+        light_rays_mask.effect_settings.light_rays.color = [1.0, 0.85, 0.62];
+    }
+    let light_rays_edge = super::LIGHT_RAYS_MASK_ATLAS_EDGE;
+    let mut light_rays_values =
+        vec![half::f16::from_f32(0.0).to_bits(); (light_rays_edge * light_rays_edge) as usize];
+    for y in 0..light_rays_edge {
+        for x in 0..light_rays_edge {
+            let image_x = (x as f32 + 0.5) * WIDTH as f32 / light_rays_edge as f32;
+            let image_y = (y as f32 + 0.5) * HEIGHT as f32 / light_rays_edge as f32;
+            let vertical_opening = (image_x - 64.0).abs() <= 2.0
+                && ((32.0..52.0).contains(&image_y) || (76.0..96.0).contains(&image_y));
+            if vertical_opening {
+                light_rays_values[(y * light_rays_edge + x) as usize] =
+                    half::f16::from_f32(1.0).to_bits();
+            }
+        }
+    }
+    pipeline
+        .update_light_rays_mask_layer(&queue, 0, &light_rays_values)
+        .unwrap();
+    let light_rays_params = super::GpuParams::new(&neutral, &glow_masks, &masked_source);
+    pipeline.recompute(&queue, &device, &light_rays_params);
+    let light_rays = pipeline
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, WIDTH, HEIGHT)
+        .unwrap();
+    let upper_shaft = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            (60.0..68.0).contains(&x) && (10.0..28.0).contains(&y)
+        })
+    };
+    let lower_shaft = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            (60.0..68.0).contains(&x) && (100.0..118.0).contains(&y)
+        })
+    };
+    let horizontal_control = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            (10.0..28.0).contains(&x) && (60.0..68.0).contains(&y)
+        })
+    };
+    let upper_lift = upper_shaft(&light_rays) - upper_shaft(&masked_neutral);
+    let lower_lift = lower_shaft(&light_rays) - lower_shaft(&masked_neutral);
+    let horizontal_lift =
+        (horizontal_control(&light_rays) - horizontal_control(&masked_neutral)).abs();
+    assert!(
+        upper_lift > 1e-4 && lower_lift > 1e-4,
+        "Light Rays did not extend radially in both directions: upper={upper_lift}, lower={lower_lift}"
+    );
+    assert!(
+        horizontal_lift < upper_lift.min(lower_lift) * 0.2 + 2e-5,
+        "Light Rays ignored radial source geometry: upper={upper_lift}, lower={lower_lift}, horizontal={horizontal_lift}"
+    );
+
+    // The same full-image emission texture and UVs must produce the same
+    // values inside an independently rendered export/zoom tile.
+    let tile_origin = [32i32, 32i32];
+    let tile_raw = crate::pipeline::crop_raw(
+        &masked_source,
+        tile_origin[0] as u32,
+        tile_origin[1] as u32,
+        64,
+        64,
+    );
+    let tile_params = super::GpuParams::new_for_tile(
+        &neutral,
+        &glow_masks,
+        &tile_raw,
+        tile_origin[0],
+        tile_origin[1],
+        WIDTH,
+        HEIGHT,
+    );
+    let tile_pipeline = RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+        &device,
+        &queue,
+        &tile_raw,
+        &tile_params,
+        ProcessingQuality::High,
+        64,
+    )
+    .unwrap();
+    tile_pipeline
+        .update_light_rays_mask_layer(&queue, 0, &light_rays_values)
+        .unwrap();
+    tile_pipeline.recompute(&queue, &device, &tile_params);
+    let tiled_light_rays = tile_pipeline
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, 64, 64)
+        .unwrap();
+    let mut maximum_tile_delta = 0.0f32;
+    for local_y in 10..54u32 {
+        for local_x in 10..54u32 {
+            let global_x = local_x + tile_origin[0] as u32;
+            let global_y = local_y + tile_origin[1] as u32;
+            let full_index = ((global_y * WIDTH + global_x) * 3) as usize;
+            let tile_index = ((local_y * 64 + local_x) * 3) as usize;
+            for channel in 0..3 {
+                maximum_tile_delta = maximum_tile_delta.max(
+                    (light_rays[full_index + channel] - tiled_light_rays[tile_index + channel])
+                        .abs(),
+                );
+            }
+        }
+    }
+    assert!(
+        maximum_tile_delta < 1e-3,
+        "Light Rays changed between full-frame and tiled rendering: max delta={maximum_tile_delta}"
     );
 }
 

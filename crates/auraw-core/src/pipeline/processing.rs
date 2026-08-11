@@ -581,9 +581,11 @@ pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_RECONSTRUCTION_SUPPORT
     * 8;
 
 /// Returns the halo actually required by the current edit. Neutral global or
-/// masked Glow, Neon, and local spatial controls should not force every tile to process their
-/// full support radius. This is especially important on Android, where a wide
-/// halo around a 768 px core can nearly triple the processed area.
+/// masked Glow, Neon, and local spatial controls should not force every tile to
+/// process their full support radius. Light Rays samples its own full-image
+/// emission atlas and therefore needs no RAW-pixel halo. This is especially
+/// important on Android, where a wide halo around a 768 px core can nearly
+/// triple the processed area.
 pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -> u32 {
     let mut support = HIGHLIGHT_RECONSTRUCTION_SUPPORT
         + DEMOSAIC_CHAIN_SUPPORT
@@ -1066,6 +1068,14 @@ mod tests {
         glow_masks.masks[0].effect_settings.glow.amount = 0.0;
         assert_eq!(
             required_export_tile_halo(&exposure, &glow_masks),
+            MIN_EXPORT_TILE_HALO
+        );
+
+        let mut light_rays_masks = MaskStack::default();
+        light_rays_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+        light_rays_masks.masks[0].effect = MaskEffect::LightRays;
+        assert_eq!(
+            required_export_tile_halo(&exposure, &light_rays_masks),
             MIN_EXPORT_TILE_HALO
         );
 

@@ -1931,6 +1931,7 @@ impl Preview {
         let neutral = match mask.effect {
             crate::pipeline::MaskEffect::Adjustment => mask.adjustments.is_neutral(),
             crate::pipeline::MaskEffect::Glow => !mask.effect_settings.glow.is_active(),
+            crate::pipeline::MaskEffect::LightRays => !mask.effect_settings.light_rays.is_active(),
             crate::pipeline::MaskEffect::Neon => !mask.effect_settings.neon.is_active(),
             _ => true,
         };

@@ -15,6 +15,7 @@ fn main() {
         "scene_adjustments.wgsl",
         "mask_effects/shared.wgsl",
         "mask_effects/glow.wgsl",
+        "mask_effects/light_rays.wgsl",
         "mask_effects/neon.wgsl",
         "creative_effects.wgsl",
         "view_transform.wgsl",

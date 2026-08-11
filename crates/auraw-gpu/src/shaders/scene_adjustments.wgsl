@@ -31,6 +31,10 @@
 // Baseline inpainting is stored as scene-linear Rec.2020 RGBA16F plus alpha and
 // inserted before all Develop adjustments, so both global and masked adjustments affect it.
 @group(0) @binding(32) var inpaint_tex: texture_2d<f32>;
+// Unlike the viewport-local atlas at binding 27, this compact atlas always
+// represents the complete image. Long-range Light Rays can therefore sample
+// identical normalized coordinates in fit preview, zoom crops, and export tiles.
+@group(0) @binding(34) var light_rays_mask_tex: texture_2d_array<f32>;
 
 fn local_mask_uv(pos: vec2<i32>) -> vec2<f32> {
     let full_size = vec2<f32>(
