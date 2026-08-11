@@ -259,6 +259,7 @@ impl AurawApp {
     fn empty(ctx: &egui::Context) -> Self {
         let performance_settings_path = crate::performance_settings::desktop_path();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
+        auraw_ai::set_ai_acceleration_enabled(performance.ai_gpu_acceleration);
         let cloud_config = crate::cloud::CloudConfig {
             enabled: performance.cloud_enabled,
             server_url: performance.cloud_server_url.clone(),
@@ -406,6 +407,7 @@ impl AurawApp {
             mask_source_cache: None,
             subject_mask_cache: None,
             birefnet_quality: performance.birefnet_quality,
+            ai_gpu_acceleration: performance.ai_gpu_acceleration,
             ai_masks_need_update: false,
             ai_mask_update_active: false,
             ai_mask_update_subject_pending: false,
@@ -1411,6 +1413,26 @@ impl AurawApp {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn set_ai_gpu_acceleration(&mut self, enabled: bool) {
+        if self.ai_gpu_acceleration == enabled {
+            return;
+        }
+        self.ai_gpu_acceleration = enabled;
+        auraw_ai::set_ai_acceleration_enabled(enabled);
+        // Settings is outside Develop, so these calls unload any idle cached
+        // sessions without waiting for a native inference that is winding down.
+        self.sync_ai_model_cache_policy();
+        self.persist_performance_settings();
+        self.notice = Some(if enabled {
+            "AI GPU acceleration enabled. New AI model sessions will use it when available."
+                .to_owned()
+        } else {
+            "AI GPU acceleration disabled. New AI model sessions will run on CPU.".to_owned()
+        });
+        self.egui_ctx.request_repaint();
+    }
+
     pub(crate) fn thumbnail_cache_size_label(&mut self) -> String {
         let update = self
             .thumbnail_cache_size_receiver
@@ -1925,6 +1947,8 @@ impl AurawApp {
             preview_quality: self.preview_quality,
             image_relative_brush_size: self.image_relative_brush_size,
             birefnet_quality: self.birefnet_quality,
+            #[cfg(not(target_os = "android"))]
+            ai_gpu_acceleration: self.ai_gpu_acceleration,
             camera_profile_mode: self.camera_profile_mode,
             camera_profile_folder: self.camera_profile_folder.clone(),
             camera_profile_folder_label: self.camera_profile_folder_label.clone(),

@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 12;
+const SETTINGS_VERSION: u32 = 13;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,6 +25,9 @@ pub struct PerformanceSettings {
     pub image_relative_brush_size: bool,
     #[serde(default)]
     pub birefnet_quality: crate::ai_masks::BiRefNetQuality,
+    #[cfg(not(target_os = "android"))]
+    #[serde(default = "default_true")]
+    pub ai_gpu_acceleration: bool,
     #[serde(default)]
     pub camera_profile_mode: CameraProfileMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +133,8 @@ impl Default for PerformanceSettings {
             preview_quality: crate::app::PreviewQuality::default(),
             image_relative_brush_size: false,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
+            #[cfg(not(target_os = "android"))]
+            ai_gpu_acceleration: true,
             camera_profile_mode: CameraProfileMode::default(),
             camera_profile_folder: None,
             camera_profile_folder_label: None,
@@ -336,6 +341,8 @@ mod tests {
             preview_quality: crate::app::PreviewQuality::High,
             image_relative_brush_size: true,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
+            #[cfg(not(target_os = "android"))]
+            ai_gpu_acceleration: false,
             camera_profile_mode: CameraProfileMode::DcpProfiles,
             camera_profile_folder: Some(PathBuf::from("profiles")),
             camera_profile_folder_label: Some("CameraProfiles".to_owned()),
@@ -389,6 +396,8 @@ mod tests {
             settings.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::High
         );
+        #[cfg(not(target_os = "android"))]
+        assert!(!settings.ai_gpu_acceleration);
         assert_eq!(settings.camera_profile_mode, CameraProfileMode::DcpProfiles);
         assert_eq!(
             settings.camera_profile_folder,
@@ -468,6 +477,7 @@ mod tests {
         );
         #[cfg(not(target_os = "android"))]
         {
+            assert!(settings.ai_gpu_acceleration);
             assert!(settings.library_folder_sidebar_open);
             assert!(settings.develop_filmstrip_open);
         }
@@ -490,6 +500,7 @@ mod tests {
         };
         #[cfg(not(target_os = "android"))]
         {
+            settings.ai_gpu_acceleration = false;
             settings.last_library_folder = Some(PathBuf::from("photos"));
             settings.last_library_selected_folder = Some(PathBuf::from("photos/2026/trip"));
             settings.library_folder_sidebar_open = false;
@@ -519,6 +530,7 @@ mod tests {
         assert_eq!(restored.last_cloud_library_folder, "b".repeat(64));
         #[cfg(not(target_os = "android"))]
         {
+            assert!(!restored.ai_gpu_acceleration);
             assert_eq!(restored.last_library_folder, Some(PathBuf::from("photos")));
             assert_eq!(
                 restored.last_library_selected_folder,

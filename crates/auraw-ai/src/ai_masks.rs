@@ -1,6 +1,8 @@
+#[cfg(not(target_os = "android"))]
+use crate::execution_provider::try_lock_interactive_ai_model;
 use crate::execution_provider::{
-    create_session_with_fallback, lock_interactive_ai_model, try_lock_interactive_ai_model,
-    CpuFallbackProfile, FallbackSession, SessionOptions,
+    create_session_with_fallback, lock_interactive_ai_model, CpuFallbackProfile, FallbackSession,
+    SessionOptions,
 };
 use crate::pipeline::{LandscapeCategory, MaskImage};
 use anyhow::{Context, Result};

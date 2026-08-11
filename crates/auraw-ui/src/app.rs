@@ -984,6 +984,8 @@ pub struct AurawApp {
     pub(crate) mask_source_cache: Option<MaskRgbImage>,
     pub(crate) subject_mask_cache: Option<MaskImage>,
     pub(crate) birefnet_quality: BiRefNetQuality,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) ai_gpu_acceleration: bool,
     pub(crate) ai_masks_need_update: bool,
     ai_mask_update_active: bool,
     ai_mask_update_subject_pending: bool,

@@ -11,10 +11,15 @@ use ort::{
         Session,
     },
 };
+#[cfg(not(target_os = "android"))]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    TryLockError,
+};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
 };
 
 /// Serializes AI inference while its ONNX session is being selected. Masking,
@@ -22,12 +27,43 @@ use std::{
 /// cannot leave two large model sessions resident at the same time.
 static INTERACTIVE_AI_MODEL_GATE: Mutex<()> = Mutex::new(());
 
+#[cfg(not(target_os = "android"))]
+static AI_ACCELERATION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Controls whether newly created desktop AI sessions may use GPU execution
+/// providers. Android keeps its platform defaults and does not expose this
+/// preference.
+#[cfg(not(target_os = "android"))]
+pub fn set_ai_acceleration_enabled(enabled: bool) {
+    if AI_ACCELERATION_ENABLED.swap(enabled, Ordering::AcqRel) != enabled {
+        if let Ok(mut statuses) = provider_statuses().lock() {
+            statuses.clear();
+        }
+        auraw_core::diagnostics::record(format!(
+            "AI GPU acceleration {} in Settings",
+            if enabled { "enabled" } else { "disabled" }
+        ));
+    }
+}
+
+pub fn ai_acceleration_enabled() -> bool {
+    #[cfg(not(target_os = "android"))]
+    {
+        AI_ACCELERATION_ENABLED.load(Ordering::Acquire)
+    }
+    #[cfg(target_os = "android")]
+    {
+        true
+    }
+}
+
 pub(crate) fn lock_interactive_ai_model() -> MutexGuard<'static, ()> {
     INTERACTIVE_AI_MODEL_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg(not(target_os = "android"))]
 pub(crate) fn try_lock_interactive_ai_model() -> Option<MutexGuard<'static, ()>> {
     match INTERACTIVE_AI_MODEL_GATE.try_lock() {
         Ok(guard) => Some(guard),
@@ -464,7 +500,8 @@ pub fn create_session_with_fallback(
     let mut attempted_acceleration = false;
     let mut setup_failures = Vec::new();
 
-    if options.allow_acceleration {
+    let acceleration_enabled = options.allow_acceleration && ai_acceleration_enabled();
+    if acceleration_enabled {
         let (providers, unavailable) = preferred_execution_providers();
         attempted_acceleration = !providers.is_empty() || !unavailable.is_empty();
         setup_failures.extend(unavailable);
@@ -531,8 +568,13 @@ pub fn create_session_with_fallback(
             options.model_name
         ));
     } else {
+        let reason = if options.allow_acceleration && !acceleration_enabled {
+            "GPU acceleration disabled in Settings"
+        } else {
+            "no accelerator configured for this target/session"
+        };
         log::info!(
-            "AI {} uses CPU for {} (no accelerator configured for this target/session)",
+            "AI {} uses CPU for {} ({reason})",
             options.model_name,
             source_description
         );

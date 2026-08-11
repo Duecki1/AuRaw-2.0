@@ -17,7 +17,9 @@ pub mod ai_masks;
 pub mod execution_provider;
 pub mod inpainting;
 
+#[cfg(not(target_os = "android"))]
+pub use execution_provider::set_ai_acceleration_enabled;
 pub use execution_provider::{
-    active_execution_providers, create_session_with_fallback, CpuFallbackProfile,
-    ExecutionProviderStatus, FallbackSession, ModelSource, SessionOptions,
+    active_execution_providers, ai_acceleration_enabled, create_session_with_fallback,
+    CpuFallbackProfile, ExecutionProviderStatus, FallbackSession, ModelSource, SessionOptions,
 };
