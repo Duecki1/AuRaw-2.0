@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 7;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 10;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
-pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0004;
+pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0005;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg";
@@ -151,7 +151,10 @@ pub fn default_edit_state() -> EditState {
 }
 
 fn is_manual_mask_kind(kind: MaskKind) -> bool {
-    matches!(kind, MaskKind::Brush | MaskKind::Radial | MaskKind::Linear)
+    matches!(
+        kind,
+        MaskKind::Brush | MaskKind::Fullscreen | MaskKind::Radial | MaskKind::Linear
+    )
 }
 
 fn filtered_mask_stack(masks: &MaskStack, include_manual: bool, include_ai: bool) -> MaskStack {
@@ -1037,7 +1040,10 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     // Schema 5 introduced extracted PNG mask assets. Schema 6 kept that layout
     // and changed inpainting binary fields to lossless compressed Base64
     // strings. Schema 7 adds the optional shared Subject refinement field;
-    // serde defaults keep every earlier sidecar backward-compatible.
+    // schema 8 adds the defaulted mask-effect selector; schema 9 adds the
+    // Fullscreen mask geometry; schema 10 adds non-destructive settings for
+    // implemented mask effects. Serde defaults keep every earlier sidecar
+    // backward-compatible.
     if original_schema >= 5 {
         restore_mask_assets(
             &mut document.edits,
@@ -1235,6 +1241,8 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
             return invalid("mask opacity is outside 0..1");
         }
         validate_local_adjustments(&mask.adjustments)?;
+        validate_glow_effect(&mask.effect_settings.glow)?;
+        validate_neon_effect(&mask.effect_settings.neon)?;
         if mask.name.len() > MAX_EDIT_NAME_BYTES {
             return invalid("mask name is unreasonably long");
         }
@@ -1868,7 +1876,8 @@ fn base64_json_string_bytes(byte_count: usize) -> Result<u64, SidecarError> {
 fn geometry_matches_kind(kind: MaskKind, geometry: &MaskGeometry) -> bool {
     matches!(
         (kind, geometry),
-        (MaskKind::Brush, MaskGeometry::Brush { .. })
+        (MaskKind::Fullscreen, MaskGeometry::Fullscreen)
+            | (MaskKind::Brush, MaskGeometry::Brush { .. })
             | (MaskKind::Radial, MaskGeometry::Radial { .. })
             | (MaskKind::Linear, MaskGeometry::Linear { .. })
             | (
@@ -1982,6 +1991,52 @@ fn validate_local_adjustments(
         "local tone curve",
     )?;
     validate_grading(&adjustments.color_grading, "local color grading")
+}
+
+fn validate_neon_effect(neon: &crate::pipeline::NeonEffectSettings) -> Result<(), SidecarError> {
+    finite(
+        "Neon mask effect",
+        &[
+            neon.amount,
+            neon.edge_width,
+            neon.detail,
+            neon.glow,
+            neon.background,
+            neon.color[0],
+            neon.color[1],
+            neon.color[2],
+        ],
+    )?;
+    bounded("Neon amount", neon.amount, 0.0, 100.0)?;
+    bounded("Neon edge width", neon.edge_width, 0.5, 8.0)?;
+    bounded("Neon detail", neon.detail, 0.0, 100.0)?;
+    bounded("Neon glow", neon.glow, 0.0, 100.0)?;
+    bounded("Neon background", neon.background, 0.0, 100.0)?;
+    for channel in neon.color {
+        bounded("Neon color channel", channel, 0.0, 1.0)?;
+    }
+    Ok(())
+}
+
+fn validate_glow_effect(glow: &crate::pipeline::GlowEffectSettings) -> Result<(), SidecarError> {
+    finite(
+        "Glow mask effect",
+        &[
+            glow.amount,
+            glow.radius,
+            glow.core,
+            glow.color[0],
+            glow.color[1],
+            glow.color[2],
+        ],
+    )?;
+    bounded("Glow amount", glow.amount, 0.0, 100.0)?;
+    bounded("Glow radius", glow.radius, 0.0, 100.0)?;
+    bounded("Glow core", glow.core, 0.0, 100.0)?;
+    for channel in glow.color {
+        bounded("Glow color channel", channel, 0.0, 1.0)?;
+    }
+    Ok(())
 }
 
 fn validate_curves(
@@ -2372,6 +2427,73 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_effect_mask_round_trips_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        masks.masks.last_mut().unwrap().effect = crate::pipeline::MaskEffect::Cartoon;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let fullscreen = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(fullscreen.components[0].kind, MaskKind::Fullscreen);
+        assert!(matches!(
+            fullscreen.components[0].geometry,
+            MaskGeometry::Fullscreen
+        ));
+        assert_eq!(fullscreen.effect, crate::pipeline::MaskEffect::Cartoon);
+    }
+
+    #[test]
+    fn neon_mask_settings_round_trip_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        let neon_mask = masks.masks.last_mut().unwrap();
+        neon_mask.effect = crate::pipeline::MaskEffect::Neon;
+        neon_mask.effect_settings.neon.amount = 48.0;
+        neon_mask.effect_settings.neon.edge_width = 4.5;
+        neon_mask.effect_settings.neon.color = [1.0, 0.15, 0.65];
+        neon_mask.adjustments.exposure = 1.0;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let neon_mask = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(neon_mask.effect, crate::pipeline::MaskEffect::Neon);
+        assert_eq!(neon_mask.effect_settings.neon.amount, 48.0);
+        assert_eq!(neon_mask.effect_settings.neon.edge_width, 4.5);
+        assert_eq!(neon_mask.effect_settings.neon.color, [1.0, 0.15, 0.65]);
+        assert_eq!(neon_mask.adjustments.exposure, 1.0);
+    }
+
+    #[test]
+    fn glow_mask_settings_round_trip_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        let glow_mask = masks.masks.last_mut().unwrap();
+        glow_mask.effect = crate::pipeline::MaskEffect::Glow;
+        glow_mask.effect_settings.glow.amount = 74.0;
+        glow_mask.effect_settings.glow.radius = 62.0;
+        glow_mask.effect_settings.glow.core = 81.0;
+        glow_mask.effect_settings.glow.color = [0.1, 0.55, 1.0];
+        glow_mask.adjustments.exposure = 1.0;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let glow_mask = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(glow_mask.effect, crate::pipeline::MaskEffect::Glow);
+        assert_eq!(glow_mask.effect_settings.glow.amount, 74.0);
+        assert_eq!(glow_mask.effect_settings.glow.radius, 62.0);
+        assert_eq!(glow_mask.effect_settings.glow.core, 81.0);
+        assert_eq!(glow_mask.effect_settings.glow.color, [0.1, 0.55, 1.0]);
+        assert_eq!(glow_mask.adjustments.exposure, 1.0);
+    }
+
+    #[test]
     fn sidecar_round_trip_preserves_shared_subject_refinement() {
         let mut edits = sample_edits();
         let refinement = {
@@ -2419,6 +2541,27 @@ mod tests {
         let loaded = decode(&legacy).unwrap();
         assert!(loaded.migrated);
         assert!(loaded.edits.masks.subject_refinement.is_empty());
+    }
+
+    #[test]
+    fn schema_seven_mask_defaults_to_adjustment_effect() {
+        let edits = sample_edits();
+        let encoded = encode(edits).unwrap();
+        let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        document["schema_version"] = 7.into();
+        document
+            .pointer_mut("/edits/masks/masks/0")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("effect");
+
+        let legacy = serde_json::to_vec(&document).unwrap();
+        let loaded = decode(&legacy).unwrap();
+        assert!(loaded.migrated);
+        assert_eq!(
+            loaded.edits.masks.masks[0].effect,
+            crate::pipeline::MaskEffect::Adjustment
+        );
     }
 
     #[test]

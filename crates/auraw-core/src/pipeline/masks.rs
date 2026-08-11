@@ -3,6 +3,12 @@ use rayon::prelude::*;
 use std::f32::consts::TAU;
 use std::sync::Arc;
 
+mod effects;
+
+pub use effects::{
+    GlowEffectSettings, MaskEffect, MaskEffectCategory, MaskEffectSettings, NeonEffectSettings,
+};
+
 pub const MAX_LOCAL_MASKS: usize = 32;
 pub const MAX_MASK_COMPONENTS: usize = 64;
 pub const MASK_ATLAS_EDGE_DESKTOP: u32 = 2048;
@@ -37,6 +43,7 @@ pub fn export_mask_atlas_edge(image_width: u32, image_height: u32) -> u32 {
 pub enum MaskKind {
     #[default]
     Brush,
+    Fullscreen,
     Radial,
     Linear,
     Subject,
@@ -52,6 +59,7 @@ impl MaskKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Brush => "Brush",
+            Self::Fullscreen => "Fullscreen",
             Self::Radial => "Radial Gradient",
             Self::Linear => "Linear Gradient",
             Self::Subject => "Select Subject",
@@ -66,6 +74,7 @@ impl MaskKind {
 
     pub const fn short_label(self) -> &'static str {
         match self {
+            Self::Fullscreen => "Full Image",
             Self::Radial => "Radial",
             Self::Linear => "Linear",
             Self::LuminanceRange => "Luminance",
@@ -79,6 +88,7 @@ impl MaskKind {
         matches!(
             self,
             Self::Brush
+                | Self::Fullscreen
                 | Self::Radial
                 | Self::Linear
                 | Self::Subject
@@ -816,6 +826,9 @@ impl Default for BrushDab {
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum MaskGeometry {
+    /// Constant coverage across the complete image. This has no editable
+    /// geometry and is immediately initialized when created.
+    Fullscreen,
     Brush {
         /// Radius as a fraction of the image's shorter edge.
         size: f32,
@@ -930,6 +943,7 @@ fn default_object_edge_refine() -> f32 {
 impl MaskGeometry {
     pub fn for_kind(kind: MaskKind) -> Self {
         match kind {
+            MaskKind::Fullscreen => Self::Fullscreen,
             MaskKind::Brush => Self::Brush {
                 size: 0.055,
                 feather: 0.55,
@@ -992,6 +1006,7 @@ impl MaskGeometry {
 
     pub fn is_initialized(&self) -> bool {
         match self {
+            Self::Fullscreen => true,
             Self::Brush { dabs, .. } => !dabs.is_empty(),
             Self::Radial { initialized, .. } | Self::Linear { initialized, .. } => *initialized,
             Self::Ai { mask, .. } | Self::Landscape { mask, .. } | Self::Object { mask, .. } => {
@@ -1131,6 +1146,15 @@ impl LocalAdjustments {
 pub struct LocalMask {
     pub name: String,
     pub enabled: bool,
+    /// What the combined mask coverage does. Missing in older sidecars, which
+    /// must retain the original adjustment-mask behavior.
+    #[serde(default)]
+    pub effect: MaskEffect,
+    /// Editable, non-destructive parameters for implemented effect types.
+    /// Keeping these separate means switching mask types never discards the
+    /// settings belonging to another type.
+    #[serde(default, skip_serializing_if = "MaskEffectSettings::is_default")]
+    pub effect_settings: MaskEffectSettings,
     #[serde(default)]
     pub invert: bool,
     pub opacity: f32,
@@ -1143,6 +1167,8 @@ impl LocalMask {
         Self {
             name: format!("Mask {number}"),
             enabled: true,
+            effect: MaskEffect::default(),
+            effect_settings: MaskEffectSettings::default(),
             invert: false,
             opacity: 1.0,
             components: vec![MaskComponent::new(kind, MaskCombineMode::Add)],
@@ -1199,6 +1225,7 @@ impl MaskStack {
         for mask in &mut cropped.masks {
             for component in &mut mask.components {
                 match &mut component.geometry {
+                    MaskGeometry::Fullscreen => {}
                     MaskGeometry::Brush { size, dabs, .. } => {
                         *size *= image_scale;
                         for dab in dabs {
@@ -1653,6 +1680,7 @@ fn rasterize_component(
     subject_refinement: &SubjectRefinement,
 ) -> Vec<f32> {
     match &component.geometry {
+        MaskGeometry::Fullscreen => vec![1.0; width as usize * height as usize],
         MaskGeometry::Brush {
             overlap_enabled,
             stroke_starts,
@@ -2652,10 +2680,125 @@ mod tests {
         assert_eq!(stack.add_mask(MaskKind::Brush), Some((0, 0)));
         assert_eq!(stack.selected_mask, Some(0));
         assert_eq!(stack.selected_component, Some(0));
+        assert_eq!(
+            stack.selected_mask().unwrap().effect,
+            MaskEffect::Adjustment
+        );
         assert!(matches!(
             stack.selected_component().unwrap().geometry,
             MaskGeometry::Brush { .. }
         ));
+    }
+
+    #[test]
+    fn fullscreen_mask_is_immediately_initialized_and_covers_every_pixel() {
+        let mut stack = MaskStack::default();
+        assert_eq!(stack.add_mask(MaskKind::Fullscreen), Some((0, 0)));
+        assert!(MaskKind::Fullscreen.is_available());
+        assert!(matches!(
+            stack.selected_component().unwrap().geometry,
+            MaskGeometry::Fullscreen
+        ));
+        assert!(stack
+            .selected_component()
+            .unwrap()
+            .geometry
+            .is_initialized());
+        assert_eq!(
+            stack.rasterize_layer(0, 17, 11, 6000, 4000),
+            vec![255; 17 * 11]
+        );
+
+        let cropped = stack.cropped_for_region(900, 700, 1200, 800, 6000, 4000);
+        assert_eq!(
+            cropped.rasterize_layer(0, 9, 7, 1200, 800),
+            vec![255; 9 * 7]
+        );
+    }
+
+    #[test]
+    fn mask_effect_picker_catalog_is_grouped_and_alphabetized() {
+        assert_eq!(MaskEffect::ALL[0], MaskEffect::Adjustment);
+        assert_eq!(MaskEffect::Adjustment.category(), None);
+        assert!(MaskEffect::Adjustment.is_implemented());
+
+        for category in MaskEffectCategory::ALL {
+            let labels: Vec<_> = MaskEffect::ALL
+                .iter()
+                .copied()
+                .filter(|effect| effect.category() == Some(category))
+                .map(MaskEffect::label)
+                .collect();
+            assert!(!labels.is_empty(), "{} category is empty", category.label());
+            assert!(
+                labels.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{} effects are not alphabetized: {labels:?}",
+                category.label()
+            );
+            assert!(labels.iter().all(|label| !label.is_empty()));
+        }
+        assert!(MaskEffect::Glow.is_implemented());
+        assert!(MaskEffect::Neon.is_implemented());
+        assert!(MaskEffect::ALL
+            .iter()
+            .copied()
+            .filter(|effect| {
+                !matches!(
+                    effect,
+                    MaskEffect::Adjustment | MaskEffect::Glow | MaskEffect::Neon
+                )
+            })
+            .all(|effect| !effect.is_implemented()));
+    }
+
+    #[test]
+    fn legacy_local_mask_defaults_to_adjustment_effect() {
+        let mask = LocalMask::new(MaskKind::Brush, 1);
+        let mut serialized = serde_json::to_value(mask).expect("serialize local mask");
+        serialized
+            .as_object_mut()
+            .expect("local mask is a JSON object")
+            .remove("effect");
+        let decoded: LocalMask =
+            serde_json::from_value(serialized).expect("deserialize legacy local mask");
+        assert_eq!(decoded.effect, MaskEffect::Adjustment);
+        assert_eq!(decoded.effect_settings, MaskEffectSettings::default());
+    }
+
+    #[test]
+    fn neon_settings_round_trip_without_touching_local_adjustments() {
+        let mut mask = LocalMask::new(MaskKind::Fullscreen, 1);
+        mask.effect = MaskEffect::Neon;
+        mask.effect_settings.neon.amount = 42.0;
+        mask.effect_settings.neon.color = [1.0, 0.2, 0.7];
+        mask.adjustments.exposure = 1.25;
+
+        let encoded = serde_json::to_string(&mask).expect("serialize Neon mask");
+        let decoded: LocalMask = serde_json::from_str(&encoded).expect("deserialize Neon mask");
+        assert_eq!(decoded.effect, MaskEffect::Neon);
+        assert_eq!(decoded.effect_settings.neon.amount, 42.0);
+        assert_eq!(decoded.effect_settings.neon.color, [1.0, 0.2, 0.7]);
+        assert_eq!(decoded.adjustments.exposure, 1.25);
+    }
+
+    #[test]
+    fn glow_settings_round_trip_without_touching_local_adjustments() {
+        let mut mask = LocalMask::new(MaskKind::Fullscreen, 1);
+        mask.effect = MaskEffect::Glow;
+        mask.effect_settings.glow.amount = 72.0;
+        mask.effect_settings.glow.radius = 84.0;
+        mask.effect_settings.glow.core = 55.0;
+        mask.effect_settings.glow.color = [0.2, 0.8, 1.0];
+        mask.adjustments.exposure = 1.25;
+
+        let encoded = serde_json::to_string(&mask).expect("serialize Glow mask");
+        let decoded: LocalMask = serde_json::from_str(&encoded).expect("deserialize Glow mask");
+        assert_eq!(decoded.effect, MaskEffect::Glow);
+        assert_eq!(decoded.effect_settings.glow.amount, 72.0);
+        assert_eq!(decoded.effect_settings.glow.radius, 84.0);
+        assert_eq!(decoded.effect_settings.glow.core, 55.0);
+        assert_eq!(decoded.effect_settings.glow.color, [0.2, 0.8, 1.0]);
+        assert_eq!(decoded.adjustments.exposure, 1.25);
     }
 
     #[test]

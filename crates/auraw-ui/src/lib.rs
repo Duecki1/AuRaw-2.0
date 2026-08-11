@@ -61,6 +61,13 @@ fn native_options() -> eframe::NativeOptions {
     }
 
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        // Ask supported native backends to reject new allocations before
+        // memory pressure is severe enough to lose the whole device. AuRaw
+        // handles that recoverable OOM below instead of allowing wgpu to panic.
+        setup.instance_descriptor.memory_budget_thresholds = eframe::wgpu::MemoryBudgetThresholds {
+            for_resource_creation: Some(90),
+            for_device_loss: Some(97),
+        };
         setup.device_descriptor = std::sync::Arc::new(|adapter| {
             let info = adapter.get_info();
             let adapter_limits = adapter.limits();
@@ -82,7 +89,6 @@ fn native_options() -> eframe::NativeOptions {
                 eframe::wgpu::Limits::default()
             };
             required_limits.max_texture_dimension_2d = adapter_limits.max_texture_dimension_2d;
-            #[cfg(target_os = "android")]
             let required_features = {
                 let mut features = eframe::wgpu::Features::empty();
                 if adapter
@@ -93,8 +99,6 @@ fn native_options() -> eframe::NativeOptions {
                 }
                 features
             };
-            #[cfg(not(target_os = "android"))]
-            let required_features = eframe::wgpu::Features::empty();
             eframe::wgpu::DeviceDescriptor {
                 label: Some("AuRaw wgpu device"),
                 required_features,

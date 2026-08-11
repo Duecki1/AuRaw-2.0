@@ -8,8 +8,6 @@ use crate::inpainting::{
     inpaint_capture_rect, inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintRequest,
     PreparedInpaintSource, LAMA_EDGE, LAMA_MODEL_BYTES,
 };
-#[cfg(target_os = "android")]
-use crate::pipeline::GpuProgramPrewarm;
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
@@ -18,10 +16,10 @@ use crate::pipeline::{
     spawn_tiled_jpeg_export_with_program_prewarm, spawn_tiled_png_export_with_program_prewarm,
     spawn_tiled_tiff_export_with_program_prewarm, BrushDab, BrushMode, CameraProfileMode,
     ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
-    GpuParams, InpaintLayer, InpaintStroke, LandscapeCategory, LensfunCatalog, LensfunLens,
-    LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality,
-    ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate, SubjectRefinement, TileSpec,
-    EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    GpuParams, GpuProgramPrewarm, InpaintLayer, InpaintStroke, LandscapeCategory, LensfunCatalog,
+    LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack,
+    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate,
+    SubjectRefinement, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
@@ -768,7 +766,6 @@ struct ExportTaskRequest {
     settings: ExportSettings,
     metadata: ExportMetadata,
     display_name: String,
-    #[cfg(target_os = "android")]
     gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
 
@@ -877,9 +874,7 @@ pub struct AurawApp {
     // Retire them now and remove them from the renderer at the start of the
     // next frame, before any new paint meshes are built.
     retired_egui_textures: Vec<egui::TextureId>,
-    #[cfg(target_os = "android")]
     gpu_preview_prewarm_receiver: Option<mpsc::Receiver<Result<RawGpuPipeline, String>>>,
-    #[cfg(target_os = "android")]
     gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
     pub(crate) preview_quality: PreviewQuality,
     pub(crate) image_relative_brush_size: bool,

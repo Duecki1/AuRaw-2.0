@@ -1392,6 +1392,11 @@ impl Preview {
         if !kind.is_available() {
             return;
         }
+        if kind == MaskKind::Fullscreen {
+            app.finish_mask_geometry_interaction();
+            app.active_mask_tool = None;
+            return;
+        }
         let subject_refining = app.subject_refinement_active
             && matches!(kind, MaskKind::Subject | MaskKind::Background);
         app.active_mask_tool = Some(kind);
@@ -1920,7 +1925,15 @@ impl Preview {
             return;
         };
         let selected_component = app.masks.selected_component;
-        let neutral = mask.adjustments.is_neutral();
+        // Keep coverage visible when the selected type has no active rendered
+        // result. Effect settings are independent from retained Adjustment
+        // values, so switching types remains fully reversible.
+        let neutral = match mask.effect {
+            crate::pipeline::MaskEffect::Adjustment => mask.adjustments.is_neutral(),
+            crate::pipeline::MaskEffect::Glow => !mask.effect_settings.glow.is_active(),
+            crate::pipeline::MaskEffect::Neon => !mask.effect_settings.neon.is_active(),
+            _ => true,
+        };
         let accent = selected_component
             .map(mask_component_color)
             .unwrap_or(Color32::from_rgb(78, 163, 255));

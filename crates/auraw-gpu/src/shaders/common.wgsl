@@ -3,7 +3,8 @@
 // trailing numeric suffixes for name disambiguation and would rewrite them.
 
 struct MaskData {
-    // Enabled, has any edit, curve flags, color feature flags (mixer/grading/hue).
+    // Enabled, has any edit, curve flags, color feature flags (mixer/grading/hue)
+    // in the low byte plus a MaskEffect shader id in the high bytes.
     metadata: vec4<u32>,
     adjust_0_field: vec4<f32>,
     adjust_1_field: vec4<f32>,
@@ -26,6 +27,10 @@ struct MaskData {
     hsl_saturation_1_field: vec4<f32>,
     hsl_luminance_0_field: vec4<f32>,
     hsl_luminance_1_field: vec4<f32>,
+}
+
+fn mask_effect_id(metadata: vec4<u32>) -> u32 {
+    return metadata.w >> 8u;
 }
 
 struct CameraUniforms {

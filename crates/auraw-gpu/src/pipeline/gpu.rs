@@ -3,15 +3,18 @@ use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
-    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
-    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, GLOBAL_TEMPERATURE_LIMIT,
-    GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES, MAX_LOCAL_MASKS,
+    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskEffect,
+    MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
+    GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES,
+    MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
 use std::sync::{Arc, Condvar, Mutex};
 use wgpu::util::DeviceExt;
+
+use crate::gpu_errors::GpuErrorScopes;
 
 mod readback;
 mod resources;
@@ -25,6 +28,7 @@ use shader_manager::ShaderManager;
 mod tests;
 
 const GPU_PARAMS_ABI_VERSION: u32 = 5;
+const MASK_EFFECT_ID_SHIFT: u32 = 8;
 // The public ABI marker retains the historical monolithic payload size while
 // the runtime uses independently allocated stage uniforms.
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
@@ -230,6 +234,9 @@ const SHADER_TONE_ANALYSIS: &str = include_str!("../shaders/tone_analysis.wgsl")
 const SHADER_REGRESSION_SCENE: &str = include_str!("../shaders/regression_scene.wgsl");
 
 const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
+const SHADER_MASK_EFFECTS_SHARED: &str = include_str!("../shaders/mask_effects/shared.wgsl");
+const SHADER_MASK_GLOW: &str = include_str!("../shaders/mask_effects/glow.wgsl");
+const SHADER_MASK_NEON: &str = include_str!("../shaders/mask_effects/neon.wgsl");
 const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
 const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
 
@@ -803,7 +810,63 @@ impl GpuParams {
         // middle-grey slope without switching view operators.
         let mut mask_data = [MaskData::zeroed(); MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
+            if mask.effect == MaskEffect::Glow {
+                let glow = mask.effect_settings.glow;
+                let active = mask.enabled && glow.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        glow.amount.clamp(0.0, 100.0),
+                        glow.radius.clamp(0.0, 100.0),
+                        glow.core.clamp(0.0, 100.0),
+                        0.0,
+                    ],
+                    adjust_1: [
+                        glow.color[0].clamp(0.0, 1.0),
+                        glow.color[1].clamp(0.0, 1.0),
+                        glow.color[2].clamp(0.0, 1.0),
+                        0.0,
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
+            if mask.effect == MaskEffect::Neon {
+                let neon = mask.effect_settings.neon;
+                let active = mask.enabled && neon.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        neon.amount.clamp(0.0, 100.0),
+                        neon.edge_width.clamp(0.5, 8.0),
+                        neon.detail.clamp(0.0, 100.0),
+                        neon.glow.clamp(0.0, 100.0),
+                    ],
+                    adjust_1: [
+                        neon.color[0].clamp(0.0, 1.0),
+                        neon.color[1].clamp(0.0, 1.0),
+                        neon.color[2].clamp(0.0, 1.0),
+                        neon.background.clamp(0.0, 100.0),
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
             let adjustment = mask.adjustments;
+            // Placeholder effect types retain any adjustment values so a user
+            // can switch back without losing work, but they must not apply
+            // those hidden values to the image.
+            let adjustment_enabled = mask.enabled && mask.effect.uses_adjustments();
             let has_hsl = adjustment.has_color_mixer();
             let curve_flags = adjustment.curve_feature_flags();
             let has_grading = adjustment.has_color_grading();
@@ -813,7 +876,7 @@ impl GpuParams {
             let (hsl_luminance_0, hsl_luminance_1) = split_eight(adjustment.hsl_luminance);
             mask_data[index] = MaskData {
                 metadata: [
-                    u32::from(mask.enabled),
+                    u32::from(adjustment_enabled),
                     u32::from(!adjustment.is_neutral()),
                     curve_flags,
                     u32::from(has_hsl) | (u32::from(has_grading) << 1) | (u32::from(has_hue) << 2),
@@ -1121,11 +1184,28 @@ impl GpuParams {
             xyz_to_bradford: shader_tuning.xyz_to_bradford,
             bradford_to_xyz: shader_tuning.bradford_to_xyz,
         };
+        // Global and masked Glow share one linear diffusion chain. Using the
+        // widest active request preserves every halo's support while avoiding
+        // another full-resolution texture stack for a non-destructive local
+        // effect.
+        let local_glow_radius = mask_data
+            .iter()
+            .filter(|mask| {
+                mask.metadata[0] != 0
+                    && mask.metadata[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Glow.shader_id()
+            })
+            .map(|mask| mask.adjust_0[1])
+            .fold(0.0_f32, f32::max);
+        let global_glow_radius = if exposure.glow_amount.abs() > 1e-6 {
+            exposure.glow_radius.clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
         let effects = EffectsUniforms {
             presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
             creative_effects: [
                 exposure.glow_amount.clamp(0.0, 100.0),
-                exposure.glow_radius.clamp(0.0, 100.0),
+                global_glow_radius.max(local_glow_radius),
                 exposure.glow_threshold.clamp(0.0, 100.0),
                 exposure.sharpen_amount.clamp(0.0, 150.0),
             ],
@@ -1319,6 +1399,12 @@ impl GpuParams {
             if state[0] == 0 || state[1] == 0 {
                 return false;
             }
+            let effect_id = state[3] >> MASK_EFFECT_ID_SHIFT;
+            if effect_id == MaskEffect::Neon.shader_id()
+                || effect_id == MaskEffect::Glow.shader_id()
+            {
+                return true;
+            }
 
             // The local tone shader is physically part of the optional
             // intermediate chain. Keep that chain scheduled when any control
@@ -1338,7 +1424,14 @@ impl GpuParams {
     }
 
     fn needs_glow_passes(&self) -> bool {
-        self.effects.creative_effects[0].abs() > 1e-6
+        if self.effects.creative_effects[0].abs() > 1e-6 {
+            return true;
+        }
+        let local_count = (self.scene_tone.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
+        self.mask_data[..local_count].iter().any(|mask| {
+            mask.metadata[0] != 0
+                && mask.metadata[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Glow.shader_id()
+        })
     }
 }
 
@@ -1370,7 +1463,7 @@ pub struct RawGpuProgramTemplate {
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
 }
 
-/// Shared completion state for Android's startup export-program prewarm.
+/// Shared completion state for the startup export-program prewarm.
 /// Export workers can wait on this without blocking the UI thread, then reuse
 /// the same immutable compute-pipeline handles for every subsequent export.
 pub struct GpuProgramPrewarm {
@@ -1379,7 +1472,6 @@ pub struct GpuProgramPrewarm {
 }
 
 impl GpuProgramPrewarm {
-    #[cfg(target_os = "android")]
     pub fn new() -> Self {
         Self {
             result: Mutex::new(None),
@@ -1387,7 +1479,6 @@ impl GpuProgramPrewarm {
         }
     }
 
-    #[cfg(target_os = "android")]
     pub fn publish(&self, result: std::result::Result<RawGpuProgramTemplate, String>) {
         let Ok(mut slot) = self.result.lock() else {
             return;
@@ -1577,7 +1668,6 @@ impl RawGpuPipeline {
         }
     }
 
-    #[cfg(target_os = "android")]
     fn into_program_template(self) -> RawGpuProgramTemplate {
         RawGpuProgramTemplate {
             cfa_kind: self.cfa_kind,
@@ -1621,7 +1711,6 @@ impl RawGpuPipeline {
     /// tiny synthetic RAW. The returned pipeline is retained only as a program
     /// template, allowing tiled export to clone already-compiled pipeline
     /// handles while allocating its own image-sized resources and mask atlas.
-    #[cfg(target_os = "android")]
     pub fn prewarm_export_program_template_with_cache(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1962,7 +2051,7 @@ impl RawGpuPipeline {
     fn new_internal(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: Option<&mut egui_wgpu::Renderer>,
+        mut renderer: Option<&mut egui_wgpu::Renderer>,
         program_template: Option<&RawGpuProgramTemplate>,
         pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
         raw: &LoadedRaw,
@@ -2004,10 +2093,14 @@ impl RawGpuPipeline {
             .dispatch_for_extent(tone_size.width, tone_size.height);
         let single_workgroup = [1, 1, 1];
 
-        let default_mask_atlas_edge = mask_atlas_edge();
+        // A full-frame mask atlas cannot add spatial detail beyond the image
+        // it masks. Capping it to the current proxy avoids reserving a 2048²
+        // texture for every layer of an 800px preview (and, importantly, for
+        // the tiny startup prewarm pipeline). Explicit detail/export atlases
+        // keep their caller-selected resolution.
         let mask_atlas_edge = config
             .mask_atlas_edge_override
-            .unwrap_or(default_mask_atlas_edge)
+            .unwrap_or_else(|| interactive_mask_atlas_edge(raw.width, raw.height))
             .clamp(64, export_mask_atlas_edge_limit());
         let mask_layer_capacity = if config.mask_atlas_edge_override.is_some() {
             // Viewport detail and export both use explicit atlas sizes and can
@@ -2046,6 +2139,11 @@ impl RawGpuPipeline {
         })?;
         let gpu_budget_reservation =
             GpuBudgetReservation::acquire(&resource_plan, gpu_working_set_limit_bytes())?;
+
+        // wgpu's create_* methods do not return allocation errors. Capture the
+        // complete construction sequence so a driver OOM becomes this
+        // constructor's Result instead of reaching wgpu's fatal default handler.
+        let gpu_error_scopes = GpuErrorScopes::push(device);
 
         // Admission succeeds before the first device allocation, including all
         // other live main/detail/navigation/headless pipelines in this process. Every persistent
@@ -2712,6 +2810,12 @@ impl RawGpuPipeline {
                             work_format,
                             wgpu::StorageTextureAccess::WriteOnly,
                         ),
+                        texture_array_entry(
+                            27,
+                            wgpu::TextureSampleType::Float { filterable: true },
+                        ),
+                        sampler_entry(28),
+                        storage_buffer_entry(33, true),
                     ],
                 })
             });
@@ -2745,6 +2849,12 @@ impl RawGpuPipeline {
                             wgpu::StorageTextureAccess::WriteOnly,
                         ),
                         texture_entry(30, wgpu::TextureSampleType::Float { filterable: false }),
+                        texture_array_entry(
+                            27,
+                            wgpu::TextureSampleType::Float { filterable: true },
+                        ),
+                        sampler_entry(28),
+                        storage_buffer_entry(33, true),
                     ],
                 })
             });
@@ -3529,6 +3639,18 @@ impl RawGpuPipeline {
                     binding: 31,
                     resource: wgpu::BindingResource::TextureView(&tex2_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 33,
+                    resource: mask_data_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -3587,6 +3709,18 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 30,
                     resource: wgpu::BindingResource::TextureView(&display_linear_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 33,
+                    resource: mask_data_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -4181,7 +4315,7 @@ impl RawGpuPipeline {
             ));
         }
 
-        let egui_texture_id = renderer.map(|renderer| {
+        let egui_texture_id = renderer.as_deref_mut().map(|renderer| {
             renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear)
         });
 
@@ -4251,6 +4385,12 @@ impl RawGpuPipeline {
             pipeline_cache,
             _gpu_budget_reservation: gpu_budget_reservation,
         };
+        if let Err(error) = gpu_error_scopes.finish("create RAW GPU pipeline") {
+            if let (Some(renderer), Some(texture_id)) = (renderer, pipeline.egui_texture_id) {
+                renderer.free_texture(&texture_id);
+            }
+            return Err(error);
+        }
         Ok(pipeline)
     }
 

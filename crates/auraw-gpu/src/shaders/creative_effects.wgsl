@@ -252,8 +252,8 @@ fn glow_diffuse_at(pos: vec2<i32>, stage: u32) -> vec3<f32> {
 }
 
 fn apply_glow(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    let amount = clamp(Common::effects_uniforms.creative_effects.x / 100.0, 0.0, 1.0);
-    if amount < 1e-6 {
+    let global_amount = clamp(Common::effects_uniforms.creative_effects.x / 100.0, 0.0, 1.0);
+    if global_amount < 1e-6 && !mask_glow_active() {
         return rgb;
     }
 
@@ -264,7 +264,7 @@ fn apply_glow(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     // the surrounding darker pixels.
     let current_luma = Common::safe_luma(rgb);
     let core_protection = 1.0 - 0.72 * smoothstep(1.0, 3.2, current_luma);
-    return rgb + bloom * amount * 2.8 * core_protection;
+    return rgb + bloom * 2.8 * core_protection;
 }
 
 fn full_image_uv(pos: vec2<i32>) -> vec2<f32> {
@@ -427,7 +427,7 @@ fn apply_local_scene_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
-        if state.x == 0u || state.y == 0u { continue; }
+        if state.x == 0u || state.y == 0u || Common::mask_effect_id(state) != 0u { continue; }
         let local = Common::mask_data[index].adjust_2_field;
         if max(max(abs(local.x), abs(local.y)), max(abs(local.z), abs(local.w))) <= 1e-7 {
             continue;
@@ -443,6 +443,25 @@ fn apply_local_scene_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<
     return rgb;
 }
 
+fn apply_local_mask_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
+    let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = Common::mask_data[index].metadata;
+        if state.x == 0u || state.y == 0u || Common::mask_effect_id(state) != MASK_EFFECT_NEON_ID { continue; }
+        let weight = SceneAdjustments::local_mask_weight(pos, index);
+        if weight <= 1e-5 { continue; }
+        let adjusted = apply_neon(
+            pos,
+            rgb,
+            Common::mask_data[index].adjust_0_field,
+            Common::mask_data[index].adjust_1_field,
+        );
+        rgb = mix(rgb, adjusted, weight);
+    }
+    return rgb;
+}
+
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -453,6 +472,7 @@ fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_dehaze_value(pos, rgb, Common::effects_uniforms.presence.z);
     rgb = BasicAdjustments::apply_saturation_vibrance(rgb);
     rgb = apply_local_scene_effect_nodes(pos, rgb);
+    rgb = apply_local_mask_effect_nodes(pos, rgb);
     textureStore(SceneAdjustments::local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 
@@ -467,7 +487,10 @@ fn copy_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn prepare_glow_source(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
-    let emission = glow_emission(SceneAdjustments::local_effects_at(pos), glow_cutoff());
+    let global_amount = clamp(Common::effects_uniforms.creative_effects.x / 100.0, 0.0, 1.0);
+    let emission = glow_emission(SceneAdjustments::local_effects_at(pos), glow_cutoff())
+        * global_amount
+        + mask_glow_source_at(pos);
     textureStore(SceneAdjustments::glow_work_out, pos, vec4<f32>(emission, 1.0));
 }
 
@@ -508,6 +531,6 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = SceneAdjustments::local_effects_at(pos);
     rgb = apply_glow(pos, rgb);
+    rgb = apply_mask_glow_cores(pos, rgb);
     textureStore(SceneAdjustments::creative_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
-

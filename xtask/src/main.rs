@@ -1588,13 +1588,14 @@ fn validate_shader_imports(root: &Path) -> Result<Vec<String>> {
     }
 
     let mut errors = Vec::new();
+    let canonical_shader_directory = canonical_or_owned(&shader_directory);
     let mut shader_names = BTreeSet::new();
-    for entry in fs::read_dir(&shader_directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_file() && path.extension() == Some(OsStr::new("wgsl")) {
-            if let Some(name) = path.file_name().and_then(OsStr::to_str) {
-                shader_names.insert(name.to_owned());
+    let mut shader_paths = Vec::new();
+    collect_files_with_extension(&shader_directory, "wgsl", &mut shader_paths)?;
+    for path in shader_paths {
+        if let Ok(relative) = path.strip_prefix(&shader_directory) {
+            if let Some(name) = relative.to_str() {
+                shader_names.insert(name.replace('\\', "/"));
             }
         }
     }
@@ -1609,10 +1610,8 @@ fn validate_shader_imports(root: &Path) -> Result<Vec<String>> {
     let watched: BTreeSet<String> = rust_string_literals(&build_rs)
         .filter(|value| value.ends_with(".wgsl"))
         .filter_map(|value| {
-            Path::new(&value)
-                .file_name()
-                .and_then(OsStr::to_str)
-                .map(str::to_owned)
+            let path = Path::new(&value);
+            is_shader_relative_path(path).then(|| path.to_string_lossy().replace('\\', "/"))
         })
         .collect();
 
@@ -1638,8 +1637,12 @@ fn validate_shader_imports(root: &Path) -> Result<Vec<String>> {
             ))
         })?;
         for include in shader_include_str_paths(&source) {
-            if let Some(name) = Path::new(&include).file_name().and_then(OsStr::to_str) {
-                imported.insert(name.to_owned());
+            let source_directory = path.parent().unwrap_or(&shader_directory);
+            let include_path = canonical_or_owned(&source_directory.join(&include));
+            if let Ok(relative) = include_path.strip_prefix(&canonical_shader_directory) {
+                if is_shader_relative_path(relative) {
+                    imported.insert(relative.to_string_lossy().replace('\\', "/"));
+                }
             }
         }
     }
@@ -1658,6 +1661,14 @@ fn validate_shader_imports(root: &Path) -> Result<Vec<String>> {
     errors.sort();
     errors.dedup();
     Ok(errors)
+}
+
+fn is_shader_relative_path(path: &Path) -> bool {
+    path.extension() == Some(OsStr::new("wgsl"))
+        && !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn collect_shader_imports(
