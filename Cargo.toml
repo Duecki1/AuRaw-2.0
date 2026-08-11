@@ -64,7 +64,7 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 eframe = { version = "0.35", default-features = false }
 egui = "0.35"
 egui-phosphor = "0.13"
-egui-wgpu = "0.35"
+egui-wgpu = "0.36"
 wgpu = "29"
 naga = { version = "29", features = ["wgsl-in"] }
 naga_oil = { version = "=0.22.0", default-features = false }
