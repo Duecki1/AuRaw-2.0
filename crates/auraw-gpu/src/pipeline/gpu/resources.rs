@@ -30,6 +30,12 @@ pub(super) fn default_processing_quality() -> ProcessingQuality {
     ProcessingQuality::Preview
 }
 
+pub(super) fn interactive_mask_atlas_edge(width: u32, height: u32) -> u32 {
+    mask_atlas_edge()
+        .min(width.max(height))
+        .clamp(64, export_mask_atlas_edge_limit())
+}
+
 const GPU_ALLOCATION_ALIGNMENT_BYTES: u64 = 256;
 const GPU_SAFETY_MARGIN_NUMERATOR: u64 = 1;
 const GPU_SAFETY_MARGIN_DENOMINATOR: u64 = 5;
@@ -1074,6 +1080,16 @@ mod resource_plan_tests {
             stage_uniform_buffer_bytes: GPU_STAGE_UNIFORM_ALLOCATION_BYTES,
             mask_data_buffer_bytes: MASK_DATA_SIZE_BYTES,
         }
+    }
+
+    #[test]
+    fn interactive_mask_atlas_never_exceeds_the_preview_raster() {
+        assert_eq!(interactive_mask_atlas_edge(16, 16), 64);
+        assert_eq!(interactive_mask_atlas_edge(800, 600), 800);
+        assert_eq!(
+            interactive_mask_atlas_edge(u32::MAX, u32::MAX),
+            mask_atlas_edge()
+        );
     }
 
     fn entry_bytes(plan: &GpuResourcePlan, name: &str) -> u64 {

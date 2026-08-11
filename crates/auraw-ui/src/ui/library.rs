@@ -4458,6 +4458,7 @@ fn developed_thumbnail_gpu() -> Result<&'static Mutex<DevelopedThumbnailGpu>, St
             },
         ))
         .map_err(|error| format!("could not create the edited-thumbnail GPU device: {error}"))?;
+        auraw_gpu::install_uncaptured_gpu_error_handler(&device);
         Ok(Mutex::new(DevelopedThumbnailGpu { device, queue }))
     });
 

@@ -553,6 +553,9 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            auraw_gpu::install_uncaptured_gpu_error_handler(&render_state.device);
+        }
         crate::ui::theme::install(&cc.egui_ctx);
         crate::diagnostics::record("AuRaw desktop UI initialized");
         Self::empty(&cc.egui_ctx)
@@ -563,6 +566,9 @@ impl AurawApp {
         cc: &eframe::CreationContext<'_>,
         android_app: auraw_ffi::AndroidApp,
     ) -> Self {
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            auraw_gpu::install_uncaptured_gpu_error_handler(&render_state.device);
+        }
         crate::android::install_context(&cc.egui_ctx);
         // Share AuRaw's palette, typography, icon font, and widget styling with
         // desktop. Portrait/landscape composition remains Android-specific.

@@ -14,6 +14,8 @@ use std::borrow::Cow;
 use std::sync::{Arc, Condvar, Mutex};
 use wgpu::util::DeviceExt;
 
+use crate::gpu_errors::GpuErrorScopes;
+
 mod readback;
 mod resources;
 mod shader_manager;
@@ -2053,7 +2055,7 @@ impl RawGpuPipeline {
     fn new_internal(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: Option<&mut egui_wgpu::Renderer>,
+        mut renderer: Option<&mut egui_wgpu::Renderer>,
         program_template: Option<&RawGpuProgramTemplate>,
         pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
         raw: &LoadedRaw,
@@ -2095,10 +2097,14 @@ impl RawGpuPipeline {
             .dispatch_for_extent(tone_size.width, tone_size.height);
         let single_workgroup = [1, 1, 1];
 
-        let default_mask_atlas_edge = mask_atlas_edge();
+        // A full-frame mask atlas cannot add spatial detail beyond the image
+        // it masks. Capping it to the current proxy avoids reserving a 2048²
+        // texture for every layer of an 800px preview (and, importantly, for
+        // the tiny startup prewarm pipeline). Explicit detail/export atlases
+        // keep their caller-selected resolution.
         let mask_atlas_edge = config
             .mask_atlas_edge_override
-            .unwrap_or(default_mask_atlas_edge)
+            .unwrap_or_else(|| interactive_mask_atlas_edge(raw.width, raw.height))
             .clamp(64, export_mask_atlas_edge_limit());
         let mask_layer_capacity = if config.mask_atlas_edge_override.is_some() {
             // Viewport detail and export both use explicit atlas sizes and can
@@ -2137,6 +2143,11 @@ impl RawGpuPipeline {
         })?;
         let gpu_budget_reservation =
             GpuBudgetReservation::acquire(&resource_plan, gpu_working_set_limit_bytes())?;
+
+        // wgpu's create_* methods do not return allocation errors. Capture the
+        // complete construction sequence so a driver OOM becomes this
+        // constructor's Result instead of reaching wgpu's fatal default handler.
+        let gpu_error_scopes = GpuErrorScopes::push(device);
 
         // Admission succeeds before the first device allocation, including all
         // other live main/detail/navigation/headless pipelines in this process. Every persistent
@@ -4308,7 +4319,7 @@ impl RawGpuPipeline {
             ));
         }
 
-        let egui_texture_id = renderer.map(|renderer| {
+        let egui_texture_id = renderer.as_deref_mut().map(|renderer| {
             renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear)
         });
 
@@ -4378,6 +4389,12 @@ impl RawGpuPipeline {
             pipeline_cache,
             _gpu_budget_reservation: gpu_budget_reservation,
         };
+        if let Err(error) = gpu_error_scopes.finish("create RAW GPU pipeline") {
+            if let (Some(renderer), Some(texture_id)) = (renderer, pipeline.egui_texture_id) {
+                renderer.free_texture(&texture_id);
+            }
+            return Err(error);
+        }
         Ok(pipeline)
     }
 
