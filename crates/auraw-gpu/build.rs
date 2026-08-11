@@ -14,6 +14,7 @@ fn main() {
         "tonemap.wgsl",
         "scene_adjustments.wgsl",
         "mask_effects/shared.wgsl",
+        "mask_effects/atmosphere.wgsl",
         "mask_effects/blur.wgsl",
         "mask_effects/edge_glow.wgsl",
         "mask_effects/glow.wgsl",
