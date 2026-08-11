@@ -3,11 +3,12 @@ use crate::app::{
     ToneCurveTab,
 };
 use crate::pipeline::{
-    BrushMode, DemosaicMode, DenoiseQuality, ExportBitDepth, ExportColorProfile, ExportResizeMode,
-    ExposureParams, GlowEffectSettings, LightRaysEffectSettings, LoadedRaw, LocalMask,
-    MaskCombineMode, MaskComponent, MaskEffect, MaskEffectCategory, MaskGeometry, MaskKind,
-    NeonEffectSettings, SigmoidColorProcessing, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS,
-    MAX_MASK_COMPONENTS, MAX_WHITE_BALANCE_TINT, MIN_WHITE_BALANCE_TINT,
+    BlurEffectSettings, BrushMode, DemosaicMode, DenoiseQuality, EdgeGlowEffectSettings,
+    ExportBitDepth, ExportColorProfile, ExportResizeMode, ExposureParams, GlowEffectSettings,
+    LightRaysEffectSettings, LoadedRaw, LocalMask, MaskCombineMode, MaskComponent, MaskEffect,
+    MaskEffectCategory, MaskGeometry, MaskKind, NeonEffectSettings, PixelateEffectSettings,
+    SigmoidColorProcessing, MAX_EXPORT_EDGE, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    MAX_WHITE_BALANCE_TINT, MIN_WHITE_BALANCE_TINT,
 };
 use crate::ui::components::adjustment_slider::{
     adjustment_slider, adjustment_slider_with_reset, hue_adjustment_slider, slider_scroll_locked,

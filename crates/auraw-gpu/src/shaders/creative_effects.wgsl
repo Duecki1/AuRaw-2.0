@@ -462,6 +462,36 @@ fn apply_local_mask_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f
     return rgb;
 }
 
+fn apply_local_creative_mask_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
+    let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = Common::mask_data[index].metadata;
+        if state.x == 0u || state.y == 0u { continue; }
+        let effect_id = Common::mask_effect_id(state);
+        if effect_id != MASK_EFFECT_BLUR_ID
+            && effect_id != MASK_EFFECT_EDGE_GLOW_ID
+            && effect_id != MASK_EFFECT_PIXELATE_ID {
+            continue;
+        }
+        let weight = SceneAdjustments::local_mask_weight(pos, index);
+        if weight <= 1e-5 { continue; }
+
+        let primary = Common::mask_data[index].adjust_0_field;
+        let secondary = Common::mask_data[index].adjust_1_field;
+        var adjusted = rgb;
+        if effect_id == MASK_EFFECT_BLUR_ID {
+            adjusted = apply_mask_blur(pos, rgb, primary);
+        } else if effect_id == MASK_EFFECT_EDGE_GLOW_ID {
+            adjusted = apply_edge_glow(pos, rgb, primary, secondary);
+        } else if effect_id == MASK_EFFECT_PIXELATE_ID {
+            adjusted = apply_pixelate(pos, rgb, primary);
+        }
+        rgb = mix(rgb, adjusted, weight);
+    }
+    return rgb;
+}
+
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -530,6 +560,7 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = SceneAdjustments::local_effects_at(pos);
+    rgb = apply_local_creative_mask_effect_nodes(pos, rgb);
     rgb = apply_glow(pos, rgb);
     rgb = apply_mask_glow_cores(pos, rgb);
     rgb = apply_light_rays(pos, rgb);

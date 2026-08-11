@@ -1930,9 +1930,12 @@ impl Preview {
         // values, so switching types remains fully reversible.
         let neutral = match mask.effect {
             crate::pipeline::MaskEffect::Adjustment => mask.adjustments.is_neutral(),
+            crate::pipeline::MaskEffect::Blur => !mask.effect_settings.blur.is_active(),
+            crate::pipeline::MaskEffect::EdgeGlow => !mask.effect_settings.edge_glow.is_active(),
             crate::pipeline::MaskEffect::Glow => !mask.effect_settings.glow.is_active(),
             crate::pipeline::MaskEffect::LightRays => !mask.effect_settings.light_rays.is_active(),
             crate::pipeline::MaskEffect::Neon => !mask.effect_settings.neon.is_active(),
+            crate::pipeline::MaskEffect::Pixelate => !mask.effect_settings.pixelate.is_active(),
             _ => true,
         };
         let accent = selected_component

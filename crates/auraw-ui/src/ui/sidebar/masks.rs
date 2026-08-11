@@ -1349,6 +1349,12 @@ impl Sidebar {
                         adjustments_changed |= section_changed;
                     });
                 }
+            } else if mask.effect == MaskEffect::Blur {
+                adjustments_changed |=
+                    mask_effects::blur::show(ui, &mut mask.effect_settings.blur);
+            } else if mask.effect == MaskEffect::EdgeGlow {
+                adjustments_changed |=
+                    mask_effects::edge_glow::show(ui, &mut mask.effect_settings.edge_glow);
             } else if mask.effect == MaskEffect::Glow {
                 adjustments_changed |=
                     mask_effects::glow::show(ui, &mut mask.effect_settings.glow);
@@ -1360,6 +1366,9 @@ impl Sidebar {
             } else if mask.effect == MaskEffect::Neon {
                 adjustments_changed |=
                     mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
+            } else if mask.effect == MaskEffect::Pixelate {
+                adjustments_changed |=
+                    mask_effects::pixelate::show(ui, &mut mask.effect_settings.pixelate);
             } else {
                 Self::show_mask_effect_placeholder(ui, mask.effect);
             }
@@ -1551,7 +1560,15 @@ impl Sidebar {
                         &mut request_object,
                     );
                 });
-                if mask.effect == MaskEffect::Glow {
+                if mask.effect == MaskEffect::Blur {
+                    adjustments_changed |=
+                        mask_effects::blur::show(ui, &mut mask.effect_settings.blur);
+                } else if mask.effect == MaskEffect::EdgeGlow {
+                    adjustments_changed |= mask_effects::edge_glow::show(
+                        ui,
+                        &mut mask.effect_settings.edge_glow,
+                    );
+                } else if mask.effect == MaskEffect::Glow {
                     adjustments_changed |=
                         mask_effects::glow::show(ui, &mut mask.effect_settings.glow);
                 } else if mask.effect == MaskEffect::LightRays {
@@ -1562,6 +1579,11 @@ impl Sidebar {
                 } else if mask.effect == MaskEffect::Neon {
                     adjustments_changed |=
                         mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
+                } else if mask.effect == MaskEffect::Pixelate {
+                    adjustments_changed |= mask_effects::pixelate::show(
+                        ui,
+                        &mut mask.effect_settings.pixelate,
+                    );
                 } else {
                     Self::show_mask_effect_placeholder(ui, mask.effect);
                 }
