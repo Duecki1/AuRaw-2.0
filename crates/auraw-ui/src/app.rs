@@ -1166,6 +1166,16 @@ fn collect_pipeline_update_results(
 }
 
 impl AurawApp {
+    pub(crate) fn sync_ai_model_cache_policy(&self) {
+        let develop_visible = self.active_tab == AppTab::Develop;
+        crate::ai_masks::set_model_cache_enabled(
+            develop_visible && self.sidebar_tab == SidebarTab::Masks,
+        );
+        crate::inpainting::set_model_cache_enabled(
+            develop_visible && self.sidebar_tab == SidebarTab::Inpainting,
+        );
+    }
+
     pub(crate) fn activate_tab(&mut self, tab: AppTab) {
         if self.active_tab == tab {
             return;
@@ -1188,6 +1198,7 @@ impl AurawApp {
             self.library.refresh(&self.egui_ctx);
         }
         self.active_tab = tab;
+        self.sync_ai_model_cache_policy();
         #[cfg(target_os = "android")]
         crate::android::set_back_navigation_active(tab != AppTab::Library);
     }

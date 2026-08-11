@@ -14,8 +14,27 @@ use ort::{
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError},
 };
+
+/// Serializes AI inference while its ONNX session is being selected. Masking,
+/// inpainting, and denoise deliberately share this gate so switching tools
+/// cannot leave two large model sessions resident at the same time.
+static INTERACTIVE_AI_MODEL_GATE: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_interactive_ai_model() -> MutexGuard<'static, ()> {
+    INTERACTIVE_AI_MODEL_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub(crate) fn try_lock_interactive_ai_model() -> Option<MutexGuard<'static, ()>> {
+    match INTERACTIVE_AI_MODEL_GATE.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
 
 /// Model storage used when a session must be rebuilt after a runtime EP failure.
 #[derive(Clone)]

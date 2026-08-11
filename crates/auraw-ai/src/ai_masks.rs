@@ -1,5 +1,6 @@
 use crate::execution_provider::{
-    create_session_with_fallback, CpuFallbackProfile, FallbackSession, SessionOptions,
+    create_session_with_fallback, lock_interactive_ai_model, try_lock_interactive_ai_model,
+    CpuFallbackProfile, FallbackSession, SessionOptions,
 };
 use crate::pipeline::{LandscapeCategory, MaskImage};
 use anyhow::{Context, Result};
@@ -14,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc, Mutex, MutexGuard, OnceLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -153,9 +154,103 @@ static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
 static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(not(target_os = "android"))]
+static AI_MASK_MODEL_CACHE_ENABLED: AtomicBool = AtomicBool::new(false);
+#[cfg(not(target_os = "android"))]
 type RuntimeProbeResult = (PathBuf, String);
 #[cfg(not(target_os = "android"))]
 static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AiMaskModel {
+    Subject,
+    Landscape,
+    VitMatte,
+    SamEncoder,
+    SamDecoder,
+}
+
+#[cfg(not(target_os = "android"))]
+fn clear_cached_session<T>(cache: &OnceLock<Mutex<Option<T>>>, label: &str) -> Result<()> {
+    let Some(cache) = cache.get() else {
+        return Ok(());
+    };
+    let mut session = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("{label} session lock was poisoned"))?;
+    *session = None;
+    Ok(())
+}
+
+pub(crate) fn unload_all_models_locked() -> Result<()> {
+    #[cfg(not(target_os = "android"))]
+    {
+        clear_cached_session(&SESSION, "BiRefNet")?;
+        clear_cached_session(&LANDSCAPE_SESSION, "MaskFormer")?;
+        clear_cached_session(&VITMATTE_SESSION, "ViTMatte")?;
+        clear_cached_session(&SAM_ENCODER_SESSION, "SAM encoder")?;
+        clear_cached_session(&SAM_DECODER_SESSION, "SAM decoder")?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn unload_other_models_locked(active: AiMaskModel) -> Result<()> {
+    if active != AiMaskModel::Subject {
+        clear_cached_session(&SESSION, "BiRefNet")?;
+    }
+    if active != AiMaskModel::Landscape {
+        clear_cached_session(&LANDSCAPE_SESSION, "MaskFormer")?;
+    }
+    if active != AiMaskModel::VitMatte {
+        clear_cached_session(&VITMATTE_SESSION, "ViTMatte")?;
+    }
+    if active != AiMaskModel::SamEncoder {
+        clear_cached_session(&SAM_ENCODER_SESSION, "SAM encoder")?;
+    }
+    if active != AiMaskModel::SamDecoder {
+        clear_cached_session(&SAM_DECODER_SESSION, "SAM decoder")?;
+    }
+    Ok(())
+}
+
+fn prepare_model(active: AiMaskModel) -> Result<MutexGuard<'static, ()>> {
+    let guard = lock_interactive_ai_model();
+    #[cfg(not(target_os = "android"))]
+    unload_other_models_locked(active)?;
+    #[cfg(target_os = "android")]
+    let _ = active;
+    crate::inpainting::unload_model_locked()?;
+    Ok(guard)
+}
+
+#[cfg(not(target_os = "android"))]
+fn model_cache_enabled() -> bool {
+    AI_MASK_MODEL_CACHE_ENABLED.load(Ordering::Acquire)
+}
+
+/// Keep at most the active mask model cached while the Masking tab is visible.
+/// Disabling the cache never waits on an in-flight native inference; that
+/// inference observes the flag before releasing the shared model gate and drops
+/// its session then.
+pub fn set_model_cache_enabled(enabled: bool) {
+    #[cfg(not(target_os = "android"))]
+    {
+        AI_MASK_MODEL_CACHE_ENABLED.store(enabled, Ordering::Release);
+        if !enabled {
+            // Retry on every policy synchronization. This closes the narrow
+            // race where inference checked the flag just before the UI left the
+            // tab, while the UI's first non-blocking gate attempt still saw the
+            // inference as active.
+            if let Some(_guard) = try_lock_interactive_ai_model() {
+                if let Err(error) = unload_all_models_locked() {
+                    log::warn!("could not unload cached AI-mask models: {error:#}");
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "android")]
+    let _ = enabled;
+}
 
 #[derive(Debug)]
 pub enum SubjectMaskEvent {
@@ -870,8 +965,8 @@ fn cache_object_ai_sessions() -> bool {
     #[cfg(target_os = "linux")]
     {
         // AppImages frequently use a user-selected external ONNX Runtime. Do
-        // not retain all object-mask sessions simultaneously; each temporary
-        // session still gets the full GPU -> CPU fallback behavior.
+        // not retain even the one active object-mask session between calls;
+        // each temporary session still gets the full GPU -> CPU fallback.
         !running_from_appimage()
     }
     #[cfg(not(target_os = "linux"))]
@@ -934,6 +1029,7 @@ fn infer_subject(
 
     #[cfg(target_os = "android")]
     let (output_width, output_height, logits) = {
+        let _model_guard = prepare_model(AiMaskModel::Subject)?;
         // Mobile memory is more important than avoiding session startup. Drop
         // all model weights and allocator state immediately after inference.
         let mut session =
@@ -943,23 +1039,33 @@ fn infer_subject(
 
     #[cfg(not(target_os = "android"))]
     let (output_width, output_height, logits) = {
+        let _model_guard = prepare_model(AiMaskModel::Subject)?;
         let sessions = SESSION.get_or_init(|| Mutex::new(None));
-        let mut session = sessions
+        let mut guard = sessions
             .lock()
             .map_err(|_| anyhow::anyhow!("BiRefNet session lock was poisoned"))?;
-        if session
+        if guard
             .as_ref()
             .is_none_or(|(cached_quality, _)| *cached_quality != quality)
         {
-            *session = Some((
-                quality,
-                create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?,
-            ));
+            // A quality change selects a different BiRefNet checkpoint. Drop
+            // the old tier before constructing the new session so even two
+            // variants of the same mask family never overlap in memory.
+            *guard = None;
+            let session =
+                create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?;
+            *guard = Some((quality, session));
         }
-        let (_, session) = session.as_mut().ok_or_else(|| {
-            anyhow::anyhow!("BiRefNet session initialization produced no session")
-        })?;
-        run_subject_session(session, input, model.input_width, model.input_height)?
+        let result = {
+            let (_, session) = guard.as_mut().ok_or_else(|| {
+                anyhow::anyhow!("BiRefNet session initialization produced no session")
+            })?;
+            run_subject_session(session, input, model.input_width, model.input_height)
+        };
+        if !model_cache_enabled() {
+            *guard = None;
+        }
+        result?
     };
 
     // BiRefNet is itself a high-resolution dichotomous segmentation model and
@@ -1135,6 +1241,7 @@ fn infer_landscape(
 
     #[cfg(target_os = "android")]
     let (output_width, output_height, probabilities) = {
+        let _model_guard = prepare_model(AiMaskModel::Landscape)?;
         let mut session =
             create_session_with_fallback(model_path, SessionOptions::new("MaskFormer"))?;
         run_landscape_session(&mut session, input, category, layout)?
@@ -1142,20 +1249,27 @@ fn infer_landscape(
 
     #[cfg(not(target_os = "android"))]
     let (output_width, output_height, probabilities) = {
+        let _model_guard = prepare_model(AiMaskModel::Landscape)?;
         let sessions = LANDSCAPE_SESSION.get_or_init(|| Mutex::new(None));
-        let mut session = sessions
+        let mut guard = sessions
             .lock()
             .map_err(|_| anyhow::anyhow!("MaskFormer session lock was poisoned"))?;
-        if session.is_none() {
-            *session = Some(create_session_with_fallback(
+        if guard.is_none() {
+            *guard = Some(create_session_with_fallback(
                 model_path,
                 SessionOptions::new("MaskFormer"),
             )?);
         }
-        let session = session.as_mut().ok_or_else(|| {
-            anyhow::anyhow!("MaskFormer session initialization produced no session")
-        })?;
-        run_landscape_session(session, input, category, layout)?
+        let result = {
+            let session = guard.as_mut().ok_or_else(|| {
+                anyhow::anyhow!("MaskFormer session initialization produced no session")
+            })?;
+            run_landscape_session(session, input, category, layout)
+        };
+        if !model_cache_enabled() {
+            *guard = None;
+        }
+        result?
     };
 
     let coarse_mask =
@@ -1890,13 +2004,15 @@ fn refine_mask_with_vitmatte(
 
     #[cfg(target_os = "android")]
     let (output_width, output_height, alpha) = {
+        let _model_guard = prepare_model(AiMaskModel::VitMatte)?;
         let mut session =
             create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
         run_vitmatte_session(&mut session, input)?
     };
     #[cfg(not(target_os = "android"))]
     let (output_width, output_height, alpha) = {
-        if cache_object_ai_sessions() {
+        let _model_guard = prepare_model(AiMaskModel::VitMatte)?;
+        if model_cache_enabled() && cache_object_ai_sessions() {
             let sessions = VITMATTE_SESSION.get_or_init(|| Mutex::new(None));
             let mut session = sessions
                 .lock()
@@ -1907,12 +2023,16 @@ fn refine_mask_with_vitmatte(
                     SessionOptions::new("ViTMatte"),
                 )?);
             }
-            run_vitmatte_session(
+            let result = run_vitmatte_session(
                 session
                     .as_mut()
                     .context("ViTMatte session initialization produced no session")?,
                 input,
-            )?
+            );
+            if !model_cache_enabled() {
+                *session = None;
+            }
+            result?
         } else {
             let mut session =
                 create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
@@ -2961,6 +3081,7 @@ fn encode_sam_image(
 
     #[cfg(target_os = "android")]
     let tensors = {
+        let _model_guard = prepare_model(AiMaskModel::SamEncoder)?;
         let mut session = create_session_with_fallback(
             encoder_path,
             SessionOptions::new("SAM 2.1 encoder")
@@ -2970,12 +3091,8 @@ fn encode_sam_image(
     };
     #[cfg(not(target_os = "android"))]
     let tensors = {
-        #[cfg(target_os = "windows")]
-        {
-            // Windows still gets GPU acceleration first. If DirectML/CUDA/TensorRT
-            // setup or inference fails, the managed session rebuilds on CPU using
-            // the conservative graph/thread settings required by some third-party
-            // ONNX Runtime CPU DLLs for the Hiera encoder.
+        let _model_guard = prepare_model(AiMaskModel::SamEncoder)?;
+        if model_cache_enabled() && cache_object_ai_sessions() {
             let sessions = SAM_ENCODER_SESSION.get_or_init(|| Mutex::new(None));
             let mut guard = sessions
                 .lock()
@@ -2987,41 +3104,23 @@ fn encode_sam_image(
                         .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
                 )?);
             }
-            run_sam_encoder(
+            let result = run_sam_encoder(
                 guard
                     .as_mut()
                     .context("SAM encoder session is unavailable")?,
                 input,
-            )?
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            if cache_object_ai_sessions() {
-                let sessions = SAM_ENCODER_SESSION.get_or_init(|| Mutex::new(None));
-                let mut guard = sessions
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("SAM encoder session lock was poisoned"))?;
-                if guard.is_none() {
-                    *guard = Some(create_session_with_fallback(
-                        encoder_path,
-                        SessionOptions::new("SAM 2.1 encoder")
-                            .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
-                    )?);
-                }
-                run_sam_encoder(
-                    guard
-                        .as_mut()
-                        .context("SAM encoder session is unavailable")?,
-                    input,
-                )?
-            } else {
-                let mut session = create_session_with_fallback(
-                    encoder_path,
-                    SessionOptions::new("SAM 2.1 encoder")
-                        .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
-                )?;
-                run_sam_encoder(&mut session, input)?
+            );
+            if !model_cache_enabled() {
+                *guard = None;
             }
+            result?
+        } else {
+            let mut session = create_session_with_fallback(
+                encoder_path,
+                SessionOptions::new("SAM 2.1 encoder")
+                    .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
+            )?;
+            run_sam_encoder(&mut session, input)?
         }
     };
 
@@ -3223,6 +3322,7 @@ fn decode_sam_mask(
 
     #[cfg(target_os = "android")]
     let (masks, scores) = {
+        let _model_guard = prepare_model(AiMaskModel::SamDecoder)?;
         let mut session =
             create_session_with_fallback(decoder_path, SessionOptions::new("SAM 2.1 decoder"))?;
         run_sam_decoder(
@@ -3238,7 +3338,8 @@ fn decode_sam_mask(
     };
     #[cfg(not(target_os = "android"))]
     let (masks, scores) = {
-        if cache_object_ai_sessions() {
+        let _model_guard = prepare_model(AiMaskModel::SamDecoder)?;
+        if model_cache_enabled() && cache_object_ai_sessions() {
             let sessions = SAM_DECODER_SESSION.get_or_init(|| Mutex::new(None));
             let mut guard = sessions
                 .lock()
@@ -3249,7 +3350,7 @@ fn decode_sam_mask(
                     SessionOptions::new("SAM 2.1 decoder"),
                 )?);
             }
-            run_sam_decoder(
+            let result = run_sam_decoder(
                 guard
                     .as_mut()
                     .context("SAM decoder session is unavailable")?,
@@ -3260,7 +3361,11 @@ fn decode_sam_mask(
                 point_labels,
                 mask_input,
                 has_mask,
-            )?
+            );
+            if !model_cache_enabled() {
+                *guard = None;
+            }
+            result?
         } else {
             let mut session =
                 create_session_with_fallback(decoder_path, SessionOptions::new("SAM 2.1 decoder"))?;

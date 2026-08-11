@@ -3,7 +3,9 @@
 //! The downloaded `.dtmodel` package is the published darktable-ai 5.6 release
 //! asset. AuRaw pins both the archive and extracted ONNX graphs by SHA-256.
 
-use crate::execution_provider::{create_session_with_fallback, FallbackSession, SessionOptions};
+use crate::execution_provider::{
+    create_session_with_fallback, lock_interactive_ai_model, FallbackSession, SessionOptions,
+};
 use anyhow::{Context, Result};
 use auraw_gpu::wgpu;
 use ort::value::Tensor;
@@ -816,6 +818,9 @@ fn infer_bayer(
     // full image is highlight-reconstructed and demosaicked only once, after
     // all tiles have been blended, and those stages remain responsive to edits.
     let mut normalized_cfa = vec![0.0f32; output_elements];
+    let model_guard = lock_interactive_ai_model();
+    crate::ai_masks::unload_all_models_locked()?;
+    crate::inpainting::unload_model_locked()?;
     let mut session = create_bayer_session(model_path)?;
     let model_white_balance = raw.rawnind_daylight_white_balance();
     for tile_y in 0..tiles_y {
@@ -935,6 +940,10 @@ fn infer_bayer(
             });
         }
     }
+    // RawNIND is intentionally not cached. Release its weights and execution-
+    // provider allocations before the CPU-only edge/highlight reconstruction.
+    drop(session);
+    drop(model_guard);
 
     fill_bayer_crop_edges(
         &mut normalized_cfa,
@@ -1087,6 +1096,9 @@ fn infer_linear(
         .and_then(|elements| usize::try_from(elements).ok())
         .context("RawNIND linear output dimensions overflow")?;
     let mut stored = vec![0u16; output_elements];
+    let model_guard = lock_interactive_ai_model();
+    crate::ai_masks::unload_all_models_locked()?;
+    crate::inpainting::unload_model_locked()?;
     let mut session =
         create_session_with_fallback(model_path, SessionOptions::new("RawNIND linear"))?;
     let mut neutral = ExposureParams::scene_referred_default();
@@ -1207,6 +1219,10 @@ fn infer_linear(
             });
         }
     }
+    // The remaining Rec.2020-to-camera conversion is CPU-only and does not
+    // need the large RawNIND session to remain resident.
+    drop(session);
+    drop(model_guard);
 
     for pixel in stored.chunks_exact_mut(3) {
         let rec2020 = [

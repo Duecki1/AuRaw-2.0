@@ -454,6 +454,9 @@ impl Sidebar {
             app.white_balance_picker_active = false;
             app.white_balance_picker_drag = None;
         }
+        if app.sidebar_tab != previous {
+            app.sync_ai_model_cache_policy();
+        }
     }
 
     fn show_adjustments(

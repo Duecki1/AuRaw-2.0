@@ -1,4 +1,7 @@
-use crate::execution_provider::{create_session_with_fallback, FallbackSession, SessionOptions};
+use crate::execution_provider::{
+    create_session_with_fallback, lock_interactive_ai_model, try_lock_interactive_ai_model,
+    FallbackSession, SessionOptions,
+};
 use anyhow::{Context, Result};
 use ort::value::Tensor;
 use rayon::prelude::*;
@@ -41,7 +44,46 @@ const REC2020_LUMA: [f32; 3] = [0.262_700_2, 0.677_998_1, 0.059_301_7];
 
 #[cfg(not(target_os = "android"))]
 static LAMA_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
+#[cfg(not(target_os = "android"))]
+static INPAINT_MODEL_CACHE_ENABLED: AtomicBool = AtomicBool::new(false);
 static LAMA_VERIFIED_MODEL: OnceLock<Mutex<Option<LamaModelIdentity>>> = OnceLock::new();
+
+pub(crate) fn unload_model_locked() -> Result<()> {
+    #[cfg(not(target_os = "android"))]
+    if let Some(cache) = LAMA_SESSION.get() {
+        let mut session = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("LaMa session lock was poisoned"))?;
+        *session = None;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn model_cache_enabled() -> bool {
+    INPAINT_MODEL_CACHE_ENABLED.load(Ordering::Acquire)
+}
+
+/// Cache LaMa only while the Inpainting tab is visible. If native inference is
+/// still running, it drops the session itself before releasing the shared AI
+/// model gate rather than making the UI thread wait.
+pub fn set_model_cache_enabled(enabled: bool) {
+    #[cfg(not(target_os = "android"))]
+    {
+        INPAINT_MODEL_CACHE_ENABLED.store(enabled, Ordering::Release);
+        if !enabled {
+            // See the mask-side policy: repeated non-blocking attempts close a
+            // tab-transition race without ever stalling egui on native ONNX.
+            if let Some(_guard) = try_lock_interactive_ai_model() {
+                if let Err(error) = unload_model_locked() {
+                    log::warn!("could not unload cached inpainting model: {error:#}");
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "android")]
+    let _ = enabled;
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LamaModelIdentity {
@@ -489,26 +531,36 @@ fn infer_lama(
 
     #[cfg(target_os = "android")]
     let output = {
+        let _model_guard = lock_interactive_ai_model();
+        crate::ai_masks::unload_all_models_locked()?;
         let mut session = create_session_with_fallback(model_path, SessionOptions::new("LaMa"))?;
         run_lama_session(&mut session, image_tensor, mask_tensor)?
     };
 
     #[cfg(not(target_os = "android"))]
     let output = {
+        let _model_guard = lock_interactive_ai_model();
+        crate::ai_masks::unload_all_models_locked()?;
         let sessions = LAMA_SESSION.get_or_init(|| Mutex::new(None));
-        let mut session = sessions
+        let mut guard = sessions
             .lock()
             .map_err(|_| anyhow::anyhow!("LaMa session lock was poisoned"))?;
-        if session.is_none() {
-            *session = Some(create_session_with_fallback(
+        if guard.is_none() {
+            *guard = Some(create_session_with_fallback(
                 model_path,
                 SessionOptions::new("LaMa"),
             )?);
         }
-        let session = session
-            .as_mut()
-            .context("LaMa session initialization produced no session")?;
-        run_lama_session(session, image_tensor, mask_tensor)?
+        let result = {
+            let session = guard
+                .as_mut()
+                .context("LaMa session initialization produced no session")?;
+            run_lama_session(session, image_tensor, mask_tensor)
+        };
+        if !model_cache_enabled() {
+            *guard = None;
+        }
+        result?
     };
 
     // Convert the model output back through the inverse of its temporary
