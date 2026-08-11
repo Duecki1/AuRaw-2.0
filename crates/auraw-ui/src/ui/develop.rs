@@ -1,7 +1,8 @@
 use crate::app::AurawApp;
 use crate::ui::library::{
-    apply_desktop_image_action, desktop_image_context_menu, load_desktop_reference_preview,
-    DesktopFilmstripItem, DesktopFilmstripSource,
+    apply_cloud_image_action, apply_desktop_image_action, cloud_image_context_menu,
+    desktop_image_context_menu, load_desktop_reference_preview, DesktopFilmstripItem,
+    DesktopFilmstripSource,
 };
 use crate::ui::preview::Preview;
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
@@ -211,6 +212,7 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
     let mut centered_path = None;
     let mut open_source: Option<DesktopFilmstripSource> = None;
     let mut library_action = None;
+    let mut cloud_library_action = None;
     let mut protected_indices = HashSet::new();
     let stride = FILMSTRIP_CARD_WIDTH + FILMSTRIP_GAP;
     let cards_width = count as f32 * stride - FILMSTRIP_GAP;
@@ -301,24 +303,26 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
                 }
 
                 response.context_menu(|ui| {
-                    if let DesktopFilmstripSource::Local(path) = &item.source {
-                        // Keep local filmstrip image actions exactly in sync
-                        // with the desktop Library card menu.
-                        let context_paths = [path.clone()];
-                        if let Some(action) =
-                            desktop_image_context_menu(ui, app, path.as_path(), &context_paths)
-                        {
-                            library_action = Some(action);
+                    match &item.source {
+                        DesktopFilmstripSource::Local(path) => {
+                            // Keep local filmstrip image actions exactly in sync
+                            // with the desktop Library card menu.
+                            let context_paths = [path.clone()];
+                            if let Some(action) =
+                                desktop_image_context_menu(ui, app, path.as_path(), &context_paths)
+                            {
+                                library_action = Some(action);
+                            }
                         }
-                        ui.separator();
-                    } else {
-                        ui.label(
-                            egui::RichText::new("AuRaw Cloud")
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                        );
-                        ui.separator();
+                        DesktopFilmstripSource::Cloud(asset) => {
+                            let context_assets = [asset.clone()];
+                            if let Some(action) = cloud_image_context_menu(ui, app, &context_assets)
+                            {
+                                cloud_library_action = Some(action);
+                            }
+                        }
                     }
+                    ui.separator();
                     if reference {
                         if ui.button("Clear Reference Image").clicked() {
                             app.develop_reference.clear();
@@ -347,6 +351,9 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
 
     if let Some(action) = library_action {
         apply_desktop_image_action(ui, app, frame, action);
+    }
+    if let Some(action) = cloud_library_action {
+        apply_cloud_image_action(app, action, ui.ctx());
     }
     if let Some(source) = open_source {
         open_filmstrip_source(app, source, ui.ctx(), frame);
