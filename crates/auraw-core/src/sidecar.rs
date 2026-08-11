@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 7;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 8;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0004;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
@@ -1037,7 +1037,8 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     // Schema 5 introduced extracted PNG mask assets. Schema 6 kept that layout
     // and changed inpainting binary fields to lossless compressed Base64
     // strings. Schema 7 adds the optional shared Subject refinement field;
-    // serde defaults keep every earlier sidecar backward-compatible.
+    // schema 8 adds the defaulted mask-effect selector. Serde defaults keep
+    // every earlier sidecar backward-compatible.
     if original_schema >= 5 {
         restore_mask_assets(
             &mut document.edits,
@@ -2419,6 +2420,27 @@ mod tests {
         let loaded = decode(&legacy).unwrap();
         assert!(loaded.migrated);
         assert!(loaded.edits.masks.subject_refinement.is_empty());
+    }
+
+    #[test]
+    fn schema_seven_mask_defaults_to_adjustment_effect() {
+        let edits = sample_edits();
+        let encoded = encode(edits).unwrap();
+        let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        document["schema_version"] = 7.into();
+        document
+            .pointer_mut("/edits/masks/masks/0")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("effect");
+
+        let legacy = serde_json::to_vec(&document).unwrap();
+        let loaded = decode(&legacy).unwrap();
+        assert!(loaded.migrated);
+        assert_eq!(
+            loaded.edits.masks.masks[0].effect,
+            crate::pipeline::MaskEffect::Adjustment
+        );
     }
 
     #[test]

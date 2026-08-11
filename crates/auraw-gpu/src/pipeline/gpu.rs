@@ -804,6 +804,10 @@ impl GpuParams {
         let mut mask_data = [MaskData::zeroed(); MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
             let adjustment = mask.adjustments;
+            // Placeholder effect types retain any adjustment values so a user
+            // can switch back without losing work, but they must not apply
+            // those hidden values to the image.
+            let adjustment_enabled = mask.enabled && mask.effect.uses_adjustments();
             let has_hsl = adjustment.has_color_mixer();
             let curve_flags = adjustment.curve_feature_flags();
             let has_grading = adjustment.has_color_grading();
@@ -813,7 +817,7 @@ impl GpuParams {
             let (hsl_luminance_0, hsl_luminance_1) = split_eight(adjustment.hsl_luminance);
             mask_data[index] = MaskData {
                 metadata: [
-                    u32::from(mask.enabled),
+                    u32::from(adjustment_enabled),
                     u32::from(!adjustment.is_neutral()),
                     curve_flags,
                     u32::from(has_hsl) | (u32::from(has_grading) << 1) | (u32::from(has_hue) << 2),

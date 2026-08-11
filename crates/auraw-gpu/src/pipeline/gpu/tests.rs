@@ -1497,6 +1497,18 @@ fn local_mask_scheduling_stack(
     }
 }
 
+#[test]
+fn placeholder_mask_effects_do_not_apply_retained_adjustments() {
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams::default();
+    let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
+    masks.masks[0].effect = crate::pipeline::MaskEffect::Neon;
+
+    let params = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(params.mask_data[0].metadata[0], 0);
+    assert!(!params.needs_intermediate_adjustment_passes());
+}
+
 fn assert_max_delta(
     adjustment: &str,
     comparison: &str,
