@@ -13,6 +13,8 @@ fn main() {
         "tone_analysis.wgsl",
         "tonemap.wgsl",
         "scene_adjustments.wgsl",
+        "mask_effects/shared.wgsl",
+        "mask_effects/glow.wgsl",
         "mask_effects/neon.wgsl",
         "creative_effects.wgsl",
         "view_transform.wgsl",
