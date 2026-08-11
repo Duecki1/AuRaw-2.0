@@ -4,23 +4,6 @@
 // Common, Color, and SceneAdjustments modules. Source pixels are never modified
 // or baked into the edit.
 
-fn encoded_srgb_component_to_linear(value: f32) -> f32 {
-    let encoded = clamp(value, 0.0, 1.0);
-    if encoded <= 0.04045 {
-        return encoded / 12.92;
-    }
-    return pow((encoded + 0.055) / 1.055, 2.4);
-}
-
-fn picker_color_to_working(color: vec3<f32>) -> vec3<f32> {
-    let linear_srgb = vec3<f32>(
-        encoded_srgb_component_to_linear(color.r),
-        encoded_srgb_component_to_linear(color.g),
-        encoded_srgb_component_to_linear(color.b),
-    );
-    return max(Common::SRGB_TO_REC2020 * linear_srgb, vec3<f32>(0.0));
-}
-
 fn log_luminance_at(pos: vec2<i32>) -> f32 {
     return log2(max(Common::safe_luma(SceneAdjustments::adjustment_base_at(pos)), 1e-6));
 }
@@ -70,7 +53,7 @@ fn apply_neon(
     let halo = smoothstep(threshold * 0.45, threshold * 1.55 + 0.012, outer_energy);
     let emission = max(core, halo * glow * 0.72);
 
-    let neon_color = picker_color_to_working(secondary.xyz);
+    let neon_color = mask_effect_picker_color_to_working(secondary.xyz);
     let source_luma = max(Common::safe_luma(source_rgb), 0.0);
     let edge_visibility = mix(0.78, 1.12, clamp(sqrt(source_luma), 0.0, 1.0));
     let emitted = neon_color * emission * edge_visibility * (0.45 + 2.35 * amount);

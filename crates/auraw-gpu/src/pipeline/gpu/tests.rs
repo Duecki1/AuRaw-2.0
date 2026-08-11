@@ -1064,6 +1064,7 @@ fn adjustment_modules_expose_the_render_graph_controls() {
     for function in [
         "apply_creative_effects",
         "apply_glow",
+        "apply_mask_glow_cores",
         "apply_vignette",
         "apply_neon",
     ] {
@@ -1550,6 +1551,38 @@ fn neon_mask_effect_packs_independent_settings_and_schedules_rendering() {
     let neutral = super::GpuParams::new(&exposure, &masks, &raw);
     assert_eq!(neutral.mask_data[0].metadata[0], 0);
     assert!(!neutral.needs_intermediate_adjustment_passes());
+}
+
+#[test]
+fn glow_mask_effect_packs_independent_settings_and_schedules_diffusion() {
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams::default();
+    let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
+    {
+        let mask = &mut masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::Glow;
+        mask.effect_settings.glow.amount = 42.0;
+        mask.effect_settings.glow.radius = 73.0;
+        mask.effect_settings.glow.core = 67.0;
+        mask.effect_settings.glow.color = [0.9, 0.2, 0.6];
+    }
+
+    let params = super::GpuParams::new(&exposure, &masks, &raw);
+    let packed = params.mask_data[0];
+    assert_eq!(packed.metadata[0], 1);
+    assert_eq!(packed.metadata[1], 1);
+    assert_eq!(packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT, 2);
+    assert_eq!(packed.adjust_0, [42.0, 73.0, 67.0, 0.0]);
+    assert_eq!(packed.adjust_1, [0.9, 0.2, 0.6, 0.0]);
+    assert_eq!(params.effects.creative_effects[1], 73.0);
+    assert!(params.needs_intermediate_adjustment_passes());
+    assert!(params.needs_glow_passes());
+
+    masks.masks[0].effect_settings.glow.amount = 0.0;
+    let neutral = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(neutral.mask_data[0].metadata[0], 0);
+    assert!(!neutral.needs_intermediate_adjustment_passes());
+    assert!(!neutral.needs_glow_passes());
 }
 
 fn assert_max_delta(
@@ -2459,6 +2492,60 @@ fn presence_and_glow_have_real_gpu_behavior_when_an_adapter_exists() {
     assert!(
         far_lift < ring_lift * 0.12 + 2e-5,
         "Glow lifted remote shadows: ring={ring_lift}, far={far_lift}"
+    );
+
+    // A mask Glow uses coverage only as an emission source. Its halo must be
+    // visible outside that coverage instead of being clipped by the mask.
+    let masked_source = fixture(WIDTH, HEIGHT, |_, _| 0.05);
+    let masked_neutral = render(&masked_source, &neutral);
+    let mut glow_masks = MaskStack::default();
+    glow_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+    let glow_mask = &mut glow_masks.masks[0];
+    glow_mask.effect = crate::pipeline::MaskEffect::Glow;
+    glow_mask.effect_settings.glow.amount = 85.0;
+    glow_mask.effect_settings.glow.radius = 75.0;
+    glow_mask.effect_settings.glow.core = 75.0;
+    glow_mask.effect_settings.glow.color = [0.1, 0.65, 1.0];
+
+    let mask_edge = pipeline.mask_atlas_edge();
+    let mut mask_values =
+        vec![half::f16::from_f32(0.0).to_bits(); (mask_edge * mask_edge) as usize];
+    for y in 0..mask_edge {
+        for x in 0..mask_edge {
+            let image_x = (x as f32 + 0.5) * WIDTH as f32 / mask_edge as f32;
+            let image_y = (y as f32 + 0.5) * HEIGHT as f32 / mask_edge as f32;
+            if (image_x - 64.0).abs() <= 2.0 && (32.0..96.0).contains(&image_y) {
+                mask_values[(y * mask_edge + x) as usize] = half::f16::from_f32(1.0).to_bits();
+            }
+        }
+    }
+    pipeline.update_mask_layer(&queue, 0, &mask_values).unwrap();
+    pipeline.upload_raw_tile(&queue, &masked_source).unwrap();
+    let masked_params = super::GpuParams::new(&neutral, &glow_masks, &masked_source);
+    pipeline.recompute(&queue, &device, &masked_params);
+    let masked_glow = pipeline
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, WIDTH, HEIGHT)
+        .unwrap();
+    let side_band = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            let distance = (x - 64.0).abs();
+            (7.0..18.0).contains(&distance) && (40.0..88.0).contains(&y)
+        })
+    };
+    let remote_band = |pixels: &[f32]| {
+        mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            (x - 64.0).abs() > 48.0 && (40.0..88.0).contains(&y)
+        })
+    };
+    let masked_halo_lift = side_band(&masked_glow) - side_band(&masked_neutral);
+    let masked_remote_lift = (remote_band(&masked_glow) - remote_band(&masked_neutral)).abs();
+    assert!(
+        masked_halo_lift > 1e-4,
+        "mask Glow was clipped to its source coverage: {masked_halo_lift}"
+    );
+    assert!(
+        masked_remote_lift < masked_halo_lift * 0.12 + 2e-5,
+        "mask Glow reached remote pixels: halo={masked_halo_lift}, remote={masked_remote_lift}"
     );
 }
 

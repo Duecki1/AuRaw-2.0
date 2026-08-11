@@ -1236,6 +1236,7 @@ fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {
             return invalid("mask opacity is outside 0..1");
         }
         validate_local_adjustments(&mask.adjustments)?;
+        validate_glow_effect(&mask.effect_settings.glow)?;
         validate_neon_effect(&mask.effect_settings.neon)?;
         if mask.name.len() > MAX_EDIT_NAME_BYTES {
             return invalid("mask name is unreasonably long");
@@ -1992,6 +1993,27 @@ fn validate_neon_effect(neon: &crate::pipeline::NeonEffectSettings) -> Result<()
     Ok(())
 }
 
+fn validate_glow_effect(glow: &crate::pipeline::GlowEffectSettings) -> Result<(), SidecarError> {
+    finite(
+        "Glow mask effect",
+        &[
+            glow.amount,
+            glow.radius,
+            glow.core,
+            glow.color[0],
+            glow.color[1],
+            glow.color[2],
+        ],
+    )?;
+    bounded("Glow amount", glow.amount, 0.0, 100.0)?;
+    bounded("Glow radius", glow.radius, 0.0, 100.0)?;
+    bounded("Glow core", glow.core, 0.0, 100.0)?;
+    for channel in glow.color {
+        bounded("Glow color channel", channel, 0.0, 1.0)?;
+    }
+    Ok(())
+}
+
 fn validate_curves(
     curves: &[&crate::pipeline::PointCurve],
     label: &str,
@@ -2419,6 +2441,31 @@ mod tests {
         assert_eq!(neon_mask.effect_settings.neon.edge_width, 4.5);
         assert_eq!(neon_mask.effect_settings.neon.color, [1.0, 0.15, 0.65]);
         assert_eq!(neon_mask.adjustments.exposure, 1.0);
+    }
+
+    #[test]
+    fn glow_mask_settings_round_trip_through_the_sidecar() {
+        let mut edits = sample_edits();
+        let masks = Arc::make_mut(&mut edits.masks);
+        masks.add_mask(MaskKind::Fullscreen).unwrap();
+        let glow_mask = masks.masks.last_mut().unwrap();
+        glow_mask.effect = crate::pipeline::MaskEffect::Glow;
+        glow_mask.effect_settings.glow.amount = 74.0;
+        glow_mask.effect_settings.glow.radius = 62.0;
+        glow_mask.effect_settings.glow.core = 81.0;
+        glow_mask.effect_settings.glow.color = [0.1, 0.55, 1.0];
+        glow_mask.adjustments.exposure = 1.0;
+
+        let encoded = encode(edits.clone()).unwrap();
+        let loaded = decode(&encoded).unwrap();
+        assert_eq!(loaded.edits, edits);
+        let glow_mask = loaded.edits.masks.masks.last().unwrap();
+        assert_eq!(glow_mask.effect, crate::pipeline::MaskEffect::Glow);
+        assert_eq!(glow_mask.effect_settings.glow.amount, 74.0);
+        assert_eq!(glow_mask.effect_settings.glow.radius, 62.0);
+        assert_eq!(glow_mask.effect_settings.glow.core, 81.0);
+        assert_eq!(glow_mask.effect_settings.glow.color, [0.1, 0.55, 1.0]);
+        assert_eq!(glow_mask.adjustments.exposure, 1.0);
     }
 
     #[test]

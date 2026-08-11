@@ -4,8 +4,10 @@
 //! serialization. Actual implementations get their own module only when they
 //! exist; placeholder modules are deliberately not created.
 
+mod glow;
 mod neon;
 
+pub use glow::GlowEffectSettings;
 pub use neon::NeonEffectSettings;
 
 /// The operation driven by a mask group's combined coverage.
@@ -161,7 +163,7 @@ impl MaskEffect {
     }
 
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::Adjustment | Self::Neon)
+        matches!(self, Self::Adjustment | Self::Glow | Self::Neon)
     }
 
     pub const fn uses_adjustments(self) -> bool {
@@ -173,6 +175,7 @@ impl MaskEffect {
     pub const fn shader_id(self) -> u32 {
         match self {
             Self::Neon => 1,
+            Self::Glow => 2,
             _ => 0,
         }
     }
@@ -219,6 +222,8 @@ impl MaskEffectCategory {
 /// type switch is reversible and never resets another effect's edit state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MaskEffectSettings {
+    #[serde(default, skip_serializing_if = "GlowEffectSettings::is_default")]
+    pub glow: GlowEffectSettings,
     #[serde(default, skip_serializing_if = "NeonEffectSettings::is_default")]
     pub neon: NeonEffectSettings,
 }

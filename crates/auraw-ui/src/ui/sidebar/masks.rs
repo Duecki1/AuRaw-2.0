@@ -1349,6 +1349,9 @@ impl Sidebar {
                         adjustments_changed |= section_changed;
                     });
                 }
+            } else if mask.effect == MaskEffect::Glow {
+                adjustments_changed |=
+                    mask_effects::glow::show(ui, &mut mask.effect_settings.glow);
             } else if mask.effect == MaskEffect::Neon {
                 adjustments_changed |=
                     mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
@@ -1542,7 +1545,10 @@ impl Sidebar {
                         &mut request_object,
                     );
                 });
-                if mask.effect == MaskEffect::Neon {
+                if mask.effect == MaskEffect::Glow {
+                    adjustments_changed |=
+                        mask_effects::glow::show(ui, &mut mask.effect_settings.glow);
+                } else if mask.effect == MaskEffect::Neon {
                     adjustments_changed |=
                         mask_effects::neon::show(ui, &mut mask.effect_settings.neon);
                 } else {

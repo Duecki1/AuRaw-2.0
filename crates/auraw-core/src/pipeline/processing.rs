@@ -580,8 +580,8 @@ pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_RECONSTRUCTION_SUPPORT
     .div_ceil(8)
     * 8;
 
-/// Returns the halo actually required by the current edit. Neutral Glow, Neon,
-/// and local spatial controls should not force every tile to process their
+/// Returns the halo actually required by the current edit. Neutral global or
+/// masked Glow, Neon, and local spatial controls should not force every tile to process their
 /// full support radius. This is especially important on Android, where a wide
 /// halo around a 768 px core can nearly triple the processed area.
 pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -> u32 {
@@ -620,7 +620,10 @@ pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -
         support += NEON_SUPPORT;
     }
 
-    if exposure.glow_amount.abs() > 1e-6 {
+    let mask_glow_active = masks.masks.iter().any(|mask| {
+        mask.enabled && mask.effect == MaskEffect::Glow && mask.effect_settings.glow.is_active()
+    });
+    if exposure.glow_amount.abs() > 1e-6 || mask_glow_active {
         support += GLOW_SUPPORT;
     }
 
@@ -1053,6 +1056,16 @@ mod tests {
         neon_masks.masks[0].effect_settings.neon.amount = 0.0;
         assert_eq!(
             required_export_tile_halo(&exposure, &neon_masks),
+            MIN_EXPORT_TILE_HALO
+        );
+
+        let mut glow_masks = MaskStack::default();
+        glow_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+        glow_masks.masks[0].effect = MaskEffect::Glow;
+        assert!(required_export_tile_halo(&exposure, &glow_masks) > MIN_EXPORT_TILE_HALO);
+        glow_masks.masks[0].effect_settings.glow.amount = 0.0;
+        assert_eq!(
+            required_export_tile_halo(&exposure, &glow_masks),
             MIN_EXPORT_TILE_HALO
         );
 
