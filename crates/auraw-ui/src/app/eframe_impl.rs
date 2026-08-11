@@ -1,5 +1,41 @@
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if auraw_gpu::take_gpu_out_of_memory() {
+            // Optional zoom/navigation pipelines and UI-only mask textures are
+            // safe to discard between frames. Keep the main preview alive so
+            // the user can save work or lower preview quality before retrying.
+            let retired = [
+                self.preview_detail
+                    .take()
+                    .and_then(|preview| preview.pipeline.egui_texture_id),
+                self.preview_navigation
+                    .take()
+                    .and_then(|preview| preview.pipeline.egui_texture_id),
+            ];
+            for texture_id in retired.into_iter().flatten() {
+                self.retire_egui_texture(texture_id);
+            }
+            self.preview_detail_pending_stage = None;
+            self.navigation_pending_stage = None;
+            self.preview_detail_urgent = false;
+            self.preview_zoom = 1.0;
+            self.preview_center = [0.5, 0.5];
+            self.mask_overlay_texture = None;
+            self.mask_overlay_texture_key = None;
+            self.mask_thumbnail_group_textures.clear();
+            self.mask_thumbnail_component_textures.clear();
+            self.mask_thumbnail_component_mask = None;
+            self.inpaint_texture = None;
+            self.inpaint_texture_key = None;
+            self.inpaint_stroke_texture = None;
+            self.inpaint_stroke_texture_key = None;
+            self.inpaint_focus_texture = None;
+            self.inpaint_focus_texture_key = None;
+            self.notice = Some(
+                "GPU memory was exhausted. AuRaw cancelled the operation and released optional preview textures. Close other GPU-heavy apps or lower Preview Quality before retrying."
+                    .to_owned(),
+            );
+        }
         // Flush IDs retired by the previous frame before this frame emits any
         // meshes. Freeing them later in `ui` would invalidate texture references
         // that egui has already recorded for the pending render pass.

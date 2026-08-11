@@ -61,6 +61,13 @@ fn native_options() -> eframe::NativeOptions {
     }
 
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        // Ask supported native backends to reject new allocations before
+        // memory pressure is severe enough to lose the whole device. AuRaw
+        // handles that recoverable OOM below instead of allowing wgpu to panic.
+        setup.instance_descriptor.memory_budget_thresholds = eframe::wgpu::MemoryBudgetThresholds {
+            for_resource_creation: Some(90),
+            for_device_loss: Some(97),
+        };
         setup.device_descriptor = std::sync::Arc::new(|adapter| {
             let info = adapter.get_info();
             let adapter_limits = adapter.limits();
