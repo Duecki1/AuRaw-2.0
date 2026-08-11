@@ -2643,7 +2643,6 @@ impl LibraryState {
         self.selection_mode = false;
     }
 
-    #[cfg(any(target_os = "android", test))]
     fn toggle_thumbnail_selection(&mut self, source: &LibrarySource) -> bool {
         self.begin_selection();
         if !self.selected_sources.remove(source) {
@@ -4999,6 +4998,7 @@ fn catalog_status(warning_count: usize, truncated: bool) -> String {
     notices.join(" · ")
 }
 
+#[cfg(not(target_os = "android"))]
 pub(crate) fn cloud_image_context_menu(
     ui: &mut Ui,
     app: &AurawApp,
@@ -5883,160 +5883,427 @@ enum LibraryCardAction {
 }
 
 #[cfg(target_os = "android")]
-fn android_selection_menu(
-    ui: &mut Ui,
-    selected: &[(LibrarySource, String)],
-    action_enabled: bool,
-    can_paste_adjustments: bool,
-    library_action: &mut Option<LibraryCardAction>,
-) {
-    let targets = || {
-        selected
-            .iter()
-            .filter_map(|(source, _)| match source {
-                LibrarySource::Android {
-                    uri, display_name, ..
-                } => Some((uri.clone(), display_name.clone())),
-                LibrarySource::Cloud(_) => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    let clipboard_targets = || {
-        selected
-            .iter()
-            .filter_map(|(source, _)| match source {
-                LibrarySource::Android {
-                    uri,
-                    display_name,
-                    bytes,
-                    ..
-                } => Some(AndroidImageClipboardItem {
-                    uri: uri.clone(),
-                    display_name: display_name.clone(),
-                    bytes: *bytes,
-                }),
-                LibrarySource::Cloud(_) => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    let selected_count = selected.len();
-
-    let export_label = if selected_count > 1 {
-        "Export selected…"
-    } else {
-        "Export…"
-    };
-    if ui
-        .add_enabled(action_enabled, egui::Button::new(export_label))
-        .clicked()
-    {
-        *library_action = Some(LibraryCardAction::Export(targets()));
-        ui.close();
-    }
-    ui.separator();
-    if selected_count == 1
-        && ui
-            .add_enabled(action_enabled, egui::Button::new("Copy adjustments"))
-            .clicked()
-    {
-        if let Some((
+fn android_selection_targets(selected: &[(LibrarySource, String)]) -> Vec<(String, String)> {
+    selected
+        .iter()
+        .filter_map(|(source, _)| match source {
             LibrarySource::Android {
                 uri, display_name, ..
-            },
-            _,
-        )) = selected.first()
-        {
-            *library_action = Some(LibraryCardAction::CopyAdjustments((
-                uri.clone(),
-                display_name.clone(),
-            )));
-        }
-        ui.close();
-    }
-    let paste_label = if selected_count > 1 {
-        "Paste adjustments to selected"
-    } else {
-        "Paste adjustments"
-    };
-    if ui
-        .add_enabled(
-            action_enabled && can_paste_adjustments,
-            egui::Button::new(paste_label),
+            } => Some((uri.clone(), display_name.clone())),
+            LibrarySource::Cloud(_) => None,
+        })
+        .collect()
+}
+
+#[cfg(target_os = "android")]
+fn android_selection_clipboard_targets(
+    selected: &[(LibrarySource, String)],
+) -> Vec<AndroidImageClipboardItem> {
+    selected
+        .iter()
+        .filter_map(|(source, _)| match source {
+            LibrarySource::Android {
+                uri,
+                display_name,
+                bytes,
+                ..
+            } => Some(AndroidImageClipboardItem {
+                uri: uri.clone(),
+                display_name: display_name.clone(),
+                bytes: *bytes,
+            }),
+            LibrarySource::Cloud(_) => None,
+        })
+        .collect()
+}
+
+fn selection_bar_action_button(
+    ui: &mut Ui,
+    enabled: bool,
+    compact: bool,
+    glyph: &'static str,
+    label: &'static str,
+) -> egui::Response {
+    if compact {
+        crate::ui::icons::phosphor_icon_button_enabled(
+            ui,
+            enabled,
+            glyph,
+            crate::ui::theme::toolbar_icon_size(),
+            label,
         )
-        .on_disabled_hover_text("Copy adjustments from an image first")
-        .clicked()
-    {
-        *library_action = Some(LibraryCardAction::PasteAdjustments(targets()));
-        ui.close();
-    }
-    ui.separator();
-    if ui
-        .add_enabled(action_enabled, egui::Button::new("Copy"))
-        .clicked()
-    {
-        *library_action = Some(LibraryCardAction::Copy(clipboard_targets()));
-        ui.close();
-    }
-    if ui
-        .add_enabled(action_enabled, egui::Button::new("Cut"))
-        .clicked()
-    {
-        *library_action = Some(LibraryCardAction::Cut(clipboard_targets()));
-        ui.close();
-    }
-    let duplicate_label = if selected_count > 1 {
-        "Duplicate selected (RAW + sidecars)"
     } else {
-        "Duplicate (RAW + sidecar)"
+        ui.add_enabled(
+            enabled,
+            egui::Button::new(format!("{glyph}  {label}"))
+                .min_size(egui::vec2(0.0, crate::ui::theme::CONTROL_HEIGHT)),
+        )
+        .on_hover_text(label)
+    }
+}
+
+fn selection_bar_more_menu<R>(
+    ui: &mut Ui,
+    enabled: bool,
+    compact: bool,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<Option<R>> {
+    let label = if compact {
+        egui::RichText::new(egui_phosphor::regular::DOTS_THREE)
+            .size(crate::ui::theme::CONTROL_HEIGHT * 0.55)
+    } else {
+        egui::RichText::new(format!("{}  More", egui_phosphor::regular::DOTS_THREE))
     };
-    if ui
-        .add_enabled(action_enabled, egui::Button::new(duplicate_label))
-        .clicked()
+    ui.add_enabled_ui(enabled, |ui| ui.menu_button(label, add_contents))
+        .inner
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionBarCommand {
+    Export,
+    CopyAdjustments,
+    PasteAdjustments,
+    Copy,
+    Cut,
+    Duplicate,
+    Rename,
+    ResetAdjustments,
+    Delete,
+}
+
+fn selection_bar_actions(
+    ui: &mut Ui,
+    selected_count: usize,
+    action_enabled: bool,
+    can_paste_adjustments: bool,
+    compact: bool,
+) -> Option<SelectionBarCommand> {
+    let mut action = None;
+
+    if selection_bar_action_button(
+        ui,
+        action_enabled,
+        compact,
+        egui_phosphor::regular::EXPORT,
+        "Export",
+    )
+    .clicked()
     {
-        *library_action = Some(LibraryCardAction::Duplicate(targets()));
-        ui.close();
+        action = Some(SelectionBarCommand::Export);
     }
     if selected_count == 1
-        && ui
-            .add_enabled(action_enabled, egui::Button::new("Rename…"))
-            .clicked()
-    {
-        *library_action = clipboard_targets()
-            .into_iter()
-            .next()
-            .map(LibraryCardAction::Rename);
-        ui.close();
-    }
-    let reset_label = if selected_count > 1 {
-        "Reset adjustments for selected"
-    } else {
-        "Reset all adjustments"
-    };
-    if ui
-        .add_enabled(
+        && selection_bar_action_button(
+            ui,
             action_enabled,
-            egui::Button::new(format!(
-                "{}  {reset_label}",
-                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
-            )),
+            compact,
+            egui_phosphor::regular::SLIDERS_HORIZONTAL,
+            "Copy adjustments",
         )
         .clicked()
     {
-        *library_action = Some(LibraryCardAction::ResetAdjustments(targets()));
-        ui.close();
+        action = Some(SelectionBarCommand::CopyAdjustments);
     }
-    ui.separator();
-    let delete_label = if selected_count > 1 {
-        "Delete selected"
-    } else {
-        "Delete"
-    };
-    if ui
-        .add_enabled(action_enabled, egui::Button::new(delete_label))
-        .clicked()
+    if selection_bar_action_button(
+        ui,
+        action_enabled && can_paste_adjustments,
+        compact,
+        egui_phosphor::regular::CLIPBOARD_TEXT,
+        "Paste adjustments",
+    )
+    .on_disabled_hover_text("Copy adjustments from an image first")
+    .clicked()
     {
-        *library_action = Some(LibraryCardAction::Delete(targets()));
-        ui.close();
+        action = Some(SelectionBarCommand::PasteAdjustments);
+    }
+    if selection_bar_action_button(
+        ui,
+        action_enabled,
+        compact,
+        egui_phosphor::regular::COPY,
+        "Copy",
+    )
+    .clicked()
+    {
+        action = Some(SelectionBarCommand::Copy);
+    }
+
+    selection_bar_more_menu(ui, action_enabled, compact, |ui| {
+        if ui.button("Cut").clicked() {
+            action = Some(SelectionBarCommand::Cut);
+            ui.close();
+        }
+        if ui
+            .button(if selected_count > 1 {
+                "Duplicate selected (RAW + sidecars)"
+            } else {
+                "Duplicate (RAW + sidecar)"
+            })
+            .clicked()
+        {
+            action = Some(SelectionBarCommand::Duplicate);
+            ui.close();
+        }
+        if selected_count == 1 && ui.button("Rename…").clicked() {
+            action = Some(SelectionBarCommand::Rename);
+            ui.close();
+        }
+        if ui
+            .button(if selected_count > 1 {
+                "Reset adjustments for selected"
+            } else {
+                "Reset all adjustments"
+            })
+            .clicked()
+        {
+            action = Some(SelectionBarCommand::ResetAdjustments);
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .button(if selected_count > 1 {
+                "Delete selected"
+            } else {
+                "Delete"
+            })
+            .clicked()
+        {
+            action = Some(SelectionBarCommand::Delete);
+            ui.close();
+        }
+    })
+    .response
+    .on_hover_text("More selection actions");
+
+    action
+}
+
+fn cloud_selection_action(
+    command: SelectionBarCommand,
+    assets: &[crate::cloud::CloudAsset],
+) -> Option<CloudLibraryCardAction> {
+    match command {
+        SelectionBarCommand::Export => Some(CloudLibraryCardAction::Export(assets.to_vec())),
+        SelectionBarCommand::CopyAdjustments if assets.len() == 1 => assets
+            .first()
+            .cloned()
+            .map(CloudLibraryCardAction::CopyAdjustments),
+        SelectionBarCommand::CopyAdjustments => None,
+        SelectionBarCommand::PasteAdjustments => {
+            Some(CloudLibraryCardAction::PasteAdjustments(assets.to_vec()))
+        }
+        SelectionBarCommand::Copy => Some(CloudLibraryCardAction::Copy(assets.to_vec())),
+        SelectionBarCommand::Cut => Some(CloudLibraryCardAction::Cut(assets.to_vec())),
+        SelectionBarCommand::Duplicate => Some(CloudLibraryCardAction::Duplicate(assets.to_vec())),
+        SelectionBarCommand::Rename if assets.len() == 1 => {
+            assets.first().cloned().map(CloudLibraryCardAction::Rename)
+        }
+        SelectionBarCommand::Rename => None,
+        SelectionBarCommand::ResetAdjustments => {
+            Some(CloudLibraryCardAction::ResetAdjustments(assets.to_vec()))
+        }
+        SelectionBarCommand::Delete => Some(CloudLibraryCardAction::Delete(assets.to_vec())),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn desktop_selection_action(
+    command: SelectionBarCommand,
+    paths: &[PathBuf],
+) -> Option<LibraryCardAction> {
+    match command {
+        SelectionBarCommand::Export => Some(LibraryCardAction::Export(paths.to_vec())),
+        SelectionBarCommand::CopyAdjustments if paths.len() == 1 => paths
+            .first()
+            .cloned()
+            .map(LibraryCardAction::CopyAdjustments),
+        SelectionBarCommand::CopyAdjustments => None,
+        SelectionBarCommand::PasteAdjustments => {
+            Some(LibraryCardAction::PasteAdjustments(paths.to_vec()))
+        }
+        SelectionBarCommand::Copy => Some(LibraryCardAction::Copy(paths.to_vec())),
+        SelectionBarCommand::Cut => Some(LibraryCardAction::Cut(paths.to_vec())),
+        SelectionBarCommand::Duplicate => Some(LibraryCardAction::Duplicate(paths.to_vec())),
+        SelectionBarCommand::Rename if paths.len() == 1 => {
+            paths.first().cloned().map(LibraryCardAction::Rename)
+        }
+        SelectionBarCommand::Rename => None,
+        SelectionBarCommand::ResetAdjustments => {
+            Some(LibraryCardAction::ResetAdjustments(paths.to_vec()))
+        }
+        SelectionBarCommand::Delete => Some(LibraryCardAction::Delete(paths.to_vec())),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_selection_action(
+    command: SelectionBarCommand,
+    targets: &[(String, String)],
+    clipboard_targets: &[AndroidImageClipboardItem],
+) -> Option<LibraryCardAction> {
+    match command {
+        SelectionBarCommand::Export => Some(LibraryCardAction::Export(targets.to_vec())),
+        SelectionBarCommand::CopyAdjustments if targets.len() == 1 => targets
+            .first()
+            .cloned()
+            .map(LibraryCardAction::CopyAdjustments),
+        SelectionBarCommand::CopyAdjustments => None,
+        SelectionBarCommand::PasteAdjustments => {
+            Some(LibraryCardAction::PasteAdjustments(targets.to_vec()))
+        }
+        SelectionBarCommand::Copy => Some(LibraryCardAction::Copy(clipboard_targets.to_vec())),
+        SelectionBarCommand::Cut => Some(LibraryCardAction::Cut(clipboard_targets.to_vec())),
+        SelectionBarCommand::Duplicate => Some(LibraryCardAction::Duplicate(targets.to_vec())),
+        SelectionBarCommand::Rename if clipboard_targets.len() == 1 => clipboard_targets
+            .first()
+            .cloned()
+            .map(LibraryCardAction::Rename),
+        SelectionBarCommand::Rename => None,
+        SelectionBarCommand::ResetAdjustments => {
+            Some(LibraryCardAction::ResetAdjustments(targets.to_vec()))
+        }
+        SelectionBarCommand::Delete => Some(LibraryCardAction::Delete(targets.to_vec())),
+    }
+}
+
+fn show_library_selection_action_bar(
+    ui: &Ui,
+    app: &mut AurawApp,
+    selected: &[(LibrarySource, String)],
+    library_action: &mut Option<LibraryCardAction>,
+    cloud_library_action: &mut Option<CloudLibraryCardAction>,
+) {
+    if selected.is_empty() {
+        return;
+    }
+
+    let bounds = ui.max_rect();
+    let compact = bounds.width() < 820.0;
+    let count = selected.len();
+    let mut clear_selection = false;
+    egui::Area::new(egui::Id::new("library-selection-action-bar"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .fixed_pos(egui::pos2(bounds.center().x, bounds.bottom() - 12.0))
+        .constrain_to(bounds)
+        .movable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = if compact { 4.0 } else { 6.0 };
+                    ui.spacing_mut().interact_size.y = crate::ui::theme::CONTROL_HEIGHT;
+                    ui.horizontal(|ui| {
+                        let count_label = if compact && bounds.width() < 360.0 {
+                            count.to_string()
+                        } else {
+                            format!("{count} selected")
+                        };
+                        ui.strong(count_label).on_hover_text(format!(
+                            "{count} selected {}",
+                            if count == 1 { "RAW" } else { "RAWs" }
+                        ));
+                        ui.separator();
+
+                        if app.library.is_cloud_view() {
+                            let assets = selected
+                                .iter()
+                                .filter_map(|(source, _)| match source {
+                                    LibrarySource::Cloud(asset) => Some(asset.clone()),
+                                    #[cfg(not(target_os = "android"))]
+                                    LibrarySource::File(_) => None,
+                                    #[cfg(target_os = "android")]
+                                    LibrarySource::Android { .. } => None,
+                                })
+                                .collect::<Vec<_>>();
+                            let action_enabled = !app.library.cloud_action_in_progress()
+                                && !app.library.cloud_upload_in_progress()
+                                && !app.library.image_paste_in_progress()
+                                && app.library.cloud_open_receiver.is_none()
+                                && app.library_batch_export_progress().is_none()
+                                && !assets.is_empty();
+                            if let Some(action) = selection_bar_actions(
+                                ui,
+                                assets.len(),
+                                action_enabled,
+                                app.has_copied_adjustments(),
+                                compact,
+                            )
+                            .and_then(|command| cloud_selection_action(command, &assets))
+                            {
+                                *cloud_library_action = Some(action);
+                            }
+                        } else {
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                let paths = selected
+                                    .iter()
+                                    .filter_map(|(source, _)| match source {
+                                        LibrarySource::File(path) => Some(path.clone()),
+                                        LibrarySource::Cloud(_) => None,
+                                    })
+                                    .collect::<Vec<_>>();
+                                let action_enabled = !app.library.file_action_in_progress()
+                                    && app.library_batch_export_progress().is_none()
+                                    && app.library_ai_mask_refresh_status().is_none()
+                                    && !paths.is_empty();
+                                if let Some(action) = selection_bar_actions(
+                                    ui,
+                                    paths.len(),
+                                    action_enabled,
+                                    app.has_copied_adjustments(),
+                                    compact,
+                                )
+                                .and_then(|command| desktop_selection_action(command, &paths))
+                                {
+                                    *library_action = Some(action);
+                                }
+                            }
+                            #[cfg(target_os = "android")]
+                            {
+                                let targets = android_selection_targets(selected);
+                                let clipboard_targets =
+                                    android_selection_clipboard_targets(selected);
+                                let action_enabled = app.library_batch_export_progress().is_none()
+                                    && app.library_ai_mask_refresh_status().is_none()
+                                    && !app.library.image_paste_in_progress()
+                                    && !app.library.cloud_action_in_progress()
+                                    && !app.library.cloud_upload_in_progress()
+                                    && app.library.cloud_open_receiver.is_none()
+                                    && !targets.is_empty();
+                                if let Some(action) = selection_bar_actions(
+                                    ui,
+                                    targets.len(),
+                                    action_enabled,
+                                    app.has_copied_adjustments(),
+                                    compact,
+                                )
+                                .and_then(|command| {
+                                    android_selection_action(command, &targets, &clipboard_targets)
+                                }) {
+                                    *library_action = Some(action);
+                                }
+                            }
+                        }
+
+                        ui.separator();
+                        if crate::ui::icons::phosphor_icon_button(
+                            ui,
+                            egui_phosphor::regular::X,
+                            crate::ui::theme::toolbar_icon_size(),
+                            "Clear selection",
+                        )
+                        .clicked()
+                        {
+                            clear_selection = true;
+                        }
+                    });
+                });
+        });
+
+    if clear_selection {
+        app.library.clear_selection();
+        #[cfg(target_os = "android")]
+        crate::android::set_back_navigation_active(false);
     }
 }
 
@@ -9304,15 +9571,6 @@ impl Library {
         let mut library_action = None;
         let mut cloud_library_action = None;
 
-        #[cfg(target_os = "android")]
-        let selected_android_items = app
-            .library
-            .entries
-            .iter()
-            .filter(|entry| app.library.selected_sources.contains(&entry.info.source))
-            .map(|entry| (entry.info.source.clone(), entry.info.name.clone()))
-            .collect::<Vec<_>>();
-
         let compact_header = ui.available_width() < 520.0;
         crate::ui::theme::toolbar_row(ui, |ui| {
             if compact_header {
@@ -9330,62 +9588,12 @@ impl Library {
                 app.set_library_folder_sidebar_open(true);
             }
 
-            #[cfg(target_os = "android")]
-            if !selected_android_items.is_empty() {
-                ui.strong(format!("{} selected", selected_android_items.len()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        app.library.clear_selection();
-                        crate::android::set_back_navigation_active(false);
-                    }
-                    let anchor = ui.allocate_response(egui::vec2(48.0, 42.0), Sense::hover());
-                    let menu_id = ui.make_persistent_id("android-library-selection-overflow");
-                    crate::ui::android_overflow_menu(ui, anchor.rect, menu_id, 36.0, |ui| {
-                        if app.library.is_cloud_view() {
-                            let assets = selected_android_items
-                                .iter()
-                                .filter_map(|(source, _)| match source {
-                                    LibrarySource::Cloud(asset) => Some(asset.clone()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>();
-                            if let Some(action) = cloud_image_context_menu(ui, app, &assets) {
-                                cloud_library_action = Some(action);
-                            }
-                        } else {
-                            let action_enabled = app.library_batch_export_progress().is_none()
-                                && app.library_ai_mask_refresh_status().is_none()
-                                && !app.library.image_paste_in_progress()
-                                && !app.library.cloud_action_in_progress()
-                                && !app.library.cloud_upload_in_progress()
-                                && app.library.cloud_open_receiver.is_none();
-                            android_selection_menu(
-                                ui,
-                                &selected_android_items,
-                                action_enabled,
-                                action_enabled && app.has_copied_adjustments(),
-                                &mut library_action,
-                            );
-                        }
-                    });
-                });
-                return;
-            }
-
-            #[cfg(not(target_os = "android"))]
-            let desktop_selection_mode = app.library.selection_mode();
-            #[cfg(not(target_os = "android"))]
-            let desktop_selection_count = app.library.selected_sources.len();
-
-            #[cfg(not(target_os = "android"))]
             if app.library.cloud_trash_open {
                 let count = app.library.cloud_trash_items.len();
                 ui.strong(format!(
                     "{count} Trash item{}",
                     if count == 1 { "" } else { "s" }
                 ));
-            } else if desktop_selection_mode {
-                ui.strong(format!("{desktop_selection_count} selected"));
             } else {
                 let count = app.library.entries.len();
                 ui.strong(format!(
@@ -9393,23 +9601,6 @@ impl Library {
                     if count == 1 { "file" } else { "files" }
                 ));
             }
-            #[cfg(target_os = "android")]
-            {
-                if app.library.cloud_trash_open {
-                    let count = app.library.cloud_trash_items.len();
-                    ui.strong(format!(
-                        "{count} Trash item{}",
-                        if count == 1 { "" } else { "s" }
-                    ));
-                } else {
-                    let count = app.library.entries.len();
-                    ui.strong(format!(
-                        "{count} RAW {}",
-                        if count == 1 { "file" } else { "files" }
-                    ));
-                }
-            }
-
             let mut selected_sort = app.library.sort_order();
             let mut selected_size = app.library.thumbnail_size();
 
@@ -9447,18 +9638,6 @@ impl Library {
                         egui::RichText::new(egui_phosphor::regular::SLIDERS_HORIZONTAL).size(17.0),
                         |ui| {
                             ui.set_min_width(220.0);
-                            #[cfg(not(target_os = "android"))]
-                            {
-                                if desktop_selection_mode && ui.button("Cancel selection").clicked()
-                                {
-                                    app.library.clear_selection();
-                                    ui.close();
-                                }
-                                if desktop_selection_mode {
-                                    ui.separator();
-                                }
-                            }
-
                             ui.strong("Thumbnail size");
                             for thumbnail_size in LibraryThumbnailSize::ALL {
                                 ui.selectable_value(
@@ -9481,13 +9660,6 @@ impl Library {
                     .response
                     .on_hover_text("Library view options");
                 } else {
-                    #[cfg(not(target_os = "android"))]
-                    if desktop_selection_mode
-                        && crate::ui::theme::toolbar_button(ui, "Cancel", 76.0).clicked()
-                    {
-                        app.library.clear_selection();
-                    }
-
                     egui::ComboBox::from_id_salt("library-sort-order")
                         .selected_text(format!("Sort: {}", selected_sort.label()))
                         .width(154.0)
@@ -9689,9 +9861,7 @@ impl Library {
 
                             if response.clicked() && !response.secondary_clicked() {
                                 if app.library.selection_mode() {
-                                    if !app.library.selected_sources.remove(&source) {
-                                        app.library.selected_sources.insert(source.clone());
-                                    }
+                                    app.library.toggle_thumbnail_selection(&source);
                                 } else {
                                     open_source = Some((source.clone(), name.clone()));
                                 }
@@ -9783,6 +9953,21 @@ impl Library {
                 });
             app.library.evict_old_textures(&protected_thumbnail_indices);
         }
+
+        let selected_items = app
+            .library
+            .entries
+            .iter()
+            .filter(|entry| app.library.selected_sources.contains(&entry.info.source))
+            .map(|entry| (entry.info.source.clone(), entry.info.name.clone()))
+            .collect::<Vec<_>>();
+        show_library_selection_action_bar(
+            ui,
+            app,
+            &selected_items,
+            &mut library_action,
+            &mut cloud_library_action,
+        );
 
         if let Some(action) = cloud_library_action {
             apply_cloud_image_action(app, action, ui.ctx());
@@ -11178,6 +11363,24 @@ mod tests {
         assert!(!library.toggle_thumbnail_selection(&source));
         assert!(!library.selection_mode());
         assert!(library.selected_sources.is_empty());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn multi_selection_rejects_single_image_actions() {
+        let paths = vec![PathBuf::from("first.dng"), PathBuf::from("second.dng")];
+
+        assert!(super::desktop_selection_action(
+            super::SelectionBarCommand::CopyAdjustments,
+            &paths,
+        )
+        .is_none());
+        assert!(
+            super::desktop_selection_action(super::SelectionBarCommand::Rename, &paths).is_none()
+        );
+        assert!(
+            super::desktop_selection_action(super::SelectionBarCommand::Export, &paths).is_some()
+        );
     }
 
     #[cfg(not(target_os = "android"))]
