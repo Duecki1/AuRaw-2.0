@@ -7,6 +7,10 @@ const MASK_EFFECT_LIGHT_RAYS_ID: u32 = 3u;
 const MASK_EFFECT_BLUR_ID: u32 = 4u;
 const MASK_EFFECT_EDGE_GLOW_ID: u32 = 5u;
 const MASK_EFFECT_PIXELATE_ID: u32 = 6u;
+const MASK_EFFECT_LENS_BLUR_ID: u32 = 7u;
+const MASK_EFFECT_MOTION_BLUR_ID: u32 = 8u;
+const MASK_EFFECT_RADIAL_BLUR_ID: u32 = 9u;
+const MASK_EFFECT_TILT_SHIFT_ID: u32 = 10u;
 
 fn mask_effect_srgb_component_to_linear(value: f32) -> f32 {
     let encoded = clamp(value, 0.0, 1.0);

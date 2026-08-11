@@ -7,16 +7,24 @@
 mod blur;
 mod edge_glow;
 mod glow;
+mod lens_blur;
 mod light_rays;
+mod motion_blur;
 mod neon;
 mod pixelate;
+mod radial_blur;
+mod tilt_shift;
 
 pub use blur::BlurEffectSettings;
 pub use edge_glow::EdgeGlowEffectSettings;
 pub use glow::GlowEffectSettings;
+pub use lens_blur::LensBlurEffectSettings;
 pub use light_rays::LightRaysEffectSettings;
+pub use motion_blur::MotionBlurEffectSettings;
 pub use neon::NeonEffectSettings;
 pub use pixelate::PixelateEffectSettings;
+pub use radial_blur::{RadialBlurEffectSettings, RadialBlurMode};
+pub use tilt_shift::TiltShiftEffectSettings;
 
 /// The operation driven by a mask group's combined coverage.
 ///
@@ -175,6 +183,10 @@ impl MaskEffect {
             self,
             Self::Adjustment
                 | Self::Blur
+                | Self::LensBlur
+                | Self::MotionBlur
+                | Self::RadialBlur
+                | Self::TiltShift
                 | Self::Glow
                 | Self::LightRays
                 | Self::Neon
@@ -197,6 +209,10 @@ impl MaskEffect {
             Self::Blur => 4,
             Self::EdgeGlow => 5,
             Self::Pixelate => 6,
+            Self::LensBlur => 7,
+            Self::MotionBlur => 8,
+            Self::RadialBlur => 9,
+            Self::TiltShift => 10,
             _ => 0,
         }
     }
@@ -245,6 +261,14 @@ impl MaskEffectCategory {
 pub struct MaskEffectSettings {
     #[serde(default, skip_serializing_if = "BlurEffectSettings::is_default")]
     pub blur: BlurEffectSettings,
+    #[serde(default, skip_serializing_if = "LensBlurEffectSettings::is_default")]
+    pub lens_blur: LensBlurEffectSettings,
+    #[serde(default, skip_serializing_if = "MotionBlurEffectSettings::is_default")]
+    pub motion_blur: MotionBlurEffectSettings,
+    #[serde(default, skip_serializing_if = "RadialBlurEffectSettings::is_default")]
+    pub radial_blur: RadialBlurEffectSettings,
+    #[serde(default, skip_serializing_if = "TiltShiftEffectSettings::is_default")]
+    pub tilt_shift: TiltShiftEffectSettings,
     #[serde(default, skip_serializing_if = "EdgeGlowEffectSettings::is_default")]
     pub edge_glow: EdgeGlowEffectSettings,
     #[serde(default, skip_serializing_if = "GlowEffectSettings::is_default")]
