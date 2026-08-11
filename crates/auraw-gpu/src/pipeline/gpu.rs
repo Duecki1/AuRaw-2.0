@@ -232,6 +232,8 @@ const SHADER_TONE_ANALYSIS: &str = include_str!("../shaders/tone_analysis.wgsl")
 const SHADER_REGRESSION_SCENE: &str = include_str!("../shaders/regression_scene.wgsl");
 
 const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
+const SHADER_MASK_EFFECTS_SHARED: &str = include_str!("../shaders/mask_effects/shared.wgsl");
+const SHADER_MASK_GLOW: &str = include_str!("../shaders/mask_effects/glow.wgsl");
 const SHADER_MASK_NEON: &str = include_str!("../shaders/mask_effects/neon.wgsl");
 const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
 const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
@@ -806,6 +808,32 @@ impl GpuParams {
         // middle-grey slope without switching view operators.
         let mut mask_data = [MaskData::zeroed(); MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
+            if mask.effect == MaskEffect::Glow {
+                let glow = mask.effect_settings.glow;
+                let active = mask.enabled && glow.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        glow.amount.clamp(0.0, 100.0),
+                        glow.radius.clamp(0.0, 100.0),
+                        glow.core.clamp(0.0, 100.0),
+                        0.0,
+                    ],
+                    adjust_1: [
+                        glow.color[0].clamp(0.0, 1.0),
+                        glow.color[1].clamp(0.0, 1.0),
+                        glow.color[2].clamp(0.0, 1.0),
+                        0.0,
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
             if mask.effect == MaskEffect::Neon {
                 let neon = mask.effect_settings.neon;
                 let active = mask.enabled && neon.is_active();
@@ -1154,11 +1182,28 @@ impl GpuParams {
             xyz_to_bradford: shader_tuning.xyz_to_bradford,
             bradford_to_xyz: shader_tuning.bradford_to_xyz,
         };
+        // Global and masked Glow share one linear diffusion chain. Using the
+        // widest active request preserves every halo's support while avoiding
+        // another full-resolution texture stack for a non-destructive local
+        // effect.
+        let local_glow_radius = mask_data
+            .iter()
+            .filter(|mask| {
+                mask.metadata[0] != 0
+                    && mask.metadata[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Glow.shader_id()
+            })
+            .map(|mask| mask.adjust_0[1])
+            .fold(0.0_f32, f32::max);
+        let global_glow_radius = if exposure.glow_amount.abs() > 1e-6 {
+            exposure.glow_radius.clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
         let effects = EffectsUniforms {
             presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
             creative_effects: [
                 exposure.glow_amount.clamp(0.0, 100.0),
-                exposure.glow_radius.clamp(0.0, 100.0),
+                global_glow_radius.max(local_glow_radius),
                 exposure.glow_threshold.clamp(0.0, 100.0),
                 exposure.sharpen_amount.clamp(0.0, 150.0),
             ],
@@ -1352,7 +1397,10 @@ impl GpuParams {
             if state[0] == 0 || state[1] == 0 {
                 return false;
             }
-            if state[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Neon.shader_id() {
+            let effect_id = state[3] >> MASK_EFFECT_ID_SHIFT;
+            if effect_id == MaskEffect::Neon.shader_id()
+                || effect_id == MaskEffect::Glow.shader_id()
+            {
                 return true;
             }
 
@@ -1374,7 +1422,14 @@ impl GpuParams {
     }
 
     fn needs_glow_passes(&self) -> bool {
-        self.effects.creative_effects[0].abs() > 1e-6
+        if self.effects.creative_effects[0].abs() > 1e-6 {
+            return true;
+        }
+        let local_count = (self.scene_tone.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
+        self.mask_data[..local_count].iter().any(|mask| {
+            mask.metadata[0] != 0
+                && mask.metadata[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Glow.shader_id()
+        })
     }
 }
 
@@ -2748,6 +2803,12 @@ impl RawGpuPipeline {
                             work_format,
                             wgpu::StorageTextureAccess::WriteOnly,
                         ),
+                        texture_array_entry(
+                            27,
+                            wgpu::TextureSampleType::Float { filterable: true },
+                        ),
+                        sampler_entry(28),
+                        storage_buffer_entry(33, true),
                     ],
                 })
             });
@@ -2781,6 +2842,12 @@ impl RawGpuPipeline {
                             wgpu::StorageTextureAccess::WriteOnly,
                         ),
                         texture_entry(30, wgpu::TextureSampleType::Float { filterable: false }),
+                        texture_array_entry(
+                            27,
+                            wgpu::TextureSampleType::Float { filterable: true },
+                        ),
+                        sampler_entry(28),
+                        storage_buffer_entry(33, true),
                     ],
                 })
             });
@@ -3565,6 +3632,18 @@ impl RawGpuPipeline {
                     binding: 31,
                     resource: wgpu::BindingResource::TextureView(&tex2_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 33,
+                    resource: mask_data_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -3623,6 +3702,18 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 30,
                     resource: wgpu::BindingResource::TextureView(&display_linear_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 33,
+                    resource: mask_data_buffer.as_entire_binding(),
                 },
             ],
         });

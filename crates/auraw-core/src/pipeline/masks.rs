@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 mod effects;
 
-pub use effects::{MaskEffect, MaskEffectCategory, MaskEffectSettings, NeonEffectSettings};
+pub use effects::{
+    GlowEffectSettings, MaskEffect, MaskEffectCategory, MaskEffectSettings, NeonEffectSettings,
+};
 
 pub const MAX_LOCAL_MASKS: usize = 32;
 pub const MAX_MASK_COMPONENTS: usize = 64;
@@ -2735,11 +2737,17 @@ mod tests {
             );
             assert!(labels.iter().all(|label| !label.is_empty()));
         }
+        assert!(MaskEffect::Glow.is_implemented());
         assert!(MaskEffect::Neon.is_implemented());
         assert!(MaskEffect::ALL
             .iter()
             .copied()
-            .filter(|effect| !matches!(effect, MaskEffect::Adjustment | MaskEffect::Neon))
+            .filter(|effect| {
+                !matches!(
+                    effect,
+                    MaskEffect::Adjustment | MaskEffect::Glow | MaskEffect::Neon
+                )
+            })
             .all(|effect| !effect.is_implemented()));
     }
 
@@ -2770,6 +2778,26 @@ mod tests {
         assert_eq!(decoded.effect, MaskEffect::Neon);
         assert_eq!(decoded.effect_settings.neon.amount, 42.0);
         assert_eq!(decoded.effect_settings.neon.color, [1.0, 0.2, 0.7]);
+        assert_eq!(decoded.adjustments.exposure, 1.25);
+    }
+
+    #[test]
+    fn glow_settings_round_trip_without_touching_local_adjustments() {
+        let mut mask = LocalMask::new(MaskKind::Fullscreen, 1);
+        mask.effect = MaskEffect::Glow;
+        mask.effect_settings.glow.amount = 72.0;
+        mask.effect_settings.glow.radius = 84.0;
+        mask.effect_settings.glow.core = 55.0;
+        mask.effect_settings.glow.color = [0.2, 0.8, 1.0];
+        mask.adjustments.exposure = 1.25;
+
+        let encoded = serde_json::to_string(&mask).expect("serialize Glow mask");
+        let decoded: LocalMask = serde_json::from_str(&encoded).expect("deserialize Glow mask");
+        assert_eq!(decoded.effect, MaskEffect::Glow);
+        assert_eq!(decoded.effect_settings.glow.amount, 72.0);
+        assert_eq!(decoded.effect_settings.glow.radius, 84.0);
+        assert_eq!(decoded.effect_settings.glow.core, 55.0);
+        assert_eq!(decoded.effect_settings.glow.color, [0.2, 0.8, 1.0]);
         assert_eq!(decoded.adjustments.exposure, 1.25);
     }
 

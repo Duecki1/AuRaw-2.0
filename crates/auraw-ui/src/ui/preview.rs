@@ -1930,6 +1930,7 @@ impl Preview {
         // values, so switching types remains fully reversible.
         let neutral = match mask.effect {
             crate::pipeline::MaskEffect::Adjustment => mask.adjustments.is_neutral(),
+            crate::pipeline::MaskEffect::Glow => !mask.effect_settings.glow.is_active(),
             crate::pipeline::MaskEffect::Neon => !mask.effect_settings.neon.is_active(),
             _ => true,
         };

@@ -1,9 +1,9 @@
 use super::{
     specialize_compute_workgroup_size, work_shader_source, ComputeWorkgroupSize,
     SHADER_BASIC_ADJUSTMENTS, SHADER_COLOR, SHADER_COMMON, SHADER_CREATIVE_EFFECTS,
-    SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_MASK_NEON, SHADER_NOISE,
-    SHADER_NOISE_CA_FINISH, SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS,
-    SHADER_TONEMAP, SHADER_TONE_COMMON,
+    SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_MASK_EFFECTS_SHARED, SHADER_MASK_GLOW,
+    SHADER_MASK_NEON, SHADER_NOISE, SHADER_NOISE_CA_FINISH, SHADER_PROFILE, SHADER_RAW_SAMPLING,
+    SHADER_SCENE_ADJUSTMENTS, SHADER_TONEMAP, SHADER_TONE_COMMON,
 };
 use anyhow::{anyhow, Context, Result};
 use naga_oil::compose::{
@@ -18,7 +18,9 @@ const SCENE_ADJUSTMENTS_IMPORT: &str = "auraw::scene_adjustments";
 fn creative_effects_source() -> String {
     // Effect implementations stay in dedicated files, while the composed
     // creative stage owns the shared resource imports and render entry point.
-    format!("{SHADER_CREATIVE_EFFECTS}\n{SHADER_MASK_NEON}")
+    format!(
+        "{SHADER_CREATIVE_EFFECTS}\n{SHADER_MASK_EFFECTS_SHARED}\n{SHADER_MASK_GLOW}\n{SHADER_MASK_NEON}"
+    )
 }
 
 /// Owns AuRaw's reusable WGSL module registry and composes validated Naga IR
