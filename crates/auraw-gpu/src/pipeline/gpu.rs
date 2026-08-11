@@ -223,8 +223,8 @@ fn expected_pass_count(cfa_kind: CfaKind) -> usize {
         CfaKind::XTrans => 10,
     };
     // One highlight reconstruction pass, demosaic, six colour-denoise scales,
-    // four tone-analysis passes, and thirteen adjustment/output passes.
-    1 + demosaic_passes + COLOR_DENOISE_ENTRY_POINTS.len() + 4 + 13
+    // four tone-analysis passes, and eighteen adjustment/output passes.
+    1 + demosaic_passes + COLOR_DENOISE_ENTRY_POINTS.len() + 4 + 18
 }
 
 const SHADER_BAYER_RCD_P1: &str = include_str!("../shaders/pass1.wgsl");
@@ -1544,6 +1544,14 @@ impl GpuParams {
                 && mask.metadata[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Glow.shader_id()
         })
     }
+
+    fn needs_blur_passes(&self) -> bool {
+        let local_count = (self.scene_tone.mask_counts[0] as usize).min(MAX_LOCAL_MASKS);
+        self.mask_data[..local_count].iter().any(|mask| {
+            mask.metadata[0] != 0
+                && mask.metadata[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Blur.shader_id()
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1645,11 +1653,16 @@ pub struct RawGpuPipeline {
     adjustment_prepare_pass_index: usize,
     adjustment_tone_pass_index: usize,
     adjustment_effects_pass_index: usize,
+    mask_blur_start_index: usize,
+    mask_blur_end_index: usize,
     glow_prepare_pass_index: usize,
     glow_blur_start_index: usize,
     glow_blur_end_index: usize,
     adjustment_creative_pass_index: usize,
     adjustment_render_pass_index: usize,
+    post_blur_glow_passes: Vec<Pass>,
+    post_blur_creative_pass: Pass,
+    post_blur_render_pass: Pass,
     passes: Vec<Pass>,
     raw_texture: wgpu::Texture,
     color_texture: wgpu::Texture,
@@ -2934,8 +2947,30 @@ impl RawGpuPipeline {
                 })
             });
 
-        let bgl_glow_prepare =
+        let bgl_mask_blur =
             reused_layout(adjustment_prepare_for_programs + 5).unwrap_or_else(|| {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bgl mask Blur diffusion"),
+                    entries: &[
+                        buffer_entry(0),
+                        texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
+                        storage_texture_entry(
+                            25,
+                            work_format,
+                            wgpu::StorageTextureAccess::WriteOnly,
+                        ),
+                        texture_array_entry(
+                            27,
+                            wgpu::TextureSampleType::Float { filterable: true },
+                        ),
+                        sampler_entry(28),
+                        storage_buffer_entry(33, true),
+                    ],
+                })
+            });
+
+        let bgl_glow_prepare =
+            reused_layout(adjustment_prepare_for_programs + 10).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl Glow source extraction"),
                     entries: &[
@@ -2957,7 +2992,7 @@ impl RawGpuPipeline {
             });
 
         let bgl_glow_blur =
-            reused_layout(adjustment_prepare_for_programs + 6).unwrap_or_else(|| {
+            reused_layout(adjustment_prepare_for_programs + 11).unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl Glow diffusion"),
                     entries: &[
@@ -2972,7 +3007,7 @@ impl RawGpuPipeline {
                 })
             });
 
-        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 11)
+        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 16)
             .unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("bgl creative glow"),
@@ -3022,7 +3057,7 @@ impl RawGpuPipeline {
             ],
         });
         let bgl_adjust_render =
-            reused_layout(adjustment_prepare_for_programs + 12).unwrap_or(bgl_adjust_render);
+            reused_layout(adjustment_prepare_for_programs + 17).unwrap_or(bgl_adjust_render);
 
         let bg_highlights = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg highlight reconstruction"),
@@ -3759,6 +3794,53 @@ impl RawGpuPipeline {
             ],
         });
 
+        // Mask Blur diffuses the completed local-effects image through five
+        // adjacent scales. It ends in tex2 and keeps tex1 available until the
+        // chain has fully incorporated mask coverage and Amount.
+        let make_mask_blur_bind_group =
+            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &bgl_mask_blur,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: camera_uniforms_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 24,
+                            resource: wgpu::BindingResource::TextureView(read_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 25,
+                            resource: wgpu::BindingResource::TextureView(write_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 27,
+                            resource: wgpu::BindingResource::TextureView(&mask_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 28,
+                            resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 33,
+                            resource: mask_data_buffer.as_entire_binding(),
+                        },
+                    ],
+                })
+            };
+        let bg_mask_blur_0 =
+            make_mask_blur_bind_group("bg mask Blur diffusion 0", &tex1_view, &tex2_view);
+        let bg_mask_blur_1 =
+            make_mask_blur_bind_group("bg mask Blur diffusion 1", &tex2_view, &display_linear_view);
+        let bg_mask_blur_2 =
+            make_mask_blur_bind_group("bg mask Blur diffusion 2", &display_linear_view, &tex2_view);
+        let bg_mask_blur_3 =
+            make_mask_blur_bind_group("bg mask Blur diffusion 3", &tex2_view, &display_linear_view);
+        let bg_mask_blur_4 =
+            make_mask_blur_bind_group("bg mask Blur diffusion 4", &display_linear_view, &tex2_view);
+
         // Glow is extracted from the completed local-effects image in tex1.
         // Five adjacent B3-spline diffusion stages then ping-pong through tex2
         // and the display-linear surface. The latter is safe scratch here: the
@@ -3826,6 +3908,65 @@ impl RawGpuPipeline {
         let bg_glow_blur_4 =
             make_glow_blur_bind_group("bg Glow diffusion 4", &tex2_view, &display_linear_view);
 
+        // When mask Blur ran first, tex2 contains the new creative base. Glow
+        // uses tex1/display-linear as scratch so that base remains available
+        // for the final creative composite.
+        let bg_glow_prepare_after_blur = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg Glow source extraction after mask Blur"),
+            layout: &bgl_glow_prepare,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_uniforms_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 31,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 33,
+                    resource: mask_data_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let bg_glow_blur_after_blur_0 = make_glow_blur_bind_group(
+            "bg Glow diffusion after mask Blur 0",
+            &tex1_view,
+            &display_linear_view,
+        );
+        let bg_glow_blur_after_blur_1 = make_glow_blur_bind_group(
+            "bg Glow diffusion after mask Blur 1",
+            &display_linear_view,
+            &tex1_view,
+        );
+        let bg_glow_blur_after_blur_2 = make_glow_blur_bind_group(
+            "bg Glow diffusion after mask Blur 2",
+            &tex1_view,
+            &display_linear_view,
+        );
+        let bg_glow_blur_after_blur_3 = make_glow_blur_bind_group(
+            "bg Glow diffusion after mask Blur 3",
+            &display_linear_view,
+            &tex1_view,
+        );
+        let bg_glow_blur_after_blur_4 = make_glow_blur_bind_group(
+            "bg Glow diffusion after mask Blur 4",
+            &tex1_view,
+            &display_linear_view,
+        );
+
         // The creative pass keeps the untouched local-effects result in tex1,
         // composites the final Glow diffusion from display_linear and writes
         // the result into tex2. The post-crop vignette is applied later in the
@@ -3869,6 +4010,45 @@ impl RawGpuPipeline {
             ],
         });
 
+        let bg_adjust_creative_after_blur = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg creative effects after mask Blur"),
+            layout: &bgl_adjust_creative,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_uniforms_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 25,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 30,
+                    resource: wgpu::BindingResource::TextureView(&display_linear_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 33,
+                    resource: mask_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 34,
+                    resource: wgpu::BindingResource::TextureView(&light_rays_mask_view),
+                },
+            ],
+        });
+
         let bg_adjust_render = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg scene look view and output"),
             layout: &bgl_adjust_render,
@@ -3884,6 +4064,49 @@ impl RawGpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 26,
                     resource: wgpu::BindingResource::TextureView(&tex2_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: tone_stats_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: profile_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: wgpu::BindingResource::TextureView(&mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 29,
+                    resource: wgpu::BindingResource::TextureView(&display_linear_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 33,
+                    resource: mask_data_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let bg_adjust_render_after_blur = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bg scene look view and output after mask Blur"),
+            layout: &bgl_adjust_render,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_uniforms_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&out_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 26,
+                    resource: wgpu::BindingResource::TextureView(&tex1_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
@@ -4322,8 +4545,10 @@ impl RawGpuPipeline {
         let adjustment_prepare_pass_index = passes.len();
         let adjustment_tone_pass_index = adjustment_prepare_pass_index + 1;
         let adjustment_effects_pass_index = adjustment_prepare_pass_index + 3;
-        let glow_prepare_pass_index = adjustment_prepare_pass_index + 5;
-        let glow_blur_start_index = adjustment_prepare_pass_index + 6;
+        let mask_blur_start_index = adjustment_prepare_pass_index + 5;
+        let mask_blur_end_index = mask_blur_start_index + 5;
+        let glow_prepare_pass_index = mask_blur_end_index;
+        let glow_blur_start_index = glow_prepare_pass_index + 1;
         let glow_blur_end_index = glow_blur_start_index + 5;
         let adjustment_creative_pass_index = glow_blur_end_index;
         let adjustment_render_pass_index = adjustment_creative_pass_index + 1;
@@ -4372,6 +4597,51 @@ impl RawGpuPipeline {
                     &bgl_adjust_effects,
                 ),
                 bind_group: bg_adjust_effects_copy,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    creative_effects_module.as_ref(),
+                    "diffuse_mask_blur_0",
+                    &bgl_mask_blur,
+                ),
+                bind_group: bg_mask_blur_0,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    creative_effects_module.as_ref(),
+                    "diffuse_mask_blur_1",
+                    &bgl_mask_blur,
+                ),
+                bind_group: bg_mask_blur_1,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    creative_effects_module.as_ref(),
+                    "diffuse_mask_blur_2",
+                    &bgl_mask_blur,
+                ),
+                bind_group: bg_mask_blur_2,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    creative_effects_module.as_ref(),
+                    "diffuse_mask_blur_3",
+                    &bgl_mask_blur,
+                ),
+                bind_group: bg_mask_blur_3,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: make_pipeline(
+                    creative_effects_module.as_ref(),
+                    "diffuse_mask_blur_4",
+                    &bgl_mask_blur,
+                ),
+                bind_group: bg_mask_blur_4,
                 workgroups: image_workgroups,
             },
             Pass {
@@ -4448,6 +4718,52 @@ impl RawGpuPipeline {
             },
         ]);
 
+        // These variants reuse the same compiled pipelines with bind groups
+        // that follow tex2 as the creative base after mask Blur. Keeping them
+        // outside `passes` avoids duplicating programs in reusable templates.
+        let post_blur_glow_passes = vec![
+            Pass {
+                pipeline: passes[glow_prepare_pass_index].pipeline.clone(),
+                bind_group: bg_glow_prepare_after_blur,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: passes[glow_blur_start_index].pipeline.clone(),
+                bind_group: bg_glow_blur_after_blur_0,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: passes[glow_blur_start_index + 1].pipeline.clone(),
+                bind_group: bg_glow_blur_after_blur_1,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: passes[glow_blur_start_index + 2].pipeline.clone(),
+                bind_group: bg_glow_blur_after_blur_2,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: passes[glow_blur_start_index + 3].pipeline.clone(),
+                bind_group: bg_glow_blur_after_blur_3,
+                workgroups: image_workgroups,
+            },
+            Pass {
+                pipeline: passes[glow_blur_start_index + 4].pipeline.clone(),
+                bind_group: bg_glow_blur_after_blur_4,
+                workgroups: image_workgroups,
+            },
+        ];
+        let post_blur_creative_pass = Pass {
+            pipeline: passes[adjustment_creative_pass_index].pipeline.clone(),
+            bind_group: bg_adjust_creative_after_blur,
+            workgroups: image_workgroups,
+        };
+        let post_blur_render_pass = Pass {
+            pipeline: passes[adjustment_render_pass_index].pipeline.clone(),
+            bind_group: bg_adjust_render_after_blur,
+            workgroups: image_workgroups,
+        };
+
         let expected_programs = expected_pass_count(raw.cfa_kind);
         if next_program_index != expected_programs || passes.len() != expected_programs {
             return Err(anyhow!(
@@ -4495,11 +4811,16 @@ impl RawGpuPipeline {
             adjustment_prepare_pass_index,
             adjustment_tone_pass_index,
             adjustment_effects_pass_index,
+            mask_blur_start_index,
+            mask_blur_end_index,
             glow_prepare_pass_index,
             glow_blur_start_index,
             glow_blur_end_index,
             adjustment_creative_pass_index,
             adjustment_render_pass_index,
+            post_blur_glow_passes,
+            post_blur_creative_pass,
+            post_blur_render_pass,
             passes,
             raw_texture,
             color_texture,
@@ -5597,33 +5918,80 @@ impl RawGpuPipeline {
         // optional presence/creative effects are neutral this pass already
         // writes the final adjustment image into tex2 for the render pass.
         self.encode_pass(encoder, self.adjustment_tone_pass_index);
+        let blur_active = params.needs_blur_passes();
         if params.needs_intermediate_adjustment_passes() {
             self.encode_pass(encoder, self.adjustment_effects_pass_index - 1);
             self.encode_pass(encoder, self.adjustment_effects_pass_index);
             self.encode_pass(encoder, self.adjustment_effects_pass_index + 1);
-            if params.needs_glow_passes() {
-                self.encode_pass(encoder, self.glow_prepare_pass_index);
+            if blur_active {
                 self.encode_pass_range(
                     encoder,
-                    self.glow_blur_start_index,
-                    self.glow_blur_end_index,
+                    self.mask_blur_start_index,
+                    self.mask_blur_end_index,
                 );
             }
-            self.encode_pass(encoder, self.adjustment_creative_pass_index);
+            if params.needs_glow_passes() {
+                if blur_active {
+                    for (index, pass) in self.post_blur_glow_passes.iter().enumerate() {
+                        self.encode_bound_pass(
+                            encoder,
+                            pass,
+                            &format!("post-Blur Glow pass {}", index + 1),
+                        );
+                    }
+                } else {
+                    self.encode_pass(encoder, self.glow_prepare_pass_index);
+                    self.encode_pass_range(
+                        encoder,
+                        self.glow_blur_start_index,
+                        self.glow_blur_end_index,
+                    );
+                }
+            }
+            if blur_active {
+                self.encode_bound_pass(
+                    encoder,
+                    &self.post_blur_creative_pass,
+                    "post-Blur creative pass",
+                );
+            } else {
+                self.encode_pass(encoder, self.adjustment_creative_pass_index);
+            }
         }
-        self.encode_pass(encoder, self.adjustment_render_pass_index);
+        if blur_active {
+            self.encode_bound_pass(
+                encoder,
+                &self.post_blur_render_pass,
+                "post-Blur render pass",
+            );
+        } else {
+            self.encode_pass(encoder, self.adjustment_render_pass_index);
+        }
     }
 
     fn encode_pass(&self, encoder: &mut wgpu::CommandEncoder, index: usize) {
+        self.encode_bound_pass(
+            encoder,
+            &self.passes[index],
+            &format!("auraw pass {}", index + 1),
+        );
+    }
+
+    fn encode_bound_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pass_record: &Pass,
+        label: &str,
+    ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some(&format!("auraw pass {}", index + 1)),
+            label: Some(label),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.passes[index].pipeline);
-        pass.set_bind_group(0, &self.passes[index].bind_group, &[]);
+        pass.set_pipeline(&pass_record.pipeline);
+        pass.set_bind_group(0, &pass_record.bind_group, &[]);
         pass.set_bind_group(1, &self.scene_tone_bind_group, &[]);
         pass.set_bind_group(2, &self.effects_bind_group, &[]);
-        let workgroups = self.passes[index].workgroups;
+        let workgroups = pass_record.workgroups;
         pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
     }
 

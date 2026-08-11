@@ -554,8 +554,11 @@ const LOCAL_EFFECTS_SUPPORT: u32 = 28;
 // Neon samples an inner edge radius capped at 24 pixels and a second halo
 // radius at twice that distance.
 const NEON_SUPPORT: u32 = 48;
-// Mask Blur and Edge Glow sample at most 48 pixels from the output location.
-const MASK_BLUR_EDGE_SUPPORT: u32 = 48;
+// Five adjacent mask-Blur B3 stages reach +/-2*(1+1+2+3+5) reference pixels.
+const MASK_BLUR_SUPPORT: u32 = 72;
+// Edge Glow samples an inner radius capped at 24 pixels and an outer radius at
+// twice that distance.
+const EDGE_GLOW_SUPPORT: u32 = 48;
 // Pixelate's scale-aware 32-reference-pixel cells can reach this distance at
 // the maximum reference scale.
 const PIXELATE_SUPPORT: u32 = 96;
@@ -570,6 +573,7 @@ const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_RECONSTRUCTION_SUPPORT
     + TONE_GUIDE_SUPPORT
     + LOCAL_EFFECTS_SUPPORT
     + NEON_SUPPORT
+    + MASK_BLUR_SUPPORT
     + PIXELATE_SUPPORT
     + GLOW_SUPPORT
     + COLOR_MIXER_SUPPORT;
@@ -627,21 +631,25 @@ pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -
         support += NEON_SUPPORT;
     }
 
-    let creative_mask_support = masks
+    let mask_blur_active = masks.masks.iter().any(|mask| {
+        mask.enabled && mask.effect == MaskEffect::Blur && mask.effect_settings.blur.is_active()
+    });
+    if mask_blur_active {
+        support += MASK_BLUR_SUPPORT;
+    }
+
+    let post_blur_creative_support = masks
         .masks
         .iter()
         .filter(|mask| mask.enabled)
         .map(|mask| match mask.effect {
-            MaskEffect::Blur if mask.effect_settings.blur.is_active() => MASK_BLUR_EDGE_SUPPORT,
-            MaskEffect::EdgeGlow if mask.effect_settings.edge_glow.is_active() => {
-                MASK_BLUR_EDGE_SUPPORT
-            }
+            MaskEffect::EdgeGlow if mask.effect_settings.edge_glow.is_active() => EDGE_GLOW_SUPPORT,
             MaskEffect::Pixelate if mask.effect_settings.pixelate.is_active() => PIXELATE_SUPPORT,
             _ => 0,
         })
         .max()
         .unwrap_or(0);
-    support += creative_mask_support;
+    support += post_blur_creative_support;
 
     let mask_glow_active = masks.masks.iter().any(|mask| {
         mask.enabled && mask.effect == MaskEffect::Glow && mask.effect_settings.glow.is_active()
@@ -1121,6 +1129,8 @@ mod tests {
         neon_masks.masks[0].effect_settings.neon.amount = 50.0;
         neon_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
         neon_masks.masks[1].effect = MaskEffect::Pixelate;
+        neon_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+        neon_masks.masks[2].effect = MaskEffect::Blur;
         assert_eq!(
             required_export_tile_halo(&exposure, &neon_masks),
             EXPORT_TILE_HALO

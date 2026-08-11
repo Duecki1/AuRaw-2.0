@@ -1064,7 +1064,7 @@ fn adjustment_modules_expose_the_render_graph_controls() {
     for function in [
         "apply_creative_effects",
         "apply_glow",
-        "apply_mask_blur",
+        "apply_mask_blur_stage",
         "apply_mask_glow_cores",
         "apply_light_rays",
         "apply_edge_glow",
@@ -1647,6 +1647,64 @@ fn blur_mask_effect_packs_independent_settings_and_schedules_rendering() {
     let neutral = super::GpuParams::new(&exposure, &masks, &raw);
     assert_eq!(neutral.mask_data[0].metadata[0], 0);
     assert!(!neutral.needs_intermediate_adjustment_passes());
+}
+
+#[test]
+fn reused_program_layouts_render_progressive_mask_blur() {
+    let _gpu_guard = gpu_resource_test_guard();
+    use super::RawGpuPipeline;
+
+    let instance = wgpu::Instance::default();
+    let Ok(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        return;
+    };
+    let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("auraw reused mask Blur test device"),
+        ..Default::default()
+    })) else {
+        return;
+    };
+
+    let raw = local_mask_scheduling_fixture(32, 32);
+    let exposure = super::ExposureParams::default();
+    let template_params =
+        super::GpuParams::new(&exposure, &crate::pipeline::MaskStack::default(), &raw);
+    let template = RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+        &device,
+        &queue,
+        &raw,
+        &template_params,
+        ProcessingQuality::High,
+        32,
+    )
+    .unwrap();
+
+    let mut masks = crate::pipeline::MaskStack::default();
+    masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+    masks.masks[0].effect = crate::pipeline::MaskEffect::Blur;
+    masks.masks[0].effect_settings.blur.amount = 100.0;
+    masks.masks[0].effect_settings.blur.radius = 16.0;
+    let params = super::GpuParams::new(&exposure, &masks, &raw);
+    let reused = RawGpuPipeline::new_headless_reusing_programs_with_mask_edge(
+        &device,
+        &queue,
+        &raw,
+        &params,
+        ProcessingQuality::High,
+        &template,
+        32,
+    )
+    .unwrap();
+    let mask_edge = reused.mask_atlas_edge();
+    let full_mask = vec![half::f16::from_f32(1.0).to_bits(); (mask_edge * mask_edge) as usize];
+    reused.update_mask_layer(&queue, 0, &full_mask).unwrap();
+    reused.recompute(&queue, &device, &params);
+    let pixels = reused
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, 32, 32)
+        .unwrap();
+    assert!(pixels.iter().all(|value| value.is_finite()));
 }
 
 #[test]
@@ -2701,6 +2759,67 @@ fn presence_and_mask_effects_have_real_gpu_behavior_when_an_adapter_exists() {
             && bright_edge(&blurred) < bright_edge(&blur_neutral) - 1e-3,
         "Blur did not diffuse across a hard edge"
     );
+
+    // A maximum-radius Blur must suppress compact high-frequency structure
+    // instead of reproducing it at a sparse set of regular offsets. The old
+    // one-pass 5x5 lattice retained most of this four-pixel checker and made
+    // the repeated copies visible as a woven pattern.
+    let blur_pattern_source = fixture(WIDTH, HEIGHT, |x, y| {
+        if (x / 4 + y / 4) % 2 == 0 {
+            0.68
+        } else {
+            0.06
+        }
+    });
+    let blur_pattern_neutral = render(&blur_pattern_source, &neutral);
+    glow_masks.masks[0].effect_settings.blur.radius = 16.0;
+    pipeline
+        .upload_raw_tile(&queue, &blur_pattern_source)
+        .unwrap();
+    let blur_pattern_params = super::GpuParams::new(&neutral, &glow_masks, &blur_pattern_source);
+    pipeline.recompute(&queue, &device, &blur_pattern_params);
+    let blur_pattern = pipeline
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, WIDTH, HEIGHT)
+        .unwrap();
+    let interior_luma_deviation = |pixels: &[f32]| {
+        let mean = mean_luma_in(pixels, WIDTH, HEIGHT, |x, y| {
+            (20.0..108.0).contains(&x) && (20.0..108.0).contains(&y)
+        });
+        let mut sum = 0.0f32;
+        let mut count = 0u32;
+        for y in 20..108u32 {
+            for x in 20..108u32 {
+                let index = ((y * WIDTH + x) * 3) as usize;
+                sum += (luma(&pixels[index..index + 3]) - mean).powi(2);
+                count += 1;
+            }
+        }
+        (sum / count as f32).sqrt()
+    };
+    let neutral_deviation = interior_luma_deviation(&blur_pattern_neutral);
+    let blurred_deviation = interior_luma_deviation(&blur_pattern);
+    assert!(
+        blurred_deviation < neutral_deviation * 0.20,
+        "maximum Blur retained a periodic sampling pattern: {neutral_deviation} -> {blurred_deviation}"
+    );
+
+    // Blur and Glow share scratch textures but use separate sequential chains.
+    // Exercising both catches accidental read/write aliasing in that route.
+    let blur_and_glow = ExposureParams {
+        glow_amount: 55.0,
+        glow_radius: 65.0,
+        glow_threshold: 35.0,
+        ..neutral
+    };
+    let blur_and_glow_params =
+        super::GpuParams::new(&blur_and_glow, &glow_masks, &blur_pattern_source);
+    pipeline.recompute(&queue, &device, &blur_and_glow_params);
+    let combined = pipeline
+        .read_display_linear_region_blocking(&device, &queue, 0, 0, WIDTH, HEIGHT)
+        .unwrap();
+    assert!(combined
+        .iter()
+        .all(|value| value.is_finite() && *value >= 0.0));
 
     let pixel_source = fixture(WIDTH, HEIGHT, |x, y| {
         0.08 + 0.62 * x as f32 / (WIDTH - 1) as f32 + if (x + y) % 2 == 0 { 0.025 } else { -0.025 }

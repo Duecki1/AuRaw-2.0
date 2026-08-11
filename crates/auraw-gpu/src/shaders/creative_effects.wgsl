@@ -469,8 +469,7 @@ fn apply_local_creative_mask_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) 
         let state = Common::mask_data[index].metadata;
         if state.x == 0u || state.y == 0u { continue; }
         let effect_id = Common::mask_effect_id(state);
-        if effect_id != MASK_EFFECT_BLUR_ID
-            && effect_id != MASK_EFFECT_EDGE_GLOW_ID
+        if effect_id != MASK_EFFECT_EDGE_GLOW_ID
             && effect_id != MASK_EFFECT_PIXELATE_ID {
             continue;
         }
@@ -480,9 +479,7 @@ fn apply_local_creative_mask_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) 
         let primary = Common::mask_data[index].adjust_0_field;
         let secondary = Common::mask_data[index].adjust_1_field;
         var adjusted = rgb;
-        if effect_id == MASK_EFFECT_BLUR_ID {
-            adjusted = apply_mask_blur(pos, rgb, primary);
-        } else if effect_id == MASK_EFFECT_EDGE_GLOW_ID {
+        if effect_id == MASK_EFFECT_EDGE_GLOW_ID {
             adjusted = apply_edge_glow(pos, rgb, primary, secondary);
         } else if effect_id == MASK_EFFECT_PIXELATE_ID {
             adjusted = apply_pixelate(pos, rgb, primary);
