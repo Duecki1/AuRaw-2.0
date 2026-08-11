@@ -15,5 +15,4 @@ pub use gpu::{
     ComputeWorkgroupSize, GpuOutputSnapshot, GpuParams, GpuProgramPrewarm, GpuShaderTuning,
     ProcessingQuality, RawGpuPipeline, RawGpuProgramTemplate,
 };
-#[cfg(target_os = "android")]
 pub use gpu_cache::PersistentGpuPipelineCache;
