@@ -58,10 +58,13 @@ pub(crate) fn show(ui: &mut Ui, settings: &mut GlowEffectSettings) -> bool {
         ui.horizontal(|ui| {
             ui.label("Color");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                changed |= ui
-                    .color_edit_button_rgb(&mut settings.color)
-                    .on_hover_text("Choose the color emitted by the Glow effect.")
-                    .changed();
+                changed |= crate::ui::components::effect_color_picker::effect_color_picker(
+                    ui,
+                    "glow-color-picker",
+                    &mut settings.color,
+                    "Glow color",
+                    "Choose the color emitted by the Glow effect.",
+                );
             });
         });
     });

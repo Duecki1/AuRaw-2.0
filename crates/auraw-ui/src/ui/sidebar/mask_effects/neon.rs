@@ -78,10 +78,13 @@ pub(crate) fn show(ui: &mut Ui, settings: &mut NeonEffectSettings) -> bool {
         ui.horizontal(|ui| {
             ui.label("Color");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                changed |= ui
-                    .color_edit_button_rgb(&mut settings.color)
-                    .on_hover_text("Choose the emitted Neon color.")
-                    .changed();
+                changed |= crate::ui::components::effect_color_picker::effect_color_picker(
+                    ui,
+                    "neon-color-picker",
+                    &mut settings.color,
+                    "Neon color",
+                    "Choose the emitted Neon color.",
+                );
             });
         });
     });
