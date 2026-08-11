@@ -616,6 +616,7 @@ impl Sidebar {
     fn mask_kind_menu(ui: &mut Ui, unavailable_message: &str) -> Option<MaskKind> {
         let mut selected = None;
         for kind in [
+            MaskKind::Fullscreen,
             MaskKind::Brush,
             MaskKind::Radial,
             MaskKind::Linear,
@@ -1708,6 +1709,9 @@ impl Sidebar {
             });
 
             match &mut component.geometry {
+                MaskGeometry::Fullscreen => {
+                    ui.label("Covers the complete image with uniform mask strength.");
+                }
                 MaskGeometry::Brush {
                     size,
                     feather,

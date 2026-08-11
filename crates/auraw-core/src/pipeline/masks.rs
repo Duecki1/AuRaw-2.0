@@ -37,6 +37,7 @@ pub fn export_mask_atlas_edge(image_width: u32, image_height: u32) -> u32 {
 pub enum MaskKind {
     #[default]
     Brush,
+    Fullscreen,
     Radial,
     Linear,
     Subject,
@@ -52,6 +53,7 @@ impl MaskKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Brush => "Brush",
+            Self::Fullscreen => "Fullscreen",
             Self::Radial => "Radial Gradient",
             Self::Linear => "Linear Gradient",
             Self::Subject => "Select Subject",
@@ -66,6 +68,7 @@ impl MaskKind {
 
     pub const fn short_label(self) -> &'static str {
         match self {
+            Self::Fullscreen => "Full Image",
             Self::Radial => "Radial",
             Self::Linear => "Linear",
             Self::LuminanceRange => "Luminance",
@@ -79,6 +82,7 @@ impl MaskKind {
         matches!(
             self,
             Self::Brush
+                | Self::Fullscreen
                 | Self::Radial
                 | Self::Linear
                 | Self::Subject
@@ -1017,6 +1021,9 @@ impl Default for BrushDab {
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum MaskGeometry {
+    /// Constant coverage across the complete image. This has no editable
+    /// geometry and is immediately initialized when created.
+    Fullscreen,
     Brush {
         /// Radius as a fraction of the image's shorter edge.
         size: f32,
@@ -1131,6 +1138,7 @@ fn default_object_edge_refine() -> f32 {
 impl MaskGeometry {
     pub fn for_kind(kind: MaskKind) -> Self {
         match kind {
+            MaskKind::Fullscreen => Self::Fullscreen,
             MaskKind::Brush => Self::Brush {
                 size: 0.055,
                 feather: 0.55,
@@ -1193,6 +1201,7 @@ impl MaskGeometry {
 
     pub fn is_initialized(&self) -> bool {
         match self {
+            Self::Fullscreen => true,
             Self::Brush { dabs, .. } => !dabs.is_empty(),
             Self::Radial { initialized, .. } | Self::Linear { initialized, .. } => *initialized,
             Self::Ai { mask, .. } | Self::Landscape { mask, .. } | Self::Object { mask, .. } => {
@@ -1405,6 +1414,7 @@ impl MaskStack {
         for mask in &mut cropped.masks {
             for component in &mut mask.components {
                 match &mut component.geometry {
+                    MaskGeometry::Fullscreen => {}
                     MaskGeometry::Brush { size, dabs, .. } => {
                         *size *= image_scale;
                         for dab in dabs {
@@ -1859,6 +1869,7 @@ fn rasterize_component(
     subject_refinement: &SubjectRefinement,
 ) -> Vec<f32> {
     match &component.geometry {
+        MaskGeometry::Fullscreen => vec![1.0; width as usize * height as usize],
         MaskGeometry::Brush {
             overlap_enabled,
             stroke_starts,
@@ -2866,6 +2877,32 @@ mod tests {
             stack.selected_component().unwrap().geometry,
             MaskGeometry::Brush { .. }
         ));
+    }
+
+    #[test]
+    fn fullscreen_mask_is_immediately_initialized_and_covers_every_pixel() {
+        let mut stack = MaskStack::default();
+        assert_eq!(stack.add_mask(MaskKind::Fullscreen), Some((0, 0)));
+        assert!(MaskKind::Fullscreen.is_available());
+        assert!(matches!(
+            stack.selected_component().unwrap().geometry,
+            MaskGeometry::Fullscreen
+        ));
+        assert!(stack
+            .selected_component()
+            .unwrap()
+            .geometry
+            .is_initialized());
+        assert_eq!(
+            stack.rasterize_layer(0, 17, 11, 6000, 4000),
+            vec![255; 17 * 11]
+        );
+
+        let cropped = stack.cropped_for_region(900, 700, 1200, 800, 6000, 4000);
+        assert_eq!(
+            cropped.rasterize_layer(0, 9, 7, 1200, 800),
+            vec![255; 9 * 7]
+        );
     }
 
     #[test]

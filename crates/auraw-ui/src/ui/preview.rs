@@ -1392,6 +1392,11 @@ impl Preview {
         if !kind.is_available() {
             return;
         }
+        if kind == MaskKind::Fullscreen {
+            app.finish_mask_geometry_interaction();
+            app.active_mask_tool = None;
+            return;
+        }
         let subject_refining = app.subject_refinement_active
             && matches!(kind, MaskKind::Subject | MaskKind::Background);
         app.active_mask_tool = Some(kind);
