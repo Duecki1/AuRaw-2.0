@@ -1,4 +1,4 @@
-use super::{CompactPixelMap, DenoiseQuality, ExposureParams, LoadedRaw, MaskStack};
+use super::{CompactPixelMap, DenoiseQuality, ExposureParams, LoadedRaw, MaskEffect, MaskStack};
 use rayon::prelude::*;
 
 /// Earliest pipeline stage that must be executed after a parameter change.
@@ -551,6 +551,9 @@ const TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 
 // Scale-aware Clarity has the widest presence footprint: the B3 kernel reaches
 // +/-2 times a step capped at 14 pixels. Texture and Dehaze remain inside it.
 const LOCAL_EFFECTS_SUPPORT: u32 = 28;
+// Neon samples an inner edge radius capped at 24 pixels and a second halo
+// radius at twice that distance.
+const NEON_SUPPORT: u32 = 48;
 // Glow cascades five B3 diffusion stages. At the capped 3x reference scale the
 // steps are 3+3+6+12+24, and each 5x5 stage reaches +/-2*step. Support therefore
 // accumulates to 96 pixels from the extracted highlight source.
@@ -561,6 +564,7 @@ const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_RECONSTRUCTION_SUPPORT
     + COLOR_DENOISE_SUPPORT_HIGH
     + TONE_GUIDE_SUPPORT
     + LOCAL_EFFECTS_SUPPORT
+    + NEON_SUPPORT
     + GLOW_SUPPORT
     + COLOR_MIXER_SUPPORT;
 
@@ -576,10 +580,10 @@ pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_RECONSTRUCTION_SUPPORT
     .div_ceil(8)
     * 8;
 
-/// Returns the halo actually required by the current edit. Neutral Glow and
-/// local spatial controls should not force every tile to process their full
-/// support radius. This is especially important on Android, where a 280 px
-/// halo around a 768 px core nearly triples the processed area.
+/// Returns the halo actually required by the current edit. Neutral Glow, Neon,
+/// and local spatial controls should not force every tile to process their
+/// full support radius. This is especially important on Android, where a wide
+/// halo around a 768 px core can nearly triple the processed area.
 pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -> u32 {
     let mut support = HIGHLIGHT_RECONSTRUCTION_SUPPORT
         + DEMOSAIC_CHAIN_SUPPORT
@@ -607,6 +611,13 @@ pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -
         });
     if local_spatial_active {
         support += LOCAL_EFFECTS_SUPPORT;
+    }
+
+    let neon_active = masks.masks.iter().any(|mask| {
+        mask.enabled && mask.effect == MaskEffect::Neon && mask.effect_settings.neon.is_active()
+    });
+    if neon_active {
+        support += NEON_SUPPORT;
     }
 
     if exposure.glow_amount.abs() > 1e-6 {
@@ -825,7 +836,7 @@ mod tests {
     };
     use crate::pipeline::{
         AiDenoisedImage, CameraProfile, CfaKind, CompactPixelMap, DenoiseQuality, ExposureParams,
-        LoadedRaw, MaskStack,
+        LoadedRaw, MaskEffect, MaskStack,
     };
 
     fn test_raw(width: u32, height: u32) -> LoadedRaw {
@@ -1035,13 +1046,24 @@ mod tests {
             MIN_EXPORT_TILE_HALO
         );
 
+        let mut neon_masks = MaskStack::default();
+        neon_masks.add_mask(crate::pipeline::MaskKind::Fullscreen);
+        neon_masks.masks[0].effect = MaskEffect::Neon;
+        assert!(required_export_tile_halo(&exposure, &neon_masks) > MIN_EXPORT_TILE_HALO);
+        neon_masks.masks[0].effect_settings.neon.amount = 0.0;
+        assert_eq!(
+            required_export_tile_halo(&exposure, &neon_masks),
+            MIN_EXPORT_TILE_HALO
+        );
+
         exposure.glow_amount = 1.0;
         assert!(required_export_tile_halo(&exposure, &masks) > MIN_EXPORT_TILE_HALO);
         exposure.clarity = 1.0;
         exposure.chroma_denoise = 1.0;
         exposure.denoise_quality = DenoiseQuality::High;
+        neon_masks.masks[0].effect_settings.neon.amount = 50.0;
         assert_eq!(
-            required_export_tile_halo(&exposure, &masks),
+            required_export_tile_halo(&exposure, &neon_masks),
             EXPORT_TILE_HALO
         );
     }

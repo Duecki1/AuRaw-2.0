@@ -427,7 +427,7 @@ fn apply_local_scene_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
-        if state.x == 0u || state.y == 0u { continue; }
+        if state.x == 0u || state.y == 0u || Common::mask_effect_id(state) != 0u { continue; }
         let local = Common::mask_data[index].adjust_2_field;
         if max(max(abs(local.x), abs(local.y)), max(abs(local.z), abs(local.w))) <= 1e-7 {
             continue;
@@ -443,6 +443,25 @@ fn apply_local_scene_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<
     return rgb;
 }
 
+fn apply_local_mask_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
+    var rgb = input_rgb;
+    let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let state = Common::mask_data[index].metadata;
+        if state.x == 0u || state.y == 0u || Common::mask_effect_id(state) != 1u { continue; }
+        let weight = SceneAdjustments::local_mask_weight(pos, index);
+        if weight <= 1e-5 { continue; }
+        let adjusted = apply_neon(
+            pos,
+            rgb,
+            Common::mask_data[index].adjust_0_field,
+            Common::mask_data[index].adjust_1_field,
+        );
+        rgb = mix(rgb, adjusted, weight);
+    }
+    return rgb;
+}
+
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -453,6 +472,7 @@ fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_dehaze_value(pos, rgb, Common::effects_uniforms.presence.z);
     rgb = BasicAdjustments::apply_saturation_vibrance(rgb);
     rgb = apply_local_scene_effect_nodes(pos, rgb);
+    rgb = apply_local_mask_effect_nodes(pos, rgb);
     textureStore(SceneAdjustments::local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 
@@ -510,4 +530,3 @@ fn apply_creative_effects(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_glow(pos, rgb);
     textureStore(SceneAdjustments::creative_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
-

@@ -100,7 +100,7 @@ fn apply_local_exposure_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32>
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
-        if state.x == 0u || state.y == 0u { continue; }
+        if state.x == 0u || state.y == 0u || Common::mask_effect_id(state) != 0u { continue; }
         let value = clamp(Common::mask_data[index].adjust_0_field.x, -5.0, 5.0);
         if abs(value) <= 1e-7 { continue; }
         let weight = local_mask_weight(pos, index);
@@ -367,7 +367,7 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
     for (var index = 0u; index < count; index = index + 1u) {
         let state = Common::mask_data[index].metadata;
-        if state.x == 0u || state.y == 0u { continue; }
+        if state.x == 0u || state.y == 0u || Common::mask_effect_id(state) != 0u { continue; }
         let weight = local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
 
@@ -448,4 +448,3 @@ fn apply_local_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     rgb = apply_local_scene_tone_nodes(pos, rgb);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
-

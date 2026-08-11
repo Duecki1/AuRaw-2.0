@@ -3,9 +3,10 @@ use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
-    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskStack,
-    PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, GLOBAL_TEMPERATURE_LIMIT,
-    GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES, MAX_LOCAL_MASKS,
+    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskEffect,
+    MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
+    GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES,
+    MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -25,6 +26,7 @@ use shader_manager::ShaderManager;
 mod tests;
 
 const GPU_PARAMS_ABI_VERSION: u32 = 5;
+const MASK_EFFECT_ID_SHIFT: u32 = 8;
 // The public ABI marker retains the historical monolithic payload size while
 // the runtime uses independently allocated stage uniforms.
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
@@ -230,6 +232,7 @@ const SHADER_TONE_ANALYSIS: &str = include_str!("../shaders/tone_analysis.wgsl")
 const SHADER_REGRESSION_SCENE: &str = include_str!("../shaders/regression_scene.wgsl");
 
 const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
+const SHADER_MASK_NEON: &str = include_str!("../shaders/mask_effects/neon.wgsl");
 const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
 const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
 
@@ -803,6 +806,32 @@ impl GpuParams {
         // middle-grey slope without switching view operators.
         let mut mask_data = [MaskData::zeroed(); MAX_LOCAL_MASKS];
         for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
+            if mask.effect == MaskEffect::Neon {
+                let neon = mask.effect_settings.neon;
+                let active = mask.enabled && neon.is_active();
+                mask_data[index] = MaskData {
+                    metadata: [
+                        u32::from(active),
+                        u32::from(active),
+                        0,
+                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+                    ],
+                    adjust_0: [
+                        neon.amount.clamp(0.0, 100.0),
+                        neon.edge_width.clamp(0.5, 8.0),
+                        neon.detail.clamp(0.0, 100.0),
+                        neon.glow.clamp(0.0, 100.0),
+                    ],
+                    adjust_1: [
+                        neon.color[0].clamp(0.0, 1.0),
+                        neon.color[1].clamp(0.0, 1.0),
+                        neon.color[2].clamp(0.0, 1.0),
+                        neon.background.clamp(0.0, 100.0),
+                    ],
+                    ..MaskData::zeroed()
+                };
+                continue;
+            }
             let adjustment = mask.adjustments;
             // Placeholder effect types retain any adjustment values so a user
             // can switch back without losing work, but they must not apply
@@ -1322,6 +1351,9 @@ impl GpuParams {
             let state = local.metadata;
             if state[0] == 0 || state[1] == 0 {
                 return false;
+            }
+            if state[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Neon.shader_id() {
+                return true;
             }
 
             // The local tone shader is physically part of the optional

@@ -3,6 +3,10 @@ use rayon::prelude::*;
 use std::f32::consts::TAU;
 use std::sync::Arc;
 
+mod effects;
+
+pub use effects::{MaskEffect, MaskEffectCategory, MaskEffectSettings, NeonEffectSettings};
+
 pub const MAX_LOCAL_MASKS: usize = 32;
 pub const MAX_MASK_COMPONENTS: usize = 64;
 pub const MASK_ATLAS_EDGE_DESKTOP: u32 = 2048;
@@ -92,207 +96,6 @@ impl MaskKind {
                 | Self::LuminanceRange
                 | Self::ColorRange
         )
-    }
-}
-
-/// The operation driven by a mask group's combined coverage.
-///
-/// `MaskKind` describes how coverage is created (brush, gradient, subject,
-/// and so on); `MaskEffect` describes what that coverage does to the image.
-/// Adjustment is the existing, fully implemented behavior. The remaining
-/// values are persisted placeholders so the effect picker and sidecar format
-/// can grow without conflating an effect with a coverage source.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum MaskEffect {
-    #[default]
-    Adjustment,
-    Blur,
-    LensBlur,
-    MotionBlur,
-    RadialBlur,
-    TiltShift,
-    BlackAndWhite,
-    Colorize,
-    Duotone,
-    GradientMap,
-    Invert,
-    Sepia,
-    Emboss,
-    HighPass,
-    Sharpen,
-    Bulge,
-    Glass,
-    Kaleidoscope,
-    Ripple,
-    Twirl,
-    Bloom,
-    Glow,
-    LightRays,
-    Neon,
-    Cartoon,
-    EdgeGlow,
-    Halftone,
-    OilPaint,
-    Outline,
-    Pixelate,
-    Posterize,
-    FilmGrain,
-    Noise,
-    TextureOverlay,
-}
-
-impl MaskEffect {
-    pub const ALL: [Self; 34] = [
-        Self::Adjustment,
-        Self::Blur,
-        Self::LensBlur,
-        Self::MotionBlur,
-        Self::RadialBlur,
-        Self::TiltShift,
-        Self::BlackAndWhite,
-        Self::Colorize,
-        Self::Duotone,
-        Self::GradientMap,
-        Self::Invert,
-        Self::Sepia,
-        Self::Emboss,
-        Self::HighPass,
-        Self::Sharpen,
-        Self::Bulge,
-        Self::Glass,
-        Self::Kaleidoscope,
-        Self::Ripple,
-        Self::Twirl,
-        Self::Bloom,
-        Self::Glow,
-        Self::LightRays,
-        Self::Neon,
-        Self::Cartoon,
-        Self::EdgeGlow,
-        Self::Halftone,
-        Self::OilPaint,
-        Self::Outline,
-        Self::Pixelate,
-        Self::Posterize,
-        Self::FilmGrain,
-        Self::Noise,
-        Self::TextureOverlay,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Adjustment => "Adjustment",
-            Self::Blur => "Blur",
-            Self::LensBlur => "Lens Blur",
-            Self::MotionBlur => "Motion Blur",
-            Self::RadialBlur => "Radial Blur",
-            Self::TiltShift => "Tilt-Shift",
-            Self::BlackAndWhite => "Black & White",
-            Self::Colorize => "Colorize",
-            Self::Duotone => "Duotone",
-            Self::GradientMap => "Gradient Map",
-            Self::Invert => "Invert",
-            Self::Sepia => "Sepia",
-            Self::Emboss => "Emboss",
-            Self::HighPass => "High Pass",
-            Self::Sharpen => "Sharpen",
-            Self::Bulge => "Bulge",
-            Self::Glass => "Glass",
-            Self::Kaleidoscope => "Kaleidoscope",
-            Self::Ripple => "Ripple",
-            Self::Twirl => "Twirl",
-            Self::Bloom => "Bloom",
-            Self::Glow => "Glow",
-            Self::LightRays => "Light Rays",
-            Self::Neon => "Neon",
-            Self::Cartoon => "Cartoon",
-            Self::EdgeGlow => "Edge Glow",
-            Self::Halftone => "Halftone",
-            Self::OilPaint => "Oil Paint",
-            Self::Outline => "Outline",
-            Self::Pixelate => "Pixelate",
-            Self::Posterize => "Posterize",
-            Self::FilmGrain => "Film Grain",
-            Self::Noise => "Noise",
-            Self::TextureOverlay => "Texture Overlay",
-        }
-    }
-
-    pub const fn category(self) -> Option<MaskEffectCategory> {
-        match self {
-            Self::Adjustment => None,
-            Self::Blur | Self::LensBlur | Self::MotionBlur | Self::RadialBlur | Self::TiltShift => {
-                Some(MaskEffectCategory::BlurAndFocus)
-            }
-            Self::BlackAndWhite
-            | Self::Colorize
-            | Self::Duotone
-            | Self::GradientMap
-            | Self::Invert
-            | Self::Sepia => Some(MaskEffectCategory::Color),
-            Self::Emboss | Self::HighPass | Self::Sharpen => Some(MaskEffectCategory::Detail),
-            Self::Bulge | Self::Glass | Self::Kaleidoscope | Self::Ripple | Self::Twirl => {
-                Some(MaskEffectCategory::Distort)
-            }
-            Self::Bloom | Self::Glow | Self::LightRays | Self::Neon => {
-                Some(MaskEffectCategory::GlowAndLight)
-            }
-            Self::Cartoon
-            | Self::EdgeGlow
-            | Self::Halftone
-            | Self::OilPaint
-            | Self::Outline
-            | Self::Pixelate
-            | Self::Posterize => Some(MaskEffectCategory::Stylize),
-            Self::FilmGrain | Self::Noise | Self::TextureOverlay => {
-                Some(MaskEffectCategory::Texture)
-            }
-        }
-    }
-
-    pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::Adjustment)
-    }
-
-    pub const fn uses_adjustments(self) -> bool {
-        matches!(self, Self::Adjustment)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaskEffectCategory {
-    BlurAndFocus,
-    Color,
-    Detail,
-    Distort,
-    GlowAndLight,
-    Stylize,
-    Texture,
-}
-
-impl MaskEffectCategory {
-    /// Categories and their effects are intentionally alphabetized for the
-    /// two-level picker.
-    pub const ALL: [Self; 7] = [
-        Self::BlurAndFocus,
-        Self::Color,
-        Self::Detail,
-        Self::Distort,
-        Self::GlowAndLight,
-        Self::Stylize,
-        Self::Texture,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::BlurAndFocus => "Blur & Focus",
-            Self::Color => "Color",
-            Self::Detail => "Detail",
-            Self::Distort => "Distort",
-            Self::GlowAndLight => "Glow & Light",
-            Self::Stylize => "Stylize",
-            Self::Texture => "Texture",
-        }
     }
 }
 
@@ -1345,6 +1148,11 @@ pub struct LocalMask {
     /// must retain the original adjustment-mask behavior.
     #[serde(default)]
     pub effect: MaskEffect,
+    /// Editable, non-destructive parameters for implemented effect types.
+    /// Keeping these separate means switching mask types never discards the
+    /// settings belonging to another type.
+    #[serde(default, skip_serializing_if = "MaskEffectSettings::is_default")]
+    pub effect_settings: MaskEffectSettings,
     #[serde(default)]
     pub invert: bool,
     pub opacity: f32,
@@ -1358,6 +1166,7 @@ impl LocalMask {
             name: format!("Mask {number}"),
             enabled: true,
             effect: MaskEffect::default(),
+            effect_settings: MaskEffectSettings::default(),
             invert: false,
             opacity: 1.0,
             components: vec![MaskComponent::new(kind, MaskCombineMode::Add)],
@@ -2926,10 +2735,11 @@ mod tests {
             );
             assert!(labels.iter().all(|label| !label.is_empty()));
         }
+        assert!(MaskEffect::Neon.is_implemented());
         assert!(MaskEffect::ALL
             .iter()
             .copied()
-            .filter(|effect| effect != &MaskEffect::Adjustment)
+            .filter(|effect| !matches!(effect, MaskEffect::Adjustment | MaskEffect::Neon))
             .all(|effect| !effect.is_implemented()));
     }
 
@@ -2944,6 +2754,23 @@ mod tests {
         let decoded: LocalMask =
             serde_json::from_value(serialized).expect("deserialize legacy local mask");
         assert_eq!(decoded.effect, MaskEffect::Adjustment);
+        assert_eq!(decoded.effect_settings, MaskEffectSettings::default());
+    }
+
+    #[test]
+    fn neon_settings_round_trip_without_touching_local_adjustments() {
+        let mut mask = LocalMask::new(MaskKind::Fullscreen, 1);
+        mask.effect = MaskEffect::Neon;
+        mask.effect_settings.neon.amount = 42.0;
+        mask.effect_settings.neon.color = [1.0, 0.2, 0.7];
+        mask.adjustments.exposure = 1.25;
+
+        let encoded = serde_json::to_string(&mask).expect("serialize Neon mask");
+        let decoded: LocalMask = serde_json::from_str(&encoded).expect("deserialize Neon mask");
+        assert_eq!(decoded.effect, MaskEffect::Neon);
+        assert_eq!(decoded.effect_settings.neon.amount, 42.0);
+        assert_eq!(decoded.effect_settings.neon.color, [1.0, 0.2, 0.7]);
+        assert_eq!(decoded.adjustments.exposure, 1.25);
     }
 
     #[test]

@@ -1925,9 +1925,14 @@ impl Preview {
             return;
         };
         let selected_component = app.masks.selected_component;
-        // Placeholder effects do not render yet, so keep their coverage
-        // visible even when the mask remembers hidden adjustment values.
-        let neutral = !mask.effect.is_implemented() || mask.adjustments.is_neutral();
+        // Keep coverage visible when the selected type has no active rendered
+        // result. Effect settings are independent from retained Adjustment
+        // values, so switching types remains fully reversible.
+        let neutral = match mask.effect {
+            crate::pipeline::MaskEffect::Adjustment => mask.adjustments.is_neutral(),
+            crate::pipeline::MaskEffect::Neon => !mask.effect_settings.neon.is_active(),
+            _ => true,
+        };
         let accent = selected_component
             .map(mask_component_color)
             .unwrap_or(Color32::from_rgb(78, 163, 255));

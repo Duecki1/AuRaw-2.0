@@ -62,11 +62,18 @@ fn validated_shader_module(name: &str, source: &str) -> naga::Module {
 }
 
 fn naga_name_matches(actual: &str, expected: &str) -> bool {
-    actual == expected || actual.rsplit("::").next() == Some(expected)
+    let actual = actual.rsplit("::").next().unwrap_or(actual);
+    actual == expected
+        || actual
+            .strip_prefix(expected)
+            .is_some_and(|suffix| suffix.starts_with("X_naga_oil_"))
 }
 
 fn unqualified_naga_name(name: &str) -> &str {
-    name.rsplit("::").next().unwrap_or(name)
+    let name = name.rsplit("::").next().unwrap_or(name);
+    name.split_once("X_naga_oil_")
+        .map(|(logical, _)| logical)
+        .unwrap_or(name)
 }
 
 fn has_function(module: &naga::Module, function_name: &str) -> bool {
@@ -1054,7 +1061,12 @@ fn adjustment_modules_expose_the_render_graph_controls() {
             "missing scene-control function {function}"
         );
     }
-    for function in ["apply_creative_effects", "apply_glow", "apply_vignette"] {
+    for function in [
+        "apply_creative_effects",
+        "apply_glow",
+        "apply_vignette",
+        "apply_neon",
+    ] {
         assert!(
             has_function(&creative, function) || has_function(&view, function),
             "missing creative-control function {function}"
@@ -1502,11 +1514,42 @@ fn placeholder_mask_effects_do_not_apply_retained_adjustments() {
     let raw = local_mask_scheduling_fixture(8, 8);
     let exposure = super::ExposureParams::default();
     let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
-    masks.masks[0].effect = crate::pipeline::MaskEffect::Neon;
+    masks.masks[0].effect = crate::pipeline::MaskEffect::Cartoon;
 
     let params = super::GpuParams::new(&exposure, &masks, &raw);
     assert_eq!(params.mask_data[0].metadata[0], 0);
     assert!(!params.needs_intermediate_adjustment_passes());
+}
+
+#[test]
+fn neon_mask_effect_packs_independent_settings_and_schedules_rendering() {
+    let raw = local_mask_scheduling_fixture(8, 8);
+    let exposure = super::ExposureParams::default();
+    let mut masks = local_mask_scheduling_stack(Some(LocalToneSchedulingCase::Contrast));
+    {
+        let mask = &mut masks.masks[0];
+        mask.effect = crate::pipeline::MaskEffect::Neon;
+        mask.effect_settings.neon.amount = 42.0;
+        mask.effect_settings.neon.edge_width = 3.5;
+        mask.effect_settings.neon.detail = 67.0;
+        mask.effect_settings.neon.glow = 81.0;
+        mask.effect_settings.neon.background = 23.0;
+        mask.effect_settings.neon.color = [0.9, 0.2, 0.6];
+    }
+
+    let params = super::GpuParams::new(&exposure, &masks, &raw);
+    let packed = params.mask_data[0];
+    assert_eq!(packed.metadata[0], 1);
+    assert_eq!(packed.metadata[1], 1);
+    assert_eq!(packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT, 1);
+    assert_eq!(packed.adjust_0, [42.0, 3.5, 67.0, 81.0]);
+    assert_eq!(packed.adjust_1, [0.9, 0.2, 0.6, 23.0]);
+    assert!(params.needs_intermediate_adjustment_passes());
+
+    masks.masks[0].effect_settings.neon.amount = 0.0;
+    let neutral = super::GpuParams::new(&exposure, &masks, &raw);
+    assert_eq!(neutral.mask_data[0].metadata[0], 0);
+    assert!(!neutral.needs_intermediate_adjustment_passes());
 }
 
 fn assert_max_delta(
