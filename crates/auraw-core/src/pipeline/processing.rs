@@ -600,6 +600,7 @@ pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -
         || exposure.dehaze.abs() > 1e-6
         || masks.masks.iter().any(|mask| {
             mask.enabled
+                && mask.effect.uses_adjustments()
                 && (mask.adjustments.texture.abs() > 1e-6
                     || mask.adjustments.clarity.abs() > 1e-6
                     || mask.adjustments.dehaze.abs() > 1e-6)

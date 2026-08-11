@@ -207,6 +207,10 @@ impl Sidebar {
                         }
                     }
                     SidebarTab::Masks => {
+                        let adjustment_mask = app
+                            .masks
+                            .selected_mask()
+                            .is_none_or(|mask| mask.effect.uses_adjustments());
                         for (section, icon, label) in [
                             (MaskSection::Properties, regular::SELECTION, "Mask"),
                             (MaskSection::Light, regular::SUN, "Light"),
@@ -216,6 +220,9 @@ impl Sidebar {
                             (MaskSection::Effects, regular::SPARKLE, "Effects"),
                             (MaskSection::ColorMixer, regular::SWATCHES, "Mixer"),
                         ] {
+                            if section != MaskSection::Properties && !adjustment_mask {
+                                continue;
+                            }
                             if Self::mobile_icon_tab(
                                 ui,
                                 icon,

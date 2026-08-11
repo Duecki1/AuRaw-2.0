@@ -1920,7 +1920,9 @@ impl Preview {
             return;
         };
         let selected_component = app.masks.selected_component;
-        let neutral = mask.adjustments.is_neutral();
+        // Placeholder effects do not render yet, so keep their coverage
+        // visible even when the mask remembers hidden adjustment values.
+        let neutral = !mask.effect.is_implemented() || mask.adjustments.is_neutral();
         let accent = selected_component
             .map(mask_component_color)
             .unwrap_or(Color32::from_rgb(78, 163, 255));
