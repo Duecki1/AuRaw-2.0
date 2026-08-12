@@ -305,6 +305,27 @@ fn scene_graph_preserves_native_call_order_and_stage_ownership() {
         .iter()
         .any(|call| call == "apply_profile_view_tone"));
 
+    let image_argument_functions = scene_module
+        .functions
+        .iter()
+        .filter_map(|(_, function)| {
+            function
+                .arguments
+                .iter()
+                .any(|argument| {
+                    matches!(
+                        scene_module.types[argument.ty].inner,
+                        naga::TypeInner::Image { .. }
+                    )
+                })
+                .then(|| function.name.as_deref().unwrap_or("<unnamed>"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        image_argument_functions.is_empty(),
+        "sampled images must stay descriptor-backed to avoid Mali Vulkan compiler crashes; found image parameters in {image_argument_functions:?}"
+    );
+
     let local_calls = entry_point_call_names(&scene_module, "apply_local_scene_tone_node");
     assert!(local_calls
         .iter()

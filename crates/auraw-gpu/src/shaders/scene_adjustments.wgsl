@@ -18,7 +18,6 @@
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(21) var adjustment_base_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
-@group(0) @binding(22) var adjustment_base_tex: texture_2d<f32>;
 @group(0) @binding(23) var local_effects_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 @group(0) @binding(24) var local_effects_tex: texture_2d<f32>;
 @group(0) @binding(25) var creative_effects_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
@@ -149,7 +148,7 @@ fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
     // binds the pre-tone base here; the later presence pass binds its post-tone
     // output here. This keeps both spatial operators sampling the correct domain
     // without allocating another full-frame working texture.
-    return textureLoad(adjustment_base_tex, Common::clamp_pos(pos), 0).xyz;
+    return DetailCapture::adjustment_base_at(pos);
 }
 
 fn local_effects_at(pos: vec2<i32>) -> vec3<f32> {
@@ -439,7 +438,7 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Capture sharpening and all H/S/W/B, Contrast, curve, and local tone
     // controls operate in the scene domain. ProfileToneCurve is excluded so
     // slider semantics remain profile-independent.
-    rgb = DetailCapture::apply_capture_sharpening(adjustment_base_tex, pos, rgb);
+    rgb = DetailCapture::apply_capture_sharpening(pos, rgb);
     rgb = Tonemap::apply_lightroom_tone(rgb, pos);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
