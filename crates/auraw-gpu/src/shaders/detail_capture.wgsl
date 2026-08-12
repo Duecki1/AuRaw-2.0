@@ -1,10 +1,13 @@
 #import auraw::common as Common
 
-// Capture sharpening receives its source texture explicitly. Keeping the
-// sampling and scalar helpers local makes this module independently composable
-// without naga_oil virtual/override callback wiring.
-fn adjustment_base_at(base_tex: texture_2d<f32>, pos: vec2<i32>) -> vec3<f32> {
-    return textureLoad(base_tex, Common::clamp_pos(pos), 0).xyz;
+// Keep the sampled image as a descriptor-backed global instead of passing it
+// through helper functions. Some Mali Vulkan compilers (including the Pixel 7
+// driver's r54 compiler) crash while resolving image operands represented as
+// SPIR-V function parameters.
+@group(0) @binding(22) var adjustment_base_tex: texture_2d<f32>;
+
+fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
+    return textureLoad(adjustment_base_tex, Common::clamp_pos(pos), 0).xyz;
 }
 
 fn log_luminance(rgb: vec3<f32>) -> f32 {
@@ -43,12 +46,11 @@ fn capture_detail_scale() -> f32 {
 }
 
 fn capture_sharpen_blur_ev(
-    base_tex: texture_2d<f32>,
     pos: vec2<i32>,
     radius_pixels: f32,
     step: i32,
 ) -> f32 {
-    let center_ev = log_luminance(adjustment_base_at(base_tex, pos));
+    let center_ev = log_luminance(adjustment_base_at(pos));
     let sigma_samples = clamp(
         radius_pixels / max(f32(step), 1.0),
         Common::effects_uniforms.capture_scale_sigma.z,
@@ -62,7 +64,7 @@ fn capture_sharpen_blur_ev(
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
             let sample_ev = log_luminance(
-                adjustment_base_at(base_tex, pos + vec2<i32>(dx * step, dy * step)),
+                adjustment_base_at(pos + vec2<i32>(dx * step, dy * step)),
             );
             let distance_squared = f32(dx * dx + dy * dy);
             let spatial = exp(-0.5 * distance_squared / (sigma_samples * sigma_samples));
@@ -79,23 +81,22 @@ fn capture_sharpen_blur_ev(
 }
 
 fn capture_sharpen_edge_strength(
-    base_tex: texture_2d<f32>,
     pos: vec2<i32>,
     step: i32,
 ) -> f32 {
-    let left = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(-step, 0)));
-    let right = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(step, 0)));
-    let up = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(0, -step)));
-    let down = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(0, step)));
+    let left = log_luminance(adjustment_base_at(pos + vec2<i32>(-step, 0)));
+    let right = log_luminance(adjustment_base_at(pos + vec2<i32>(step, 0)));
+    let up = log_luminance(adjustment_base_at(pos + vec2<i32>(0, -step)));
+    let down = log_luminance(adjustment_base_at(pos + vec2<i32>(0, step)));
     return length(vec2<f32>(right - left, down - up));
 }
 
-fn capture_local_ev_bounds(base_tex: texture_2d<f32>, pos: vec2<i32>) -> vec2<f32> {
+fn capture_local_ev_bounds(pos: vec2<i32>) -> vec2<f32> {
     var low = 1e20;
     var high = -1e20;
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let value = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(dx, dy)));
+            let value = log_luminance(adjustment_base_at(pos + vec2<i32>(dx, dy)));
             low = min(low, value);
             high = max(high, value);
         }
@@ -104,16 +105,15 @@ fn capture_local_ev_bounds(base_tex: texture_2d<f32>, pos: vec2<i32>) -> vec2<f3
 }
 
 fn capture_impulse_coherence(
-    base_tex: texture_2d<f32>,
     pos: vec2<i32>,
     center_ev: f32,
 ) -> f32 {
     // Isolated single-pixel residuals are usually noise/demosaic sparkle. Real
     // fine detail tends to have support on at least one neighbouring axis.
-    let left = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(-1, 0)));
-    let right = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(1, 0)));
-    let up = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(0, -1)));
-    let down = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(0, 1)));
+    let left = log_luminance(adjustment_base_at(pos + vec2<i32>(-1, 0)));
+    let right = log_luminance(adjustment_base_at(pos + vec2<i32>(1, 0)));
+    let up = log_luminance(adjustment_base_at(pos + vec2<i32>(0, -1)));
+    let down = log_luminance(adjustment_base_at(pos + vec2<i32>(0, 1)));
     let horizontal = min(abs(center_ev - left), abs(center_ev - right));
     let vertical = min(abs(center_ev - up), abs(center_ev - down));
     let support = min(horizontal, vertical);
@@ -143,7 +143,6 @@ fn capture_noise_ev_sigma(rgb: vec3<f32>) -> f32 {
 }
 
 fn apply_capture_sharpening(
-    base_tex: texture_2d<f32>,
     pos: vec2<i32>,
     rgb: vec3<f32>,
 ) -> vec3<f32> {
@@ -159,16 +158,16 @@ fn apply_capture_sharpening(
     let step = clamp(i32(round(max(radius_pixels * 0.48, 1.0))), 1, 3);
 
     let center_ev = log_luminance(rgb);
-    let base_ev = capture_sharpen_blur_ev(base_tex, pos, radius_pixels, step);
+    let base_ev = capture_sharpen_blur_ev(pos, radius_pixels, step);
     let acutance_ev = center_ev - base_ev;
 
     // Detail changes selection within the capture band; it does not widen the
     // radius into the creative Texture band. A restrained 4-neighbour residual
     // restores the very finest structure only near the top of the slider.
-    let micro_left = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(-1, 0)));
-    let micro_right = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(1, 0)));
-    let micro_up = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(0, -1)));
-    let micro_down = log_luminance(adjustment_base_at(base_tex, pos + vec2<i32>(0, 1)));
+    let micro_left = log_luminance(adjustment_base_at(pos + vec2<i32>(-1, 0)));
+    let micro_right = log_luminance(adjustment_base_at(pos + vec2<i32>(1, 0)));
+    let micro_up = log_luminance(adjustment_base_at(pos + vec2<i32>(0, -1)));
+    let micro_down = log_luminance(adjustment_base_at(pos + vec2<i32>(0, 1)));
     let micro_base_ev = 0.25 * (micro_left + micro_right + micro_up + micro_down);
     let micro_ev = center_ev - micro_base_ev;
     let selected_band = mix(acutance_ev, mix(acutance_ev, micro_ev, 0.42), detail * detail);
@@ -181,7 +180,7 @@ fn apply_capture_sharpening(
         Common::effects_uniforms.capture_thresholds.y,
         detail
     ) * mix(1.0, 2.3, shadow_noise);
-    let edge_strength = capture_sharpen_edge_strength(base_tex, pos, 1);
+    let edge_strength = capture_sharpen_edge_strength(pos, 1);
     // A sensor-aware threshold belongs in flat/weakly textured regions, not
     // across an unambiguous structural edge. Relieving it continuously on
     // strong edges keeps Amount 40 at Lightroom-like acutance without turning
@@ -196,7 +195,7 @@ fn apply_capture_sharpening(
         * mix(1.0, 0.12, edge_noise_relief);
     let detail_threshold = max(fixed_threshold, sensor_threshold);
     let thresholded = soft_detail_threshold(selected_band, detail_threshold);
-    let coherence = mix(1.0, capture_impulse_coherence(base_tex, pos, center_ev), 0.72 + 0.20 * detail);
+    let coherence = mix(1.0, capture_impulse_coherence(pos, center_ev), 0.72 + 0.20 * detail);
 
     var edge_mask = 1.0;
     if masking > 1e-6 {
@@ -223,7 +222,7 @@ fn apply_capture_sharpening(
     // Constrain overshoot to the local 3x3 envelope plus a tiny allowance.
     // This is the main halo guard: sharpening can increase edge acutance but
     // cannot invent a bright/dark rim outside the neighbourhood extrema.
-    let bounds = capture_local_ev_bounds(base_tex, pos);
+    let bounds = capture_local_ev_bounds(pos);
     let target_ev = clamp(center_ev + sharpen_ev, bounds.x - 0.018, bounds.y + 0.018);
     sharpen_ev = target_ev - center_ev;
     return max(rgb * exp2(sharpen_ev), vec3<f32>(0.0));

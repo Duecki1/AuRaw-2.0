@@ -23,6 +23,7 @@ auraw-gpu.workspace = true
 anyhow.workspace = true
 egui-phosphor.workspace = true
 half.workspace = true
+hex.workspace = true
 image.workspace = true
 log.workspace = true
 ring.workspace = true

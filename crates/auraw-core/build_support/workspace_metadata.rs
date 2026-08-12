@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use toml_edit::{DocumentMut, Item, Table, Value};
 
 #[derive(Debug)]
 pub struct WorkspaceMetadata {
@@ -103,84 +103,45 @@ fn find_workspace_manifest(manifest_dir: &Path) -> Result<PathBuf, String> {
     ))
 }
 
-fn parse_workspace_metadata(path: &Path, source: &str) -> Result<BTreeMap<String, String>, String> {
-    let mut values = BTreeMap::new();
-    let mut in_metadata = false;
-    for (line_index, raw_line) in source.lines().enumerate() {
-        let line_number = line_index + 1;
-        let line = strip_comment(raw_line).trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_metadata = line == "[workspace.metadata]";
-            continue;
-        }
-        if !in_metadata {
-            continue;
-        }
-        let (key, value) = line.split_once('=').ok_or_else(|| {
+fn parse_workspace_metadata(path: &Path, source: &str) -> Result<Table, String> {
+    let document = source.parse::<DocumentMut>().map_err(|error| {
+        format!("cannot parse {} as TOML: {error}", path.display())
+    })?;
+    let metadata = document
+        .get("workspace")
+        .and_then(Item::as_table)
+        .and_then(|workspace| workspace.get("metadata"))
+        .and_then(Item::as_table)
+        .ok_or_else(|| {
             format!(
-                "{}:{line_number}: expected key = value in [workspace.metadata]",
+                "{} is missing a populated [workspace.metadata] table",
                 path.display()
             )
         })?;
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(format!(
-                "{}:{line_number}: metadata key cannot be empty",
-                path.display()
-            ));
-        }
-        if values
-            .insert(key.to_owned(), value.trim().to_owned())
-            .is_some()
-        {
-            return Err(format!(
-                "{}:{line_number}: duplicate workspace metadata key {key}",
-                path.display()
-            ));
-        }
-    }
-    if values.is_empty() {
+    if metadata.is_empty() {
         return Err(format!(
             "{} is missing a populated [workspace.metadata] table",
             path.display()
         ));
     }
-    Ok(values)
+    Ok(metadata.clone())
 }
 
-fn strip_comment(line: &str) -> &str {
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, character) in line.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-        } else if character == '"' {
-            in_string = true;
-        } else if character == '#' {
-            return &line[..index];
-        }
-    }
-    line
-}
-
-fn required_string(values: &BTreeMap<String, String>, key: &str) -> Result<String, String> {
-    let encoded = required(values, key)?;
+fn required_string(values: &Table, key: &str) -> Result<String, String> {
+    let item = required(values, key)?;
+    let value = item
+        .as_value()
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("workspace.metadata.{key} must be a plain TOML string"))?;
+    let encoded = item.to_string();
+    let encoded = encoded.trim();
     if encoded.len() < 2 || !encoded.starts_with('"') || !encoded.ends_with('"') {
         return Err(format!(
             "workspace.metadata.{key} must be a plain TOML string"
         ));
     }
-    let value = &encoded[1..encoded.len() - 1];
-    if value.is_empty() || value.contains('"') || value.contains('\\') {
+    let raw_value = &encoded[1..encoded.len() - 1];
+    if value.is_empty() || raw_value.contains('"') || raw_value.contains('\\') {
         return Err(format!(
             "workspace.metadata.{key} must be a non-empty unescaped TOML string"
         ));
@@ -188,30 +149,25 @@ fn required_string(values: &BTreeMap<String, String>, key: &str) -> Result<Strin
     Ok(value.to_owned())
 }
 
-fn required_u32(values: &BTreeMap<String, String>, key: &str) -> Result<u32, String> {
-    let encoded = required(values, key)?;
-    let value = encoded
-        .parse::<u32>()
-        .map_err(|_| format!("workspace.metadata.{key} must be a positive integer"))?;
-    if value == 0 {
-        return Err(format!(
-            "workspace.metadata.{key} must be a positive integer"
-        ));
-    }
+fn required_u32(values: &Table, key: &str) -> Result<u32, String> {
+    let value = required(values, key)?
+        .as_value()
+        .and_then(Value::as_integer)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("workspace.metadata.{key} must be a positive integer"))?;
     Ok(value)
 }
 
-fn required_bool(values: &BTreeMap<String, String>, key: &str) -> Result<bool, String> {
-    match required(values, key)? {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(format!("workspace.metadata.{key} must be a boolean")),
-    }
+fn required_bool(values: &Table, key: &str) -> Result<bool, String> {
+    required(values, key)?
+        .as_value()
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("workspace.metadata.{key} must be a boolean"))
 }
 
-fn required<'a>(values: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str, String> {
+fn required<'a>(values: &'a Table, key: &str) -> Result<&'a Item, String> {
     values
         .get(key)
-        .map(String::as_str)
         .ok_or_else(|| format!("workspace.metadata.{key} is required"))
 }
