@@ -16,6 +16,7 @@ egui.workspace = true
 egui-wgpu.workspace = true
 half.workspace = true
 image.workspace = true
+jpeg-encoder.workspace = true
 log.workspace = true
 memmap2.workspace = true
 png.workspace = true

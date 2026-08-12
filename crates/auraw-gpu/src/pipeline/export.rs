@@ -10,7 +10,7 @@ use crate::file_ops::replace_file;
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -1466,7 +1466,6 @@ fn export_tiled_jpeg_geometry(
     let quality = quality.clamp(1, 100);
     let source_linear = temporary_export_path(request.path)?;
     let transformed_rgb = temporary_export_path(request.path)?;
-    let encoded_jpeg = temporary_export_path(request.path)?;
     let result = (|| -> Result<()> {
         {
             let file = OpenOptions::new()
@@ -1552,42 +1551,22 @@ fn export_tiled_jpeg_geometry(
             request.output_height,
         )?;
 
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&encoded_jpeg)
-            .with_context(|| format!("create staged JPEG {}", encoded_jpeg.display()))?;
-        let mut writer = BufWriter::new(file);
-        {
-            let mut encoder =
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality);
-            encoder
-                .encode(
-                    &transformed_map[..],
-                    request.output_width,
-                    request.output_height,
-                    image::ExtendedColorType::Rgb8,
-                )
-                .with_context(|| format!("encode JPEG {}", request.path.display()))?;
-        }
-        writer.flush().context("flush transformed JPEG")?;
-        drop(transformed_map);
-        drop(transformed_file);
-
-        write_final_jpeg(
-            &encoded_jpeg,
+        encode_jpeg_rgb(
+            &transformed_map,
             request.path,
-            request.keep_metadata,
-            request.metadata,
             request.output_width,
             request.output_height,
+            quality,
+            request.keep_metadata,
+            request.metadata,
             request.color.embedded_icc.as_deref(),
         )?;
+        drop(transformed_map);
+        drop(transformed_file);
         Ok(())
     })();
     let _ = fs::remove_file(&source_linear);
     let _ = fs::remove_file(&transformed_rgb);
-    let _ = fs::remove_file(&encoded_jpeg);
     if result.is_err() {
         let _ = fs::remove_file(request.path);
     }
@@ -2286,7 +2265,6 @@ fn export_tiled_jpeg(
     }
     let quality = quality.clamp(1, 100);
     let staged_rgb = temporary_export_path(request.path)?;
-    let encoded_jpeg = temporary_export_path(request.path)?;
     let encode_result = (|| -> Result<()> {
         // Render directly into a disk-backed RGB8 raster. This removes the old
         // full PNG encode -> PNG decode -> RGB staging round trip while keeping
@@ -2317,151 +2295,70 @@ fn export_tiled_jpeg(
             "staged RGB raster length does not match its dimensions"
         );
 
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&encoded_jpeg)
-            .with_context(|| format!("create staged JPEG {}", encoded_jpeg.display()))?;
-        let mut writer = BufWriter::new(file);
-        {
-            let mut encoder =
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality);
-            encoder
-                .encode(
-                    &mapped[..],
-                    request.output_width,
-                    request.output_height,
-                    image::ExtendedColorType::Rgb8,
-                )
-                .with_context(|| format!("encode JPEG {}", request.path.display()))?;
-        }
-        writer.flush().context("flush staged JPEG")?;
-        drop(mapped);
-        drop(rgb_file);
-
-        write_final_jpeg(
-            &encoded_jpeg,
+        encode_jpeg_rgb(
+            &mapped,
             request.path,
-            request.keep_metadata,
-            request.metadata,
             request.output_width,
             request.output_height,
+            quality,
+            request.keep_metadata,
+            request.metadata,
             request.color.embedded_icc.as_deref(),
         )?;
+        drop(mapped);
+        drop(rgb_file);
         Ok(())
     })();
     let _ = fs::remove_file(&staged_rgb);
-    let _ = fs::remove_file(&encoded_jpeg);
     if encode_result.is_err() {
         let _ = fs::remove_file(request.path);
     }
     encode_result
 }
 
-fn write_final_jpeg(
-    encoded_path: &Path,
+#[allow(clippy::too_many_arguments)]
+fn encode_jpeg_rgb(
+    rgb: &[u8],
     output_path: &Path,
-    keep_metadata: bool,
-    metadata: &ExportMetadata,
     output_width: u32,
     output_height: u32,
+    quality: u8,
+    keep_metadata: bool,
+    metadata: &ExportMetadata,
     icc_profile: Option<&[u8]>,
 ) -> Result<()> {
-    if !keep_metadata && icc_profile.is_none() {
-        if is_direct_export_destination(output_path) {
-            let mut input = BufReader::new(
-                fs::File::open(encoded_path)
-                    .with_context(|| format!("open staged JPEG {}", encoded_path.display()))?,
-            );
-            let mut output = BufWriter::new(open_export_destination(output_path)?);
-            std::io::copy(&mut input, &mut output)
-                .context("copy JPEG to direct export destination")?;
-            output.flush().context("flush direct JPEG export")?;
-            return Ok(());
-        }
-        return fs::rename(encoded_path, output_path).with_context(|| {
-            format!(
-                "publish staged JPEG {} to {}",
-                encoded_path.display(),
-                output_path.display()
-            )
-        });
-    }
-
-    let mut input = BufReader::new(
-        fs::File::open(encoded_path)
-            .with_context(|| format!("open staged JPEG {}", encoded_path.display()))?,
-    );
-    let mut soi = [0u8; 2];
-    input.read_exact(&mut soi).context("read JPEG SOI marker")?;
-    anyhow::ensure!(soi == [0xff, 0xd8], "staged JPEG is missing its SOI marker");
-
-    let output = open_export_destination(output_path)
-        .with_context(|| format!("create final JPEG {}", output_path.display()))?;
-    let mut output = BufWriter::new(output);
-    output.write_all(&soi).context("write JPEG SOI marker")?;
-
+    validate_rgb_raster_len(rgb, output_width, output_height)?;
+    let width = u16::try_from(output_width).context("JPEG width exceeds baseline limit")?;
+    let height = u16::try_from(output_height).context("JPEG height exceeds baseline limit")?;
+    let file = open_export_destination(output_path)
+        .with_context(|| format!("create JPEG {}", output_path.display()))?;
+    let mut writer = BufWriter::with_capacity(256 * 1024, file);
+    let encode_started = Instant::now();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut writer, quality.clamp(1, 100));
+    // Preserve the previous encoder's 4:4:4 output. The faster encoder still
+    // uses its AVX2 path when available without lowering chroma resolution.
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_1_1);
     if let Some(profile) = icc_profile {
-        write_jpeg_icc_segments(&mut output, profile)?;
+        encoder
+            .add_icc_profile(profile)
+            .context("embed JPEG ICC profile")?;
     }
-
     if keep_metadata {
-        let tiff = build_exif_payload(metadata, output_width, output_height);
-        let payload_len = 6usize
-            .checked_add(tiff.len())
-            .context("JPEG EXIF payload length overflow")?;
-        let segment_len = payload_len
-            .checked_add(2)
-            .context("JPEG EXIF segment length overflow")?;
-        let segment_len = u16::try_from(segment_len)
-            .context("JPEG EXIF metadata exceeds the APP1 segment limit")?;
-        output
-            .write_all(&[0xff, 0xe1])
-            .context("write JPEG APP1 marker")?;
-        output
-            .write_all(&segment_len.to_be_bytes())
-            .context("write JPEG APP1 length")?;
-        output
-            .write_all(b"Exif\0\0")
-            .context("write JPEG EXIF signature")?;
-        output.write_all(&tiff).context("write JPEG EXIF payload")?;
+        encoder
+            .add_exif_metadata(&build_exif_payload(metadata, output_width, output_height))
+            .context("embed JPEG EXIF metadata")?;
     }
-
-    std::io::copy(&mut input, &mut output).context("copy JPEG image data")?;
-    output.flush().context("flush final JPEG")?;
-    Ok(())
-}
-
-fn write_jpeg_icc_segments<W: Write>(output: &mut W, profile: &[u8]) -> Result<()> {
-    const ICC_HEADER: &[u8; 12] = b"ICC_PROFILE\0";
-    const MAX_CHUNK: usize = 65_519;
-    let total = profile.len().div_ceil(MAX_CHUNK);
-    anyhow::ensure!(
-        total <= u8::MAX as usize,
-        "ICC profile is too large for JPEG APP2 chunking"
-    );
-    for (index, chunk) in profile.chunks(MAX_CHUNK).enumerate() {
-        let payload_len = ICC_HEADER
-            .len()
-            .checked_add(2)
-            .and_then(|value| value.checked_add(chunk.len()))
-            .context("JPEG ICC segment length overflow")?;
-        let segment_len =
-            u16::try_from(payload_len + 2).context("JPEG ICC segment exceeds APP2 size limit")?;
-        output
-            .write_all(&[0xff, 0xe2])
-            .context("write JPEG APP2 marker")?;
-        output
-            .write_all(&segment_len.to_be_bytes())
-            .context("write JPEG ICC length")?;
-        output
-            .write_all(ICC_HEADER)
-            .context("write JPEG ICC signature")?;
-        output
-            .write_all(&[(index + 1) as u8, total as u8])
-            .context("write JPEG ICC sequence")?;
-        output.write_all(chunk).context("write JPEG ICC payload")?;
-    }
+    encoder
+        .encode(rgb, width, height, jpeg_encoder::ColorType::Rgb)
+        .with_context(|| format!("encode JPEG {}", output_path.display()))?;
+    writer.flush().context("flush JPEG export")?;
+    crate::diagnostics::record(format!(
+        "JPEG compression finished in {:.3}s: {}x{} quality={}",
+        encode_started.elapsed().as_secs_f64(),
+        output_width,
+        output_height,
+        quality,
+    ));
     Ok(())
 }
 
@@ -3745,11 +3642,12 @@ fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_heigh
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_tile_spec, build_exif_payload, build_lanczos_contributions, encode_srgb_row,
-        encode_srgb_row_with_format, export_to_destination, publish_completed_export,
-        resolved_export_tile_spec, stitch_linear_tile_into_band, tile_mask_source_region,
-        validate_export_dimensions, ExportMetadata, ExportResizeMode, ExportRowFormat,
-        ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO, MAX_EXPORT_EDGE,
+        bounded_tile_spec, build_exif_payload, build_lanczos_contributions, built_in_srgb_icc,
+        encode_jpeg_rgb, encode_srgb_row, encode_srgb_row_with_format, export_to_destination,
+        publish_completed_export, resolved_export_tile_spec, stitch_linear_tile_into_band,
+        tile_mask_source_region, validate_export_dimensions, ExportMetadata, ExportResizeMode,
+        ExportRowFormat, ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO,
+        MAX_EXPORT_EDGE,
     };
     use crate::pipeline::{
         ExportTile, ExposureParams, GeometryTransform, IccOutputTransform, MaskStack, TileSpec,
@@ -3875,6 +3773,55 @@ mod tests {
         assert_eq!(rgba.len(), 4);
         assert_eq!(rgb.len(), 3);
         assert_eq!(&rgba[..3], &rgb);
+    }
+
+    #[test]
+    fn fast_jpeg_encoder_writes_decodable_pixels_exif_and_icc() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("auraw-jpeg-encoder-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("photo.jpg");
+        let width = 16u32;
+        let height = 8u32;
+        let rgb = (0..width as usize * height as usize * 3)
+            .map(|index| index.wrapping_mul(37) as u8)
+            .collect::<Vec<_>>();
+        let metadata = ExportMetadata {
+            camera_make: "CameraCo".to_owned(),
+            camera_model: "Fast JPEG".to_owned(),
+            ..ExportMetadata::default()
+        };
+        let icc = built_in_srgb_icc();
+
+        encode_jpeg_rgb(
+            &rgb,
+            &destination,
+            width,
+            height,
+            90,
+            true,
+            &metadata,
+            Some(&icc),
+        )
+        .unwrap();
+
+        let encoded = std::fs::read(&destination).unwrap();
+        assert_eq!(&encoded[..2], &[0xff, 0xd8]);
+        assert!(encoded
+            .windows(b"Exif\0\0".len())
+            .any(|window| window == b"Exif\0\0"));
+        assert!(encoded
+            .windows(b"ICC_PROFILE\0".len())
+            .any(|window| window == b"ICC_PROFILE\0"));
+        let decoded = image::load_from_memory_with_format(&encoded, image::ImageFormat::Jpeg)
+            .expect("fast JPEG should decode");
+        assert_eq!((decoded.width(), decoded.height()), (width, height));
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
