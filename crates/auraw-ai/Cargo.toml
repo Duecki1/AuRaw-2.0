@@ -13,6 +13,7 @@ auraw-gpu.workspace = true
 anyhow.workspace = true
 bytemuck.workspace = true
 half.workspace = true
+hex.workspace = true
 image.workspace = true
 log.workspace = true
 rayon.workspace = true

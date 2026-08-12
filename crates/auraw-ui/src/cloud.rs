@@ -1143,12 +1143,7 @@ fn save_metadata(path: &Path, metadata: &CachedAssetMetadata) -> Result<(), Stri
 }
 
 fn sha256_hex(context: Sha256Context) -> String {
-    context
-        .finish()
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex::encode(context.finish().as_ref())
 }
 
 fn download_to_path(

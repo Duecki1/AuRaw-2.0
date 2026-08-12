@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 use zip::ZipArchive;
 
 const BENCHMARK_SCENES: [(&str, &str, u32, u32); 2] = [
@@ -770,45 +770,41 @@ fn command_validate_math(args: ValidateMathArgs) -> Result<()> {
 }
 
 fn validate_generated_binaries(root: &Path) -> Result<Vec<String>> {
-    fn visit(root: &Path, directory: &Path, errors: &mut Vec<String>) -> Result<()> {
-        for entry in fs::read_dir(directory).map_err(|error| {
-            XtaskError::new(format!(
-                "cannot read directory {}: {error}",
-                directory.display()
-            ))
-        })? {
-            let entry = entry?;
-            let path = entry.path();
-            let relative = relative_display(root, &path);
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                if IGNORED_BINARY_ROOTS.iter().any(|ignored| {
-                    relative == *ignored || relative.starts_with(&format!("{ignored}/"))
-                }) {
-                    continue;
-                }
-                visit(root, &path, errors)?;
-            } else if file_type.is_file() {
-                let extension = path
-                    .extension()
-                    .and_then(OsStr::to_str)
-                    .map(str::to_ascii_lowercase);
-                if extension
-                    .as_deref()
-                    .is_some_and(|extension| BINARY_SUFFIXES.contains(&extension))
-                    && !ALLOWED_BINARY_PATHS.contains(&relative.as_str())
-                {
-                    errors.push(format!(
-                        "generated binary is present in the source tree: {relative}"
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
     let mut errors = Vec::new();
-    visit(root, root, &mut errors)?;
+    let entries = walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                return true;
+            }
+            let relative = relative_display(root, entry.path());
+            !IGNORED_BINARY_ROOTS.iter().any(|ignored| {
+                relative == *ignored || relative.starts_with(&format!("{ignored}/"))
+            })
+        });
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            XtaskError::new(format!("cannot walk source tree {}: {error}", root.display()))
+        })?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let relative = relative_display(root, path);
+        let extension = path
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(str::to_ascii_lowercase);
+        if extension
+            .as_deref()
+            .is_some_and(|extension| BINARY_SUFFIXES.contains(&extension))
+            && !ALLOWED_BINARY_PATHS.contains(&relative.as_str())
+        {
+            errors.push(format!(
+                "generated binary is present in the source tree: {relative}"
+            ));
+        }
+    }
     errors.sort();
     Ok(errors)
 }
@@ -1048,24 +1044,18 @@ fn collect_files_with_extensions(
     extensions: &[&str],
     output: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    for entry in fs::read_dir(directory).map_err(|error| {
-        XtaskError::new(format!(
-            "cannot read directory {}: {error}",
-            directory.display()
-        ))
-    })? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_files_with_extensions(&path, extensions, output)?;
-        } else if file_type.is_file()
-            && path
+    for entry in walkdir::WalkDir::new(directory) {
+        let entry = entry.map_err(|error| {
+            XtaskError::new(format!("cannot walk directory {}: {error}", directory.display()))
+        })?;
+        if entry.file_type().is_file()
+            && entry
+                .path()
                 .extension()
                 .and_then(OsStr::to_str)
                 .is_some_and(|extension| extensions.contains(&extension))
         {
-            output.push(path);
+            output.push(entry.into_path());
         }
     }
     Ok(())
@@ -1531,22 +1521,7 @@ fn collect_files_with_extension(
     extension: &str,
     output: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    for entry in fs::read_dir(directory).map_err(|error| {
-        XtaskError::new(format!(
-            "cannot read directory {}: {error}",
-            directory.display()
-        ))
-    })? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_files_with_extension(&path, extension, output)?;
-        } else if file_type.is_file() && path.extension() == Some(OsStr::new(extension)) {
-            output.push(path);
-        }
-    }
-    Ok(())
+    collect_files_with_extensions(directory, &[extension], output)
 }
 
 fn rust_string_literals(source: &str) -> impl Iterator<Item = String> + '_ {
@@ -2096,7 +2071,7 @@ fn command_verify_android_16kb(args: AndroidArgs) -> Result<()> {
         )));
     }
 
-    let temporary = TemporaryDirectory::new("auraw-16kb")?;
+    let temporary = temporary_directory("auraw-16kb")?;
     let libraries = extract_64_bit_libraries(&apk, temporary.path())?;
     if libraries.is_empty() {
         println!("No 64-bit native libraries found; ELF 16 KB check not applicable.");
@@ -2300,16 +2275,14 @@ fn directory_has_extension(path: &Path, extension: &str) -> Result<bool> {
     if !path.is_dir() {
         return Ok(false);
     }
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(directory) = stack.pop() {
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
-            let candidate = entry.path();
-            if candidate.is_dir() {
-                stack.push(candidate);
-            } else if candidate.extension() == Some(OsStr::new(extension)) {
-                return Ok(true);
-            }
+    for entry in walkdir::WalkDir::new(path) {
+        let entry = entry.map_err(|error| {
+            XtaskError::new(format!("cannot walk directory {}: {error}", path.display()))
+        })?;
+        if entry.file_type().is_file()
+            && entry.path().extension() == Some(OsStr::new(extension))
+        {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -2830,7 +2803,7 @@ impl DigestAlgorithm {
 
 fn parse_expected_digest(source: &str) -> Result<(DigestAlgorithm, String)> {
     let (algorithm, expected) = if source.starts_with("https://") {
-        let temporary = TemporaryDirectory::new("auraw-checksum")?;
+        let temporary = temporary_directory("auraw-checksum")?;
         let target = temporary.path().join("checksum.txt");
         download_https(source, &target, 9, 300)?;
         let text = fs::read_to_string(&target).map_err(|error| {
@@ -2959,7 +2932,7 @@ fn digest_file(path: &Path, algorithm: DigestAlgorithm) -> Result<String> {
         }
         context.update(&buffer[..count]);
     }
-    Ok(hex_encode(context.finish().as_ref()))
+    Ok(hex::encode(context.finish().as_ref()))
 }
 
 fn replace_file(source: &Path, destination: &Path) -> Result<()> {
@@ -3159,158 +3132,8 @@ fn validate_required_workspace_metadata(
     Ok(())
 }
 
-struct Sha256 {
-    state: [u32; 8],
-    buffer: [u8; 64],
-    buffer_len: usize,
-    total_len: u64,
-}
-
-impl Sha256 {
-    fn new() -> Self {
-        Self {
-            state: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-                0x5be0cd19,
-            ],
-            buffer: [0; 64],
-            buffer_len: 0,
-            total_len: 0,
-        }
-    }
-
-    fn update(&mut self, mut input: &[u8]) {
-        self.total_len = self.total_len.wrapping_add(input.len() as u64);
-        if self.buffer_len != 0 {
-            let needed = 64 - self.buffer_len;
-            let copied = needed.min(input.len());
-            self.buffer[self.buffer_len..self.buffer_len + copied]
-                .copy_from_slice(&input[..copied]);
-            self.buffer_len += copied;
-            input = &input[copied..];
-            if self.buffer_len == 64 {
-                let block = self.buffer;
-                self.compress(&block);
-                self.buffer_len = 0;
-            }
-        }
-        while input.len() >= 64 {
-            let block: &[u8; 64] = input[..64].try_into().expect("64-byte SHA-256 block");
-            self.compress(block);
-            input = &input[64..];
-        }
-        if !input.is_empty() {
-            self.buffer[..input.len()].copy_from_slice(input);
-            self.buffer_len = input.len();
-        }
-    }
-
-    fn finalize(mut self) -> [u8; 32] {
-        let bit_len = self.total_len.wrapping_mul(8);
-        self.buffer[self.buffer_len] = 0x80;
-        self.buffer_len += 1;
-        if self.buffer_len > 56 {
-            self.buffer[self.buffer_len..].fill(0);
-            let block = self.buffer;
-            self.compress(&block);
-            self.buffer = [0; 64];
-            self.buffer_len = 0;
-        }
-        self.buffer[self.buffer_len..56].fill(0);
-        self.buffer[56..64].copy_from_slice(&bit_len.to_be_bytes());
-        let block = self.buffer;
-        self.compress(&block);
-
-        let mut digest = [0u8; 32];
-        for (chunk, word) in digest.chunks_exact_mut(4).zip(self.state) {
-            chunk.copy_from_slice(&word.to_be_bytes());
-        }
-        digest
-    }
-
-    fn compress(&mut self, block: &[u8; 64]) {
-        const K: [u32; 64] = [
-            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-            0xc67178f2,
-        ];
-        let mut schedule = [0u32; 64];
-        for (index, chunk) in block.chunks_exact(4).take(16).enumerate() {
-            schedule[index] = u32::from_be_bytes(chunk.try_into().expect("four-byte word"));
-        }
-        for index in 16..64 {
-            let s0 = schedule[index - 15].rotate_right(7)
-                ^ schedule[index - 15].rotate_right(18)
-                ^ (schedule[index - 15] >> 3);
-            let s1 = schedule[index - 2].rotate_right(17)
-                ^ schedule[index - 2].rotate_right(19)
-                ^ (schedule[index - 2] >> 10);
-            schedule[index] = schedule[index - 16]
-                .wrapping_add(s0)
-                .wrapping_add(schedule[index - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
-        for index in 0..64 {
-            let sigma1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choose = (e & f) ^ ((!e) & g);
-            let temp1 = h
-                .wrapping_add(sigma1)
-                .wrapping_add(choose)
-                .wrapping_add(K[index])
-                .wrapping_add(schedule[index]);
-            let sigma0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = sigma0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-        for (state, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-            *state = state.wrapping_add(value);
-        }
-    }
-}
-
 fn sha256_file(path: &Path) -> Result<String> {
-    let file = File::open(path)
-        .map_err(|error| XtaskError::new(format!("cannot open {}: {error}", path.display())))?;
-    let mut reader = io::BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| XtaskError::new(format!("cannot read {}: {error}", path.display())))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex_encode(&hasher.finalize()))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
+    digest_file(path, DigestAlgorithm::Sha256)
 }
 
 struct TemporaryFile {
@@ -3431,42 +3254,18 @@ fn parse_alignment_power(line: &str) -> Option<u32> {
     }
 }
 
-struct TemporaryDirectory {
-    path: PathBuf,
-}
-
-impl TemporaryDirectory {
-    fn new(prefix: &str) -> Result<Self> {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = env::temp_dir().join(format!("{prefix}-{}-{nonce}", std::process::id()));
-        fs::create_dir(&path).map_err(|error| {
-            XtaskError::new(format!(
-                "cannot create temporary directory {}: {error}",
-                path.display()
-            ))
-        })?;
-        Ok(Self { path })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TemporaryDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
+fn temporary_directory(prefix: &str) -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(&format!("{prefix}-"))
+        .tempdir()
+        .map_err(|error| XtaskError::new(format!("cannot create temporary directory: {error}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        hex_encode, median, native_library_path, parse_alignment_power, percentile_95,
-        validate_generated_binaries, Sha256, TemporaryDirectory,
+        median, native_library_path, parse_alignment_power, percentile_95, temporary_directory,
+        validate_generated_binaries,
     };
     use std::fs;
 
@@ -3487,18 +3286,19 @@ mod tests {
     }
 
     #[test]
-    fn sha256_matches_standard_test_vector() {
-        let mut hasher = Sha256::new();
-        hasher.update(b"abc");
+    fn sha256_file_matches_standard_test_vector() {
+        let directory = temporary_directory("auraw-sha256-test").unwrap();
+        let path = directory.path().join("fixture.bin");
+        fs::write(&path, b"abc").unwrap();
         assert_eq!(
-            hex_encode(&hasher.finalize()),
+            super::sha256_file(&path).unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 
     #[test]
     fn ignores_android_cmake_outputs_but_rejects_source_binaries() {
-        let directory = TemporaryDirectory::new("auraw-generated-binary-test").unwrap();
+        let directory = temporary_directory("auraw-generated-binary-test").unwrap();
         let generated = directory
             .path()
             .join("android/app/.cxx/Debug/arm64-v8a/CMakeFiles/raw.dir/colorconst.cpp.o");

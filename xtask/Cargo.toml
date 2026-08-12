@@ -8,7 +8,10 @@ publish = false
 
 [dependencies]
 image.workspace = true
+hex.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
+walkdir.workspace = true
 zip.workspace = true

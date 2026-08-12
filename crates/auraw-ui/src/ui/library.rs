@@ -11242,11 +11242,7 @@ mod tests {
 
     #[cfg(not(target_os = "android"))]
     fn sha256_hex(bytes: &[u8]) -> String {
-        ring::digest::digest(&ring::digest::SHA256, bytes)
-            .as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        hex::encode(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
     }
 
     #[cfg(not(target_os = "android"))]
