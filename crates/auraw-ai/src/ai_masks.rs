@@ -404,10 +404,7 @@ fn sha256_reader(reader: &mut impl Read) -> Result<[u8; 32]> {
 }
 
 pub fn sha256_file_hex(path: &Path) -> Result<String> {
-    Ok(sha256_file(path)?
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok(hex::encode(sha256_file(path)?))
 }
 
 fn download_model(

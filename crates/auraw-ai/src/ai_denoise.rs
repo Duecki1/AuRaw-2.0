@@ -82,7 +82,7 @@ pub fn model_cache_dir() -> PathBuf {
 
 pub fn result_cache_path(root: &Path, source_identity: &str) -> PathBuf {
     let digest = ring::digest::digest(&SHA256, source_identity.as_bytes());
-    root.join(format!("{}.auraw-ai.zip", hex_digest(digest.as_ref())))
+    root.join(format!("{}.auraw-ai.zip", hex::encode(digest.as_ref())))
 }
 
 /// Loads a source- and process-validated derived RawNIND scene. A missing file
@@ -610,17 +610,7 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(hex_digest(hasher.finish().as_ref()))
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
+    Ok(hex::encode(hasher.finish().as_ref()))
 }
 
 fn download_package(
@@ -687,7 +677,7 @@ fn download_package(
             "RawNIND package received {downloaded} bytes, expected {RAWNIND_PACKAGE_BYTES}"
         );
         anyhow::ensure!(
-            hex_digest(hasher.finish().as_ref()) == RAWNIND_PACKAGE_SHA256,
+            hex::encode(hasher.finish().as_ref()) == RAWNIND_PACKAGE_SHA256,
             "RawNIND package SHA-256 mismatch"
         );
         ensure_not_cancelled(cancellation)?;
