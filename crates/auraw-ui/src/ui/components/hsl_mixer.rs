@@ -1,6 +1,8 @@
 use crate::app::HslMixerColor;
 use crate::pipeline::HSL_HUE_LIMIT;
-use crate::ui::components::adjustment_slider::accented_adjustment_slider;
+use crate::ui::components::adjustment_slider::{
+    accented_gradient_adjustment_slider, SliderGradient,
+};
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Layout, RichText, Sense, Stroke, StrokeKind, Ui,
 };
@@ -78,7 +80,7 @@ pub fn hsl_mixer(
     }
 
     ui.push_id(("hsl-color", index), |ui| {
-        changed |= accented_adjustment_slider(
+        changed |= accented_gradient_adjustment_slider(
             ui,
             "Hue",
             &mut hue[index],
@@ -87,8 +89,13 @@ pub fn hsl_mixer(
             1.0,
             Some("Shift this color range toward neighboring hues."),
             accent,
+            SliderGradient::ChannelHue {
+                left: CHANNELS[(index + CHANNELS.len() - 2) % CHANNELS.len()].1,
+                center: accent,
+                right: CHANNELS[(index + 2) % CHANNELS.len()].1,
+            },
         );
-        changed |= accented_adjustment_slider(
+        changed |= accented_gradient_adjustment_slider(
             ui,
             "Saturation",
             &mut saturation[index],
@@ -97,8 +104,9 @@ pub fn hsl_mixer(
             1.0,
             Some("Increase or reduce this color range's intensity."),
             accent,
+            SliderGradient::Saturation(accent),
         );
-        changed |= accented_adjustment_slider(
+        changed |= accented_gradient_adjustment_slider(
             ui,
             "Luminance",
             &mut luminance[index],
@@ -107,6 +115,7 @@ pub fn hsl_mixer(
             1.0,
             Some("Brighten or darken this color range."),
             accent,
+            SliderGradient::Luminance(accent),
         );
     });
 

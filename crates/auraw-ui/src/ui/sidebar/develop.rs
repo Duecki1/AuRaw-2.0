@@ -147,7 +147,7 @@ impl Sidebar {
     fn show_basic(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Light", true, foldable, |ui| {
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Exposure",
                 &mut exposure.exposure,
@@ -155,8 +155,9 @@ impl Sidebar {
                 2,
                 0.05,
                 Some("Overall scene-linear brightness in exposure stops."),
+                SliderGradient::Brightness,
             );
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Contrast",
                 &mut exposure.contrast,
@@ -164,8 +165,9 @@ impl Sidebar {
                 0,
                 1.0,
                 Some("Maps -100%..+100% to darktable's normal sigmoid contrast range, 0.7..3.0 around its 1.5 default."),
+                SliderGradient::Brightness,
             );
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Highlights",
                 &mut exposure.highlights,
@@ -173,8 +175,9 @@ impl Sidebar {
                 0,
                 1.0,
                 Some("Recovers or brightens the upper tonal range without hard clipping."),
+                SliderGradient::Brightness,
             );
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Shadows",
                 &mut exposure.shadows,
@@ -182,8 +185,9 @@ impl Sidebar {
                 0,
                 1.0,
                 Some("Opens or deepens the lower tonal range."),
+                SliderGradient::Brightness,
             );
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Whites",
                 &mut exposure.whites,
@@ -191,8 +195,9 @@ impl Sidebar {
                 0,
                 1.0,
                 Some("Moves the bright endpoint and specular range."),
+                SliderGradient::Brightness,
             );
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Blacks",
                 &mut exposure.blacks,
@@ -200,6 +205,7 @@ impl Sidebar {
                 0,
                 1.0,
                 Some("Moves the display black/toe endpoint while preserving sensor black calibration."),
+                SliderGradient::Brightness,
             );
         });
         changed
@@ -452,7 +458,7 @@ impl Sidebar {
                     // Include this image's neutral so loading another camera
                     // white balance also updates the reset value.
                     .push_id(base_kelvin.to_bits(), |ui| {
-                        adjustment_slider(
+                        gradient_adjustment_slider(
                             ui,
                             "Temperature (K)",
                             &mut kelvin,
@@ -461,6 +467,7 @@ impl Sidebar {
                             0,
                             10.0,
                             Some("Scene illuminant color temperature in Kelvin; the as-shot camera white balance is the reset value."),
+                            SliderGradient::Temperature,
                         )
                     })
                     .inner;
@@ -473,7 +480,7 @@ impl Sidebar {
                 let base_tint = raw.as_shot_white_balance().map_or(tint, |value| value.1);
                 let tint_changed = ui
                     .push_id(base_tint.to_bits(), |ui| {
-                        adjustment_slider(
+                        gradient_adjustment_slider(
                             ui,
                             "Tint",
                             &mut tint,
@@ -481,6 +488,7 @@ impl Sidebar {
                             3,
                             0.005,
                             Some("darktable-compatible absolute camera tint; the as-shot value is the reset value."),
+                            SliderGradient::Tint,
                         )
                     })
                     .inner;
@@ -507,7 +515,7 @@ impl Sidebar {
                 &mut exposure.hue,
                 Some("Rotates every color around the perceptual color wheel while preserving lightness and chroma."),
             );
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Vibrance",
                 &mut exposure.vibrance,
@@ -515,8 +523,9 @@ impl Sidebar {
                 0,
                 1.0,
                 Some("Perceptual colorfulness with protection for saturated colors and skin hues."),
+                SliderGradient::Colorfulness,
             );
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Saturation",
                 &mut exposure.saturation,
@@ -524,6 +533,7 @@ impl Sidebar {
                 0,
                 1.0,
                 Some("Uniform perceptual chroma scaling."),
+                SliderGradient::Colorfulness,
             );
         });
         changed
@@ -751,7 +761,7 @@ impl Sidebar {
             ui.separator();
             ui.push_id("vignette", |ui| {
                 ui.strong("Vignette");
-                changed |= adjustment_slider(
+                changed |= gradient_adjustment_slider(
                     ui,
                     "Amount",
                     &mut exposure.vignette_amount,
@@ -759,6 +769,7 @@ impl Sidebar {
                     0,
                     1.0,
                     Some("Darkens negative values or brightens positive values toward the image edges."),
+                    SliderGradient::Brightness,
                 );
                 changed |= adjustment_slider(
                     ui,
@@ -787,7 +798,7 @@ impl Sidebar {
                     1.0,
                     Some("Controls the softness of the vignette transition."),
                 );
-                changed |= adjustment_slider(
+                changed |= gradient_adjustment_slider(
                     ui,
                     "Highlights",
                     &mut exposure.vignette_highlights,
@@ -795,6 +806,7 @@ impl Sidebar {
                     0,
                     1.0,
                     Some("Restores bright edge highlights when using a dark vignette."),
+                    SliderGradient::Brightness,
                 );
             });
         });
@@ -837,7 +849,7 @@ impl Sidebar {
                 0.01,
                 None,
             );
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Target white (%)",
                 &mut exposure.sigmoid.display_white_target,
@@ -845,8 +857,9 @@ impl Sidebar {
                 1,
                 1.0,
                 None,
+                SliderGradient::Brightness,
             );
-            changed |= adjustment_slider(
+            changed |= gradient_adjustment_slider(
                 ui,
                 "Target black (%)",
                 &mut exposure.sigmoid.display_black_target,
@@ -854,6 +867,7 @@ impl Sidebar {
                 4,
                 0.0001,
                 None,
+                SliderGradient::Brightness,
             );
 
             let old_method = exposure.sigmoid.color_processing;

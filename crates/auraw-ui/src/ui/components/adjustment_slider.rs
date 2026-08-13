@@ -21,7 +21,6 @@ const HANDLE_RADIUS: f32 = 8.0;
 const HANDLE_TOUCH_RADIUS: f32 = 18.0;
 const TRACK_DRAG_THRESHOLD: f32 = 8.0;
 const HANDLE_DRAG_THRESHOLD: f32 = 2.0;
-const FINE_HUE_DRAG_SCALE: f64 = 1.0 / 12.0;
 #[cfg(not(target_os = "android"))]
 const CONTROL_GAP: f32 = 4.0;
 #[cfg(target_os = "android")]
@@ -30,6 +29,40 @@ const CONTROL_GAP: f32 = 2.0;
 const ROW_BOTTOM_SPACE: f32 = 7.0;
 #[cfg(target_os = "android")]
 const ROW_BOTTOM_SPACE: f32 = 3.0;
+
+
+/// Semantic color treatment for slider tracks.
+///
+/// Gradients are opt-in so only controls whose values have a clear visual
+/// color meaning use them. Interaction, reset, focus, and keyboard behavior
+/// remain shared by every adjustment slider.
+#[derive(Clone, Copy, Debug)]
+pub enum SliderGradient {
+    /// Map the track directly to hue angles in degrees.
+    HueDegrees { start: f32, end: f32 },
+    /// Shift around a named color channel toward its neighboring ranges.
+    ChannelHue {
+        left: egui::Color32,
+        center: egui::Color32,
+        right: egui::Color32,
+    },
+    /// Dark-to-bright tonal meaning.
+    Brightness,
+    /// Cool-to-warm white-balance meaning.
+    Temperature,
+    /// Green-to-magenta white-balance meaning.
+    Tint,
+    /// Desaturated-to-multi-hue treatment for whole-image saturation/vibrance.
+    ///
+    /// The negative half remains neutral while the positive half traverses a
+    /// restrained spectrum, communicating increasing colorfulness without
+    /// tying the control to one arbitrary representative hue.
+    Colorfulness,
+    /// Desaturated-to-saturated treatment around a representative color.
+    Saturation(egui::Color32),
+    /// Dark-to-channel-to-bright treatment around a representative color.
+    Luminance(egui::Color32),
+}
 
 fn slider_scroll_lock_id() -> egui::Id {
     egui::Id::new("auraw-adjustment-slider-scroll-lock")
@@ -83,16 +116,33 @@ where
     Num: egui::emath::Numeric + Copy,
 {
     adjustment_slider_impl(
-        ui, label, value, range, decimals, speed, hover_text, None, None, false, 1.0,
+        ui, label, value, range, decimals, speed, hover_text, None, None, None,
     )
 }
 
-/// Adjustment slider with a color accent for channel-based controls.
-///
-/// The geometry and interaction remain identical to [`adjustment_slider`];
-/// only the channel swatch, active track, and handle use the supplied color.
+/// Adjustment slider with a semantic color gradient.
 #[allow(clippy::too_many_arguments)]
-pub fn accented_adjustment_slider<Num>(
+pub fn gradient_adjustment_slider<Num>(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Num,
+    range: RangeInclusive<Num>,
+    decimals: usize,
+    speed: f64,
+    hover_text: Option<&str>,
+    gradient: SliderGradient,
+) -> bool
+where
+    Num: egui::emath::Numeric + Copy,
+{
+    adjustment_slider_impl(
+        ui, label, value, range, decimals, speed, hover_text, None, None, Some(gradient),
+    )
+}
+
+/// Adjustment slider with both a channel accent and semantic gradient.
+#[allow(clippy::too_many_arguments)]
+pub fn accented_gradient_adjustment_slider<Num>(
     ui: &mut Ui,
     label: &str,
     value: &mut Num,
@@ -101,6 +151,7 @@ pub fn accented_adjustment_slider<Num>(
     speed: f64,
     hover_text: Option<&str>,
     accent: egui::Color32,
+    gradient: SliderGradient,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
@@ -115,40 +166,29 @@ where
         hover_text,
         None,
         Some(accent),
-        false,
-        1.0,
+        Some(gradient),
     )
 }
 
-/// Lightroom-style whole-spectrum Hue control.
-///
-/// Hue is stored in degrees. The optional fine mode only changes interaction
-/// sensitivity; it never changes the saved value or the available half-turn
-/// range, so toggling it cannot alter an edit.
+/// Whole-spectrum Hue control using the exact same interaction model as every
+/// other adjustment slider. The only specialization is its visual track and
+/// explicit neutral reset value.
 pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&str>) -> bool {
-    let fine_id = ui.id().with("hue-fine-adjustment");
-    let mut fine = ui.data(|data| data.get_temp::<bool>(fine_id).unwrap_or(false));
-    let changed = adjustment_slider_impl(
+    adjustment_slider_impl(
         ui,
         "Hue",
         value,
         -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES..=crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
         1,
-        if fine { 0.1 } else { 1.0 },
+        1.0,
         hover_text,
         Some(0.0),
         None,
-        true,
-        if fine { FINE_HUE_DRAG_SCALE } else { 1.0 },
-    );
-    let fine_response = ui.checkbox(&mut fine, "Use fine adjustment").on_hover_text(
-        "Slows Hue dragging for precise corrections without changing the saved adjustment.",
-    );
-    if fine_response.changed() {
-        ui.data_mut(|data| data.insert_temp(fine_id, fine));
-    }
-    ui.add_space(ROW_BOTTOM_SPACE);
-    changed
+        Some(SliderGradient::HueDegrees {
+            start: -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
+            end: crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
+        }),
+    )
 }
 
 /// Adjustment slider with an explicit semantic reset value.
@@ -180,8 +220,7 @@ where
         hover_text,
         Some(reset_value.to_f64()),
         None,
-        false,
-        1.0,
+        None,
     )
 }
 
@@ -196,8 +235,7 @@ fn adjustment_slider_impl<Num>(
     hover_text: Option<&str>,
     explicit_reset_value: Option<f64>,
     accent: Option<egui::Color32>,
-    hue_track: bool,
-    drag_sensitivity: f64,
+    gradient: Option<SliderGradient>,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
@@ -280,8 +318,7 @@ where
                 hover_text,
                 reset_value,
                 accent,
-                hue_track,
-                drag_sensitivity,
+                gradient,
             );
             ui.add_space(ROW_BOTTOM_SPACE);
         });
@@ -319,8 +356,7 @@ fn guarded_slider<Num>(
     hover_text: Option<&str>,
     reset_value: f64,
     accent: Option<egui::Color32>,
-    hue_track: bool,
-    drag_sensitivity: f64,
+    gradient: Option<SliderGradient>,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
@@ -380,25 +416,6 @@ where
     });
     let mut slider_drag_active = pointer.2
         && slider_scroll_lock_owner(ui.ctx()).is_some_and(|owner| owner == slider_drag_id);
-    let drag_start_value_id = ui.id().with("guarded-slider-drag-start-value");
-    if !pointer.2 {
-        ui.data_mut(|data| data.remove::<f64>(drag_start_value_id));
-    }
-    let drag_start_value =
-        if drag_sensitivity < 1.0 && pointer.0.is_some_and(|origin| rect.contains(origin)) {
-            Some(ui.data_mut(|data| {
-                if let Some(initial) = data.get_temp::<f64>(drag_start_value_id) {
-                    initial
-                } else {
-                    let initial = value.to_f64();
-                    data.insert_temp(drag_start_value_id, initial);
-                    initial
-                }
-            }))
-        } else {
-            None
-        };
-
     if !reset_requested {
         if let (Some(origin), Some(position), true) = pointer {
             if slider_drag_active {
@@ -406,17 +423,7 @@ where
                 // if the finger moves vertically or leaves the original hit rect.
                 // This prevents the parent ScrollArea from waking up mid-drag.
                 lock_slider_scroll(ui.ctx(), slider_drag_id);
-                changed |= set_from_pointer_with_sensitivity(
-                    value,
-                    start,
-                    end,
-                    decimals,
-                    track_rect,
-                    origin.x,
-                    position.x,
-                    drag_start_value,
-                    drag_sensitivity,
-                );
+                changed |= set_from_pointer(value, start, end, decimals, track_rect, position.x);
             } else if rect.contains(origin) {
                 let delta = position - origin;
                 let began_on_handle = handle_hit_rect.contains(origin);
@@ -431,17 +438,7 @@ where
                     slider_drag_active = true;
                     lock_slider_scroll(ui.ctx(), slider_drag_id);
                     track_response.request_focus();
-                    changed |= set_from_pointer_with_sensitivity(
-                        value,
-                        start,
-                        end,
-                        decimals,
-                        track_rect,
-                        origin.x,
-                        position.x,
-                        drag_start_value,
-                        drag_sensitivity,
-                    );
+                    changed |= set_from_pointer(value, start, end, decimals, track_rect, position.x);
                 }
             }
         }
@@ -477,13 +474,10 @@ where
     };
 
     let painter = ui.painter();
-    let visual_accent = if hue_track {
-        Some(hue_shift_color(fraction))
-    } else {
-        accent
-    };
-    if hue_track {
-        paint_hue_track(painter, track_rect);
+    let gradient_color = gradient.map(|gradient| gradient_color_at(gradient, fraction));
+    let visual_accent = gradient_color.or(accent);
+    if let Some(gradient) = gradient {
+        paint_gradient_track(painter, track_rect, gradient);
     } else {
         painter.rect_filled(
             track_rect,
@@ -503,7 +497,7 @@ where
     };
     let fill_left = fill_origin.min(handle_x);
     let fill_right = fill_origin.max(handle_x);
-    if !hue_track && fill_right - fill_left > 0.25 {
+    if gradient.is_none() && fill_right - fill_left > 0.25 {
         let fill_rect = egui::Rect::from_min_max(
             egui::pos2(fill_left, track_rect.top()),
             egui::pos2(fill_right, track_rect.bottom()),
@@ -562,38 +556,14 @@ where
     set_numeric(value, start + (end - start) * fraction as f64, decimals)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn set_from_pointer_with_sensitivity<Num>(
-    value: &mut Num,
-    start: f64,
-    end: f64,
-    decimals: usize,
-    track_rect: egui::Rect,
-    pointer_origin_x: f32,
-    pointer_x: f32,
-    drag_start_value: Option<f64>,
-    sensitivity: f64,
-) -> bool
-where
-    Num: egui::emath::Numeric + Copy,
-{
-    let Some(initial) = drag_start_value.filter(|_| sensitivity < 1.0) else {
-        return set_from_pointer(value, start, end, decimals, track_rect, pointer_x);
-    };
-    let delta = f64::from(pointer_x - pointer_origin_x) / f64::from(track_rect.width().max(1.0));
-    let next =
-        (initial + (end - start) * delta * sensitivity).clamp(start.min(end), start.max(end));
-    set_numeric(value, next, decimals)
-}
-
-fn paint_hue_track(painter: &egui::Painter, rect: egui::Rect) {
-    const SEGMENTS: usize = 48;
+fn paint_gradient_track(painter: &egui::Painter, rect: egui::Rect, gradient: SliderGradient) {
+    const SEGMENTS: usize = 64;
     for segment in 0..SEGMENTS {
         let left_fraction = segment as f32 / SEGMENTS as f32;
         let right_fraction = (segment + 1) as f32 / SEGMENTS as f32;
         let left = egui::lerp(rect.left()..=rect.right(), left_fraction);
         let right = egui::lerp(rect.left()..=rect.right(), right_fraction);
-        let color = hue_shift_color((left_fraction + right_fraction) * 0.5);
+        let color = gradient_color_at(gradient, (left_fraction + right_fraction) * 0.5);
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(left - 0.25, rect.top()),
@@ -611,12 +581,94 @@ fn paint_hue_track(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
-fn hue_shift_color(fraction: f32) -> egui::Color32 {
-    let hue = (fraction + 0.5).fract() * 6.0;
+fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
+    let t = fraction.clamp(0.0, 1.0);
+    match gradient {
+        SliderGradient::HueDegrees { start, end } => {
+            hsv_color(egui::lerp(start..=end, t), 0.90, 0.92)
+        }
+        SliderGradient::ChannelHue { left, center, right } => {
+            if t <= 0.5 {
+                lerp_hue_color(left, center, t * 2.0)
+            } else {
+                lerp_hue_color(center, right, (t - 0.5) * 2.0)
+            }
+        }
+        SliderGradient::Brightness => {
+            if t <= 0.5 {
+                lerp_color(egui::Color32::from_gray(18), egui::Color32::from_gray(118), t * 2.0)
+            } else {
+                lerp_color(egui::Color32::from_gray(118), egui::Color32::from_gray(245), (t - 0.5) * 2.0)
+            }
+        }
+        SliderGradient::Temperature => {
+            if t <= 0.5 {
+                lerp_color(egui::Color32::from_rgb(72, 128, 235), egui::Color32::from_gray(208), t * 2.0)
+            } else {
+                lerp_color(egui::Color32::from_gray(208), egui::Color32::from_rgb(244, 157, 62), (t - 0.5) * 2.0)
+            }
+        }
+        SliderGradient::Tint => {
+            if t <= 0.5 {
+                lerp_color(egui::Color32::from_rgb(76, 181, 112), egui::Color32::from_gray(202), t * 2.0)
+            } else {
+                lerp_color(egui::Color32::from_gray(202), egui::Color32::from_rgb(222, 84, 174), (t - 0.5) * 2.0)
+            }
+        }
+        SliderGradient::Colorfulness => {
+            if t <= 0.5 {
+                // Negative saturation/vibrance moves toward monochrome. Keep
+                // this half intentionally neutral so the track does not imply
+                // a hue shift.
+                lerp_color(
+                    egui::Color32::from_gray(92),
+                    egui::Color32::from_gray(178),
+                    t * 2.0,
+                )
+            } else {
+                // Positive colorfulness affects every hue, so show a compact
+                // spectrum instead of choosing a single representative color.
+                // Saturation ramps in from the neutral midpoint to keep the
+                // center visually continuous.
+                let u = (t - 0.5) * 2.0;
+                let hue = u * 360.0;
+                let saturation = egui::lerp(0.0..=0.94, u.sqrt());
+                let value = egui::lerp(0.70..=0.92, u);
+                hsv_color(hue, saturation, value)
+            }
+        }
+        SliderGradient::Saturation(color) => {
+            let (hue, saturation, value) = rgb_to_hsv(color);
+            let target_saturation = if t <= 0.5 {
+                egui::lerp(0.02..=saturation.max(0.35), t * 2.0)
+            } else {
+                egui::lerp(saturation.max(0.35)..=1.0, (t - 0.5) * 2.0)
+            };
+            hsv_color(hue, target_saturation, value.max(0.78))
+        }
+        SliderGradient::Luminance(color) => {
+            if t <= 0.5 {
+                lerp_color(egui::Color32::from_rgb(10, 10, 10), color, t * 2.0)
+            } else {
+                lerp_color(color, egui::Color32::from_rgb(246, 246, 246), (t - 0.5) * 2.0)
+            }
+        }
+    }
+}
+
+fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    egui::Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
+fn hsv_color(hue_degrees: f32, saturation: f32, value: f32) -> egui::Color32 {
+    let hue = hue_degrees.rem_euclid(360.0) / 60.0;
     let sector = hue.floor() as u32;
     let blend = hue - sector as f32;
-    let value = 0.92;
-    let low = 0.10;
+    let saturation = saturation.clamp(0.0, 1.0);
+    let value = value.clamp(0.0, 1.0);
+    let low = value * (1.0 - saturation);
     let rise = low + (value - low) * blend;
     let fall = value - (value - low) * blend;
     let (red, green, blue) = match sector % 6 {
@@ -628,10 +680,41 @@ fn hue_shift_color(fraction: f32) -> egui::Color32 {
         _ => (value, low, fall),
     };
     egui::Color32::from_rgb(
-        (red * 255.0) as u8,
-        (green * 255.0) as u8,
-        (blue * 255.0) as u8,
+        (red * 255.0).round() as u8,
+        (green * 255.0).round() as u8,
+        (blue * 255.0).round() as u8,
     )
+}
+
+fn lerp_hue_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let (hue_a, saturation_a, value_a) = rgb_to_hsv(a);
+    let (hue_b, saturation_b, value_b) = rgb_to_hsv(b);
+    let delta = (hue_b - hue_a + 180.0).rem_euclid(360.0) - 180.0;
+    hsv_color(
+        hue_a + delta * t.clamp(0.0, 1.0),
+        egui::lerp(saturation_a..=saturation_b, t.clamp(0.0, 1.0)),
+        egui::lerp(value_a..=value_b, t.clamp(0.0, 1.0)),
+    )
+}
+
+fn rgb_to_hsv(color: egui::Color32) -> (f32, f32, f32) {
+    let red = color.r() as f32 / 255.0;
+    let green = color.g() as f32 / 255.0;
+    let blue = color.b() as f32 / 255.0;
+    let max = red.max(green).max(blue);
+    let min = red.min(green).min(blue);
+    let delta = max - min;
+    let hue = if delta <= f32::EPSILON {
+        0.0
+    } else if max == red {
+        60.0 * ((green - blue) / delta).rem_euclid(6.0)
+    } else if max == green {
+        60.0 * ((blue - red) / delta + 2.0)
+    } else {
+        60.0 * ((red - green) / delta + 4.0)
+    };
+    let saturation = if max <= f32::EPSILON { 0.0 } else { delta / max };
+    (hue, saturation, max)
 }
 
 fn set_numeric<Num>(value: &mut Num, raw: f64, decimals: usize) -> bool
@@ -651,8 +734,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{set_from_pointer_with_sensitivity, FINE_HUE_DRAG_SCALE, HEADER_HEIGHT};
-    use eframe::egui;
+    use super::{gradient_color_at, SliderGradient, HEADER_HEIGHT};
 
     #[test]
     fn slider_header_reserves_the_full_themed_control_height() {
@@ -660,20 +742,20 @@ mod tests {
     }
 
     #[test]
-    fn fine_hue_drag_covers_thirty_degrees_per_track_width() {
-        let track = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(360.0, 4.0));
-        let mut hue = 0.0f32;
-        assert!(set_from_pointer_with_sensitivity(
-            &mut hue,
-            -180.0,
-            180.0,
-            1,
-            track,
-            180.0,
-            540.0,
-            Some(0.0),
-            FINE_HUE_DRAG_SCALE,
-        ));
-        assert!((hue - 30.0).abs() < 0.01);
+    fn hue_gradient_wraps_to_the_same_color_at_a_full_turn() {
+        let gradient = SliderGradient::HueDegrees {
+            start: 0.0,
+            end: 360.0,
+        };
+        assert_eq!(gradient_color_at(gradient, 0.0), gradient_color_at(gradient, 1.0));
+    }
+
+    #[test]
+    fn brightness_gradient_is_monotonic_in_luma() {
+        let gradient = SliderGradient::Brightness;
+        let low = gradient_color_at(gradient, 0.0);
+        let mid = gradient_color_at(gradient, 0.5);
+        let high = gradient_color_at(gradient, 1.0);
+        assert!(low.r() < mid.r() && mid.r() < high.r());
     }
 }
