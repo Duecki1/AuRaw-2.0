@@ -1,6 +1,7 @@
 use super::raw_loader::{validate_raw_dimensions, LoadedRaw, RawThumbnail};
 use anyhow::{anyhow, Context, Result};
 use image::{ColorType, ImageFormat};
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -12,6 +13,7 @@ const MAX_TIFF_DECODE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_TIFF_IFDS: usize = 32;
 const MAX_TIFF_IFD_ENTRIES: u64 = 4096;
 const MAX_TIFF_SUBIFDS: usize = 64;
+const MIN_TIFF_ICC_BYTES: u64 = 132;
 const MAX_TIFF_ICC_BYTES: u64 = 16 * 1024 * 1024;
 
 const REC709_TO_REC2020: [[f32; 3]; 3] = [
@@ -131,7 +133,13 @@ pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
         let next_pos = entries_start
             .checked_add(entries_bytes)
             .context("TIFF IFD size overflow")?;
-        anyhow::ensure!(next_pos < file_len, "TIFF IFD extends outside the file");
+        let next_width = if big_tiff { 8u64 } else { 4u64 };
+        anyhow::ensure!(
+            next_pos
+                .checked_add(next_width)
+                .is_some_and(|end| end <= file_len),
+            "TIFF IFD extends outside the file"
+        );
 
         for entry_index in 0..entry_count {
             let entry_offset = entries_start + entry_index * entry_size;
@@ -154,13 +162,6 @@ pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
                 tag,
                 33421 // CFARepeatPatternDim
                     | 33422 // CFAPattern
-                    | 50706 // DNGVersion
-                    | 50707 // DNGBackwardVersion
-                    | 50721 // ColorMatrix1
-                    | 50722 // ColorMatrix2
-                    | 50723 // CameraCalibration1
-                    | 50724 // CameraCalibration2
-                    | 50728 // AsShotNeutral
             ) {
                 return Ok(TiffContainerKind::Sensor);
             }
@@ -330,14 +331,14 @@ fn decode_scene_linear_rec2020(path: &Path) -> Result<(u32, u32, Vec<f32>)> {
     let source_color = image.color();
     let source_is_float = matches!(source_color, ColorType::Rgb32F | ColorType::Rgba32F);
     let mut rgb = image.into_rgb32f().into_raw();
-    if rgb.iter().any(|value| !value.is_finite()) {
+    if rgb.par_iter().any(|value| !value.is_finite()) {
         return Err(anyhow!("TIFF contains NaN or infinity"));
     }
 
     if let Some(icc) = read_embedded_icc_profile(path)? {
         super::color_profile::convert_embedded_icc_rgb_to_rec2020(&icc, &mut rgb)
             .with_context(|| format!("apply embedded TIFF ICC profile from {}", path.display()))?;
-        if rgb.iter().any(|value| !value.is_finite()) {
+        if rgb.par_iter().any(|value| !value.is_finite()) {
             return Err(anyhow!("embedded TIFF ICC conversion produced NaN or infinity"));
         }
     } else if source_is_float {
@@ -348,7 +349,7 @@ fn decode_scene_linear_rec2020(path: &Path) -> Result<(u32, u32, Vec<f32>)> {
         // TIFF has no universal default RGB color space. sRGB is the practical
         // fallback for untagged integer files, but an embedded profile must take
         // precedence. Lightroom commonly writes ProPhoto RGB / Adobe RGB here.
-        rgb.chunks_exact_mut(3).for_each(|pixel| {
+        rgb.par_chunks_exact_mut(3).for_each(|pixel| {
             let r = srgb_to_linear(pixel[0]);
             let g = srgb_to_linear(pixel[1]);
             let b = srgb_to_linear(pixel[2]);
@@ -506,7 +507,7 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
                     "TIFF ICC profile tag has unsupported field type {field_type}"
                 );
                 anyhow::ensure!(
-                    (132..=MAX_TIFF_ICC_BYTES).contains(&count),
+                    (MIN_TIFF_ICC_BYTES..=MAX_TIFF_ICC_BYTES).contains(&count),
                     "TIFF ICC profile has an invalid size"
                 );
                 let inline_bytes = if big_tiff { 8u64 } else { 4u64 };
@@ -527,11 +528,7 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
                     usize::try_from(count).context("TIFF ICC profile size overflow")?
                 ];
                 file.read_exact(&mut bytes)?;
-                anyhow::ensure!(
-                    bytes.len() >= 40 && &bytes[36..40] == b"acsp",
-                    "TIFF ICC profile has an invalid header"
-                );
-                return Ok(Some(bytes));
+                return Ok(Some(normalize_icc_profile(bytes)?));
             }
 
             if tag == 330 && pending.len() < MAX_TIFF_SUBIFDS {
@@ -563,20 +560,40 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(None)
 }
 
+fn normalize_icc_profile(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        bytes.len() >= MIN_TIFF_ICC_BYTES as usize && &bytes[36..40] == b"acsp",
+        "TIFF ICC profile has an invalid header"
+    );
+    let declared = u32::from_be_bytes(
+        bytes[0..4]
+            .try_into()
+            .map_err(|_| anyhow!("TIFF ICC profile has an invalid size field"))?,
+    ) as usize;
+    anyhow::ensure!(
+        (MIN_TIFF_ICC_BYTES as usize..=bytes.len()).contains(&declared),
+        "TIFF ICC profile declares an invalid size"
+    );
+    // Container padding is not part of the ICC profile. Passing it downstream
+    // makes profile hashes unstable and can confuse stricter CMS backends.
+    bytes.truncate(declared);
+    Ok(bytes)
+}
+
 fn decode_tiff(path: &Path) -> Result<image::DynamicImage> {
-    let dimensions = load_raster_tiff_dimensions(path)?;
-    let pixels = validate_raw_dimensions(dimensions[0], dimensions[1])? as u64;
+    let file = File::open(path).with_context(|| format!("open TIFF {}", path.display()))?;
+    let mut reader = image::ImageReader::with_format(BufReader::new(file), ImageFormat::Tiff);
+    configure_limits(&mut reader);
+    let image = reader
+        .decode()
+        .with_context(|| format!("decode TIFF {} in process", path.display()))?;
+    let pixels = validate_raw_dimensions(image.width(), image.height())? as u64;
     anyhow::ensure!(
         pixels.saturating_mul(16) <= MAX_TIFF_DECODE_BYTES,
         "TIFF {} requires too much decoded memory for this platform",
         path.display()
     );
-    let file = File::open(path).with_context(|| format!("open TIFF {}", path.display()))?;
-    let mut reader = image::ImageReader::with_format(BufReader::new(file), ImageFormat::Tiff);
-    configure_limits(&mut reader);
-    reader
-        .decode()
-        .with_context(|| format!("decode TIFF {} in process", path.display()))
+    Ok(image)
 }
 
 fn configure_limits<R: std::io::BufRead + Seek>(reader: &mut image::ImageReader<R>) {
@@ -616,6 +633,67 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(inspect_tiff_container(&path).unwrap(), TiffContainerKind::Sensor);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rendered_rgb_with_copied_color_matrix_metadata_stays_on_raster_path() {
+        let path = std::env::temp_dir().join(format!(
+            "auraw-rendered-metadata-tiff-{}-{}.tif",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II");
+        bytes.extend_from_slice(&42u16.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+
+        // PhotometricInterpretation = RGB.
+        bytes.extend_from_slice(&262u16.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+
+        // DNGVersion and ColorMatrix1 can be copied into rendered TIFF metadata.
+        // Neither tag, by itself, proves that the pixel raster is a sensor mosaic.
+        bytes.extend_from_slice(&50706u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 6, 0, 0]);
+
+        bytes.extend_from_slice(&50721u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        assert_eq!(
+            inspect_tiff_container(&path).unwrap(),
+            TiffContainerKind::Raster
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn icc_payload_is_trimmed_to_its_declared_profile_size() {
+        let mut bytes = vec![0u8; 148];
+        bytes[0..4].copy_from_slice(&132u32.to_be_bytes());
+        bytes[36..40].copy_from_slice(b"acsp");
+        let normalized = normalize_icc_profile(bytes).unwrap();
+        assert_eq!(normalized.len(), 132);
+    }
+
+    #[test]
+    fn icc_payload_rejects_a_declared_size_beyond_the_tag() {
+        let mut bytes = vec![0u8; 132];
+        bytes[0..4].copy_from_slice(&4096u32.to_be_bytes());
+        bytes[36..40].copy_from_slice(b"acsp");
+        assert!(normalize_icc_profile(bytes).is_err());
     }
 
     #[test]
