@@ -29,6 +29,8 @@ use crate::ui::components::adjustment_slider::slider_scroll_locked;
 use crate::ui::develop::Develop;
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::{Library, LibraryState};
+#[cfg(target_os = "android")]
+use crate::ui::preview::Preview;
 use crate::ui::settings::Settings;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::top_bar::TopBar;
