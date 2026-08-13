@@ -528,12 +528,109 @@ pub(super) fn create_demosaic_texture(
     })
 }
 
+fn upload_raster_scene_texture(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    raw: &LoadedRaw,
+    rgb: &[f32],
+) -> Result<()> {
+    let expected = raw.width as usize * raw.height as usize * 3;
+    anyhow::ensure!(
+        rgb.len() == expected,
+        "scene-linear raster has {} values, expected {expected}",
+        rgb.len()
+    );
+    let bytes_per_texel = match format {
+        wgpu::TextureFormat::Rgba16Float => 8usize,
+        wgpu::TextureFormat::Rgba32Float => 16usize,
+        _ => return Err(anyhow!("unsupported raster scene format {format:?}")),
+    };
+    let bytes_per_row = raw
+        .width
+        .checked_mul(bytes_per_texel as u32)
+        .ok_or_else(|| anyhow!("raster scene upload row byte count overflows"))?;
+    let rows_per_chunk = (MAX_UPLOAD_SCRATCH_BYTES / bytes_per_row as usize).max(1) as u32;
+    let row_elements = raw.width as usize * 4;
+
+    for first_row in (0..raw.height).step_by(rows_per_chunk as usize) {
+        let row_count = rows_per_chunk.min(raw.height - first_row);
+        let pixels = row_count as usize * raw.width as usize;
+        match format {
+            wgpu::TextureFormat::Rgba16Float => {
+                let mut rgba = vec![0u16; row_count as usize * row_elements];
+                for pixel in 0..pixels {
+                    let source = (first_row as usize * raw.width as usize + pixel) * 3;
+                    let destination = pixel * 4;
+                    rgba[destination] = half::f16::from_f32(rgb[source]).to_bits();
+                    rgba[destination + 1] = half::f16::from_f32(rgb[source + 1]).to_bits();
+                    rgba[destination + 2] = half::f16::from_f32(rgb[source + 2]).to_bits();
+                    rgba[destination + 3] = half::f16::ONE.to_bits();
+                }
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: 0, y: first_row, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&rgba),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(row_count),
+                    },
+                    wgpu::Extent3d {
+                        width: raw.width,
+                        height: row_count,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            wgpu::TextureFormat::Rgba32Float => {
+                let mut rgba = vec![0.0f32; row_count as usize * row_elements];
+                for pixel in 0..pixels {
+                    let source = (first_row as usize * raw.width as usize + pixel) * 3;
+                    let destination = pixel * 4;
+                    rgba[destination..destination + 3].copy_from_slice(&rgb[source..source + 3]);
+                    rgba[destination + 3] = 1.0;
+                }
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: 0, y: first_row, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&rgba),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(row_count),
+                    },
+                    wgpu::Extent3d {
+                        width: raw.width,
+                        height: row_count,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn upload_ai_scene_texture(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     format: wgpu::TextureFormat,
     raw: &LoadedRaw,
 ) -> Result<bool> {
+    if let Some(rgb) = raw.scene_linear_raster() {
+        upload_raster_scene_texture(queue, texture, format, raw, rgb)?;
+        return Ok(true);
+    }
     let Some(image) = raw.ai_denoised_image() else {
         return Ok(false);
     };
@@ -714,7 +811,17 @@ pub(super) fn storage_texture_entry(
 
 pub(super) fn validate_raw(raw: &LoadedRaw) -> Result<()> {
     let pixels = crate::pipeline::raw_loader::validate_raw_dimensions(raw.width, raw.height)?;
-    if raw.raw_pixels.len() != pixels {
+    if raw.is_pre_demosaiced_raster() {
+        let expected = pixels
+            .checked_mul(3)
+            .ok_or_else(|| anyhow!("raster RGB element count overflows"))?;
+        let rgb = raw
+            .scene_linear_raster()
+            .ok_or_else(|| anyhow!("raster source is missing scene-linear RGB pixels"))?;
+        if rgb.len() != expected || rgb.iter().any(|value| !value.is_finite()) {
+            return Err(anyhow!("scene-linear raster payload is invalid"));
+        }
+    } else if raw.raw_pixels.len() != pixels {
         return Err(anyhow!(
             "raw pixel count mismatch: got {}, expected {}",
             raw.raw_pixels.len(),
@@ -874,9 +981,14 @@ pub(super) fn create_raw_texture(
     raw_pixels: &[u16],
 ) -> wgpu::Texture {
     debug_assert_eq!(raw_pixels.len(), raw.raw_pixels.len());
+    let sensor_size = if raw.is_pre_demosaiced_raster() {
+        texture_size(1, 1)
+    } else {
+        texture_size(raw.width, raw.height)
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("auraw raw mosaic"),
-        size: texture_size(raw.width, raw.height),
+        size: sensor_size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -884,16 +996,18 @@ pub(super) fn create_raw_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[wgpu::TextureFormat::R16Uint],
     });
-    queue.write_texture(
-        copy_texture(&texture),
-        bytemuck::cast_slice(raw_pixels),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(raw.width * 2),
-            rows_per_image: Some(raw.height),
-        },
-        texture_size(raw.width, raw.height),
-    );
+    if !raw_pixels.is_empty() {
+        queue.write_texture(
+            copy_texture(&texture),
+            bytemuck::cast_slice(raw_pixels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raw.width * 2),
+                rows_per_image: Some(raw.height),
+            },
+            texture_size(raw.width, raw.height),
+        );
+    }
     texture
 }
 
@@ -902,9 +1016,14 @@ pub(super) fn create_black_texture(
     queue: &wgpu::Queue,
     raw: &LoadedRaw,
 ) -> wgpu::Texture {
+    let sensor_size = if raw.is_pre_demosaiced_raster() {
+        texture_size(1, 1)
+    } else {
+        texture_size(raw.width, raw.height)
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("auraw per-pixel black levels"),
-        size: texture_size(raw.width, raw.height),
+        size: sensor_size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -912,7 +1031,9 @@ pub(super) fn create_black_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[wgpu::TextureFormat::R32Float],
     });
-    upload_black_texture(queue, &texture, raw);
+    if !raw.is_pre_demosaiced_raster() {
+        upload_black_texture(queue, &texture, raw);
+    }
     texture
 }
 
@@ -983,9 +1104,14 @@ pub(super) fn create_color_texture(
     queue: &wgpu::Queue,
     raw: &LoadedRaw,
 ) -> wgpu::Texture {
+    let sensor_size = if raw.is_pre_demosaiced_raster() {
+        texture_size(1, 1)
+    } else {
+        texture_size(raw.width, raw.height)
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("auraw CFA color indices"),
-        size: texture_size(raw.width, raw.height),
+        size: sensor_size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -993,7 +1119,9 @@ pub(super) fn create_color_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[wgpu::TextureFormat::R8Uint],
     });
-    upload_color_texture(queue, &texture, raw);
+    if !raw.is_pre_demosaiced_raster() {
+        upload_color_texture(queue, &texture, raw);
+    }
     texture
 }
 

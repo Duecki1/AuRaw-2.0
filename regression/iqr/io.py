@@ -105,7 +105,13 @@ def load_linear_image(
     elif suffix in {".tif", ".tiff"}:
         import tifffile
 
-        rgb = tifffile.imread(source)
+        # Uncompressed TIFFs can be mapped without an eager full-file copy.
+        # Compressed/tiled images fall back to tifffile's native decoder while
+        # retaining uint16/float32 samples without an 8-bit intermediate.
+        try:
+            rgb = tifffile.memmap(source)
+        except (ValueError, OSError):
+            rgb = tifffile.imread(source)
     elif suffix in {".png", ".jpg", ".jpeg"}:
         from PIL import Image
 
@@ -131,6 +137,8 @@ def load_linear_image(
 
 def _as_rgb_float(array: np.ndarray) -> np.ndarray:
     value = np.asarray(array)
+    if value.ndim == 3 and value.shape[0] in {3, 4} and value.shape[2] not in {3, 4}:
+        value = np.moveaxis(value, 0, 2)
     if value.ndim == 2:
         value = np.repeat(value[..., None], 3, axis=2)
     if value.ndim != 3 or value.shape[2] not in {3, 4}:

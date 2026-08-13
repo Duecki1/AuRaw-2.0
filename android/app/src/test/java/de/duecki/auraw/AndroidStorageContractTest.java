@@ -28,8 +28,11 @@ public final class AndroidStorageContractTest {
         assertEquals("a_b_c.dng", AndroidStorageContract.safeRawName("a/b\\c.dng"));
         assertTrue(AndroidStorageContract.isRawName("capture.DNG"));
         assertTrue(AndroidStorageContract.isRawName("capture.raf"));
+        assertTrue(AndroidStorageContract.isRawName("rendered.TIF"));
+        assertTrue(AndroidStorageContract.isRawName("rendered.tiff"));
         assertFalse(AndroidStorageContract.isRawName("capture.jpg"));
         assertEquals("capture.dng.auraw", AndroidStorageContract.sidecarDisplayName("capture.dng"));
+        assertEquals("rendered.tif.auraw", AndroidStorageContract.sidecarDisplayName("rendered.tif"));
         assertEquals(
                 ".auraw-import-capture.dng.part",
                 AndroidStorageContract.importPartialName("capture.dng"));

@@ -1407,6 +1407,7 @@ fn reflected_raw_tile(raw: &LoadedRaw, origin_x: i32, origin_y: i32) -> Result<L
         capture_metadata: raw.capture_metadata.clone(),
         cfa_kind: raw.cfa_kind,
         raw_pixels,
+        scene_linear_raster: None,
         color_indices: CompactPixelMap::compact_from_dense(
             TILE_EDGE as u32,
             TILE_EDGE as u32,
@@ -1517,6 +1518,7 @@ mod tests {
             capture_metadata: Default::default(),
             cfa_kind: CfaKind::Bayer,
             raw_pixels: (0..pixels).map(|index| index as u16 * 17).collect(),
+            scene_linear_raster: None,
             color_indices: CompactPixelMap::repeating(width, height, 2, 2, vec![0, 1, 3, 2]),
             wb_coeffs: [2.0, 1.0, 1.5, 1.0],
             cam_to_srgb: [

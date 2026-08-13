@@ -4,6 +4,7 @@ use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskEffect,
+    SigmoidParams,
     MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
     GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES,
     MAX_LOCAL_MASKS,
@@ -408,6 +409,18 @@ struct CameraUniforms {
 }
 
 const _: () = assert!(std::mem::size_of::<CameraUniforms>() == CAMERA_UNIFORMS_SIZE_BYTES as usize);
+
+fn raster_uses_scene_view_transform(exposure: &ExposureParams) -> bool {
+    const EPSILON: f32 = 1e-6;
+    let default = SigmoidParams::default();
+    exposure.contrast.abs() > EPSILON
+        || (exposure.sigmoid.contrast - default.contrast).abs() > EPSILON
+        || (exposure.sigmoid.skew - default.skew).abs() > EPSILON
+        || (exposure.sigmoid.display_white_target - default.display_white_target).abs() > EPSILON
+        || (exposure.sigmoid.display_black_target - default.display_black_target).abs() > EPSILON
+        || (exposure.sigmoid.hue_preservation - default.hue_preservation).abs() > EPSILON
+        || exposure.sigmoid.color_processing != default.color_processing
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -1178,7 +1191,13 @@ impl GpuParams {
         let (hsl_hue_0, hsl_hue_1) = split_eight(exposure.hsl_hue);
         let (hsl_saturation_0, hsl_saturation_1) = split_eight(exposure.hsl_saturation);
         let (hsl_luminance_0, hsl_luminance_1) = split_eight(exposure.hsl_luminance);
-        let highlight_method = shader_highlight_method(raw.cfa_kind, exposure.highlight_method);
+        let highlight_method = if raw.is_pre_demosaiced_raster() {
+            // Highlight reconstruction is a sensor/CFA operation. A rendered
+            // TIFF already supplies RGB scene values, including any HDR headroom.
+            0.0
+        } else {
+            shader_highlight_method(raw.cfa_kind, exposure.highlight_method)
+        };
         let opposed_chroma = if highlight_method >= 1.5 {
             raw.inpaint_opposed_chroma(
                 exposure.black_point,
@@ -1211,8 +1230,12 @@ impl GpuParams {
             tint: exposure
                 .tint
                 .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
-            _pad_0: 0.0,
-            _pad_1: 0.0,
+            _pad_0: if raw.is_pre_demosaiced_raster() { 1.0 } else { 0.0 },
+            _pad_1: if !raw.is_pre_demosaiced_raster() || raster_uses_scene_view_transform(exposure) {
+                1.0
+            } else {
+                0.0
+            },
             _pad_2: 0.0,
             highlight_options: [
                 highlight_method,
@@ -1850,6 +1873,7 @@ pub struct RawGpuPipeline {
     scene_texture: wgpu::Texture,
     scene_format: wgpu::TextureFormat,
     has_ai_scene: bool,
+    has_raster_scene: bool,
     has_ai_cfa: bool,
     display_linear_texture: wgpu::Texture,
     _tone_guide_a: wgpu::Texture,
@@ -2062,6 +2086,7 @@ impl RawGpuPipeline {
             capture_metadata: Default::default(),
             cfa_kind,
             raw_pixels: vec![0u16; pixels],
+            scene_linear_raster: None,
             color_indices: crate::pipeline::CompactPixelMap::repeating(
                 EDGE,
                 EDGE,
@@ -2501,6 +2526,7 @@ impl RawGpuPipeline {
             demosaic_format,
             "auraw scene-linear camera RGB",
         );
+        let has_raster_scene = raw.is_pre_demosaiced_raster();
         let has_ai_scene = upload_ai_scene_texture(queue, &scene_texture, demosaic_format, raw)?;
 
         // The final creative result is tone-mapped into display-linear Rec.2020
@@ -5008,6 +5034,7 @@ impl RawGpuPipeline {
             scene_texture,
             scene_format: demosaic_format,
             has_ai_scene,
+            has_raster_scene,
             has_ai_cfa,
             display_linear_texture,
             _tone_guide_a: tone_guide_a,
@@ -5488,6 +5515,18 @@ impl RawGpuPipeline {
             ));
         }
         validate_raw(raw)?;
+
+        if self.has_raster_scene {
+            anyhow::ensure!(
+                raw.is_pre_demosaiced_raster(),
+                "reusable raster pipeline received a sensor RAW tile"
+            );
+            anyhow::ensure!(
+                upload_ai_scene_texture(queue, &self.scene_texture, self.scene_format, raw)?,
+                "reusable raster pipeline received a tile without scene-linear RGB"
+            );
+            return Ok(());
+        }
 
         let ai_image = raw.ai_denoised_image();
         let raw_pixels = if self.has_ai_cfa {
@@ -6058,6 +6097,19 @@ impl RawGpuPipeline {
     }
 
     fn encode_raw_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
+        if self.has_raster_scene {
+            // Pre-demosaiced TIFFs are uploaded directly at the scene-linear
+            // Rec.2020 boundary. Retain the shared post-demosaic chroma filter
+            // when requested, but never execute CFA reconstruction shaders.
+            if params.camera.chroma_denoise > 1e-6 {
+                self.encode_pass_range(
+                    encoder,
+                    self.color_denoise_start_index,
+                    self.color_denoise_end_index,
+                );
+            }
+            return;
+        }
         if self.has_ai_scene && params.uses_ai_denoise() {
             // The RawNIND result was uploaded directly into the camera-RGB
             // scene boundary. Tone analysis and the complete output stage,

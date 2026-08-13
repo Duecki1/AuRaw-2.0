@@ -24,7 +24,7 @@ final class AndroidStorageContract {
             "cs1", "dc2", "dcr", "dcs", "dng", "drf", "eip", "erf", "fff", "gpr",
             "iiq", "k25", "kc2", "kdc", "mdc", "mef", "mos", "mrw", "nef", "nrw",
             "obm", "orf", "pef", "ptx", "pxn", "qtk", "r3d", "raf", "raw", "rdc",
-            "rw2", "rwl", "rwz", "sr2", "srf", "srw", "sti", "x3f"));
+            "rw2", "rwl", "rwz", "sr2", "srf", "srw", "sti", "tif", "tiff", "x3f"));
 
     private AndroidStorageContract() {}
 

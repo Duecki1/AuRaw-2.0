@@ -49,29 +49,39 @@ def test_relative_luma_response_is_independent_of_each_renderer_baseline() -> No
     )
 
 
-def test_decoder_preserves_native_uint16_values(monkeypatch, tmp_path: Path) -> None:
+def test_decoder_preserves_native_uint16_values(tmp_path: Path) -> None:
+    import tifffile
+
     comparator = load_comparator()
     source = tmp_path / "fixture.tif"
-    source.write_bytes(b"placeholder")
-    samples = np.array([0, 1, 32768, 65535, 12345, 54321], dtype="<u2")
-    observed: dict[str, object] = {}
-
-    class Result:
-        stdout = samples.tobytes()
-        stderr = b""
-
-    def fake_run(command, **kwargs):
-        observed["command"] = command
-        observed["kwargs"] = kwargs
-        return Result()
-
-    monkeypatch.setattr(comparator, "image_region_size", lambda path, crop: (2, 1))
-    monkeypatch.setattr(comparator.subprocess, "run", fake_run)
+    samples = np.array(
+        [[[0, 1, 32768], [65535, 12345, 54321]]],
+        dtype=np.uint16,
+    )
+    tifffile.imwrite(source, samples, photometric="rgb")
     decoded = comparator.encoded_rgb16(source, crop=None, sample_step=1)
 
-    np.testing.assert_allclose(decoded.reshape(-1), samples.astype(np.float32) / 65535.0)
-    command = observed["command"]
-    assert command[-7:] == ["-alpha", "off", "-depth", "16", "-endian", "LSB", "rgb:-"]
+    np.testing.assert_array_equal(
+        decoded, samples.astype(np.float32) / np.float32(65535.0)
+    )
+
+
+def test_decoder_preserves_float32_hdr_and_sampling(tmp_path: Path) -> None:
+    import tifffile
+
+    comparator = load_comparator()
+    source = tmp_path / "scene.tiff"
+    samples = np.array(
+        [
+            [[-0.25, 0.0, 1.25], [0.5, 2.0, 4.0], [0.1, 0.2, 0.3]],
+            [[0.4, 0.5, 0.6], [0.7, 0.8, 0.9], [1.0, 1.1, 1.2]],
+        ],
+        dtype=np.float32,
+    )
+    tifffile.imwrite(source, samples, photometric="rgb")
+    decoded = comparator.encoded_rgb16(source, crop=(0, 0, 3, 2), sample_step=2)
+
+    np.testing.assert_array_equal(decoded, samples[::2, ::2])
 
 
 def test_color_space_transfers_and_endpoint_metadata_are_functional(monkeypatch) -> None:
