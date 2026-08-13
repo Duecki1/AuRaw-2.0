@@ -386,7 +386,9 @@ final class StorageManager {
             long modifiedSeconds,
             int maximumEdge) throws Exception {
         return thumbnailCachePath(
-                "raw\n" + uriText + "\n" + bytes + "\n" + modifiedSeconds
+                // v2 invalidates previews generated before TIFF input color
+                // management and rendered-raster tone handling stabilized.
+                "raw-v2\n" + uriText + "\n" + bytes + "\n" + modifiedSeconds
                         + "\n" + maximumEdge,
                 ".raw.jpg").getAbsolutePath();
     }

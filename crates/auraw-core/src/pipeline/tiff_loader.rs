@@ -398,11 +398,11 @@ pub fn load_raster_tiff_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawT
     let rgb = image.into_rgb32f().into_raw();
     let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
     for pixel in rgb.chunks_exact(3) {
-        let r = 1.660_491 * pixel[0] - 0.587_641 * pixel[1] - 0.072_850 * pixel[2];
-        let g = -0.124_550 * pixel[0] + 1.132_900 * pixel[1] - 0.008_349 * pixel[2];
-        let b = -0.018_151 * pixel[0] - 0.100_579 * pixel[1] + 1.118_730 * pixel[2];
-        for value in [r, g, b] {
-            rgba.push((linear_to_srgb(value).clamp(0.0, 1.0) * 255.0).round() as u8);
+        let encoded = super::color_profile::display_linear_rec2020_to_srgb([
+            pixel[0], pixel[1], pixel[2],
+        ]);
+        for value in encoded {
+            rgba.push((value.clamp(0.0, 1.0) * 255.0).round() as u8);
         }
         rgba.push(255);
     }
@@ -563,14 +563,6 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(None)
 }
 
-fn linear_to_srgb(value: f32) -> f32 {
-    if value <= 0.003_130_8 {
-        12.92 * value
-    } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
-    }
-}
-
 fn decode_tiff(path: &Path) -> Result<image::DynamicImage> {
     let dimensions = load_raster_tiff_dimensions(path)?;
     let pixels = validate_raw_dimensions(dimensions[0], dimensions[1])? as u64;
@@ -645,6 +637,31 @@ mod tests {
         assert!((rgb[0] - REC709_TO_REC2020[0][0]).abs() < 2e-4);
         assert!((rgb[1] - REC709_TO_REC2020[1][0]).abs() < 2e-4);
         assert!((rgb[2] - REC709_TO_REC2020[2][0]).abs() < 2e-4);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn raster_tiff_thumbnail_preserves_black_and_white_endpoints() {
+        let path = std::env::temp_dir().join(format!(
+            "auraw-raster-thumb-{}-{}.tif",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let image = ImageBuffer::<Rgb<u16>, Vec<u16>>::from_raw(
+            2,
+            1,
+            vec![0, 0, 0, 65535, 65535, 65535],
+        )
+        .unwrap();
+        image.save_with_format(&path, ImageFormat::Tiff).unwrap();
+
+        let thumbnail = load_raster_tiff_thumbnail(&path, 512).unwrap();
+        assert_eq!([thumbnail.width, thumbnail.height], [2, 1]);
+        assert_eq!(&thumbnail.rgba[0..4], &[0, 0, 0, 255]);
+        assert_eq!(&thumbnail.rgba[4..8], &[255, 255, 255, 255]);
         let _ = std::fs::remove_file(path);
     }
 
