@@ -2551,7 +2551,7 @@ impl Sidebar {
         let mut changed = false;
         let shadows_before = adjustment.shadows;
         let blacks_before = adjustment.blacks;
-        changed |= adjustment_slider(
+        changed |= gradient_adjustment_slider(
             ui,
             "Exposure",
             &mut adjustment.exposure,
@@ -2559,8 +2559,9 @@ impl Sidebar {
             2,
             0.05,
             None,
+            SliderGradient::Brightness,
         );
-        changed |= adjustment_slider(
+        changed |= gradient_adjustment_slider(
             ui,
             "Contrast",
             &mut adjustment.contrast,
@@ -2568,8 +2569,9 @@ impl Sidebar {
             0,
             1.0,
             None,
+            SliderGradient::Brightness,
         );
-        changed |= adjustment_slider(
+        changed |= gradient_adjustment_slider(
             ui,
             "Highlights",
             &mut adjustment.highlights,
@@ -2577,8 +2579,9 @@ impl Sidebar {
             0,
             1.0,
             None,
+            SliderGradient::Brightness,
         );
-        changed |= adjustment_slider(
+        changed |= gradient_adjustment_slider(
             ui,
             "Shadows",
             &mut adjustment.shadows,
@@ -2586,8 +2589,9 @@ impl Sidebar {
             0,
             1.0,
             None,
+            SliderGradient::Brightness,
         );
-        changed |= adjustment_slider(
+        changed |= gradient_adjustment_slider(
             ui,
             "Whites",
             &mut adjustment.whites,
@@ -2595,8 +2599,9 @@ impl Sidebar {
             0,
             1.0,
             None,
+            SliderGradient::Brightness,
         );
-        changed |= adjustment_slider(
+        changed |= gradient_adjustment_slider(
             ui,
             "Blacks",
             &mut adjustment.blacks,
@@ -2604,6 +2609,7 @@ impl Sidebar {
             0,
             1.0,
             None,
+            SliderGradient::Brightness,
         );
         (
             changed,
@@ -2616,7 +2622,7 @@ impl Sidebar {
         adjustment: &mut crate::pipeline::LocalAdjustments,
     ) -> bool {
         let mut changed = false;
-        changed |= adjustment_slider(
+        changed |= gradient_adjustment_slider(
             ui,
             "Temperature",
             &mut adjustment.temperature,
@@ -2624,8 +2630,9 @@ impl Sidebar {
             0,
             1.0,
             None,
+            SliderGradient::Temperature,
         );
-        changed |= adjustment_slider(
+        changed |= gradient_adjustment_slider(
             ui,
             "Tint",
             &mut adjustment.tint,
@@ -2633,13 +2640,14 @@ impl Sidebar {
             0,
             1.0,
             None,
+            SliderGradient::Tint,
         );
         changed |= hue_adjustment_slider(
             ui,
             &mut adjustment.hue,
             Some("Rotates colors inside the mask around the perceptual color wheel."),
         );
-        changed |= adjustment_slider(
+        changed |= gradient_adjustment_slider(
             ui,
             "Saturation",
             &mut adjustment.saturation,
@@ -2647,6 +2655,7 @@ impl Sidebar {
             0,
             1.0,
             None,
+            SliderGradient::Colorfulness,
         );
         changed
     }

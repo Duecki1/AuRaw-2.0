@@ -1,6 +1,8 @@
 use crate::app::ColorGradeTab;
 use crate::pipeline::{ColorGradeWheel, ColorGrading};
-use crate::ui::components::adjustment_slider::adjustment_slider;
+use crate::ui::components::adjustment_slider::{
+    adjustment_slider, gradient_adjustment_slider, SliderGradient,
+};
 use eframe::egui::{self, Color32, Mesh, Pos2, Sense, Shape, Stroke, Ui};
 
 const WHEEL_MAX_SIZE: f32 = 190.0;
@@ -191,7 +193,7 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
     });
     let _ = wheel_response;
 
-    changed |= adjustment_slider(
+    changed |= gradient_adjustment_slider(
         ui,
         "Hue",
         &mut wheel.hue,
@@ -199,8 +201,14 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
         0,
         1.0,
         Some("Sets the color-wheel angle in degrees."),
+        SliderGradient::HueDegrees {
+            start: 0.0,
+            end: 360.0,
+        },
     );
-    changed |= adjustment_slider(
+    wheel.hue = wheel.hue.rem_euclid(360.0);
+    let grade_color = hsv_color(wheel.hue / 360.0, 0.86, 0.90);
+    changed |= gradient_adjustment_slider(
         ui,
         "Saturation",
         &mut wheel.saturation,
@@ -208,11 +216,11 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
         0,
         1.0,
         Some("Sets the distance from the neutral center of the wheel."),
+        SliderGradient::Saturation(grade_color),
     );
-    wheel.hue = wheel.hue.rem_euclid(360.0);
     wheel.saturation = wheel.saturation.clamp(0.0, 100.0);
 
-    changed |= adjustment_slider(
+    changed |= gradient_adjustment_slider(
         ui,
         "Luminance",
         &mut wheel.luminance,
@@ -220,6 +228,7 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
         0,
         1.0,
         Some("Applies a hue-preserving scene-linear exposure gain to this tonal range."),
+        SliderGradient::Luminance(grade_color),
     );
     wheel.luminance = wheel.luminance.clamp(-100.0, 100.0);
 
