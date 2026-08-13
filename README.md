@@ -39,6 +39,12 @@ permission. Exported images are separate and are published to `Pictures/AuRaw`
 so gallery apps can discover them. See [ANDROID.md](ANDROID.md) for migration
 and scoped-storage details.
 
+Rendered `.tif`/`.tiff` files are also supported. AuRaw distinguishes rendered
+RGB TIFFs from CFA/DNG-style sensor TIFFs before decoding, honors embedded ICC
+profiles, preserves float HDR headroom, and exports 8/16-bit ICC-managed TIFF or
+32-bit linear Rec.2020 masters. See [`docs/TIFF.md`](docs/TIFF.md) for the import,
+color-management, resource-limit, and export-strip contract.
+
 Develop edits are non-destructive. AuRaw restores exposure, color, effects,
 local masks, and lens selection from a versioned `<raw filename>.auraw`
 sidecar, then saves committed edits in the background. **Save Edits** (or
