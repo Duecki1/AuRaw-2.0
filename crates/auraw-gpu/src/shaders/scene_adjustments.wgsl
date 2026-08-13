@@ -496,7 +496,7 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     // controls operate in the scene domain. ProfileToneCurve is excluded so
     // slider semantics remain profile-independent.
     rgb = DetailCapture::apply_capture_sharpening(pos, rgb);
-    rgb = Tonemap::apply_lightroom_tone(rgb, pos);
+    rgb = Tonemap::apply_basic_tone(rgb, pos);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));
 }
 

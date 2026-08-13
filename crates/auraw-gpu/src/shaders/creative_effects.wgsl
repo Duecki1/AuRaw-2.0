@@ -9,7 +9,7 @@
 // Creative effects layered after scene-domain adjustments: dehaze, Glow diffusion,
 // and the post-crop vignette used by the final display-linear pass.
 
-// Lightroom-like post-crop vignette calibration anchors are supplied through
+// Post-crop vignette calibration anchors are supplied through
 // EffectsUniforms. Each vec4 stores (smoothstep start radius, smoothstep end
 // radius, falloff exponent, corner opacity). The Rust defaults preserve the
 // empirical fits measured from Lightroom Amount -50, -100, +50, and +100.
@@ -98,7 +98,7 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let haze_likelihood = clamp(veil * (0.52 + 0.48 * low_contrast), 0.0, 1.0);
 
     if amount > 0.0 {
-        // Lightroom's +100 endpoint is aggressive in the toe but remains
+        // The +100 endpoint is aggressive in the toe but remains
         // monotone through the midtones. The former transmission range
         // (down to 0.22) subtracted 20-78% of A and drove broad, ordinary
         // midtones to black. Keep physical veil subtraction near one percent
@@ -134,7 +134,7 @@ fn apply_dehaze_value(pos: vec2<i32>, rgb: vec3<f32>, value: f32) -> vec3<f32> {
         );
     }
 
-    // Negative Dehaze is a controlled move toward ambient. Lightroom protects
+    // Negative Dehaze is a controlled move toward ambient. It protects
     // absolute black, lifts the lower midtones more than AuRaw's old
     // haze-likelihood inversion, and strongly reduces chroma in the veil.
     // Increase the mix with normalized scene brightness: this avoids turning
@@ -317,7 +317,7 @@ fn calibrated_vignette_anchor(
     return edge_opacity * pow(smoothstep(start, end, distance), power);
 }
 
-fn lightroom_vignette_opacity(
+fn calibrated_vignette_opacity(
     distance: f32,
     amount: f32,
     midpoint: f32,
@@ -399,7 +399,7 @@ fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let midpoint = clamp(Common::effects_uniforms.vignette.y / 100.0, 0.0, 1.0);
     let roundness = clamp(Common::effects_uniforms.vignette.z / 100.0, -1.0, 1.0);
     let feather = clamp(Common::effects_uniforms.vignette.w / 100.0, 0.0, 1.0);
-    var opacity = lightroom_vignette_opacity(
+    var opacity = calibrated_vignette_opacity(
         vignette_distance(pos, roundness),
         amount,
         midpoint,
@@ -410,13 +410,12 @@ fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
         let highlight_protection = 1.0
             - highlights * smoothstep(0.35, 1.0, Common::safe_luma(rgb));
         opacity = opacity * highlight_protection;
-        // Darktable and Lightroom both implement the dark branch as an edge
-        // multiplication. It preserves hue and reaches a true black corner at
-        // -100 without the gray rings caused by RGB subtraction.
+        // The dark branch multiplies edges, preserving hue and reaching a true
+        // black corner at -100 without the gray rings caused by RGB subtraction.
         return rgb * (1.0 - opacity);
     }
     // A positive vignette is not exposure gain: it is an additive/white edge
-    // treatment. Blending in display-linear RGB reproduces Lightroom's neutral
+    // treatment. Blending in display-linear RGB produces neutral
     // white corners without amplifying hue or clipping channels independently.
     return mix(rgb, vec3<f32>(1.0), opacity);
 }

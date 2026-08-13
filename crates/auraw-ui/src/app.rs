@@ -984,8 +984,7 @@ pub struct AurawApp {
     #[cfg(not(target_os = "android"))]
     desktop_picker_receiver: Option<mpsc::Receiver<DesktopPickerEvent>>,
     pub status: String,
-    /// Reveals low-level darktable/raw controls. The default Lightroom-like
-    /// interface intentionally keeps these implementation details hidden.
+    /// Reveals low-level darktable/RAW controls hidden by the standard view.
     pub expert_mode: bool,
     pub(crate) lens_correction: LensCorrectionState,
     edit_history: EditHistory,

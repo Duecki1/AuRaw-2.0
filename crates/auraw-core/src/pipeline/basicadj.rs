@@ -53,7 +53,7 @@ impl HighlightReconstructionMethod {
     }
 }
 
-/// Lightroom-style editable point curve. Points are stored in normalized
+/// Editable point curve. Points are stored in normalized
 /// input/output coordinates and evaluated in a reversible scene-luminance
 /// shaper, so the neutral diagonal is an exact no-op for HDR scene values.
 pub const MAX_POINT_CURVE_POINTS: usize = 8;
@@ -158,8 +158,7 @@ impl ColorGradeWheel {
     }
 }
 
-/// Scene-referred four-way grading inspired by Lightroom Color Grading and
-/// darktable color balance rgb. Tonal ranges overlap smoothly in log-luminance
+/// Scene-referred four-way grading. Tonal ranges overlap smoothly in log-luminance
 /// space; `blending` controls that overlap and `balance` moves the pivot.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ColorGrading {
@@ -327,8 +326,7 @@ pub struct ExposureParams {
     pub clarity: f32,
     pub dehaze: f32,
 
-    // Capture sharpening. The defaults mirror the familiar Lightroom-style
-    // starting point while remaining entirely non-destructive and editable.
+    // Capture sharpening with conservative, fully editable defaults.
     // Amount is 0..150, Radius is 0.5..3.0 px at a 1080 px reference short
     // edge, and Detail/Masking use 0..100 perceptual domains.
     #[serde(default = "default_sharpen_amount")]

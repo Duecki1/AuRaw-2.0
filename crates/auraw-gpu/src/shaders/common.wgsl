@@ -173,7 +173,7 @@ struct EffectsUniforms {
     vignette_frame: vec4<f32>,
     // Normalized source-to-final 2x2 affine transform.
     vignette_transform: vec4<f32>,
-    // Lightroom-like vignette calibration anchors. Each lane stores
+    // Vignette calibration anchors. Each lane stores
     // (smoothstep start, smoothstep end, falloff exponent, corner opacity).
     vignette_dark_half_fit: vec4<f32>,
     vignette_dark_full_fit: vec4<f32>,

@@ -9,7 +9,7 @@
 // Display/view-domain processing: perceptual color mixer, color grading, the
 // profile/sigmoid view transform, display black toe, and output encoding.
 
-// Lightroom's named HSL channels are a UI model, not a reason to process in
+// The named HSL channels are a UI model, not a reason to process in
 // mathematical HSL. HSL lightness is based on per-pixel RGB extrema and turns
 // demosaic/chroma noise into luminance noise. The mixer below instead selects
 // hues in perceptual OKLab, stabilizes only the selector with an edge-aware
@@ -22,7 +22,7 @@
 // OKLab. They therefore do not equal the source HSL angles: OKLab deliberately
 // redistributes hue around its perceptual plane. The paired bell widths are
 // empirical overlap widths chosen to bridge the unequal OKLab spacing while
-// retaining distinct centers for Lightroom's eight named mixer ranges.
+// retaining distinct centers for the eight named mixer ranges.
 const MIXER_HUE_RED: f32 = 0.0812052;
 const MIXER_HUE_ORANGE: f32 = 0.1465993;
 const MIXER_HUE_YELLOW: f32 = 0.3049145;
@@ -67,7 +67,7 @@ fn smooth_hue_bell(hue: f32, anchor: f32, width: f32) -> f32 {
     let t = clamp(1.0 - circular_distance(hue, anchor) / width, 0.0, 1.0);
     let feather = t * t * (3.0 - 2.0 * t);
     // Squaring the smoothstep keeps channel centers precise while retaining
-    // soft overlaps between Lightroom's eight named colour ranges.
+    // soft overlaps between the eight named colour ranges.
     return feather * feather;
 }
 
@@ -208,7 +208,7 @@ fn mixer_luminance_ev(amount: f32, lightness: f32) -> f32 {
     return value * endpoint_ev * signal * hdr_guard;
 }
 
-// Lightroom's local Hue control is a uniform rotation of the underlying pixel
+// The local Hue control is a uniform rotation of the underlying pixel
 // hue, not a tint overlay or a named-channel HSL edit. Work in perceptual
 // OKLab so lightness and chroma stay fixed, then use the shared Rec.2020 gamut
 // service only when the rotated hue cannot represent the requested chroma.
@@ -271,7 +271,7 @@ fn color_grade_vector(wheel: vec4<f32>) -> vec2<f32> {
 
 fn color_grade_tonal_weights(luminance: f32, options: vec4<f32>) -> vec3<f32> {
     // Evaluate ranges in exposure space around photographic middle gray.
-    // Wider blending produces Lightroom-like overlap without hard range
+    // Wider blending produces smooth overlap without hard range
     // boundaries. Balance shifts the shared pivot by up to 1.5 stops.
     let ev = log2(max(luminance, 1e-7) / ToneCommon::SCENE_MIDDLE_GREY);
     let width = mix(0.60, 2.80, clamp(options.x, 0.0, 1.0));
@@ -471,7 +471,7 @@ fn apply_view_transform(scene_rgb: vec3<f32>) -> vec3<f32> {
     let looked = Profile::apply_optional_profile_look(scene_rgb);
     let view_input = Color::gamut_project_nonnegative_rec2020(looked);
 
-    // Lightroom-style rendered TIFFs already arrive with a baked display
+    // Rendered TIFFs already arrive with a baked display
     // rendering. Reapplying the default scene->display sigmoid deepens shadows
     // and pushes highlights, so raster inputs bypass it unless the user has
     // explicitly enabled a non-default sigmoid/contrast configuration.
