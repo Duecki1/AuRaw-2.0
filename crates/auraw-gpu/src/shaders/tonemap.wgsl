@@ -586,7 +586,14 @@ fn remap_scene_luminance(
 
 fn scene_curve_zero_slope(curve: u32) -> f32 {
     let count = tone_curve_count(curve);
+    let first = tone_curve_point(curve, 0u);
     let encoded_black = point_curve_value(curve, 0.0);
+    // point_curve_value() holds the first endpoint constant to the left of its
+    // X coordinate. If that endpoint was moved right, the effective slope at
+    // scene zero is therefore flat rather than the first segment's secant.
+    if first.x > 0.0 {
+        return 0.0;
+    }
     let encoded_slope = tone_curve_tangent(curve, 0u, count);
     return decoded_scene_curve_zero_slope(encoded_black, encoded_slope);
 }

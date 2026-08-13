@@ -4,6 +4,7 @@ use eframe::egui::{self, Color32, Pos2, Sense, Stroke, StrokeKind, Ui};
 const CURVE_HEIGHT: f32 = 210.0;
 const POINT_RADIUS: f32 = 5.0;
 const PICK_RADIUS: f32 = 16.0;
+const MIN_POINT_X_GAP: f32 = 0.005;
 
 pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color32) -> bool {
     curve.sanitize();
@@ -71,13 +72,17 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color
                 let mut normalized = screen_to_curve(rect, pointer);
                 let len = curve.len as usize;
                 if index == 0 {
-                    normalized[0] = 0.0;
+                    normalized[0] = normalized[0]
+                        .clamp(0.0, curve.points[1][0] - MIN_POINT_X_GAP);
                 } else if index + 1 == len {
-                    normalized[0] = 1.0;
+                    normalized[0] = normalized[0].clamp(
+                        curve.points[index - 1][0] + MIN_POINT_X_GAP,
+                        1.0,
+                    );
                 } else {
                     normalized[0] = normalized[0].clamp(
-                        curve.points[index - 1][0] + 0.01,
-                        curve.points[index + 1][0] - 0.01,
+                        curve.points[index - 1][0] + MIN_POINT_X_GAP,
+                        curve.points[index + 1][0] - MIN_POINT_X_GAP,
                     );
                 }
                 normalized[1] = normalized[1].clamp(0.0, 1.0);
@@ -156,7 +161,10 @@ fn nearest_point(
 
 fn insert_point(curve: &mut PointCurve, point: [f32; 2]) -> bool {
     let len = curve.len as usize;
-    if len >= MAX_POINT_CURVE_POINTS || point[0] <= 0.005 || point[0] >= 0.995 {
+    if len >= MAX_POINT_CURVE_POINTS
+        || point[0] <= curve.points[0][0] + MIN_POINT_X_GAP
+        || point[0] >= curve.points[len - 1][0] - MIN_POINT_X_GAP
+    {
         return false;
     }
     if curve.points[..len]

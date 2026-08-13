@@ -66,7 +66,7 @@ pub struct PointCurve {
 
 impl PointCurve {
     pub const fn linear() -> Self {
-        // Lightroom's Point Curve starts with only the two locked endpoints.
+        // The Point Curve starts with the two neutral corner endpoints.
         // Interior control points are created explicitly by the user.
         Self {
             points: [
@@ -89,20 +89,29 @@ impl PointCurve {
 
     pub fn is_identity(&self) -> bool {
         let len = self.len.clamp(2, MAX_POINT_CURVE_POINTS as u32) as usize;
+        // A diagonal partial-domain curve is not an identity: values before the
+        // first point and after the last point are held at the endpoint values.
+        if self.points[0][0].abs() > 1e-6 || (self.points[len - 1][0] - 1.0).abs() > 1e-6 {
+            return false;
+        }
         self.points[..len]
             .iter()
             .all(|point| (point[1] - point[0]).abs() <= 1e-6)
     }
 
     pub fn sanitize(&mut self) {
+        const MIN_X_GAP: f32 = 0.005;
+
         self.len = self.len.clamp(2, MAX_POINT_CURVE_POINTS as u32);
         let len = self.len as usize;
-        self.points[0] = [0.0, self.points[0][1].clamp(0.0, 1.0)];
-        self.points[len - 1] = [1.0, self.points[len - 1][1].clamp(0.0, 1.0)];
-        for index in 1..len - 1 {
-            let lower = self.points[index - 1][0] + 0.005;
+        for index in 0..len {
+            let lower = if index == 0 {
+                0.0
+            } else {
+                self.points[index - 1][0] + MIN_X_GAP
+            };
             let remaining = (len - 1 - index) as f32;
-            let upper = 1.0 - 0.005 * remaining;
+            let upper = 1.0 - MIN_X_GAP * remaining;
             self.points[index][0] = self.points[index][0].clamp(lower, upper.max(lower));
             self.points[index][1] = self.points[index][1].clamp(0.0, 1.0);
         }
@@ -528,6 +537,47 @@ mod tests {
             if index > 0 {
                 assert!(point[0] > curve.points[index - 1][0]);
             }
+        }
+    }
+
+    #[test]
+    fn point_curve_sanitize_preserves_moved_endpoints() {
+        let mut curve = PointCurve::linear();
+        curve.points[0] = [0.2, 0.3];
+        curve.points[1] = [0.8, 0.7];
+        curve.sanitize();
+
+        assert_eq!(curve.points[0], [0.2, 0.3]);
+        assert_eq!(curve.points[1], [0.8, 0.7]);
+    }
+
+    #[test]
+    fn diagonal_partial_domain_curve_is_not_identity() {
+        let mut curve = PointCurve::linear();
+        curve.points[0] = [0.2, 0.2];
+        curve.points[1] = [0.8, 0.8];
+        curve.sanitize();
+
+        assert!(!curve.is_identity());
+    }
+
+    #[test]
+    fn point_curve_sanitize_keeps_all_points_sorted_inside_the_domain() {
+        let mut curve = PointCurve::linear();
+        curve.len = 4;
+        curve.points[0] = [0.7, -1.0];
+        curve.points[1] = [0.1, 0.25];
+        curve.points[2] = [0.2, 0.75];
+        curve.points[3] = [0.3, 2.0];
+        curve.sanitize();
+
+        assert!(curve.points[0][0] >= 0.0);
+        assert!(curve.points[3][0] <= 1.0);
+        for index in 1..curve.len as usize {
+            assert!(curve.points[index][0] - curve.points[index - 1][0] >= 0.0049);
+        }
+        for point in &curve.points[..curve.len as usize] {
+            assert!((0.0..=1.0).contains(&point[1]));
         }
     }
 
