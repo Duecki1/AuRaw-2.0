@@ -114,33 +114,90 @@ fn apply_local_exposure_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32>
     return rgb;
 }
 
+fn raster_ca_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
+    let local_extent = vec2<f32>(
+        f32(Common::camera_uniforms.width - 1u),
+        f32(Common::camera_uniforms.height - 1u),
+    );
+    let origin = vec2<f32>(
+        f32(Common::camera_uniforms.tile_origin_x),
+        f32(Common::camera_uniforms.tile_origin_y),
+    );
+    let full_extent = vec2<f32>(
+        f32(Common::camera_uniforms.full_width - 1u),
+        f32(Common::camera_uniforms.full_height - 1u),
+    );
+    let center = 0.5 * full_extent;
+    let global_pos = vec2<f32>(pos) + origin;
+    let rel = global_pos - center;
+    let norm = rel / max(center, vec2<f32>(1.0));
+    let scale = 1.0 + amount * 0.001 * dot(norm, norm);
+    let warped_global = clamp(center + rel * scale, vec2<f32>(0.0), full_extent);
+    return clamp(warped_global - origin, vec2<f32>(0.0), local_extent);
+}
+
+fn raster_scene_bilinear(pos: vec2<f32>) -> vec3<f32> {
+    let base = floor(pos);
+    let p0 = vec2<i32>(i32(base.x), i32(base.y));
+    let p1 = p0 + vec2<i32>(1, 1);
+    let f = fract(pos);
+    let a = textureLoad(scene_tex, Common::clamp_pos(p0), 0).xyz;
+    let b = textureLoad(scene_tex, Common::clamp_pos(vec2<i32>(p1.x, p0.y)), 0).xyz;
+    let c = textureLoad(scene_tex, Common::clamp_pos(vec2<i32>(p0.x, p1.y)), 0).xyz;
+    let d = textureLoad(scene_tex, Common::clamp_pos(p1), 0).xyz;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+fn source_scene_at(pos: vec2<i32>) -> vec3<f32> {
+    var rgb = textureLoad(scene_tex, Common::clamp_pos(pos), 0).xyz;
+    if Common::camera_uniforms._pad_0_field <= 0.5 {
+        return rgb;
+    }
+    if abs(Common::camera_uniforms.ca_red) > 1e-6 {
+        rgb.r = raster_scene_bilinear(
+            raster_ca_warped_pos(pos, Common::camera_uniforms.ca_red),
+        ).r;
+    }
+    if abs(Common::camera_uniforms.ca_blue) > 1e-6 {
+        rgb.b = raster_scene_bilinear(
+            raster_ca_warped_pos(pos, Common::camera_uniforms.ca_blue),
+        ).b;
+    }
+    return rgb;
+}
+
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
-    let camera_rgb = textureLoad(scene_tex, Common::clamp_pos(pos), 0).xyz;
-    // The global white balance and its DCP interpolation are folded into the
-    // camera-specific matrix assembled on the CPU. Preserve the matrix result
-    // until all DCP stages are complete: gamut remapping between HueSatMap,
-    // exposure, LookTable and ProfileToneCurve changes the profile itself.
-    let working = Color::cam_to_working(camera_rgb);
+    let camera_rgb = source_scene_at(pos);
+    // Sensor RAWs arrive in camera RGB and use the CPU-assembled camera/DCP
+    // matrix. Pre-demosaiced TIFFs arrive in scene-linear Rec.2020 and carry an
+    // identity matrix, so both source types meet at the same working boundary.
+    var working = Color::cam_to_working(camera_rgb);
 
     // LaMa is run on a neutral pre-adjustment rendition. Its generated output
     // is converted to scene-linear Rec.2020 on the CPU immediately after
     // inference and retained as RGBA16F, so no 8-bit sRGB round trip occurs here.
-    // From this point onward the replacement follows the exact same profile,
-    // global, mask, Effects, grading, vignette, sigmoid and output-transform path.
     let replacement = textureLoad(inpaint_tex, Common::clamp_pos(pos), 0);
-    if replacement.a <= 1e-6 {
-        return working;
+    if replacement.a > 1e-6 {
+        let replacement_neutral = replacement.rgb;
+        let replacement_working = vec3<f32>(
+            dot(Common::camera_uniforms.inpaint_wb_0_field.xyz, replacement_neutral),
+            dot(Common::camera_uniforms.inpaint_wb_1_field.xyz, replacement_neutral),
+            dot(Common::camera_uniforms.inpaint_wb_2_field.xyz, replacement_neutral),
+        );
+        working = mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
     }
-    let replacement_neutral = replacement.rgb;
-    // Inpaint pixels are generated in the RAW's neutral camera-WB working
-    // basis. Remap them through the live camera transform so global
-    // temperature/tint changes remain non-destructive after the erase.
-    let replacement_working = vec3<f32>(
-        dot(Common::camera_uniforms.inpaint_wb_0_field.xyz, replacement_neutral),
-        dot(Common::camera_uniforms.inpaint_wb_1_field.xyz, replacement_neutral),
-        dot(Common::camera_uniforms.inpaint_wb_2_field.xyz, replacement_neutral),
-    );
-    return mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
+
+    // Rendered TIFFs have no sensor-space white-balance model. Apply the same
+    // Bradford scene adaptation used by local adjustments so Temperature/Tint
+    // remains fully functional without pretending the raster is a CFA mosaic.
+    if Common::camera_uniforms._pad_0_field > 0.5 {
+        working = BasicAdjustments::apply_temperature_tint_values(
+            working,
+            Common::camera_uniforms.temperature,
+            Common::camera_uniforms.tint,
+        );
+    }
+    return working;
 }
 
 fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {

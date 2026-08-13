@@ -1,6 +1,7 @@
 #import auraw::common as Common
 #import auraw::color as Color
 #import auraw::profile as Profile
+#import auraw::basic_adjustments as BasicAdjustments
 #import auraw::tone_common as ToneCommon
 
 // Quarter/eighth-resolution image analysis. One pass creates a log-luminance
@@ -18,8 +19,60 @@ struct ToneHistogram {
 @group(0) @binding(18) var tone_guide_write: texture_storage_2d<r32float, write>;
 @group(0) @binding(32) var tone_inpaint_tex: texture_2d<f32>;
 
+fn tone_raster_ca_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
+    let local_extent = vec2<f32>(
+        f32(Common::camera_uniforms.width - 1u),
+        f32(Common::camera_uniforms.height - 1u),
+    );
+    let origin = vec2<f32>(
+        f32(Common::camera_uniforms.tile_origin_x),
+        f32(Common::camera_uniforms.tile_origin_y),
+    );
+    let full_extent = vec2<f32>(
+        f32(Common::camera_uniforms.full_width - 1u),
+        f32(Common::camera_uniforms.full_height - 1u),
+    );
+    let center = 0.5 * full_extent;
+    let global_pos = vec2<f32>(pos) + origin;
+    let rel = global_pos - center;
+    let norm = rel / max(center, vec2<f32>(1.0));
+    let scale = 1.0 + amount * 0.001 * dot(norm, norm);
+    let warped_global = clamp(center + rel * scale, vec2<f32>(0.0), full_extent);
+    return clamp(warped_global - origin, vec2<f32>(0.0), local_extent);
+}
+
+fn tone_raster_scene_bilinear(pos: vec2<f32>) -> vec3<f32> {
+    let base = floor(pos);
+    let p0 = vec2<i32>(i32(base.x), i32(base.y));
+    let p1 = p0 + vec2<i32>(1, 1);
+    let f = fract(pos);
+    let a = textureLoad(tone_scene_tex, Common::clamp_pos(p0), 0).xyz;
+    let b = textureLoad(tone_scene_tex, Common::clamp_pos(vec2<i32>(p1.x, p0.y)), 0).xyz;
+    let c = textureLoad(tone_scene_tex, Common::clamp_pos(vec2<i32>(p0.x, p1.y)), 0).xyz;
+    let d = textureLoad(tone_scene_tex, Common::clamp_pos(p1), 0).xyz;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+fn tone_source_scene_at(pos: vec2<i32>) -> vec3<f32> {
+    var rgb = textureLoad(tone_scene_tex, Common::clamp_pos(pos), 0).xyz;
+    if Common::camera_uniforms._pad_0_field <= 0.5 {
+        return rgb;
+    }
+    if abs(Common::camera_uniforms.ca_red) > 1e-6 {
+        rgb.r = tone_raster_scene_bilinear(
+            tone_raster_ca_warped_pos(pos, Common::camera_uniforms.ca_red),
+        ).r;
+    }
+    if abs(Common::camera_uniforms.ca_blue) > 1e-6 {
+        rgb.b = tone_raster_scene_bilinear(
+            tone_raster_ca_warped_pos(pos, Common::camera_uniforms.ca_blue),
+        ).b;
+    }
+    return rgb;
+}
+
 fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
-    let camera_rgb = textureLoad(tone_scene_tex, Common::clamp_pos(pos), 0).xyz;
+    let camera_rgb = tone_source_scene_at(pos);
 
     // Sensor black calibration has already happened per CFA plane. Tone
     // statistics are measured after camera characterization and fixed DNG
@@ -40,6 +93,13 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
             dot(Common::camera_uniforms.inpaint_wb_2_field.xyz, replacement.rgb),
         );
         working = mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
+    }
+    if Common::camera_uniforms._pad_0_field > 0.5 {
+        working = BasicAdjustments::apply_temperature_tint_values(
+            working,
+            Common::camera_uniforms.temperature,
+            Common::camera_uniforms.tint,
+        );
     }
     let characterized = Profile::apply_camera_characterization(working);
     let profile_exposure_ev = bitcast<f32>(Common::camera_uniforms.profile_flags.z);

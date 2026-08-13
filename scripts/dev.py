@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -426,29 +425,65 @@ def encoded_rgb16(
     crop: tuple[int, int, int, int] | None,
     sample_step: int,
 ) -> np.ndarray:
-    width, height = image_region_size(path, crop)
-    sampled_width = (width + sample_step - 1) // sample_step
-    sampled_height = (height + sample_step - 1) // sample_step
-    command = ["magick", str(path)]
-    if crop is not None:
-        x, y, crop_width, crop_height = crop
-        command += ["-crop", f"{crop_width}x{crop_height}+{x}+{y}", "+repage"]
-    if sample_step > 1:
-        # Point sampling avoids inventing spatial detail while reducing memory.
-        command += ["-filter", "point", "-sample", f"{sampled_width}x{sampled_height}!"]
-    command += ["-alpha", "off", "-depth", "16", "-endian", "LSB", "rgb:-"]
-    try:
-        result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as error:
-        message = error.stderr.decode("utf-8", "replace").strip()
-        raise RuntimeError(f"ImageMagick could not decode {path}: {message}") from error
-    expected_values = sampled_width * sampled_height * 3
-    encoded = np.frombuffer(result.stdout, dtype="<u2")
-    if encoded.size != expected_values:
-        raise RuntimeError(
-            f"ImageMagick returned {encoded.size} values for {path}; expected {expected_values}"
+    """Read an image in process without reducing high-bit-depth TIFF data.
+
+    TIFF uses tifffile so uint16 and float32 samples reach NumPy unchanged.
+    Pillow remains the lightweight path for PNG/JPEG endpoint images.
+    """
+    suffix = path.suffix.lower()
+    if suffix in {".tif", ".tiff"}:
+        try:
+            import tifffile
+        except ImportError as error:
+            raise RuntimeError(
+                "tifffile is required to read TIFF comparison images; "
+                "install requirements-regression.txt"
+            ) from error
+        source = np.asarray(tifffile.imread(path))
+    else:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            source = np.asarray(image.convert("RGB"))
+
+    # tifffile can expose a singleton page axis. Reject true stacks rather than
+    # silently comparing the wrong page.
+    while source.ndim > 3 and source.shape[0] == 1:
+        source = source[0]
+    if source.ndim == 3 and source.shape[0] in (3, 4) and source.shape[2] not in (3, 4):
+        source = np.moveaxis(source, 0, 2)
+    if source.ndim == 2:
+        source = np.repeat(source[..., None], 3, axis=2)
+    if source.ndim != 3 or source.shape[2] not in (3, 4):
+        raise ValueError(
+            f"{path} must contain one grayscale/RGB/RGBA image, got shape {source.shape}"
         )
-    return encoded.astype(np.float32).reshape(sampled_height, sampled_width, 3) / 65535.0
+    source = source[..., :3]
+
+    source_height, source_width = source.shape[:2]
+    if crop is None:
+        x = y = 0
+        width, height = source_width, source_height
+    else:
+        x, y, width, height = crop
+        if x + width > source_width or y + height > source_height:
+            raise ValueError(
+                f"crop {crop} is outside {path.name} ({source_width}x{source_height})"
+            )
+    source = source[y : y + height : sample_step, x : x + width : sample_step]
+
+    if np.issubdtype(source.dtype, np.integer):
+        info = np.iinfo(source.dtype)
+        # Preserve every uint16 code value exactly in float32. Signed formats
+        # retain negative scene headroom and normalize by their positive range.
+        scale = float(info.max)
+        return source.astype(np.float32) / scale
+    if np.issubdtype(source.dtype, np.floating):
+        encoded = source.astype(np.float32, copy=False)
+        if not np.isfinite(encoded).all():
+            raise ValueError(f"{path} contains NaN or infinity")
+        return encoded
+    raise ValueError(f"unsupported pixel dtype {source.dtype} in {path}")
 
 
 def linear_rgb(
@@ -531,10 +566,6 @@ def command_compare_lightroom(args: argparse.Namespace) -> int:
     if args.sample_step < 1:
         print("error: --sample-step must be positive", file=sys.stderr)
         return 2
-    if shutil.which("magick") is None:
-        print("error: ImageMagick 7 (`magick`) is required for native 16-bit RGB decoding", file=sys.stderr)
-        return 2
-
     try:
         auraw_base = linear_rgb(
             args.auraw_dir / args.auraw_baseline,

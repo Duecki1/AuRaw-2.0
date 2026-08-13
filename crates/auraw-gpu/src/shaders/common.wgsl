@@ -49,7 +49,11 @@ struct CameraUniforms {
     dual_threshold: f32,
     frequency_chroma: f32,
     tint: f32,
+    // >0.5 means the source is a pre-demosaiced raster instead of a sensor CFA.
     _pad_0_field: f32,
+    // >0.5 means apply the scene->display sigmoid view transform. Rendered
+    // TIFFs disable this at defaults so their baked tone rendering is not
+    // contrast-mapped a second time.
     _pad_1_field: f32,
     _pad_2_field: f32,
     // Reconstruction method followed by inpaint-opposed RGB chrominance offsets.

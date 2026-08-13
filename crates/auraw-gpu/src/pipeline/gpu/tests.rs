@@ -1497,6 +1497,7 @@ fn local_mask_scheduling_fixture(width: u32, height: u32) -> super::LoadedRaw {
         capture_metadata: Default::default(),
         cfa_kind: crate::pipeline::CfaKind::Bayer,
         raw_pixels,
+        scene_linear_raster: None,
         color_indices: crate::pipeline::CompactPixelMap::dense(width, height, color_indices),
         wb_coeffs: [1.0; 4],
         cam_to_srgb: [
@@ -2207,6 +2208,7 @@ fn gpu_pipeline_renders_and_reads_scene_textures_when_an_adapter_exists() {
             capture_metadata: Default::default(),
             cfa_kind,
             raw_pixels: vec![2048; (width * height) as usize],
+            scene_linear_raster: None,
             color_indices: crate::pipeline::CompactPixelMap::dense(width, height, color_indices),
             wb_coeffs: [1.0; 4],
             cam_to_srgb: [
@@ -2491,6 +2493,7 @@ fn presence_and_mask_effects_have_real_gpu_behavior_when_an_adapter_exists() {
             capture_metadata: Default::default(),
             cfa_kind: CfaKind::Bayer,
             raw_pixels,
+            scene_linear_raster: None,
             color_indices: crate::pipeline::CompactPixelMap::dense(width, height, color_indices),
             wb_coeffs: [1.0; 4],
             cam_to_srgb: [
@@ -3344,6 +3347,7 @@ fn inpaint_opposed_keeps_large_clipped_highlights_finite() {
         capture_metadata: Default::default(),
         cfa_kind: CfaKind::Bayer,
         raw_pixels,
+        scene_linear_raster: None,
         color_indices: crate::pipeline::CompactPixelMap::dense(width, height, color_indices),
         wb_coeffs: wb,
         cam_to_srgb: [
@@ -3471,6 +3475,7 @@ fn inpaint_opposed_recovers_selectively_clipped_highlights() {
             capture_metadata: Default::default(),
             cfa_kind,
             raw_pixels,
+            scene_linear_raster: None,
             color_indices: crate::pipeline::CompactPixelMap::dense(WIDTH, HEIGHT, color_indices),
             wb_coeffs: WB,
             cam_to_srgb: [

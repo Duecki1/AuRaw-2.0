@@ -72,9 +72,162 @@ impl Default for ProxySpec {
     }
 }
 
+fn raster_with_metadata(
+    raw: &LoadedRaw,
+    width: u32,
+    height: u32,
+    rgb: Vec<f32>,
+    preserve_lens_geometry: bool,
+) -> LoadedRaw {
+    let mut output = LoadedRaw::from_scene_linear_rec2020(width, height, rgb)
+        .expect("validated raster dimensions must remain valid");
+    output.camera_make = raw.camera_make.clone();
+    output.camera_model = raw.camera_model.clone();
+    output.lens_make = raw.lens_make.clone();
+    output.lens_model = raw.lens_model.clone();
+    output.focal_length = raw.focal_length;
+    output.aperture = raw.aperture;
+    output.focus_distance = raw.focus_distance;
+    output.capture_metadata = raw.capture_metadata.clone();
+    output.noise_profile = raw.noise_profile;
+    output.camera_profile = raw.camera_profile.clone();
+    output.camera_profile_source = raw.camera_profile_source.clone();
+    output.available_camera_profiles = raw.available_camera_profiles.clone();
+    output.lens_geometry = preserve_lens_geometry
+        .then(|| raw.lens_geometry.clone())
+        .flatten();
+    output.opposed_chroma_cache = std::sync::Arc::clone(&raw.opposed_chroma_cache);
+    output
+}
+
+fn crop_raster(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> LoadedRaw {
+    let x = x.min(raw.width.saturating_sub(1));
+    let y = y.min(raw.height.saturating_sub(1));
+    let width = width.max(1).min(raw.width - x);
+    let height = height.max(1).min(raw.height - y);
+    let source = raw
+        .scene_linear_raster()
+        .expect("raster source flag requires RGB pixels");
+    let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+    let source_width = raw.width as usize;
+    for row in y..y + height {
+        let start = (row as usize * source_width + x as usize) * 3;
+        let end = start + width as usize * 3;
+        rgb.extend_from_slice(&source[start..end]);
+    }
+    raster_with_metadata(
+        raw,
+        width,
+        height,
+        rgb,
+        x == 0 && y == 0 && width == raw.width && height == raw.height,
+    )
+}
+
+fn build_raster_region_proxy(
+    raw: &LoadedRaw,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    spec: ProxySpec,
+) -> LoadedRaw {
+    let x = x.min(raw.width.saturating_sub(1));
+    let y = y.min(raw.height.saturating_sub(1));
+    let region_width = width.max(1).min(raw.width - x);
+    let region_height = height.max(1).min(raw.height - y);
+    let max_edge = spec.max_edge.max(1);
+    let longest = region_width.max(region_height);
+    if longest <= max_edge {
+        return crop_raster(raw, x, y, region_width, region_height);
+    }
+
+    let scale = max_edge as f64 / longest as f64;
+    let output_width = (region_width as f64 * scale).round().max(1.0) as u32;
+    let output_height = (region_height as f64 * scale).round().max(1.0) as u32;
+    let source = raw
+        .scene_linear_raster()
+        .expect("raster source flag requires RGB pixels");
+    let source_width = raw.width as usize;
+    let mut rgb = vec![0.0f32; output_width as usize * output_height as usize * 3];
+    let partition = |index: u32, source_count: u32, output_count: u32| {
+        let start = (u64::from(index) * u64::from(source_count) / u64::from(output_count)) as u32;
+        let end = (u64::from(index + 1) * u64::from(source_count) / u64::from(output_count)) as u32;
+        (start, end.max(start + 1).min(source_count))
+    };
+    rgb.par_chunks_mut(output_width as usize * 3)
+        .enumerate()
+        .for_each(|(output_y, row)| {
+            let (sy0, sy1) = partition(output_y as u32, region_height, output_height);
+            for output_x in 0..output_width {
+                let (sx0, sx1) = partition(output_x, region_width, output_width);
+                let mut sum = [0.0f64; 3];
+                let mut count = 0u32;
+                for sy in sy0..sy1 {
+                    for sx in sx0..sx1 {
+                        let index = ((y + sy) as usize * source_width + (x + sx) as usize) * 3;
+                        sum[0] += f64::from(source[index]);
+                        sum[1] += f64::from(source[index + 1]);
+                        sum[2] += f64::from(source[index + 2]);
+                        count += 1;
+                    }
+                }
+                let destination = output_x as usize * 3;
+                let divisor = f64::from(count.max(1));
+                row[destination] = (sum[0] / divisor) as f32;
+                row[destination + 1] = (sum[1] / divisor) as f32;
+                row[destination + 2] = (sum[2] / divisor) as f32;
+            }
+        });
+    raster_with_metadata(
+        raw,
+        output_width,
+        output_height,
+        rgb,
+        x == 0 && y == 0 && region_width == raw.width && region_height == raw.height,
+    )
+}
+
+fn fill_padded_raster_pixels(raw: &LoadedRaw, tile: ExportTile, rgb: &mut [f32]) {
+    let source = raw
+        .scene_linear_raster()
+        .expect("raster source flag requires RGB pixels");
+    let width = tile.padded_width as usize;
+    let expected = width
+        .saturating_mul(tile.padded_height as usize)
+        .saturating_mul(3);
+    debug_assert_eq!(rgb.len(), expected);
+    let max_x = i64::from(raw.width.saturating_sub(1));
+    let max_y = i64::from(raw.height.saturating_sub(1));
+    let source_width = raw.width as usize;
+    for local_y in 0..tile.padded_height {
+        let source_y =
+            (i64::from(tile.global_origin_y) + i64::from(local_y)).clamp(0, max_y) as usize;
+        for local_x in 0..tile.padded_width {
+            let source_x =
+                (i64::from(tile.global_origin_x) + i64::from(local_x)).clamp(0, max_x) as usize;
+            let source_index = (source_y * source_width + source_x) * 3;
+            let destination = (local_y as usize * width + local_x as usize) * 3;
+            rgb[destination..destination + 3]
+                .copy_from_slice(&source[source_index..source_index + 3]);
+        }
+    }
+}
+
+fn extract_padded_raster_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
+    let width = tile.padded_width as usize;
+    let height = tile.padded_height as usize;
+    let mut rgb = vec![0.0f32; width.saturating_mul(height).saturating_mul(3)];
+    fill_padded_raster_pixels(raw, tile, &mut rgb);
+    raster_with_metadata(raw, tile.padded_width, tile.padded_height, rgb, false)
+}
+
 /// Copies a rectangular RAW region while retaining camera metadata and the
 /// explicit CFA/black-level maps. Coordinates are clamped to the source image.
 pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> LoadedRaw {
+    if raw.is_pre_demosaiced_raster() {
+        return crop_raster(raw, x, y, width, height);
+    }
     let x = x.min(raw.width.saturating_sub(1));
     let y = y.min(raw.height.saturating_sub(1));
     let width = width.max(1).min(raw.width - x);
@@ -105,6 +258,7 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         capture_metadata: raw.capture_metadata.clone(),
         cfa_kind: raw.cfa_kind,
         raw_pixels,
+        scene_linear_raster: None,
         color_indices,
         wb_coeffs: raw.wb_coeffs,
         cam_to_srgb: raw.cam_to_srgb,
@@ -148,6 +302,9 @@ pub fn build_region_proxy(
     height: u32,
     spec: ProxySpec,
 ) -> LoadedRaw {
+    if raw.is_pre_demosaiced_raster() {
+        return build_raster_region_proxy(raw, x, y, width, height, spec);
+    }
     let x = x.min(raw.width.saturating_sub(1));
     let y = y.min(raw.height.saturating_sub(1));
     let region_width = width.max(1).min(raw.width - x);
@@ -263,6 +420,7 @@ pub fn build_region_proxy(
         capture_metadata: raw.capture_metadata.clone(),
         cfa_kind: raw.cfa_kind,
         raw_pixels,
+        scene_linear_raster: None,
         color_indices: CompactPixelMap::compact_from_dense(width, height, color_indices, 64),
         wb_coeffs: raw.wb_coeffs,
         cam_to_srgb: raw.cam_to_srgb,
@@ -770,6 +928,9 @@ impl TilePlan {
 /// Extracts a fixed-size, halo-padded RAW tile. Out-of-image samples clamp to
 /// the nearest sensor edge, allowing one reusable GPU allocation for all tiles.
 pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
+    if raw.is_pre_demosaiced_raster() {
+        return extract_padded_raster_tile(raw, tile);
+    }
     let mut tile_raw = LoadedRaw {
         width: tile.padded_width,
         height: tile.padded_height,
@@ -783,6 +944,7 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
         capture_metadata: raw.capture_metadata.clone(),
         cfa_kind: raw.cfa_kind,
         raw_pixels: Vec::new(),
+        scene_linear_raster: None,
         color_indices: raw.color_indices.subregion_clamped(
             i64::from(tile.global_origin_x),
             i64::from(tile.global_origin_y),
@@ -815,9 +977,52 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
 }
 
 /// Reuses the allocation and metadata clones of an existing tile buffer. The
-/// hot export loop only rewrites the mosaic pixels and compact calibration
-/// maps, avoiding three fresh full-tile allocations per tile.
+/// hot export loop rewrites either the scene-linear raster or the sensor mosaic
+/// in place, avoiding fresh full-tile allocations for every export tile.
 pub fn extract_padded_tile_into(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mut LoadedRaw) {
+    if raw.is_pre_demosaiced_raster() {
+        let dimensions_changed =
+            tile_raw.width != tile.padded_width || tile_raw.height != tile.padded_height;
+        tile_raw.width = tile.padded_width;
+        tile_raw.height = tile.padded_height;
+        if dimensions_changed {
+            tile_raw.color_indices = CompactPixelMap::repeating(
+                tile.padded_width,
+                tile.padded_height,
+                1,
+                1,
+                vec![1],
+            );
+            tile_raw.black_levels_per_pixel = CompactPixelMap::repeating(
+                tile.padded_width,
+                tile.padded_height,
+                1,
+                1,
+                vec![0.0],
+            );
+        }
+        let expected = (tile.padded_width as usize)
+            .saturating_mul(tile.padded_height as usize)
+            .saturating_mul(3);
+        if tile_raw
+            .scene_linear_raster
+            .as_ref()
+            .is_none_or(|rgb| rgb.len() != expected)
+        {
+            tile_raw.scene_linear_raster = Some(vec![0.0f32; expected].into());
+        }
+        let rgb = std::sync::Arc::make_mut(
+            tile_raw
+                .scene_linear_raster
+                .as_mut()
+                .expect("raster tile allocation must exist"),
+        );
+        fill_padded_raster_pixels(raw, tile, rgb);
+        tile_raw.raw_pixels.clear();
+        tile_raw.lens_geometry = None;
+        tile_raw.clear_ai_denoised_image();
+        return;
+    }
     tile_raw.width = tile.padded_width;
     tile_raw.height = tile.padded_height;
     tile_raw.color_indices = raw.color_indices.subregion_clamped(
@@ -893,6 +1098,16 @@ mod tests {
         LoadedRaw, MaskEffect, MaskStack,
     };
 
+    fn test_raster(width: u32, height: u32) -> LoadedRaw {
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                rgb.extend_from_slice(&[x as f32, y as f32, (x + y) as f32]);
+            }
+        }
+        LoadedRaw::from_scene_linear_rec2020(width, height, rgb).unwrap()
+    }
+
     fn test_raw(width: u32, height: u32) -> LoadedRaw {
         let pixels = (0..width * height)
             .map(|value| value as u16)
@@ -910,6 +1125,7 @@ mod tests {
             capture_metadata: Default::default(),
             cfa_kind: CfaKind::Bayer,
             raw_pixels: pixels,
+            scene_linear_raster: None,
             color_indices: CompactPixelMap::dense(
                 width,
                 height,
@@ -1197,6 +1413,68 @@ mod tests {
     }
 
     #[test]
+    fn raster_crop_proxy_and_export_tile_stay_in_scene_linear_rgb() {
+        let raw = test_raster(4, 4);
+        let cropped = crop_raw(&raw, 1, 1, 2, 2);
+        assert!(cropped.is_pre_demosaiced_raster());
+        assert_eq!(
+            cropped.scene_linear_raster().unwrap(),
+            &[1.0, 1.0, 2.0, 2.0, 1.0, 3.0, 1.0, 2.0, 3.0, 2.0, 2.0, 4.0]
+        );
+
+        let proxy = build_proxy(&raw, ProxySpec { max_edge: 2 });
+        assert_eq!((proxy.width, proxy.height), (2, 2));
+        assert!(proxy.is_pre_demosaiced_raster());
+        let proxy_rgb = proxy.scene_linear_raster().unwrap();
+        assert_eq!(
+            proxy_rgb,
+            &[0.5, 0.5, 1.0, 2.5, 0.5, 3.0, 0.5, 2.5, 3.0, 2.5, 2.5, 5.0]
+        );
+
+        let tile = ExportTile {
+            core_x: 0,
+            core_y: 0,
+            core_width: 2,
+            core_height: 2,
+            local_core_x: 1,
+            local_core_y: 1,
+            padded_width: 4,
+            padded_height: 4,
+            global_origin_x: -1,
+            global_origin_y: -1,
+        };
+        let mut padded = extract_padded_tile(&raw, tile);
+        assert!(padded.is_pre_demosaiced_raster());
+        let allocation = padded.scene_linear_raster().unwrap().as_ptr();
+        let padded_rgb = padded.scene_linear_raster().unwrap();
+        assert_eq!(&padded_rgb[0..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(
+            &padded_rgb[(2 * 4 + 2) * 3..(2 * 4 + 2) * 3 + 3],
+            &[1.0, 1.0, 2.0]
+        );
+
+        let shifted = ExportTile {
+            global_origin_x: 0,
+            global_origin_y: 0,
+            ..tile
+        };
+        extract_padded_tile_into(&raw, shifted, &mut padded);
+        assert_eq!(
+            padded.scene_linear_raster().unwrap().as_ptr(),
+            allocation,
+            "same-size raster export tiles should reuse their float buffer"
+        );
+        assert_eq!(
+            &padded.scene_linear_raster().unwrap()[0..3],
+            &[0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            &padded.scene_linear_raster().unwrap()[(3 * 4 + 3) * 3..(3 * 4 + 3) * 3 + 3],
+            &[3.0, 3.0, 6.0]
+        );
+    }
+
+    #[test]
     fn crop_raw_copies_only_the_requested_sensor_region() {
         let width = 4;
         let height = 3;
@@ -1213,6 +1491,7 @@ mod tests {
             capture_metadata: Default::default(),
             cfa_kind: CfaKind::Bayer,
             raw_pixels: (0..width * height).map(|value| value as u16).collect(),
+            scene_linear_raster: None,
             color_indices: CompactPixelMap::dense(
                 width,
                 height,
@@ -1283,6 +1562,7 @@ mod tests {
             capture_metadata: Default::default(),
             cfa_kind: CfaKind::Bayer,
             raw_pixels: vec![100; (width * height) as usize],
+            scene_linear_raster: None,
             color_indices: CompactPixelMap::dense(width, height, color_indices),
             wb_coeffs: [1.0; 4],
             cam_to_srgb: [[0.0; 4]; 3],

@@ -616,7 +616,20 @@ fn desktop_raw_stamp(raw_path: &Path) -> Result<String, String> {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    Ok(format!("v1:{}:{modified}", metadata.len()))
+    // The cache generation is part of the decoder contract. TIFF thumbnail
+    // color management changed after first-class TIFF support landed; without
+    // a generation token, previews produced by an older build survive forever
+    // because source size/mtime are unchanged. Keep existing camera-RAW caches
+    // valid while forcing TIFFs through the current color-managed renderer.
+    let generation = raw_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff")
+        })
+        .then_some(2)
+        .unwrap_or(1);
+    Ok(format!("v{generation}:{}:{modified}", metadata.len()))
 }
 
 pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -760,6 +773,21 @@ mod tests {
         assert!(!legacy_cache.exists());
         assert!(!legacy_fingerprint.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn tiff_raw_thumbnail_stamp_uses_current_color_pipeline_generation() {
+        let root = temporary_test_path("stamp-generation");
+        fs::create_dir_all(&root).unwrap();
+        let tiff = root.join("rendered.TIFF");
+        let raw = root.join("capture.dng");
+        fs::write(&tiff, b"same").unwrap();
+        fs::write(&raw, b"same").unwrap();
+
+        assert!(desktop_raw_stamp(&tiff).unwrap().starts_with("v2:"));
+        assert!(desktop_raw_stamp(&raw).unwrap().starts_with("v1:"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(target_os = "android"))]

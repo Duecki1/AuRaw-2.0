@@ -7,6 +7,7 @@ pub mod noise;
 pub mod processing;
 pub mod raw_loader;
 pub mod sigmoid;
+mod tiff_loader;
 pub mod white_balance_presets;
 
 pub use basicadj::{

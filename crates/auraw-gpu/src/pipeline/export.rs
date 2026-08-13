@@ -1681,6 +1681,8 @@ fn tiff_embedded_profile(color: &ResolvedExportColor) -> Vec<u8> {
     color.embedded_icc.clone().unwrap_or_else(built_in_srgb_icc)
 }
 
+const TIFF_TARGET_STRIP_BYTES: u64 = 1024 * 1024;
+
 #[derive(Clone)]
 struct TiffEntry {
     tag: u16,
@@ -1697,12 +1699,76 @@ fn tiff_long(value: u32) -> Vec<u8> {
     value.to_le_bytes().to_vec()
 }
 
+fn tiff_long_values(values: &[u32]) -> Result<Vec<u8>> {
+    let capacity = values
+        .len()
+        .checked_mul(std::mem::size_of::<u32>())
+        .context("TIFF LONG array size overflow")?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(capacity)
+        .context("reserve TIFF LONG array")?;
+    for value in values {
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(data)
+}
+
 fn tiff_ascii(value: &str) -> Vec<u8> {
     let mut bytes = value.as_bytes().to_vec();
     if bytes.last().copied() != Some(0) {
         bytes.push(0);
     }
     bytes
+}
+
+fn tiff_ascii_entry(tag: u16, value: &str) -> Result<TiffEntry> {
+    let data = tiff_ascii(value);
+    Ok(TiffEntry {
+        tag,
+        field_type: 2,
+        count: u32::try_from(data.len()).context("TIFF ASCII tag is too large")?,
+        data,
+    })
+}
+
+/// Chooses classic TIFF strips around 1 MiB. Keeping strips bounded improves
+/// decoder locality and error recovery while preserving AuRaw's row-streamed,
+/// constant-memory export path. The final strip is allowed to be shorter.
+fn tiff_strip_layout(width: u32, height: u32, bits_per_sample: u16) -> Result<(u32, Vec<u32>)> {
+    anyhow::ensure!(width > 0 && height > 0, "TIFF dimensions must be non-zero");
+    anyhow::ensure!(matches!(bits_per_sample, 8 | 16 | 32), "unsupported TIFF bit depth");
+
+    let bytes_per_pixel = u64::from(bits_per_sample / 8)
+        .checked_mul(3)
+        .context("TIFF bytes-per-pixel overflow")?;
+    let bytes_per_row = u64::from(width)
+        .checked_mul(bytes_per_pixel)
+        .context("TIFF row byte count overflow")?;
+    let rows_per_strip = (TIFF_TARGET_STRIP_BYTES / bytes_per_row)
+        .max(1)
+        .min(u64::from(height));
+    let rows_per_strip =
+        u32::try_from(rows_per_strip).context("TIFF rows-per-strip overflow")?;
+    let strip_count = height.div_ceil(rows_per_strip);
+    let mut byte_counts = Vec::new();
+    byte_counts
+        .try_reserve_exact(strip_count as usize)
+        .context("reserve TIFF strip byte counts")?;
+
+    for strip in 0..strip_count {
+        let first_row = strip
+            .checked_mul(rows_per_strip)
+            .context("TIFF strip row offset overflow")?;
+        let rows = rows_per_strip.min(height - first_row);
+        let bytes = u64::from(rows)
+            .checked_mul(bytes_per_row)
+            .context("TIFF strip byte count overflow")?;
+        byte_counts.push(
+            u32::try_from(bytes).context("individual TIFF strip exceeds classic TIFF limits")?,
+        );
+    }
+
+    Ok((rows_per_strip, byte_counts))
 }
 
 fn write_tiff_header<W: Write>(
@@ -1727,8 +1793,25 @@ fn write_tiff_header<W: Write>(
         .checked_mul(u64::from(request.output_height))
         .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
         .context("TIFF pixel byte count overflow")?;
-    let pixel_bytes_u32 =
-        u32::try_from(pixel_bytes).context("TIFF pixel data exceeds classic TIFF's 4 GiB limit")?;
+    // AuRaw's export dimension budget currently keeps even 32-bit RGB below
+    // classic TIFF's 4 GiB address space. Keep this explicit so a future budget
+    // increase fails safely instead of silently wrapping offsets.
+    anyhow::ensure!(
+        pixel_bytes <= u64::from(u32::MAX),
+        "TIFF pixel data exceeds classic TIFF's 4 GiB limit"
+    );
+
+    let (rows_per_strip, strip_byte_counts) =
+        tiff_strip_layout(request.output_width, request.output_height, bits)?;
+    let strip_count = u32::try_from(strip_byte_counts.len()).context("too many TIFF strips")?;
+    let strip_offsets_placeholder = vec![
+        0u8;
+        strip_byte_counts
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .context("TIFF strip-offset array size overflow")?
+    ];
+    let software = tiff_ascii_entry(305, "AuRaw 2.0")?;
 
     let mut entries = vec![
         TiffEntry {
@@ -1764,8 +1847,8 @@ fn write_tiff_header<W: Write>(
         TiffEntry {
             tag: 273,
             field_type: 4,
-            count: 1,
-            data: tiff_long(0),
+            count: strip_count,
+            data: strip_offsets_placeholder,
         },
         TiffEntry {
             tag: 274,
@@ -1783,13 +1866,13 @@ fn write_tiff_header<W: Write>(
             tag: 278,
             field_type: 4,
             count: 1,
-            data: tiff_long(request.output_height),
+            data: tiff_long(rows_per_strip),
         },
         TiffEntry {
             tag: 279,
             field_type: 4,
-            count: 1,
-            data: tiff_long(pixel_bytes_u32),
+            count: strip_count,
+            data: tiff_long_values(&strip_byte_counts)?,
         },
         TiffEntry {
             tag: 284,
@@ -1797,12 +1880,7 @@ fn write_tiff_header<W: Write>(
             count: 1,
             data: tiff_short(1),
         },
-        TiffEntry {
-            tag: 305,
-            field_type: 2,
-            count: 10,
-            data: tiff_ascii("AuRaw 2.0"),
-        },
+        software,
         TiffEntry {
             tag: 339,
             field_type: 3,
@@ -1825,44 +1903,21 @@ fn write_tiff_header<W: Write>(
     if request.keep_metadata {
         let description = combined_image_description(request.metadata);
         if !description.is_empty() {
-            let data = tiff_ascii(&description);
-            entries.push(TiffEntry {
-                tag: 270,
-                field_type: 2,
-                count: data.len() as u32,
-                data,
-            });
+            entries.push(tiff_ascii_entry(270, &description)?);
         }
         if !request.metadata.camera_make.trim().is_empty() {
-            let data = tiff_ascii(request.metadata.camera_make.trim());
-            entries.push(TiffEntry {
-                tag: 271,
-                field_type: 2,
-                count: data.len() as u32,
-                data,
-            });
+            entries.push(tiff_ascii_entry(271, request.metadata.camera_make.trim())?);
         }
         if !request.metadata.camera_model.trim().is_empty() {
-            let data = tiff_ascii(request.metadata.camera_model.trim());
-            entries.push(TiffEntry {
-                tag: 272,
-                field_type: 2,
-                count: data.len() as u32,
-                data,
-            });
+            entries.push(tiff_ascii_entry(272, request.metadata.camera_model.trim())?);
         }
         if !request.metadata.artist.trim().is_empty() {
-            let data = tiff_ascii(request.metadata.artist.trim());
-            entries.push(TiffEntry {
-                tag: 315,
-                field_type: 2,
-                count: data.len() as u32,
-                data,
-            });
+            entries.push(tiff_ascii_entry(315, request.metadata.artist.trim())?);
         }
     }
 
     entries.sort_by_key(|entry| entry.tag);
+    let entry_count = u16::try_from(entries.len()).context("too many TIFF IFD entries")?;
     let ifd_size = 2usize
         .checked_add(
             entries
@@ -1878,7 +1933,12 @@ fn write_tiff_header<W: Write>(
     let mut external_offsets = Vec::with_capacity(entries.len());
     for entry in &entries {
         if entry.data.len() > 4 {
-            cursor = (cursor + 1) & !1;
+            // LONG/RATIONAL payloads benefit from natural 4-byte alignment and
+            // all TIFF readers accept this stricter form of the 2-byte baseline.
+            cursor = cursor
+                .checked_add(3)
+                .map(|value| value & !3)
+                .context("TIFF metadata alignment overflow")?;
             external_offsets.push(Some(cursor));
             cursor = cursor
                 .checked_add(entry.data.len())
@@ -1887,7 +1947,10 @@ fn write_tiff_header<W: Write>(
             external_offsets.push(None);
         }
     }
-    cursor = (cursor + 3) & !3;
+    cursor = cursor
+        .checked_add(3)
+        .map(|value| value & !3)
+        .context("TIFF pixel alignment overflow")?;
     let pixel_offset =
         u32::try_from(cursor).context("TIFF header exceeds classic TIFF offset range")?;
     let total_len = u64::from(pixel_offset)
@@ -1897,8 +1960,26 @@ fn write_tiff_header<W: Write>(
         total_len <= u64::from(u32::MAX),
         "TIFF export exceeds classic TIFF's 4 GiB limit"
     );
-    if let Some(strip) = entries.iter_mut().find(|entry| entry.tag == 273) {
-        strip.data = pixel_offset.to_le_bytes().to_vec();
+
+    let mut strip_offsets = Vec::new();
+    strip_offsets
+        .try_reserve_exact(strip_byte_counts.len())
+        .context("reserve TIFF strip offsets")?;
+    let mut next_strip_offset = u64::from(pixel_offset);
+    for byte_count in &strip_byte_counts {
+        strip_offsets.push(
+            u32::try_from(next_strip_offset).context("TIFF strip offset exceeds classic limits")?,
+        );
+        next_strip_offset = next_strip_offset
+            .checked_add(u64::from(*byte_count))
+            .context("TIFF strip offset overflow")?;
+    }
+    anyhow::ensure!(
+        next_strip_offset == total_len,
+        "TIFF strip layout does not cover the complete raster"
+    );
+    if let Some(strip_offsets_entry) = entries.iter_mut().find(|entry| entry.tag == 273) {
+        strip_offsets_entry.data = tiff_long_values(&strip_offsets)?;
     }
 
     output.write_all(b"II").context("write TIFF byte order")?;
@@ -1909,7 +1990,7 @@ fn write_tiff_header<W: Write>(
         .write_all(&8u32.to_le_bytes())
         .context("write TIFF IFD offset")?;
     output
-        .write_all(&(entries.len() as u16).to_le_bytes())
+        .write_all(&entry_count.to_le_bytes())
         .context("write TIFF entry count")?;
 
     for (entry, external_offset) in entries.iter().zip(&external_offsets) {
@@ -1942,7 +2023,9 @@ fn write_tiff_header<W: Write>(
         .write_all(&0u32.to_le_bytes())
         .context("write TIFF next IFD")?;
 
-    let mut written = 8 + ifd_size;
+    let mut written = 8usize
+        .checked_add(ifd_size)
+        .context("TIFF header write count overflow")?;
     for (entry, external_offset) in entries.iter().zip(external_offsets) {
         if let Some(offset) = external_offset {
             while written < offset {
@@ -1952,7 +2035,9 @@ fn write_tiff_header<W: Write>(
             output
                 .write_all(&entry.data)
                 .context("write TIFF metadata payload")?;
-            written += entry.data.len();
+            written = written
+                .checked_add(entry.data.len())
+                .context("TIFF metadata write count overflow")?;
         }
     }
     while written < pixel_offset as usize {
@@ -3645,9 +3730,9 @@ mod tests {
         bounded_tile_spec, build_exif_payload, build_lanczos_contributions, built_in_srgb_icc,
         encode_jpeg_rgb, encode_srgb_row, encode_srgb_row_with_format, export_to_destination,
         publish_completed_export, resolved_export_tile_spec, stitch_linear_tile_into_band,
-        tile_mask_source_region, validate_export_dimensions, ExportMetadata, ExportResizeMode,
-        ExportRowFormat, ExportSettings, GeometryResampler, LinearLightResizer, EXPORT_TILE_HALO,
-        MAX_EXPORT_EDGE,
+        tiff_strip_layout, tile_mask_source_region, validate_export_dimensions, ExportMetadata,
+        ExportResizeMode, ExportRowFormat, ExportSettings, GeometryResampler, LinearLightResizer,
+        EXPORT_TILE_HALO, MAX_EXPORT_EDGE, TIFF_TARGET_STRIP_BYTES,
     };
     use crate::pipeline::{
         ExportTile, ExposureParams, GeometryTransform, IccOutputTransform, MaskStack, TileSpec,
@@ -3822,6 +3907,33 @@ mod tests {
         assert_eq!((decoded.width(), decoded.height()), (width, height));
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn tiff_strip_layout_is_chunked_and_covers_the_raster_exactly() {
+        let width = 4_000u32;
+        let height = 3_000u32;
+        let (rows_per_strip, byte_counts) = tiff_strip_layout(width, height, 16).unwrap();
+        assert!(rows_per_strip > 0);
+        assert!(byte_counts.len() > 1);
+        let row_bytes = u64::from(width) * 6;
+        assert!(u64::from(byte_counts[0]) <= TIFF_TARGET_STRIP_BYTES);
+        assert_eq!(
+            byte_counts.iter().map(|value| u64::from(*value)).sum::<u64>(),
+            u64::from(width) * u64::from(height) * 6
+        );
+        assert!(byte_counts
+            .iter()
+            .all(|count| u64::from(*count) % row_bytes == 0));
+    }
+
+    #[test]
+    fn tiff_strip_layout_uses_one_row_when_a_row_exceeds_the_target() {
+        let width = 100_000u32;
+        let height = 3u32;
+        let (rows_per_strip, byte_counts) = tiff_strip_layout(width, height, 32).unwrap();
+        assert_eq!(rows_per_strip, 1);
+        assert_eq!(byte_counts, vec![1_200_000; 3]);
     }
 
     #[test]
