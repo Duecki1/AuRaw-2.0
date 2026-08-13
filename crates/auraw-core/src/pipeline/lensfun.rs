@@ -65,24 +65,7 @@ mod imp {
 
     const LENSFUN_BUILD_VERSION: &str = env!("AURAW_LENSFUN_BUILD_VERSION");
 
-    // # Native safety contract
-    //
-    // * ABI: build.rs accepts Lensfun 0.3.2 through 0.3.4, verifies that the
-    //   pkg-config and selected header versions agree, and bindgen emits the
-    //   declarations plus compile-time layout tests from that exact header.
-    // * Ownership: Database and Modifier uniquely own pointers returned by
-    //   their constructors; OwnedPointerList owns only search-result arrays.
-    //   Camera/lens records and multilingual strings remain Lensfun-owned.
-    // * Lifetimes: record pointers are used only while their Database guard is
-    //   live, localized strings are copied immediately, and search arrays are
-    //   freed exactly once through lf_free.
-    // * Nullability: every constructor/list/record/string result is checked by
-    //   the safe wrapper before dereference or conversion.
-    // * Thread safety: database and modifier handles are never shared across
-    //   threads. Rayon work starts only after Lensfun has filled Rust-owned
-    //   coordinate/gain buffers and operates exclusively on those copies.
-    // * Buffer validity: each native call's SAFETY comment states the exact
-    //   element count, row stride, and live pointer requirements.
+    // Safety
     mod ffi {
         #![allow(
             dead_code,
@@ -544,10 +527,7 @@ mod imp {
         let width = raw.width as usize;
         let height = raw.height as usize;
         let mut raw_pixels = vec![0u16; raw.raw_pixels.len()];
-        // Geometric interpolation of a constant black level is still exactly
-        // that same constant. Most modern Bayer RAWs (including the Sony ARWs
-        // in the loading benchmarks) use one uniform value, so avoid allocating
-        // and writing a dense f32 map with tens of millions of identical entries.
+        // Black level
         let uniform_black = raw
             .black_levels_per_pixel
             .storage_slice()
@@ -766,8 +746,7 @@ mod imp {
             // Lensfun warp. Six coordinates are emitted per output RGB pixel.
             const ROW_BATCH: usize = 32;
             let coordinate_row_len = width.saturating_mul(6);
-            let mut coordinates =
-                vec![0.0f32; coordinate_row_len.saturating_mul(ROW_BATCH)];
+            let mut coordinates = vec![0.0f32; coordinate_row_len.saturating_mul(ROW_BATCH)];
 
             for batch_y in (0..height).step_by(ROW_BATCH) {
                 let batch_rows = (height - batch_y).min(ROW_BATCH);
@@ -803,11 +782,11 @@ mod imp {
                         let local_y = local_index / width;
                         let x = local_index % width;
                         let coordinate_base = local_y * coordinate_row_len + x * 6;
-                        for channel in 0..3 {
+                        for (channel, value) in pixel.iter_mut().enumerate() {
                             let coordinate_index = coordinate_base + channel * 2;
                             let source_x = coordinate_batch[coordinate_index];
                             let source_y = coordinate_batch[coordinate_index + 1];
-                            pixel[channel] = sample_raster_channel_bilinear(
+                            *value = sample_raster_channel_bilinear(
                                 &shaded,
                                 width,
                                 height,

@@ -1,5 +1,5 @@
 use super::noise::DenoiseQuality;
-use super::sigmoid::{SigmoidColorProcessing, SigmoidParams};
+use super::sigmoid::SigmoidParams;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum DemosaicMode {

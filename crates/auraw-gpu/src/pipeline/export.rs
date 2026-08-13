@@ -1736,7 +1736,10 @@ fn tiff_ascii_entry(tag: u16, value: &str) -> Result<TiffEntry> {
 /// constant-memory export path. The final strip is allowed to be shorter.
 fn tiff_strip_layout(width: u32, height: u32, bits_per_sample: u16) -> Result<(u32, Vec<u32>)> {
     anyhow::ensure!(width > 0 && height > 0, "TIFF dimensions must be non-zero");
-    anyhow::ensure!(matches!(bits_per_sample, 8 | 16 | 32), "unsupported TIFF bit depth");
+    anyhow::ensure!(
+        matches!(bits_per_sample, 8 | 16 | 32),
+        "unsupported TIFF bit depth"
+    );
 
     let bytes_per_pixel = u64::from(bits_per_sample / 8)
         .checked_mul(3)
@@ -1747,8 +1750,7 @@ fn tiff_strip_layout(width: u32, height: u32, bits_per_sample: u16) -> Result<(u
     let rows_per_strip = (TIFF_TARGET_STRIP_BYTES / bytes_per_row)
         .max(1)
         .min(u64::from(height));
-    let rows_per_strip =
-        u32::try_from(rows_per_strip).context("TIFF rows-per-strip overflow")?;
+    let rows_per_strip = u32::try_from(rows_per_strip).context("TIFF rows-per-strip overflow")?;
     let strip_count = height.div_ceil(rows_per_strip);
     let mut byte_counts = Vec::new();
     byte_counts
@@ -3919,7 +3921,10 @@ mod tests {
         let row_bytes = u64::from(width) * 6;
         assert!(u64::from(byte_counts[0]) <= TIFF_TARGET_STRIP_BYTES);
         assert_eq!(
-            byte_counts.iter().map(|value| u64::from(*value)).sum::<u64>(),
+            byte_counts
+                .iter()
+                .map(|value| u64::from(*value))
+                .sum::<u64>(),
             u64::from(width) * u64::from(height) * 6
         );
         assert!(byte_counts

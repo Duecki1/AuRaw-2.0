@@ -1,4 +1,5 @@
 use super::*;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -571,7 +572,11 @@ fn upload_raster_scene_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
                         mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y: first_row, z: 0 },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: first_row,
+                            z: 0,
+                        },
                         aspect: wgpu::TextureAspect::All,
                     },
                     bytemuck::cast_slice(&rgba),
@@ -599,7 +604,11 @@ fn upload_raster_scene_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
                         mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y: first_row, z: 0 },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: first_row,
+                            z: 0,
+                        },
                         aspect: wgpu::TextureAspect::All,
                     },
                     bytemuck::cast_slice(&rgba),

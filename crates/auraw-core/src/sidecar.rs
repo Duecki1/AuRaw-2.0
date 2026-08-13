@@ -3415,11 +3415,15 @@ mod tests {
     #[test]
     fn tiff_sidecars_keep_the_source_extension() {
         assert_eq!(
-            sidecar_path_for_raw(Path::new("photo.tif")).file_name().unwrap(),
+            sidecar_path_for_raw(Path::new("photo.tif"))
+                .file_name()
+                .unwrap(),
             "photo.tif.auraw"
         );
         assert_eq!(
-            sidecar_path_for_raw(Path::new("photo.TIFF")).file_name().unwrap(),
+            sidecar_path_for_raw(Path::new("photo.TIFF"))
+                .file_name()
+                .unwrap(),
             "photo.TIFF.auraw"
         );
     }

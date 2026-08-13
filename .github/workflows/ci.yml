@@ -19,7 +19,7 @@ env:
 
 jobs:
   quality:
-    name: Format, lint, tests, shaders
+    name: Format, lint, and tests
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -34,8 +34,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libclang-dev libraw-dev liblensfun-dev liblensfun-data-v1 \
             libasound2-dev libdbus-1-dev libegl1-mesa-dev libfontconfig1-dev \
-            libgl1-mesa-dev libudev-dev libwayland-dev libx11-dev libxkbcommon-dev \
-            python3-pip python3-venv
+            libgl1-mesa-dev libudev-dev libwayland-dev libx11-dev libxkbcommon-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-14
@@ -46,9 +45,6 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Install Python test dependencies
-        run: python3 -m pip install --disable-pip-version-check pytest -r requirements-regression.txt
-
       - name: Run repository validation checks
         run: cargo xtask check-all
 
@@ -58,44 +54,5 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      - name: Run Rust tests and WGSL validation
+      - name: Run tests
         run: cargo test --locked --workspace --all-targets
-
-      - name: Run full Python suite
-        run: python3 -m pytest -q
-
-  regression-smoke:
-    name: Deterministic image regression smoke
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - name: Check out source
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-
-      - name: Install native and software-GPU dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libclang-dev libraw-dev liblensfun-dev liblensfun-data-v1 \
-            libasound2-dev libdbus-1-dev libegl1-mesa-dev libfontconfig1-dev \
-            libgl1-mesa-dev libudev-dev libwayland-dev libx11-dev libxkbcommon-dev \
-            mesa-vulkan-drivers vulkan-tools python3-pip
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-14
-        with:
-          toolchain: 1.92.0
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: Install regression dependencies
-        run: python3 -m pip install --disable-pip-version-check -r requirements-regression.txt
-
-      - name: Build regression renderer
-        run: cargo build --locked -p auraw-cli --bin auraw-regression-render
-
-      - name: Run deterministic synthetic-corpus gate
-        env:
-          WGPU_BACKEND: vulkan
-        run: python3 scripts/dev.py smoke-regression

@@ -344,9 +344,10 @@ checked before allocation or unpacking. Oversized or inconsistent inputs fail
 with an error rather than allowing unbounded memory or storage growth.
 
 
-## Development quality gates
+## Development
 
-Pull requests run Rust formatting, Clippy with warnings denied, all Rust tests (including WGSL parse/validation), the complete Python suite, source-connectivity checks, and deterministic renders of the committed CC0 Bayer and X-Trans fixtures. See `docs/DEVELOPMENT.md` and `regression/README.md`. Dependency policy is documented in [DEPENDENCIES.md](DEPENDENCIES.md), with bundled-license details in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Pull requests run formatting, Clippy, Rust tests, and shader validation. See
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 ## License and attribution
 
@@ -357,7 +358,5 @@ the [GNU General Public License, version 3 or later](COPYING)
 Some algorithms are adapted from GPL-compatible upstream projects and retain
 their original copyrights. Model weights, native libraries, profile databases,
 and other third-party components keep their own licenses. See
-[NOTICE.md](NOTICE.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and
-[DEPENDENCIES.md](DEPENDENCIES.md) before redistributing a packaged build. The
-bilingual [privacy notice](PRIVACY.md) explains local image processing and the
-optional third-party model downloads.
+[NOTICE.md](NOTICE.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+before redistributing a packaged build.

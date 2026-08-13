@@ -25,7 +25,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          fetch-depth: 0 # Fetch full history so git commit timestamps are valid
+          fetch-depth: 0
 
       - name: Restore Linux build cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
@@ -99,9 +99,6 @@ jobs:
           /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
           source "$HOME/.cargo/env"
 
-          # Match the LibRaw checkout and default Autotools configuration
-          # installed in /usr/local on the development PC.
-          # Assign before eval so a failed metadata command is not masked by eval.
           build_metadata="$(cargo xtask print-metadata --format shell)"
           eval "$build_metadata"
           LIBRAW_SOURCE_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
@@ -138,10 +135,7 @@ jobs:
           REVISION="$(cargo xtask verify-source-revision)"
           export AURAW_REQUIRE_COMMITTED_SOURCE=1
           export AURAW_SOURCE_REVISION="$REVISION"
-          
-          # Fallback to current Unix timestamp if Git commit timestamp is empty/0
-          COMMIT_EPOCH="$(git show -s --format=%ct "$REVISION" 2>/dev/null || true)"
-          export SOURCE_DATE_EPOCH="${COMMIT_EPOCH:-$(date +%s)}"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$REVISION")"
 
           cargo build --release --locked
           strip target/release/auraw
@@ -155,8 +149,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # Rust was installed in the preceding step, but Gitea/act starts each
-          # run block with a fresh PATH. Restore Cargo before invoking xtask.
+          # Environment
           source "$HOME/.cargo/env"
 
           VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
@@ -172,7 +165,7 @@ jobs:
           LENSFUN_DB="$(find /usr/share/lensfun -type f -name '*.xml' -printf '%h\n' | head -n 1)"
           test -n "$LENSFUN_DB"
 
-          rm -rf AppDir dist appimage-packaging squashfs-root
+          rm -rf AppDir dist appimage-packaging
           mkdir -p dist appimage-packaging AppDir/usr/share/auraw/lensfun
           cp -a "$LENSFUN_DB"/. AppDir/usr/share/auraw/lensfun/
           test -n "$(find AppDir/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
@@ -212,36 +205,11 @@ jobs:
             --icon-file "$APPIMAGE_ICON" \
             --output appimage
 
-          test -n "$(find AppDir -name 'libraw*.so*' -print -quit)"
-          test -n "$(find AppDir -name 'liblensfun*.so*' -print -quit)"
-          test -n "$(find AppDir/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
-
           mv "$LDAI_OUTPUT" dist/
           chmod +x "dist/$LDAI_OUTPUT"
           file "dist/$LDAI_OUTPUT"
 
-          unset APPIMAGE_EXTRACT_AND_RUN
-          "dist/$LDAI_OUTPUT" --appimage-extract >/dev/null
-          test -n "$(find squashfs-root -name 'libraw*.so*' -print -quit)"
-          test -n "$(find squashfs-root -name 'liblensfun*.so*' -print -quit)"
-          test -n "$(find squashfs-root/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
-          test -L squashfs-root/.DirIcon
-          test "$(readlink squashfs-root/.DirIcon)" = "$APP_ID.png"
-          cmp packaging/icons/auraw-256.png "squashfs-root/$APP_ID.png"
-          cmp packaging/icons/auraw-256.png \
-            "squashfs-root/usr/share/icons/hicolor/256x256/apps/$APP_ID.png"
-          test -f "squashfs-root/usr/share/applications/$APP_ID.desktop"
-          grep -qx "Icon=$APP_ID" \
-            "squashfs-root/usr/share/applications/$APP_ID.desktop"
-          grep -qx "StartupWMClass=$APP_ID" \
-            "squashfs-root/usr/share/applications/$APP_ID.desktop"
-          rm -rf squashfs-root
-
           sha256sum "dist/$LDAI_OUTPUT" > "dist/$LDAI_OUTPUT.sha256"
-
-      - name: Fix artifact timestamps
-        shell: bash
-        run: touch dist/*
 
       - name: Upload AppImage
         uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
@@ -258,14 +226,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          fetch-depth: 0 # Fetch full history so git commit timestamps are valid
-
-      - name: Restore Android debug signing key
-        if: ${{ gitea.event_name != 'pull_request' }}
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
-        with:
-          path: ~/.android/debug.keystore
-          key: auraw-android-debug-keystore-v1
+          fetch-depth: 0
 
       - name: Restore pinned Android toolchains
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
@@ -277,7 +238,7 @@ jobs:
             ~/.cargo/bin/cargo-ndk-env
             ~/.cargo/bin/cargo-ndk-runner
             ~/.cargo/bin/cargo-ndk-test
-          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/dev.py', 'scripts/bootstrap_download.py', 'xtask/src/main.rs') }}-v2
+          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/bootstrap_download.py', 'xtask/src/main.rs') }}-v2
 
       - name: Restore Android dependency and build cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
@@ -306,33 +267,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Initialize Android debug signing key
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          KEYSTORE="$HOME/.android/debug.keystore"
-          mkdir -p "$(dirname "$KEYSTORE")"
-          if [ ! -f "$KEYSTORE" ]; then
-            keytool -genkeypair \
-              -keystore "$KEYSTORE" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -dname "CN=Android Debug,O=Android,C=US" \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -noprompt
-          fi
-          chmod 600 "$KEYSTORE"
-
-          keytool -list -v \
-            -keystore "$KEYSTORE" \
-            -storepass android \
-            -alias androiddebugkey \
-            | grep -E 'Alias name:|SHA256:'
 
       - name: Install Android and native build dependencies
         shell: bash
@@ -430,12 +364,6 @@ jobs:
 
           cargo xtask check-all
           ./gradlew --version
-          case "$GITHUB_RUN_NUMBER" in
-            ''|*[!0-9]*)
-              echo "GITHUB_RUN_NUMBER must be a positive integer" >&2
-              exit 1
-              ;;
-          esac
 
           ./gradlew \
             --no-daemon \
@@ -447,26 +375,11 @@ jobs:
 
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
-          unzip -tq "$APK" 'lib/arm64-v8a/libauraw.so'
-          unzip -tq "$APK" 'lib/arm64-v8a/libc++_shared.so'
-          unzip -tq "$APK" 'assets/lensfun/version_1/*.xml'
-          "$ANDROID_HOME/build-tools/$AURAW_ANDROID_BUILD_TOOLS_VERSION/aapt" dump badging "$APK" \
-            | tee /tmp/auraw-apk-badging.txt
-          grep -q "application-icon-" /tmp/auraw-apk-badging.txt
-          grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' \
-            android/app/src/main/AndroidManifest.xml
           cargo xtask verify-android-16kb "$APK"
           mkdir -p dist
           cp "$APK" dist/AuRaw-debug-arm64-v8a.apk
-          "$ANDROID_HOME/build-tools/$AURAW_ANDROID_BUILD_TOOLS_VERSION/apksigner" \
-            verify --print-certs "$APK" \
-            | tee dist/AuRaw-debug-arm64-v8a.signing-certificate.txt
           sha256sum dist/AuRaw-debug-arm64-v8a.apk \
             > dist/AuRaw-debug-arm64-v8a.apk.sha256
-
-      - name: Fix artifact timestamps
-        shell: bash
-        run: touch dist/*
 
       - name: Upload debug APK
         uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5

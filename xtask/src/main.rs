@@ -1,7 +1,7 @@
 use image::{imageops::FilterType, DynamicImage, ImageFormat, Rgba, RgbaImage};
 use ring::digest::{Context as DigestContext, SHA256, SHA512};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -10,47 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::time::Instant;
 use zip::ZipArchive;
-
-const BENCHMARK_SCENES: [(&str, &str, u32, u32); 2] = [
-    (
-        "synthetic-bayer-multitarget",
-        "synthetic-bayer.dng",
-        256,
-        256,
-    ),
-    (
-        "synthetic-xtrans-multitarget",
-        "synthetic-xtrans.dng",
-        256,
-        256,
-    ),
-];
-
-const CAMERA_PROFILE_TEST_FILTERS: &[&str] = &[
-    "pipeline::color_profile::tests",
-    "pipeline::color_profile::dcp::tests",
-    "pipeline::color_profile::icc::tests",
-    "pipeline::sigmoid::tests",
-    "gpu_params_follow_the_wgsl_uniform_layout",
-    "profile_shader_parses_with_the_profile_storage_contract",
-    "adjustments_shader_exposes_darktable_sigmoid_paths",
-    "scene_graph_preserves_native_call_order_and_stage_ownership",
-    "global_wb_changes_raw_multipliers_without_changing_the_camera_transform",
-];
-
-const DEMOSAIC_TEST_FILTERS: &[&str] = &[
-    "compute_shaders_parse_and_validate",
-    "demosaic_contracts_are_compiler_validated",
-    "demosaic_shaders_expose_every_dispatched_entry_point",
-    "inpaint_opposed",
-];
-
-const MATH_TEST_GROUPS: [(&str, &[&str]); 2] = [
-    ("camera profile", CAMERA_PROFILE_TEST_FILTERS),
-    ("demosaic", DEMOSAIC_TEST_FILTERS),
-];
 
 const ANDROID_64_BIT_ABIS: [&str; 2] = ["arm64-v8a", "x86_64"];
 
@@ -127,7 +87,6 @@ fn run() -> Result<()> {
             ensure_no_extra_args(&rest, "check-gradle")?;
             command_checks(&[CheckKind::Gradle])
         }
-        "validate-math" => command_validate_math(parse_validate_math_args(rest)?),
         "print-metadata" | "print-build-metadata" => {
             command_print_metadata(parse_print_metadata_args(rest)?)
         }
@@ -136,7 +95,6 @@ fn run() -> Result<()> {
             ensure_no_extra_args(&rest, "verify-source-revision")?;
             command_verify_source_revision()
         }
-        "bench" => command_bench(parse_bench_args(rest)?),
         "icons" => {
             ensure_no_extra_args(&rest, "icons")?;
             command_icons()
@@ -177,9 +135,6 @@ fn print_help() {
            check-source
            check-workflows
            check-gradle
-           validate-math [--release]
-           bench [--renderer PATH] [--runs N] [--output PATH]
-                 [--budget-file PATH] [--enforce-budget] [--dry-run]
            icons
            build-android [ABI] [PROFILE] [--print-build-contract]
            build-android-libraw [ABI] [--print-build-contract]
@@ -407,96 +362,6 @@ fn parse_verified_download_args(args: Vec<OsString>) -> Result<VerifiedDownloadA
 }
 
 #[derive(Debug)]
-struct BenchArgs {
-    renderer: PathBuf,
-    runs: i64,
-    budget_file: PathBuf,
-    output: PathBuf,
-    enforce_budget: bool,
-    dry_run: bool,
-}
-
-fn parse_bench_args(args: Vec<OsString>) -> Result<BenchArgs> {
-    let mut parsed = BenchArgs {
-        renderer: PathBuf::from("target/release/auraw-regression-render"),
-        runs: 3,
-        budget_file: PathBuf::from("benchmarks/gpu-budget.json"),
-        output: PathBuf::from("target/benchmark-report.json"),
-        enforce_budget: false,
-        dry_run: false,
-    };
-
-    let mut index = 0usize;
-    while index < args.len() {
-        let argument = args[index].to_string_lossy();
-        if argument == "--renderer" {
-            parsed.renderer = PathBuf::from(next_value(&args, &mut index, "--renderer")?);
-        } else if let Some(value) = argument.strip_prefix("--renderer=") {
-            parsed.renderer = PathBuf::from(value);
-        } else if argument == "--runs" {
-            let value = next_value(&args, &mut index, "--runs")?;
-            parsed.runs = parse_i64(&value, "--runs")?;
-        } else if let Some(value) = argument.strip_prefix("--runs=") {
-            parsed.runs = value
-                .parse::<i64>()
-                .map_err(|_| XtaskError::usage("--runs must be an integer"))?;
-        } else if argument == "--budget-file" {
-            parsed.budget_file = PathBuf::from(next_value(&args, &mut index, "--budget-file")?);
-        } else if let Some(value) = argument.strip_prefix("--budget-file=") {
-            parsed.budget_file = PathBuf::from(value);
-        } else if argument == "--output" {
-            parsed.output = PathBuf::from(next_value(&args, &mut index, "--output")?);
-        } else if let Some(value) = argument.strip_prefix("--output=") {
-            parsed.output = PathBuf::from(value);
-        } else if argument == "--enforce-budget" {
-            parsed.enforce_budget = true;
-        } else if argument == "--dry-run" {
-            parsed.dry_run = true;
-        } else if matches!(argument.as_ref(), "--help" | "-h") {
-            print_help();
-            std::process::exit(0);
-        } else {
-            return Err(XtaskError::usage(format!(
-                "unknown bench option: {argument}"
-            )));
-        }
-        index += 1;
-    }
-    Ok(parsed)
-}
-
-fn parse_i64(value: &OsStr, option: &str) -> Result<i64> {
-    value
-        .to_string_lossy()
-        .parse::<i64>()
-        .map_err(|_| XtaskError::usage(format!("{option} must be an integer")))
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ValidateMathArgs {
-    release: bool,
-}
-
-fn parse_validate_math_args(args: Vec<OsString>) -> Result<ValidateMathArgs> {
-    let mut release = false;
-    for argument in args {
-        match argument.to_string_lossy().as_ref() {
-            "--release" => release = true,
-            "--help" | "-h" => {
-                print_help();
-                std::process::exit(0);
-            }
-            unknown => {
-                return Err(XtaskError::usage(format!(
-                    "unknown validate-math option: {unknown}"
-                )))
-            }
-        }
-    }
-    Ok(ValidateMathArgs { release })
-}
-
-#[derive(Debug)]
 struct BuildAndroidArgs {
     abi: String,
     profile: String,
@@ -697,78 +562,6 @@ fn command_checks(checks: &[CheckKind]) -> Result<()> {
     }
 }
 
-fn command_validate_math(args: ValidateMathArgs) -> Result<()> {
-    if find_executable("cargo").is_none() {
-        return Err(XtaskError::usage(
-            "cargo is required because math validation compiles Rust and validates WGSL with Naga",
-        ));
-    }
-    let root = workspace_root();
-    let mut failed = Vec::new();
-    let total: usize = MATH_TEST_GROUPS
-        .iter()
-        .map(|(_, filters)| filters.len())
-        .sum();
-
-    for (group_name, filters) in MATH_TEST_GROUPS {
-        let title = group_name
-            .split_whitespace()
-            .map(|word| {
-                let mut characters = word.chars();
-                match characters.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
-                    None => String::new(),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        println!("== {title} validation ({} test filters) ==", filters.len());
-        for filter in filters {
-            let filter = *filter;
-            let mut display = vec!["cargo", "test", "--locked", "--lib"];
-            if args.release {
-                display.push("--release");
-            }
-            display.extend([filter, "--", "--nocapture"]);
-            println!("  $ {}", display.join(" "));
-
-            let mut command = Command::new("cargo");
-            command.args(["test", "--locked", "--lib"]);
-            if args.release {
-                command.arg("--release");
-            }
-            let status = command
-                .args([filter, "--", "--nocapture"])
-                .current_dir(&root)
-                .status();
-            match status {
-                Ok(status) if status.success() => {}
-                Ok(_) => failed.push(filter.to_owned()),
-                Err(error) => {
-                    eprintln!("  unable to execute cargo: {error}");
-                    failed.push(filter.to_owned());
-                }
-            }
-        }
-        println!();
-    }
-
-    if !failed.is_empty() {
-        eprintln!(
-            "Math validation failed for {} of {total} test filters:",
-            failed.len()
-        );
-        for filter in failed {
-            eprintln!("  - {filter}");
-        }
-        return Err(XtaskError::silent(1));
-    }
-
-    let mode = if args.release { "release" } else { "debug" };
-    println!("PASS: all {total} compiler-backed math test filters passed ({mode} mode)");
-    Ok(())
-}
-
 fn validate_generated_binaries(root: &Path) -> Result<Vec<String>> {
     let mut errors = Vec::new();
     let entries = walkdir::WalkDir::new(root)
@@ -778,13 +571,16 @@ fn validate_generated_binaries(root: &Path) -> Result<Vec<String>> {
                 return true;
             }
             let relative = relative_display(root, entry.path());
-            !IGNORED_BINARY_ROOTS.iter().any(|ignored| {
-                relative == *ignored || relative.starts_with(&format!("{ignored}/"))
-            })
+            !IGNORED_BINARY_ROOTS
+                .iter()
+                .any(|ignored| relative == *ignored || relative.starts_with(&format!("{ignored}/")))
         });
     for entry in entries {
         let entry = entry.map_err(|error| {
-            XtaskError::new(format!("cannot walk source tree {}: {error}", root.display()))
+            XtaskError::new(format!(
+                "cannot walk source tree {}: {error}",
+                root.display()
+            ))
         })?;
         if !entry.file_type().is_file() {
             continue;
@@ -865,7 +661,7 @@ fn workflow_action_reference(line: &str) -> Option<String> {
                 .split(|character: char| character.is_whitespace() || character == '#')
                 .next()
                 .unwrap_or_default()
-                .trim_end_matches(|character| matches!(character, ',' | '}'))
+                .trim_end_matches([',', '}'])
                 .trim_matches(|character| matches!(character, '\'' | '"'));
             if !token.is_empty() {
                 return Some(token.to_owned());
@@ -1046,7 +842,10 @@ fn collect_files_with_extensions(
 ) -> Result<()> {
     for entry in walkdir::WalkDir::new(directory) {
         let entry = entry.map_err(|error| {
-            XtaskError::new(format!("cannot walk directory {}: {error}", directory.display()))
+            XtaskError::new(format!(
+                "cannot walk directory {}: {error}",
+                directory.display()
+            ))
         })?;
         if entry.file_type().is_file()
             && entry
@@ -1701,14 +1500,6 @@ fn is_simple_file_name(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn required_f64(value: &Value, key: &str) -> Result<f64> {
-    value
-        .get(key)
-        .and_then(Value::as_f64)
-        .filter(|number| number.is_finite())
-        .ok_or_else(|| XtaskError::new(format!("benchmark budget {key} must be a number")))
-}
-
 const ICON_BACKGROUND: Rgba<u8> = Rgba([17, 24, 39, 255]);
 const ICON_FOREGROUND: Rgba<u8> = Rgba([255, 255, 255, 255]);
 const ICON_OUTER_A: [(f64, f64); 7] = [
@@ -1811,210 +1602,6 @@ fn command_icons() -> Result<()> {
         .map_err(|error| XtaskError::new(format!("cannot write auraw-256.png: {error}")))?;
     write_ico(&output.join("auraw.ico"))?;
     Ok(())
-}
-
-fn command_bench(args: BenchArgs) -> Result<()> {
-    if args.runs < 1 {
-        return Err(XtaskError::usage("--runs must be positive"));
-    }
-
-    let root = workspace_root();
-    let renderer = rooted(&root, args.renderer);
-    let output = rooted(&root, args.output);
-    let budget_file = rooted(&root, args.budget_file);
-
-    let mut scene_inputs = BTreeMap::new();
-    for (name, filename, width, height) in BENCHMARK_SCENES {
-        let source = root.join("regression/raw").join(filename);
-        if !source.is_file() {
-            return Err(XtaskError::usage(format!(
-                "committed benchmark scene is missing: {}",
-                source.display()
-            )));
-        }
-        scene_inputs.insert(name, (source, width, height));
-    }
-
-    if args.dry_run {
-        for (scene, (source, _, _)) in &scene_inputs {
-            let target = root
-                .join("target/benchmarks")
-                .join(format!("{scene}-1.npz"));
-            println!(
-                "{}",
-                display_command(
-                    &renderer,
-                    [
-                        OsStr::new("--backend"),
-                        OsStr::new("gpu"),
-                        OsStr::new("--input"),
-                        source.as_os_str(),
-                        OsStr::new("--output"),
-                        target.as_os_str(),
-                    ]
-                )
-            );
-        }
-        return Ok(());
-    }
-
-    if !renderer.is_file() {
-        return Err(XtaskError::usage(format!(
-            "renderer does not exist: {}",
-            renderer.display()
-        )));
-    }
-
-    let measured_runs = args.runs as usize;
-    let benchmark_directory = root.join("target/benchmarks");
-    fs::create_dir_all(&benchmark_directory)?;
-    let mut warmups = BTreeMap::<String, f64>::new();
-    let mut measured = BTreeMap::<String, Vec<f64>>::new();
-
-    for (scene, (source, _, _)) in &scene_inputs {
-        let mut times = Vec::with_capacity(measured_runs);
-        for run in 0..=measured_runs {
-            let target = benchmark_directory.join(format!("{scene}-{run}.npz"));
-            let elapsed_ms = run_renderer(&renderer, source, &target)?;
-            if run == 0 {
-                warmups.insert((*scene).to_owned(), elapsed_ms);
-            } else {
-                times.push(elapsed_ms);
-            }
-        }
-        measured.insert((*scene).to_owned(), times);
-    }
-
-    let mut scene_reports = serde_json::Map::new();
-    for (scene, times) in &measured {
-        let (_, width, height) = &scene_inputs[scene.as_str()];
-        let megapixels = f64::from(*width) * f64::from(*height) / 1_000_000.0;
-        let median_ms = median(times);
-        scene_reports.insert(
-            scene.clone(),
-            json!({
-                "width": width,
-                "height": height,
-                "megapixels": megapixels,
-                "warmup_ms": warmups[scene],
-                "times_ms": times,
-                "median_ms": median_ms,
-                "p95_ms": legacy_percentile_95(times),
-                "median_megapixels_per_second": megapixels / (median_ms / 1000.0),
-            }),
-        );
-    }
-
-    let budget: Value = serde_json::from_reader(File::open(&budget_file).map_err(|error| {
-        XtaskError::new(format!("cannot read {}: {error}", budget_file.display()))
-    })?)?;
-    let budgets = budget
-        .get("budgets")
-        .ok_or_else(|| XtaskError::new("benchmark budget is missing budgets"))?;
-    let minimum_throughput = required_f64(budgets, "export_mp_per_second_min")?;
-    let maximum_startup = required_f64(budgets, "startup_shader_compile_p95_ms")?;
-    let throughput_pass = scene_reports.values().all(|scene| {
-        scene["median_megapixels_per_second"]
-            .as_f64()
-            .is_some_and(|value| value >= minimum_throughput)
-    });
-    let startup_pass = warmups
-        .values()
-        .copied()
-        .reduce(f64::max)
-        .is_some_and(|value| value <= maximum_startup);
-    let passed = throughput_pass && startup_pass;
-    let budget_display = budget_file
-        .strip_prefix(&root)
-        .unwrap_or(&budget_file)
-        .to_string_lossy()
-        .replace('\\', "/");
-
-    let report = json!({
-        "schema": 2,
-        "renderer": renderer.to_string_lossy(),
-        "runs": measured_runs,
-        "scenes": scene_reports,
-        "budget": {
-            "budget_file": budget_display,
-            "export_throughput_pass": throughput_pass,
-            "startup_pass": startup_pass,
-            "passed": passed,
-        },
-        "measurement_scope": "wall-clock process startup plus canonical GPU render/readback; use native GPU timestamp queries for per-pass diagnosis",
-    });
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = File::create(&output)?;
-    serde_json::to_writer_pretty(&mut file, &report)?;
-    file.write_all(b"\n")?;
-    println!("{}", output.display());
-
-    if args.enforce_budget && !passed {
-        Err(XtaskError::silent(1))
-    } else {
-        Ok(())
-    }
-}
-
-fn legacy_percentile_95(values: &[f64]) -> f64 {
-    let mut ordered = values.to_vec();
-    ordered.sort_by(f64::total_cmp);
-    let index = ((ordered.len() as f64 * 0.95) as usize).max(1) - 1;
-    ordered[index]
-}
-
-fn run_renderer(renderer: &Path, input: &Path, output: &Path) -> Result<f64> {
-    let started = Instant::now();
-    let status = Command::new(renderer)
-        .args(["--backend", "gpu", "--input"])
-        .arg(input)
-        .arg("--output")
-        .arg(output)
-        .stdin(Stdio::null())
-        .status()
-        .map_err(|error| {
-            XtaskError::new(format!("could not execute {}: {error}", renderer.display()))
-        })?;
-    let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
-    if !status.success() {
-        return Err(XtaskError::silent(status.code().unwrap_or(1)));
-    }
-    Ok(elapsed_ms)
-}
-
-fn median(values: &[f64]) -> f64 {
-    let mut ordered = values.to_vec();
-    ordered.sort_by(f64::total_cmp);
-    let middle = ordered.len() / 2;
-    if ordered.len() % 2 == 0 {
-        (ordered[middle - 1] + ordered[middle]) / 2.0
-    } else {
-        ordered[middle]
-    }
-}
-
-fn percentile_95(values: &[f64]) -> f64 {
-    let mut ordered = values.to_vec();
-    ordered.sort_by(f64::total_cmp);
-    let rank = (ordered.len() * 95).div_ceil(100).max(1);
-    ordered[rank - 1]
-}
-
-fn display_command<I, S>(program: &Path, arguments: I) -> String
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    std::iter::once(shell_escape(program.as_os_str()))
-        .chain(
-            arguments
-                .into_iter()
-                .map(|argument| shell_escape(argument.as_ref())),
-        )
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn shell_escape(value: &OsStr) -> String {
@@ -2279,9 +1866,7 @@ fn directory_has_extension(path: &Path, extension: &str) -> Result<bool> {
         let entry = entry.map_err(|error| {
             XtaskError::new(format!("cannot walk directory {}: {error}", path.display()))
         })?;
-        if entry.file_type().is_file()
-            && entry.path().extension() == Some(OsStr::new(extension))
-        {
+        if entry.file_type().is_file() && entry.path().extension() == Some(OsStr::new(extension)) {
             return Ok(true);
         }
     }
@@ -2697,10 +2282,7 @@ fn command_build_linux() -> Result<()> {
             .arg(root.join("Cargo.toml")),
         &cargo.display().to_string(),
     )?;
-    let outputs = [
-        root.join("target/release/auraw"),
-        root.join("target/release/auraw-regression-render"),
-    ];
+    let outputs = [root.join("target/release/auraw")];
     for output in &outputs {
         require_file(output)?;
     }
@@ -3259,76 +2841,4 @@ fn temporary_directory(prefix: &str) -> Result<tempfile::TempDir> {
         .prefix(&format!("{prefix}-"))
         .tempdir()
         .map_err(|error| XtaskError::new(format!("cannot create temporary directory: {error}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        median, native_library_path, parse_alignment_power, percentile_95, temporary_directory,
-        validate_generated_binaries,
-    };
-    use std::fs;
-
-    #[test]
-    fn statistics_are_deterministic() {
-        assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0);
-        assert_eq!(median(&[4.0, 1.0, 2.0, 3.0]), 2.5);
-        assert_eq!(percentile_95(&[1.0, 2.0, 3.0]), 3.0);
-    }
-
-    #[test]
-    fn parses_llvm_objdump_alignment() {
-        assert_eq!(
-            parse_alignment_power("  LOAD off 0x0 align 2**14"),
-            Some(14)
-        );
-        assert_eq!(parse_alignment_power("  LOAD off 0x0 align 4096"), None);
-    }
-
-    #[test]
-    fn sha256_file_matches_standard_test_vector() {
-        let directory = temporary_directory("auraw-sha256-test").unwrap();
-        let path = directory.path().join("fixture.bin");
-        fs::write(&path, b"abc").unwrap();
-        assert_eq!(
-            super::sha256_file(&path).unwrap(),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
-    fn ignores_android_cmake_outputs_but_rejects_source_binaries() {
-        let directory = temporary_directory("auraw-generated-binary-test").unwrap();
-        let generated = directory
-            .path()
-            .join("android/app/.cxx/Debug/arm64-v8a/CMakeFiles/raw.dir/colorconst.cpp.o");
-        fs::create_dir_all(generated.parent().unwrap()).unwrap();
-        fs::write(&generated, b"generated object").unwrap();
-
-        assert!(validate_generated_binaries(directory.path())
-            .unwrap()
-            .is_empty());
-
-        let source_binary = directory.path().join("crates/auraw-core/src/accidental.o");
-        fs::create_dir_all(source_binary.parent().unwrap()).unwrap();
-        fs::write(&source_binary, b"unexpected object").unwrap();
-
-        assert_eq!(
-            validate_generated_binaries(directory.path()).unwrap(),
-            vec![String::from(concat!(
-                "generated binary is present in the source tree: ",
-                "crates/auraw-core/src/accidental.o"
-            ))]
-        );
-    }
-
-    #[test]
-    fn accepts_only_flat_apk_native_library_paths() {
-        assert_eq!(
-            native_library_path("lib/arm64-v8a/libauraw.so"),
-            Some(("arm64-v8a", "libauraw.so"))
-        );
-        assert_eq!(native_library_path("assets/libauraw.so"), None);
-        assert_eq!(native_library_path("lib/arm64-v8a/sub/libauraw.so"), None);
-    }
 }

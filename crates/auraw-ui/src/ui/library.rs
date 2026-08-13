@@ -1593,23 +1593,10 @@ impl LibraryState {
 
     #[cfg(all(not(target_os = "android"), test))]
     pub(crate) fn new(context: &egui::Context) -> Self {
-        Self::new_with_workers(
+        Self::new_desktop_with_preferences(
             context,
             default_thumbnail_worker_count(),
             LibraryThumbnailSize::default(),
-        )
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub(crate) fn new_with_workers(
-        context: &egui::Context,
-        workers: usize,
-        thumbnail_size: LibraryThumbnailSize,
-    ) -> Self {
-        Self::new_desktop_with_preferences(
-            context,
-            workers,
-            thumbnail_size,
             LibrarySortOrder::default(),
             true,
         )
@@ -3690,7 +3677,7 @@ impl LibraryState {
                         ),
                     };
                     if !errors.is_empty() {
-                        summary.push_str("\n");
+                        summary.push('\n');
                         summary.push_str(&errors.join("\n"));
                     }
                     if uploaded > 0
@@ -7795,6 +7782,7 @@ fn show_android_library_folder_dialog(ui: &mut Ui, app: &mut AurawApp) {
 }
 
 #[cfg(not(target_os = "android"))]
+#[allow(clippy::too_many_arguments)]
 fn show_library_folder_node(
     ui: &mut Ui,
     node: &LibraryFolderNode,

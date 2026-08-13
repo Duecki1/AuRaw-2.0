@@ -1,12 +1,11 @@
 use super::{
-    specialize_compute_workgroup_size, work_shader_source, ComputeWorkgroupSize,
-    SHADER_BASIC_ADJUSTMENTS, SHADER_COLOR, SHADER_COMMON, SHADER_CREATIVE_EFFECTS,
-    SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE, SHADER_MASK_ATMOSPHERE, SHADER_MASK_BLUR,
-    SHADER_MASK_EDGE_GLOW, SHADER_MASK_EFFECTS_SHARED, SHADER_MASK_GLOW, SHADER_MASK_LENS_BLUR,
-    SHADER_MASK_LIGHT_RAYS, SHADER_MASK_MOTION_BLUR, SHADER_MASK_NEON, SHADER_MASK_PIXELATE,
-    SHADER_MASK_RADIAL_BLUR, SHADER_MASK_TILT_SHIFT, SHADER_NOISE, SHADER_NOISE_CA_FINISH,
-    SHADER_PROFILE, SHADER_RAW_SAMPLING, SHADER_SCENE_ADJUSTMENTS, SHADER_TONEMAP,
-    SHADER_TONE_COMMON,
+    work_shader_source, SHADER_BASIC_ADJUSTMENTS, SHADER_COLOR, SHADER_COMMON,
+    SHADER_CREATIVE_EFFECTS, SHADER_DETAIL_CAPTURE, SHADER_DETAIL_SCALE_SPACE,
+    SHADER_MASK_ATMOSPHERE, SHADER_MASK_BLUR, SHADER_MASK_EDGE_GLOW, SHADER_MASK_EFFECTS_SHARED,
+    SHADER_MASK_GLOW, SHADER_MASK_LENS_BLUR, SHADER_MASK_LIGHT_RAYS, SHADER_MASK_MOTION_BLUR,
+    SHADER_MASK_NEON, SHADER_MASK_PIXELATE, SHADER_MASK_RADIAL_BLUR, SHADER_MASK_TILT_SHIFT,
+    SHADER_NOISE, SHADER_NOISE_CA_FINISH, SHADER_PROFILE, SHADER_RAW_SAMPLING,
+    SHADER_SCENE_ADJUSTMENTS, SHADER_TONEMAP, SHADER_TONE_COMMON,
 };
 use anyhow::{anyhow, Context, Result};
 use naga_oil::compose::{
@@ -19,35 +18,22 @@ const SHADER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders/");
 const SCENE_ADJUSTMENTS_IMPORT: &str = "auraw::scene_adjustments";
 
 fn creative_effects_source() -> String {
-    // Effect implementations stay in dedicated files, while the composed
-    // creative stage owns the shared resource imports and render entry point.
+    // Effects
     format!(
         "{SHADER_CREATIVE_EFFECTS}\n{SHADER_MASK_EFFECTS_SHARED}\n{SHADER_MASK_LENS_BLUR}\n{SHADER_MASK_MOTION_BLUR}\n{SHADER_MASK_RADIAL_BLUR}\n{SHADER_MASK_TILT_SHIFT}\n{SHADER_MASK_BLUR}\n{SHADER_MASK_EDGE_GLOW}\n{SHADER_MASK_GLOW}\n{SHADER_MASK_NEON}\n{SHADER_MASK_PIXELATE}\n{SHADER_MASK_LIGHT_RAYS}\n{SHADER_MASK_ATMOSPHERE}"
     )
 }
 
-/// Owns AuRaw's reusable WGSL module registry and composes validated Naga IR
-/// for each concrete compute-shader source.
+/// WGSL module registry.
 pub(super) struct ShaderManager {
     composer: Composer,
-    workgroup_size: ComputeWorkgroupSize,
 }
 
 impl ShaderManager {
     pub(super) fn new(work_format: wgpu::TextureFormat) -> Result<Self> {
-        Self::new_with_workgroup_size(work_format, ComputeWorkgroupSize::default())
-    }
-
-    pub(super) fn new_with_workgroup_size(
-        work_format: wgpu::TextureFormat,
-        workgroup_size: ComputeWorkgroupSize,
-    ) -> Result<Self> {
         let mut manager = Self {
-            // Composer::default() keeps Naga validation enabled. Do not replace
-            // this with Composer::non_validating(): accurate source spans and
-            // codespan diagnostics depend on validation being active.
+            // Validation
             composer: Composer::default(),
-            workgroup_size,
         };
 
         manager.register("auraw::common", "common.wgsl", SHADER_COMMON)?;
@@ -128,9 +114,8 @@ impl ShaderManager {
         } else {
             source
         };
-        let source = specialize_compute_workgroup_size(source, self.workgroup_size);
         let result = self.composer.make_naga_module(NagaModuleDescriptor {
-            source: source.as_ref(),
+            source,
             file_path: &file_path,
             shader_type: ShaderType::Wgsl,
             shader_defs: Default::default(),

@@ -450,7 +450,6 @@ dependencies = [
  "auraw-core",
  "auraw-gpu",
  "pollster",
- "ring",
 ]
 
 [[package]]

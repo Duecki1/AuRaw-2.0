@@ -1,14 +1,7 @@
 #import auraw::common as Common
 #import auraw::noise as Noise
 
-// Dense post-demosaic colour-noise reduction.
-//
-// The old finishing pass averaged isolated samples on sparse radius rings.
-// That reduced single-pixel false colour but left the spatially correlated
-// clouds created by demosaic. This shader instead performs an edge-aware
-// à-trous decomposition in the camera-space Y0U0V0-like basis from noise.wgsl.
-// Each pass keeps the camera signal exactly and soft-thresholds only the two
-// decorrelated opponent detail bands using the measured sensor variance.
+// Color denoise
 
 @group(0) @binding(11) var color_denoise_read: texture_2d<f32>;
 @group(0) @binding(10) var color_denoise_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
@@ -54,30 +47,15 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     let center_variance = Noise::nr_component_variance(center);
     let detail = clamp(Common::camera_uniforms.noise_options.y, 0.0, 1.0);
     let requested = clamp(Common::camera_uniforms.chroma_denoise, 0.0, 1.0);
-    // Each accepted low pass reduces the noise presented to the next scale.
-    // Using the original sensor variance forever makes a real boundary look
-    // progressively less significant after the first shrinkage pass, which is
-    // why high Color values used to diffuse dark chroma at radii 8/16/32.
-    // Track the approximate residual guide variance so later scales compare
-    // against their much cleaner input rather than the original RAW noise.
+    // Variance
     let guide_variance_scale = exp2(-f32(scale));
-    // Keep both brightness and genuine color boundaries out of the low pass.
-    // A signal-only guide mistakes isoluminant boundaries for flat areas, so
-    // the wide scales can otherwise carry saturated chroma many pixels into a
-    // neutral neighbor. The chroma guide is normalized by the measured pair
-    // variance. Like Darktable's profiled-denoise wavelet guide, keep a noise
-    // dead zone before applying a steep edge falloff: ordinary sensor/demosaic
-    // noise pools at full weight, while a coherent color difference just
-    // beyond the noise envelope is rejected instead of partially crossing the
-    // boundary at every broad scale.
+    // Edges
     let signal_guide_sigma = mix(10.0, 5.5, detail);
     let opponent_noise_deadzone = mix(12.0, 6.0, detail);
     let opponent_edge_slope = mix(0.28, 0.52, detail);
     let center_opponents = Noise::nr_opponents(center);
     let center_opponent_variance = Noise::nr_opponent_variance(center);
-    // The two broadest High-quality scales use a 3x3 binomial kernel. Their
-    // large spacing supplies Lightroom-like color smoothness without paying
-    // for 25 samples per pixel or extending support beyond the export halo.
+    // Kernel
     let compact = scale >= 4;
     let extent = select(2, 1, compact);
     var opponent_sum = vec2<f32>(0.0);
@@ -129,12 +107,7 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
         Noise::nr_opponent_variance(center) * guide_variance_scale,
     );
 
-    // A soft threshold is the key distinction from a blur: noise-sized colour
-    // variation disappears, while coherent isoluminant colour edges keep the
-    // portion that exceeds the profile-derived threshold.
-    // Thresholding already has a perceptual onset, so keep this mapping close
-    // to linear. Unlike the old response=16 blend, Color 25 must not be
-    // numerically indistinguishable from Color 100.
+    // Threshold
     let threshold_strength = mix(3.1, 1.35, detail)
         * color_denoise_scale_gain(scale)
         * requested;
@@ -142,20 +115,13 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     let normalized_magnitude = length(normalized_detail);
     let soft_retained =
         max(1.0 - threshold_strength / max(normalized_magnitude, 1e-6), 0.0);
-    // Use a firm upper knee instead of subtracting the threshold from every
-    // coefficient forever. A real, coherent colored feature several sensor
-    // sigmas above the noise (LED text, small lights, saturated trim) is
-    // restored without bias, while ordinary color speckles remain below it.
+    // Features
     let feature_retention = smoothstep(
         mix(9.0, 5.0, detail),
         mix(18.0, 10.0, detail),
         normalized_magnitude,
     );
-    // Profile sigma grows with shot noise in highlights, so a small saturated
-    // light can be fewer normalized sigmas than expected even though its
-    // camera-space chroma is unquestionably real. Protect such well-exposed,
-    // strongly colored structure without giving dark chroma speckles the same
-    // exemption.
+    // Saturation
     let relative_chroma =
         length(center_opponents) / max(abs(center_signal), 0.02);
     let saturated_feature = smoothstep(0.15, 0.35, relative_chroma)

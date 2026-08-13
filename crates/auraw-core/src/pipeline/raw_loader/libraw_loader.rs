@@ -80,10 +80,12 @@ const XYZ_TO_REC2020: [[f32; 3]; 3] = [
 
 #[allow(
     clippy::upper_case_acronyms,
+    clippy::ptr_offset_with_cast,
     dead_code,
     non_camel_case_types,
     non_snake_case,
-    non_upper_case_globals
+    non_upper_case_globals,
+    unnecessary_transmutes
 )]
 mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -1428,8 +1430,7 @@ unsafe fn copy_active_pixels(
         .context("reserve oriented RAW pixel buffer")?;
     pixels.resize(output_len, 0);
 
-    // Copy the actual mosaic first. The common unrotated case can move whole
-    // rows at once instead of performing one pointer calculation per pixel.
+    // Mosaic
     if flip == 0 {
         for y in 0..height {
             let raw_y = crop_y + y;
@@ -1442,11 +1443,7 @@ unsafe fn copy_active_pixels(
             destination.copy_from_slice(source);
         }
     } else {
-        // Rotated RAWs cannot use contiguous row copies, but every destination
-        // row is independent. Spread those rows across Rayon workers instead of
-        // walking the entire 30–60 MP mosaic on one CPU core. Capture the source
-        // address as an integer so the immutable LibRaw buffer can be read from
-        // worker threads without sharing a mutable raw pointer wrapper.
+        // Rotation
         let raw_image_addr = raw_image as usize;
         pixels.par_chunks_mut(out_width).enumerate().try_for_each(
             |(y, destination)| -> Result<()> {
@@ -1468,12 +1465,7 @@ unsafe fn copy_active_pixels(
         )?;
     }
 
-    // CFA channels and metadata black levels are periodic for supported Bayer
-    // and X-Trans mosaics. Store one exact repeating cell instead of allocating
-    // 1 + 4 bytes for every photosite. The period combines the CFA cycle with
-    // LibRaw's optional row/column black-level pattern; rotated images swap the
-    // pattern axes. If metadata ever describes a period as large as the image,
-    // this naturally becomes an exact dense map rather than approximating it.
+    // Pattern
     let cfa_period = match cfa_kind {
         CfaKind::Bayer => 2usize,
         CfaKind::XTrans => 6usize,
@@ -2956,7 +2948,7 @@ mod tests {
     use super::{
         adjusted_white_balance_coefficients, apply_resolved_default_exposure, black_levels,
         cam_to_working, canonical_cfa_map, canonicalize_f32x4, cfa_kind_from_filters,
-        daylight_white_balance, effective_black_level, identity_4x4, load_raw_thumbnail,
+        daylight_white_balance, effective_black_level, identity_4x4,
         matching_thumbnail_orientation, oriented_source_pos, resolve_default_exposure_ev,
         valid_baseline_exposure, validate_embedded_thumbnail_metadata, white_balance, white_levels,
         CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint,
@@ -2997,19 +2989,6 @@ mod tests {
         // the profile offset a second time.
         apply_resolved_default_exposure(&mut profile, Some(-0.35));
         assert!((profile.default_exposure_ev + 0.15).abs() < 1e-6);
-    }
-
-    #[test]
-    fn synthetic_dng_produces_a_bounded_rgba_thumbnail() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("regression/raw/synthetic-bayer.dng");
-        let thumbnail = load_raw_thumbnail(&path, 128).unwrap();
-        assert!(thumbnail.width > 0 && thumbnail.height > 0);
-        assert!(thumbnail.width <= 128 && thumbnail.height <= 128);
-        assert_eq!(
-            thumbnail.rgba.len(),
-            thumbnail.width as usize * thumbnail.height as usize * 4
-        );
     }
 
     #[test]

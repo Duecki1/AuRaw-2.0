@@ -1181,6 +1181,7 @@ impl MaskFormerInputLayout {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn infer_landscape(
     model_path: &Path,
     vitmatte_path: &Path,
