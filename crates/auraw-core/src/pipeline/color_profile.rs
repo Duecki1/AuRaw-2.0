@@ -442,21 +442,8 @@ impl IccOutputTransform {
                         output_lut_linear_node(g, size),
                         output_lut_linear_node(b, size),
                     ];
-                    let linear = mul3(
-                        [
-                            [1.660_491, -0.587_641_1, -0.072_849_9],
-                            [-0.124_550_5, 1.132_899_9, -0.008_349_4],
-                            [-0.018_150_8, -0.100_578_9, 1.118_729_7],
-                        ],
-                        rec2020,
-                    );
-                    let linear = perceptual_gamut_compress(linear);
-                    entries.push([
-                        srgb_encode(linear[0]),
-                        srgb_encode(linear[1]),
-                        srgb_encode(linear[2]),
-                        0.0,
-                    ]);
+                    let encoded = display_linear_rec2020_to_srgb(rec2020);
+                    entries.push([encoded[0], encoded[1], encoded[2], 0.0]);
                 }
             }
         }
@@ -956,6 +943,18 @@ fn invert3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
             (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv,
         ],
     ])
+}
+
+pub(super) fn display_linear_rec2020_to_srgb(rgb: [f32; 3]) -> [f32; 3] {
+    let linear = mul3(
+        [
+            [1.660_491, -0.587_641_1, -0.072_849_9],
+            [-0.124_550_5, 1.132_899_9, -0.008_349_4],
+            [-0.018_150_8, -0.100_578_9, 1.118_729_7],
+        ],
+        rgb,
+    );
+    perceptual_gamut_compress(linear).map(srgb_encode)
 }
 
 fn perceptual_gamut_compress(rgb: [f32; 3]) -> [f32; 3] {

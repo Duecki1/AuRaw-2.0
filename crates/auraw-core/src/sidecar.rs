@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 pub const SIDECAR_SCHEMA_VERSION: u32 = 11;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
-pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0005;
+pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0006;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg";
