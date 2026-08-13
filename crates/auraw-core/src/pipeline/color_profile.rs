@@ -22,6 +22,10 @@ const MAX_DCP_TONE_POINTS: usize = 65_536;
 #[cfg(any(target_os = "android", test))]
 const D50_XYZ: [f32; 3] = [0.964_22, 1.0, 0.825_21];
 
+pub(super) fn convert_embedded_icc_rgb_to_rec2020(bytes: &[u8], rgb: &mut [f32]) -> Result<()> {
+    icc::convert_input_rgb_to_rec2020(bytes, rgb)
+}
+
 #[cfg(not(target_os = "android"))]
 #[derive(Clone, Debug)]
 pub struct DisplayIccProfile {

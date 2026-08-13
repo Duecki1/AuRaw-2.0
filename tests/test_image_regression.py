@@ -59,6 +59,42 @@ class LinearIntermediateTests(unittest.TestCase):
         self.assertEqual(loaded.rgb.shape, (2, 3, 3))
         self.assertEqual(loaded.metadata["schema"], 1)
 
+    def test_tiff_import_preserves_uint16_and_float32_precision(self) -> None:
+        import tifffile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            integer_path = root / "integer.tif"
+            integer = np.array([[[0, 1, 65535], [32768, 12345, 54321]]], dtype=np.uint16)
+            tifffile.imwrite(integer_path, integer, photometric="rgb")
+            loaded_integer = load_linear_image(
+                integer_path, color_space="linear-rec2020-d65", transfer="linear"
+            )
+            np.testing.assert_array_equal(
+                loaded_integer.rgb, integer.astype(np.float32) / np.float32(65535.0)
+            )
+
+            float_path = root / "float.tiff"
+            floating = np.array([[[-0.25, 0.5, 1.25], [2.0, 4.0, 8.0]]], dtype=np.float32)
+            tifffile.imwrite(float_path, floating, photometric="rgb")
+            loaded_float = load_linear_image(
+                float_path, color_space="linear-rec2020-d65", transfer="linear"
+            )
+            np.testing.assert_array_equal(loaded_float.rgb, floating)
+
+    def test_tiff_import_accepts_planar_separate_rgb(self) -> None:
+        import tifffile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "planar.tif"
+            planar = np.arange(3 * 4 * 5, dtype=np.uint16).reshape(3, 4, 5)
+            tifffile.imwrite(path, planar, photometric="rgb", planarconfig="separate")
+            loaded = load_linear_image(
+                path, color_space="linear-rec2020-d65", transfer="linear"
+            )
+            expected = np.moveaxis(planar, 0, 2).astype(np.float32) / np.float32(65535.0)
+            np.testing.assert_array_equal(loaded.rgb, expected)
+
     def test_rejects_camera_rgb_for_delta_e(self) -> None:
         image = LinearImage(np.zeros((40, 40, 3), dtype=np.float32), "camera-rgb")
         with self.assertRaisesRegex(ValueError, "camera-rgb"):

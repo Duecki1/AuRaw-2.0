@@ -3374,6 +3374,18 @@ mod tests {
     }
 
     #[test]
+    fn tiff_sidecars_keep_the_source_extension() {
+        assert_eq!(
+            sidecar_path_for_raw(Path::new("photo.tif")).file_name().unwrap(),
+            "photo.tif.auraw"
+        );
+        assert_eq!(
+            sidecar_path_for_raw(Path::new("photo.TIFF")).file_name().unwrap(),
+            "photo.TIFF.auraw"
+        );
+    }
+
+    #[test]
     fn desktop_save_is_atomic_and_uses_appended_suffix() {
         let directory = temporary_directory("atomic");
         let raw = directory.join("photo.CR3");

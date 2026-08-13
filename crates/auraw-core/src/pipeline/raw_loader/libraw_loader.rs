@@ -1334,6 +1334,7 @@ unsafe fn loaded_raw_from_context(
         },
         cfa_kind,
         raw_pixels,
+        scene_linear_raster: None,
         color_indices,
         wb_coeffs,
         cam_to_srgb,

@@ -178,7 +178,7 @@ fn run() -> Result<()> {
         Some(profile) => load_raw_file_with_dcp(&args.input, profile),
         None => load_raw_file(&args.input),
     }
-    .with_context(|| format!("load RAW {}", args.input.display()))?;
+    .with_context(|| format!("load source image {}", args.input.display()))?;
 
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

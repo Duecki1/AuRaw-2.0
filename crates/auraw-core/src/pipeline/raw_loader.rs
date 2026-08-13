@@ -61,7 +61,7 @@ pub const SUPPORTED_RAW_EXTENSIONS: &[&str] = &[
     "3fr", "ari", "arw", "bay", "bmq", "cap", "cine", "cr2", "cr3", "crw", "cs1", "dc2", "dcr",
     "dcs", "dng", "drf", "eip", "erf", "fff", "gpr", "iiq", "k25", "kc2", "kdc", "mdc", "mef",
     "mos", "mrw", "nef", "nrw", "obm", "orf", "pef", "ptx", "pxn", "qtk", "r3d", "raf", "raw",
-    "rdc", "rw2", "rwl", "rwz", "sr2", "srf", "srw", "sti", "x3f",
+    "rdc", "rw2", "rwl", "rwz", "sr2", "srf", "srw", "sti", "tif", "tiff", "x3f",
 ];
 
 pub fn is_supported_raw_path(path: &Path) -> bool {
@@ -495,6 +495,10 @@ pub struct LoadedRaw {
     pub capture_metadata: CaptureMetadata,
     pub cfa_kind: CfaKind,
     pub raw_pixels: Vec<u16>,
+    /// Pre-demosaiced scene-linear Rec.2020 D65 RGB raster. TIFF raster inputs
+    /// populate this buffer and leave `raw_pixels` empty; sensor RAW files leave
+    /// it empty and follow the CFA reconstruction path.
+    pub scene_linear_raster: Option<Arc<[f32]>>,
     pub color_indices: CompactPixelMap<u8>,
     pub wb_coeffs: [f32; 4],
     pub cam_to_srgb: [[f32; 4]; 3],
@@ -539,6 +543,75 @@ pub struct OpposedChromaCacheKey {
 pub type OpposedChromaCache = Arc<RwLock<HashMap<OpposedChromaCacheKey, [f32; 3]>>>;
 
 impl LoadedRaw {
+    pub fn from_scene_linear_rec2020(width: u32, height: u32, rgb: Vec<f32>) -> Result<Self> {
+        let pixels = validate_raw_dimensions(width, height)?;
+        let expected = pixels
+            .checked_mul(3)
+            .context("scene-linear raster element count overflow")?;
+        anyhow::ensure!(
+            rgb.len() == expected,
+            "scene-linear raster has {} values, expected {expected} for {width}x{height}",
+            rgb.len()
+        );
+        anyhow::ensure!(
+            rgb.iter().all(|value| value.is_finite()),
+            "scene-linear raster contains NaN or infinity"
+        );
+        Ok(Self {
+            width,
+            height,
+            camera_make: String::new(),
+            camera_model: String::new(),
+            lens_make: String::new(),
+            lens_model: String::new(),
+            focal_length: 0.0,
+            aperture: 0.0,
+            focus_distance: 0.0,
+            capture_metadata: CaptureMetadata::default(),
+            cfa_kind: CfaKind::Bayer,
+            raw_pixels: Vec::new(),
+            scene_linear_raster: Some(rgb.into()),
+            color_indices: CompactPixelMap::repeating(width, height, 1, 1, vec![1]),
+            wb_coeffs: [1.0; 4],
+            cam_to_srgb: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            black_levels: [0.0; 4],
+            black_levels_per_pixel: CompactPixelMap::repeating(
+                width,
+                height,
+                1,
+                1,
+                vec![0.0],
+            ),
+            white_levels: [1.0; 4],
+            noise_profile: NoiseProfile::default(),
+            camera_profile: CameraProfile::default(),
+            camera_profile_source: None,
+            available_camera_profiles: Vec::new(),
+            white_balance_model: None,
+            lens_geometry: None,
+            ai_denoised: Arc::new(RwLock::new(None)),
+            opposed_chroma_cache: Default::default(),
+        })
+    }
+
+    pub fn is_pre_demosaiced_raster(&self) -> bool {
+        self.raw_pixels.is_empty()
+            && self.scene_linear_raster.as_ref().is_some_and(|rgb| {
+                rgb.len()
+                    == (self.width as usize)
+                        .saturating_mul(self.height as usize)
+                        .saturating_mul(3)
+            })
+    }
+
+    pub fn scene_linear_raster(&self) -> Option<&[f32]> {
+        self.scene_linear_raster.as_deref()
+    }
+
     fn opposed_sensor_value(&self, index: usize, black_point: f32, pixels: &[u16]) -> f32 {
         let channel = usize::from(self.color_indices[index].min(3));
         let raw = f32::from(pixels[index]);
@@ -894,6 +967,12 @@ impl LoadedRaw {
         second: [f32; 2],
         black_point: f32,
     ) -> Option<(f32, f32)> {
+        // The picker below operates on sensor CFA planes and a LibRaw white
+        // balance model. Rendered TIFFs use the generic raster temperature/tint
+        // transform on the GPU, so there are no sensor coefficients to solve.
+        if self.is_pre_demosaiced_raster() {
+            return None;
+        }
         if self.width == 0 || self.height == 0 {
             return None;
         }
@@ -1045,67 +1124,87 @@ impl LoadedRaw {
     }
 }
 
+fn tiff_routes_to_raster(path: &Path) -> Result<bool> {
+    if !super::tiff_loader::is_tiff_path(path) {
+        return Ok(false);
+    }
+    Ok(matches!(
+        super::tiff_loader::inspect_tiff_container(path)?,
+        super::tiff_loader::TiffContainerKind::Raster
+    ))
+}
+
 #[cfg(not(libraw_available))]
-pub fn load_raw_file(_path: &Path) -> Result<LoadedRaw> {
+pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
+    if tiff_routes_to_raster(path)? {
+        return super::tiff_loader::load_raster_tiff(path);
+    }
     Err(anyhow!(
         "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
     ))
 }
 
 #[cfg(not(libraw_available))]
-pub fn load_raw_embedded_thumbnail(_path: &Path, _maximum_edge: u32) -> Result<RawThumbnail> {
+pub fn load_raw_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+    if tiff_routes_to_raster(path)? {
+        return super::tiff_loader::load_raster_tiff_thumbnail(path, maximum_edge);
+    }
     Err(anyhow!(
         "this build was compiled without LibRaw, so embedded RAW thumbnails are unavailable"
     ))
 }
 
 #[cfg(not(libraw_available))]
-pub fn load_raw_thumbnail(_path: &Path, _maximum_edge: u32) -> Result<RawThumbnail> {
+pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+    if tiff_routes_to_raster(path)? {
+        return super::tiff_loader::load_raster_tiff_thumbnail(path, maximum_edge);
+    }
     Err(anyhow!(
         "this build was compiled without LibRaw, so RAW thumbnails are unavailable"
     ))
 }
 
 #[cfg(not(libraw_available))]
-pub fn load_raw_display_dimensions(_path: &Path) -> Result<[u32; 2]> {
+pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
+    if tiff_routes_to_raster(path)? {
+        return super::tiff_loader::load_raster_tiff_dimensions(path);
+    }
     Err(anyhow!(
         "this build was compiled without LibRaw, so RAW dimensions are unavailable"
     ))
 }
 
 #[cfg(not(libraw_available))]
-pub fn load_raw_file_with_dcp(_path: &Path, _profile_path: &Path) -> Result<LoadedRaw> {
-    Err(anyhow!(
-        "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
-    ))
+pub fn load_raw_file_with_dcp(path: &Path, _profile_path: &Path) -> Result<LoadedRaw> {
+    load_raw_file(path)
 }
 
 #[cfg(not(libraw_available))]
 pub fn load_raw_file_with_profile_config(
-    _path: &Path,
+    path: &Path,
     _mode: CameraProfileMode,
     _profile_folder: Option<&Path>,
 ) -> Result<LoadedRaw> {
-    Err(anyhow!(
-        "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
-    ))
+    load_raw_file(path)
 }
 
 #[cfg(not(libraw_available))]
 pub fn load_raw_file_with_profile_selection(
-    _path: &Path,
+    path: &Path,
     _mode: CameraProfileMode,
     _profile_folder: Option<&Path>,
     _selected_profile: Option<&Path>,
 ) -> Result<LoadedRaw> {
-    Err(anyhow!(
-        "this build was compiled without LibRaw. Install LibRaw and make libraw.pc visible through PKG_CONFIG_PATH, then rebuild AuRaw."
-    ))
+    load_raw_file(path)
 }
 
 #[cfg(libraw_available)]
 pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
-    libraw_loader::load_raw_file(path)
+    if tiff_routes_to_raster(path)? {
+        super::tiff_loader::load_raster_tiff(path)
+    } else {
+        libraw_loader::load_raw_file(path)
+    }
 }
 
 #[cfg(libraw_available)]
@@ -1114,7 +1213,11 @@ pub fn load_raw_file_with_profile_config(
     mode: CameraProfileMode,
     profile_folder: Option<&Path>,
 ) -> Result<LoadedRaw> {
-    libraw_loader::load_raw_file_with_profile_config(path, mode, profile_folder)
+    if tiff_routes_to_raster(path)? {
+        super::tiff_loader::load_raster_tiff(path)
+    } else {
+        libraw_loader::load_raw_file_with_profile_config(path, mode, profile_folder)
+    }
 }
 
 #[cfg(libraw_available)]
@@ -1124,32 +1227,52 @@ pub fn load_raw_file_with_profile_selection(
     profile_folder: Option<&Path>,
     selected_profile: Option<&Path>,
 ) -> Result<LoadedRaw> {
-    libraw_loader::load_raw_file_with_profile_selection(
-        path,
-        mode,
-        profile_folder,
-        selected_profile,
-    )
+    if tiff_routes_to_raster(path)? {
+        super::tiff_loader::load_raster_tiff(path)
+    } else {
+        libraw_loader::load_raw_file_with_profile_selection(
+            path,
+            mode,
+            profile_folder,
+            selected_profile,
+        )
+    }
 }
 
 #[cfg(libraw_available)]
 pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<LoadedRaw> {
-    libraw_loader::load_raw_file_with_dcp(path, profile_path)
+    if tiff_routes_to_raster(path)? {
+        super::tiff_loader::load_raster_tiff(path)
+    } else {
+        libraw_loader::load_raw_file_with_dcp(path, profile_path)
+    }
 }
 
 #[cfg(libraw_available)]
 pub fn load_raw_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
-    libraw_loader::load_raw_embedded_thumbnail(path, maximum_edge)
+    if tiff_routes_to_raster(path)? {
+        super::tiff_loader::load_raster_tiff_thumbnail(path, maximum_edge)
+    } else {
+        libraw_loader::load_raw_embedded_thumbnail(path, maximum_edge)
+    }
 }
 
 #[cfg(libraw_available)]
 pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
-    libraw_loader::load_raw_thumbnail(path, maximum_edge)
+    if tiff_routes_to_raster(path)? {
+        super::tiff_loader::load_raster_tiff_thumbnail(path, maximum_edge)
+    } else {
+        libraw_loader::load_raw_thumbnail(path, maximum_edge)
+    }
 }
 
 #[cfg(libraw_available)]
 pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
-    libraw_loader::load_raw_display_dimensions(path)
+    if tiff_routes_to_raster(path)? {
+        super::tiff_loader::load_raster_tiff_dimensions(path)
+    } else {
+        libraw_loader::load_raw_display_dimensions(path)
+    }
 }
 
 #[cfg(libraw_available)]
@@ -1170,6 +1293,19 @@ pub fn prewarm_dcp_profile_index(_folder: &Path) {}
 
 #[cfg(libraw_available)]
 mod libraw_loader;
+
+#[cfg(test)]
+mod extension_tests {
+    use super::is_supported_raw_path;
+    use std::path::Path;
+
+    #[test]
+    fn tiff_extensions_are_supported_case_insensitively() {
+        for name in ["photo.tif", "photo.TIF", "photo.tiff", "photo.TIFF"] {
+            assert!(is_supported_raw_path(Path::new(name)), "{name}");
+        }
+    }
+}
 
 #[cfg(all(test, libraw_available))]
 mod tests {
@@ -1199,6 +1335,7 @@ mod tests {
             capture_metadata: Default::default(),
             cfa_kind: CfaKind::Bayer,
             raw_pixels: vec![0],
+            scene_linear_raster: None,
             color_indices: CompactPixelMap::dense(1, 1, vec![0]),
             wb_coeffs: [2.0, 1.0, 1.5, 1.0],
             cam_to_srgb: [

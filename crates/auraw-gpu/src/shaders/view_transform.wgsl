@@ -471,6 +471,13 @@ fn apply_view_transform(scene_rgb: vec3<f32>) -> vec3<f32> {
     let looked = Profile::apply_optional_profile_look(scene_rgb);
     let view_input = Color::gamut_project_nonnegative_rec2020(looked);
 
+    // Lightroom-style rendered TIFFs already arrive with a baked display
+    // rendering. Reapplying the default scene->display sigmoid deepens shadows
+    // and pushes highlights, so raster inputs bypass it unless the user has
+    // explicitly enabled a non-default sigmoid/contrast configuration.
+    if Common::camera_uniforms._pad_1_field <= 0.5 {
+        return view_input;
+    }
     return Tonemap::apply_sigmoid_view_transform(view_input);
 }
 

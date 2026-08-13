@@ -538,6 +538,9 @@ mod imp {
         flags: c_int,
         lens_geometry: Option<Arc<LensGeometryMap>>,
     ) -> Result<LoadedRaw> {
+        if raw.is_pre_demosaiced_raster() {
+            return correct_raster(raw, modifier, flags, lens_geometry);
+        }
         let width = raw.width as usize;
         let height = raw.height as usize;
         let mut raw_pixels = vec![0u16; raw.raw_pixels.len()];
@@ -700,6 +703,7 @@ mod imp {
             capture_metadata: raw.capture_metadata.clone(),
             cfa_kind: raw.cfa_kind,
             raw_pixels,
+            scene_linear_raster: None,
             color_indices: raw.color_indices.clone(),
             wb_coeffs: raw.wb_coeffs,
             cam_to_srgb: raw.cam_to_srgb,
@@ -724,6 +728,185 @@ mod imp {
             ai_denoised: Arc::new(std::sync::RwLock::new(None)),
             opposed_chroma_cache: Default::default(),
         })
+    }
+
+    fn correct_raster(
+        raw: &LoadedRaw,
+        modifier: &Modifier,
+        flags: c_int,
+        lens_geometry: Option<Arc<LensGeometryMap>>,
+    ) -> Result<LoadedRaw> {
+        let width = raw.width as usize;
+        let height = raw.height as usize;
+        let source = raw
+            .scene_linear_raster()
+            .ok_or_else(|| anyhow!("rendered TIFF is missing its scene-linear RGB raster"))?;
+        let expected = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(3))
+            .ok_or_else(|| anyhow!("rendered TIFF dimensions overflow"))?;
+        if source.len() != expected {
+            return Err(anyhow!(
+                "rendered TIFF RGB buffer has {} values, expected {expected}",
+                source.len()
+            ));
+        }
+
+        let vignette_enabled = flags & LF_MODIFY_VIGNETTING != 0;
+        let coordinate_enabled = flags & LF_MODIFY_TCA != 0;
+        let mut shaded = source.to_vec();
+        if vignette_enabled {
+            apply_raster_vignette(raw, modifier, &mut shaded)?;
+        }
+
+        let output = if coordinate_enabled {
+            let mut output = vec![0.0f32; expected];
+            // Match the CFA correction path's bounded temporary storage while
+            // retaining TIFF values as f32 throughout the channel-relative
+            // Lensfun warp. Six coordinates are emitted per output RGB pixel.
+            const ROW_BATCH: usize = 32;
+            let coordinate_row_len = width.saturating_mul(6);
+            let mut coordinates =
+                vec![0.0f32; coordinate_row_len.saturating_mul(ROW_BATCH)];
+
+            for batch_y in (0..height).step_by(ROW_BATCH) {
+                let batch_rows = (height - batch_y).min(ROW_BATCH);
+                let coordinate_len = batch_rows.saturating_mul(coordinate_row_len);
+                let coordinate_batch = &mut coordinates[..coordinate_len];
+                // SAFETY: the output buffer has width*batch_rows*2*3 floats
+                // and the modifier stays on this thread while Lensfun writes it.
+                let filled = unsafe {
+                    lf_modifier_apply_subpixel_geometry_distortion(
+                        modifier.0,
+                        0.0,
+                        batch_y as f32,
+                        raw.width as c_int,
+                        batch_rows as c_int,
+                        coordinate_batch.as_mut_ptr(),
+                    )
+                };
+                if filled == 0 {
+                    for local_y in 0..batch_rows {
+                        let y = batch_y + local_y;
+                        let row_coordinates = &mut coordinate_batch
+                            [local_y * coordinate_row_len..(local_y + 1) * coordinate_row_len];
+                        fill_identity_coordinates(row_coordinates, y, width);
+                    }
+                }
+
+                let pixel_start = batch_y * width;
+                let pixel_end = pixel_start + batch_rows * width;
+                output[pixel_start * 3..pixel_end * 3]
+                    .par_chunks_exact_mut(3)
+                    .enumerate()
+                    .for_each(|(local_index, pixel)| {
+                        let local_y = local_index / width;
+                        let x = local_index % width;
+                        let coordinate_base = local_y * coordinate_row_len + x * 6;
+                        for channel in 0..3 {
+                            let coordinate_index = coordinate_base + channel * 2;
+                            let source_x = coordinate_batch[coordinate_index];
+                            let source_y = coordinate_batch[coordinate_index + 1];
+                            pixel[channel] = sample_raster_channel_bilinear(
+                                &shaded,
+                                width,
+                                height,
+                                source_x,
+                                source_y,
+                                x,
+                                batch_y + local_y,
+                                channel,
+                            );
+                        }
+                    });
+            }
+            output
+        } else {
+            shaded
+        };
+
+        let mut corrected = raw.clone();
+        corrected.scene_linear_raster = Some(Arc::from(output));
+        corrected.lens_geometry = lens_geometry;
+        // Lens correction changes the source pixels. Any cached sensor-domain
+        // alternative is no longer valid (normally absent for rendered TIFFs).
+        corrected.ai_denoised = Arc::new(std::sync::RwLock::new(None));
+        corrected.opposed_chroma_cache = Default::default();
+        Ok(corrected)
+    }
+
+    fn apply_raster_vignette(
+        raw: &LoadedRaw,
+        modifier: &Modifier,
+        raster: &mut [f32],
+    ) -> Result<()> {
+        let width = raw.width as usize;
+        let height = raw.height as usize;
+        let row_stride = c_int::try_from(width.saturating_mul(std::mem::size_of::<AlignedRgba>()))
+            .context("Lensfun TIFF vignette row stride overflow")?;
+        const ROW_BATCH: usize = 32;
+        let mut rgba_gains = vec![AlignedRgba([1.0; 4]); width.saturating_mul(ROW_BATCH)];
+
+        for batch_y in (0..height).step_by(ROW_BATCH) {
+            let batch_rows = (height - batch_y).min(ROW_BATCH);
+            let batch_len = batch_rows * width;
+            let rgba_batch = &mut rgba_gains[..batch_len];
+            rgba_batch.fill(AlignedRgba([1.0; 4]));
+            // SAFETY: rgba_batch contains batch_rows aligned RGBA f32 rows with
+            // exactly the row stride supplied to Lensfun.
+            let _applied = unsafe {
+                lf_modifier_apply_color_modification(
+                    modifier.0,
+                    rgba_batch.as_mut_ptr().cast(),
+                    0.0,
+                    batch_y as f32,
+                    raw.width as c_int,
+                    batch_rows as c_int,
+                    LF_CR_RGBA,
+                    row_stride,
+                )
+            };
+
+            let pixel_start = batch_y * width;
+            raster[pixel_start * 3..(pixel_start + batch_len) * 3]
+                .par_chunks_exact_mut(3)
+                .zip(rgba_batch.par_iter())
+                .for_each(|(pixel, rgba)| {
+                    pixel[0] *= rgba.0[0];
+                    pixel[1] *= rgba.0[1];
+                    pixel[2] *= rgba.0[2];
+                });
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_raster_channel_bilinear(
+        source: &[f32],
+        width: usize,
+        height: usize,
+        x: f32,
+        y: f32,
+        fallback_x: usize,
+        fallback_y: usize,
+        channel: usize,
+    ) -> f32 {
+        if !x.is_finite() || !y.is_finite() || width == 0 || height == 0 {
+            return source[(fallback_y * width + fallback_x) * 3 + channel];
+        }
+        let x = x.clamp(0.0, width.saturating_sub(1) as f32);
+        let y = y.clamp(0.0, height.saturating_sub(1) as f32);
+        let x0 = x.floor() as usize;
+        let y0 = y.floor() as usize;
+        let x1 = (x0 + 1).min(width - 1);
+        let y1 = (y0 + 1).min(height - 1);
+        let tx = x - x0 as f32;
+        let ty = y - y0 as f32;
+        let sample = |sx: usize, sy: usize| source[(sy * width + sx) * 3 + channel];
+        let top = sample(x0, y0) * (1.0 - tx) + sample(x1, y0) * tx;
+        let bottom = sample(x0, y1) * (1.0 - tx) + sample(x1, y1) * tx;
+        top * (1.0 - ty) + bottom * ty
     }
 
     fn build_vignette_gain_map(raw: &LoadedRaw, modifier: &Modifier) -> Result<Vec<f32>> {
