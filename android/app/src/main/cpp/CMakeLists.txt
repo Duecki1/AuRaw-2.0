@@ -258,6 +258,60 @@ file(WRITE "${AURAW_LENSFUN_STAGE}/lib/pkgconfig/iconv.pc"
 "Version: 1.17\n"
 "Libs: -L\${libdir} -liconv -lcharset\n")
 
+# GLib 2.78's Meson fallback for zlib 1.2.11 downloads from
+# zlib.net/fossils. That endpoint is unreliable in CI, so build a newer pinned
+# zlib from its official GitHub release and expose it through the isolated
+# Android pkg-config directory used below. This also keeps Meson from ever
+# resolving a zlib from the build host.
+ExternalProject_Add(auraw_zlib
+    URL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+    URL_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+    PREFIX "${AURAW_EXTERNAL_ROOT}/zlib-prefix"
+    BINARY_DIR "${AURAW_EXTERNAL_ROOT}/zlib-build"
+    CONFIGURE_COMMAND
+        "${CMAKE_COMMAND}"
+        -S <SOURCE_DIR>
+        -B <BINARY_DIR>
+        -G Ninja
+        "-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+        "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
+        "-DANDROID_NDK=${CMAKE_ANDROID_NDK}"
+        "-DANDROID_ABI=${ANDROID_ABI}"
+        "-DANDROID_PLATFORM=android-${AURAW_ANDROID_MIN_SDK}"
+        -DANDROID_STL=c++_shared
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DZLIB_BUILD_EXAMPLES=OFF
+    BUILD_COMMAND
+        "${CMAKE_COMMAND}" --build <BINARY_DIR> --target zlibstatic
+        --parallel "${AURAW_BUILD_JOBS}"
+    INSTALL_COMMAND
+        "${CMAKE_COMMAND}" -E rm -f
+        "${AURAW_LENSFUN_STAGE}/lib/libz.so"
+        "${AURAW_LENSFUN_STAGE}/lib/libz.so.1"
+        "${AURAW_LENSFUN_STAGE}/lib/libz.so.1.3.1"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        <BINARY_DIR>/libz.a "${AURAW_LENSFUN_STAGE}/lib/libz.a"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        <SOURCE_DIR>/zlib.h "${AURAW_LENSFUN_STAGE}/include/zlib.h"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        <BINARY_DIR>/zconf.h "${AURAW_LENSFUN_STAGE}/include/zconf.h"
+    BUILD_BYPRODUCTS
+        "${AURAW_LENSFUN_STAGE}/include/zlib.h"
+        "${AURAW_LENSFUN_STAGE}/lib/libz.a"
+        "${AURAW_LENSFUN_STAGE}/lib/pkgconfig/zlib.pc"
+)
+
+file(WRITE "${AURAW_LENSFUN_STAGE}/lib/pkgconfig/zlib.pc"
+"prefix=${AURAW_LENSFUN_STAGE}\n"
+"includedir=\${prefix}/include\n"
+"libdir=\${prefix}/lib\n\n"
+"Name: zlib\n"
+"Description: zlib compression library for AuRaw Android GLib\n"
+"Version: 1.3.1\n"
+"Libs: -L\${libdir} -lz\n"
+"Cflags: -I\${includedir}\n")
+
 set(AURAW_PKG_CONFIG_DIR "${AURAW_LENSFUN_STAGE}/lib/pkgconfig")
 set(AURAW_MESON "${Python3_EXECUTABLE};${auraw_meson_source_SOURCE_DIR}/meson.py")
 ExternalProject_Add(auraw_glib
@@ -265,7 +319,7 @@ ExternalProject_Add(auraw_glib
     URL_HASH SHA256=244854654dd82c7ebcb2f8e246156d2a05eb9cd1ad07ed7a779659b4602c9fae
     PREFIX "${AURAW_EXTERNAL_ROOT}/glib-prefix"
     BINARY_DIR "${AURAW_EXTERNAL_ROOT}/glib-build"
-    DEPENDS auraw_iconv
+    DEPENDS auraw_iconv auraw_zlib
     CONFIGURE_COMMAND
         "${CMAKE_COMMAND}" -E env
         "PKG_CONFIG_LIBDIR=${AURAW_PKG_CONFIG_DIR}"
@@ -275,7 +329,8 @@ ExternalProject_Add(auraw_glib
         <BINARY_DIR>
         <SOURCE_DIR>
         --cross-file "${AURAW_GLIB_CROSS_FILE}"
-        --wrap-mode=forcefallback
+        --wrap-mode=default
+        --force-fallback-for=libpcre2-8,libffi
         --prefix "${AURAW_LENSFUN_STAGE}"
         --libdir lib
         --default-library static
@@ -304,7 +359,6 @@ ExternalProject_Add(auraw_glib
         "${AURAW_LENSFUN_STAGE}/lib/libglib-2.0.a"
         "${AURAW_LENSFUN_STAGE}/lib/libpcre2-8.a"
         "${AURAW_LENSFUN_STAGE}/lib/libffi.a"
-        "${AURAW_LENSFUN_STAGE}/lib/libz.a"
 )
 
 ExternalProject_Add(auraw_lensfun
