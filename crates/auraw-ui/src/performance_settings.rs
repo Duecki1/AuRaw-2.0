@@ -6,7 +6,7 @@ const SETTINGS_VERSION: u32 = 13;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PerformanceSettings {
+pub(crate) struct PerformanceSettings {
     #[serde(default = "settings_version")]
     pub version: u32,
     #[serde(default = "default_raw_cache_files")]

@@ -1,23 +1,13 @@
-# AuRaw copyright and attribution notice
+# Notice
 
 AuRaw
 Copyright (C) 2026 Duecki and AuRaw contributors
 
-AuRaw is free software licensed under the GNU General Public License, version 3
-or (at your option) any later version. The complete license is in `COPYING`.
+AuRaw is licensed under GPL-3.0-or-later; see [COPYING](COPYING). Adapted
+darktable and Ansel code retains its original copyright and compatible license.
+RapidRAW influenced the interface and workflow, but its AGPL-3.0 source is not
+part of AuRaw.
 
-AuRaw includes adaptations of work from darktable and Ansel. Copyright in those
-adapted portions remains with their respective contributors; details and source
-locations are recorded in `THIRD_PARTY_NOTICES.md` and in the affected file
-headers.
-
-RapidRAW influenced AuRaw's interface and editing-workflow direction. RapidRAW
-is a separate project distributed under the GNU Affero General Public License
-version 3; its name and license acknowledgement do not change AuRaw's license.
-
-Third-party libraries, optional downloaded model weights, and profile databases
-retain their respective licenses. See `THIRD_PARTY_NOTICES.md` and
-`DEPENDENCIES.md` for redistribution information.
-
-The names and trademarks of upstream projects belong to their respective
-owners. Attribution does not imply endorsement.
+Third-party libraries, models, and profile databases retain their own licenses.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Names and trademarks belong
+to their owners; attribution does not imply endorsement.

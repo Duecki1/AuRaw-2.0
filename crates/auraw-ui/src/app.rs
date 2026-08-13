@@ -30,6 +30,7 @@ use crate::ui::components::adjustment_slider::slider_scroll_locked;
 use crate::ui::develop::Develop;
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::{Library, LibraryState};
+#[cfg(target_os = "android")]
 use crate::ui::preview::Preview;
 use crate::ui::settings::Settings;
 use crate::ui::sidebar::Sidebar;
@@ -112,6 +113,10 @@ impl DevelopReferenceState {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+type DevelopThumbnailResult = (PathBuf, Result<Option<RawThumbnail>, String>);
+
+#[derive(Default)]
 pub(crate) struct DevelopLoadingThumbnailState {
     #[cfg(not(target_os = "android"))]
     pub(crate) path: Option<PathBuf>,
@@ -120,22 +125,7 @@ pub(crate) struct DevelopLoadingThumbnailState {
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) texture_size: Option<[u32; 2]>,
     #[cfg(not(target_os = "android"))]
-    pub(crate) receiver: Option<mpsc::Receiver<(PathBuf, Result<Option<RawThumbnail>, String>)>>,
-}
-
-impl Default for DevelopLoadingThumbnailState {
-    fn default() -> Self {
-        Self {
-            #[cfg(not(target_os = "android"))]
-            path: None,
-            #[cfg(target_os = "android")]
-            source_uri: None,
-            texture: None,
-            texture_size: None,
-            #[cfg(not(target_os = "android"))]
-            receiver: None,
-        }
-    }
+    pub(crate) receiver: Option<mpsc::Receiver<DevelopThumbnailResult>>,
 }
 
 impl DevelopLoadingThumbnailState {
@@ -994,8 +984,7 @@ pub struct AurawApp {
     #[cfg(not(target_os = "android"))]
     desktop_picker_receiver: Option<mpsc::Receiver<DesktopPickerEvent>>,
     pub status: String,
-    /// Reveals low-level darktable/raw controls. The default Lightroom-like
-    /// interface intentionally keeps these implementation details hidden.
+    /// Reveals low-level darktable/RAW controls hidden by the standard view.
     pub expert_mode: bool,
     pub(crate) lens_correction: LensCorrectionState,
     edit_history: EditHistory,

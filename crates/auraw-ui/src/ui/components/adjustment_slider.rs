@@ -30,7 +30,6 @@ const ROW_BOTTOM_SPACE: f32 = 7.0;
 #[cfg(target_os = "android")]
 const ROW_BOTTOM_SPACE: f32 = 3.0;
 
-
 /// Semantic color treatment for slider tracks.
 ///
 /// Gradients are opt-in so only controls whose values have a clear visual
@@ -136,7 +135,16 @@ where
     Num: egui::emath::Numeric + Copy,
 {
     adjustment_slider_impl(
-        ui, label, value, range, decimals, speed, hover_text, None, None, Some(gradient),
+        ui,
+        label,
+        value,
+        range,
+        decimals,
+        speed,
+        hover_text,
+        None,
+        None,
+        Some(gradient),
     )
 }
 
@@ -191,12 +199,8 @@ pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&s
     )
 }
 
-/// Adjustment slider with an explicit semantic reset value.
-///
-/// Most controls can remember the value they first displayed. Controls whose
-/// meaning changes while reusing the same sidebar slot (notably AI-mask
-/// feather) need an explicit reset so a deleted Brush's 0.55 default cannot be
-/// inherited by a newly created 0.0-feather AI mask.
+/// Slider with a reset value.
+#[allow(clippy::too_many_arguments)]
 pub fn adjustment_slider_with_reset<Num>(
     ui: &mut Ui,
     label: &str,
@@ -438,7 +442,8 @@ where
                     slider_drag_active = true;
                     lock_slider_scroll(ui.ctx(), slider_drag_id);
                     track_response.request_focus();
-                    changed |= set_from_pointer(value, start, end, decimals, track_rect, position.x);
+                    changed |=
+                        set_from_pointer(value, start, end, decimals, track_rect, position.x);
                 }
             }
         }
@@ -587,7 +592,11 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
         SliderGradient::HueDegrees { start, end } => {
             hsv_color(egui::lerp(start..=end, t), 0.90, 0.92)
         }
-        SliderGradient::ChannelHue { left, center, right } => {
+        SliderGradient::ChannelHue {
+            left,
+            center,
+            right,
+        } => {
             if t <= 0.5 {
                 lerp_hue_color(left, center, t * 2.0)
             } else {
@@ -596,23 +605,47 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
         }
         SliderGradient::Brightness => {
             if t <= 0.5 {
-                lerp_color(egui::Color32::from_gray(18), egui::Color32::from_gray(118), t * 2.0)
+                lerp_color(
+                    egui::Color32::from_gray(18),
+                    egui::Color32::from_gray(118),
+                    t * 2.0,
+                )
             } else {
-                lerp_color(egui::Color32::from_gray(118), egui::Color32::from_gray(245), (t - 0.5) * 2.0)
+                lerp_color(
+                    egui::Color32::from_gray(118),
+                    egui::Color32::from_gray(245),
+                    (t - 0.5) * 2.0,
+                )
             }
         }
         SliderGradient::Temperature => {
             if t <= 0.5 {
-                lerp_color(egui::Color32::from_rgb(72, 128, 235), egui::Color32::from_gray(208), t * 2.0)
+                lerp_color(
+                    egui::Color32::from_rgb(72, 128, 235),
+                    egui::Color32::from_gray(208),
+                    t * 2.0,
+                )
             } else {
-                lerp_color(egui::Color32::from_gray(208), egui::Color32::from_rgb(244, 157, 62), (t - 0.5) * 2.0)
+                lerp_color(
+                    egui::Color32::from_gray(208),
+                    egui::Color32::from_rgb(244, 157, 62),
+                    (t - 0.5) * 2.0,
+                )
             }
         }
         SliderGradient::Tint => {
             if t <= 0.5 {
-                lerp_color(egui::Color32::from_rgb(76, 181, 112), egui::Color32::from_gray(202), t * 2.0)
+                lerp_color(
+                    egui::Color32::from_rgb(76, 181, 112),
+                    egui::Color32::from_gray(202),
+                    t * 2.0,
+                )
             } else {
-                lerp_color(egui::Color32::from_gray(202), egui::Color32::from_rgb(222, 84, 174), (t - 0.5) * 2.0)
+                lerp_color(
+                    egui::Color32::from_gray(202),
+                    egui::Color32::from_rgb(222, 84, 174),
+                    (t - 0.5) * 2.0,
+                )
             }
         }
         SliderGradient::Colorfulness => {
@@ -650,7 +683,11 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
             if t <= 0.5 {
                 lerp_color(egui::Color32::from_rgb(10, 10, 10), color, t * 2.0)
             } else {
-                lerp_color(color, egui::Color32::from_rgb(246, 246, 246), (t - 0.5) * 2.0)
+                lerp_color(
+                    color,
+                    egui::Color32::from_rgb(246, 246, 246),
+                    (t - 0.5) * 2.0,
+                )
             }
         }
     }
@@ -713,7 +750,11 @@ fn rgb_to_hsv(color: egui::Color32) -> (f32, f32, f32) {
     } else {
         60.0 * ((red - green) / delta + 4.0)
     };
-    let saturation = if max <= f32::EPSILON { 0.0 } else { delta / max };
+    let saturation = if max <= f32::EPSILON {
+        0.0
+    } else {
+        delta / max
+    };
     (hue, saturation, max)
 }
 
@@ -747,7 +788,10 @@ mod tests {
             start: 0.0,
             end: 360.0,
         };
-        assert_eq!(gradient_color_at(gradient, 0.0), gradient_color_at(gradient, 1.0));
+        assert_eq!(
+            gradient_color_at(gradient, 0.0),
+            gradient_color_at(gradient, 1.0)
+        );
     }
 
     #[test]

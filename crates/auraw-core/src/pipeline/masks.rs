@@ -1142,9 +1142,9 @@ fn apply_retouch_dabs_causally(
             }
         }
         for (pixel, target, coverage) in updates {
-            for channel in 0..3 {
-                canvas[pixel + channel] += (target[channel] - canvas[pixel + channel]) * coverage;
-                generated[pixel + channel] = target[channel];
+            for (channel, value) in target.into_iter().enumerate() {
+                canvas[pixel + channel] += (value - canvas[pixel + channel]) * coverage;
+                generated[pixel + channel] = value;
             }
             let mask_pixel = pixel / 3;
             painted[mask_pixel] += (1.0 - painted[mask_pixel]) * coverage;
@@ -1724,7 +1724,7 @@ pub struct LocalAdjustments {
     pub blacks: f32,
     pub temperature: f32,
     pub tint: f32,
-    /// Lightroom-style uniform hue rotation in degrees.
+    /// Uniform hue rotation in degrees.
     #[serde(default)]
     pub hue: f32,
     pub saturation: f32,
@@ -3028,8 +3028,9 @@ fn recorded_brush_groups(
         let stroke_end = starts.get(stroke_index + 1).copied().unwrap_or(dabs.len());
         let mut group_start = stroke_start;
         let mut positive = dabs[group_start].opacity >= 0.0;
-        for dab_index in stroke_start + 1..stroke_end {
-            let next_positive = dabs[dab_index].opacity >= 0.0;
+        for (offset, dab) in dabs[stroke_start + 1..stroke_end].iter().enumerate() {
+            let dab_index = stroke_start + 1 + offset;
+            let next_positive = dab.opacity >= 0.0;
             if next_positive != positive {
                 groups.push(BrushStrokeGroup {
                     start: group_start - legacy_end,

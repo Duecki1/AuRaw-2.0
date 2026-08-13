@@ -81,7 +81,7 @@ impl Settings {
                 );
             ui.add(
                 egui::Label::new(
-                    "The standard Develop view keeps only Lightroom-style photographic controls visible.",
+                    "The standard Develop view keeps only photographic controls visible.",
                 )
                 .wrap(),
             );

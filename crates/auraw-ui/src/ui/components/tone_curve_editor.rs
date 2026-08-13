@@ -72,13 +72,10 @@ pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color
                 let mut normalized = screen_to_curve(rect, pointer);
                 let len = curve.len as usize;
                 if index == 0 {
-                    normalized[0] = normalized[0]
-                        .clamp(0.0, curve.points[1][0] - MIN_POINT_X_GAP);
+                    normalized[0] = normalized[0].clamp(0.0, curve.points[1][0] - MIN_POINT_X_GAP);
                 } else if index + 1 == len {
-                    normalized[0] = normalized[0].clamp(
-                        curve.points[index - 1][0] + MIN_POINT_X_GAP,
-                        1.0,
-                    );
+                    normalized[0] =
+                        normalized[0].clamp(curve.points[index - 1][0] + MIN_POINT_X_GAP, 1.0);
                 } else {
                     normalized[0] = normalized[0].clamp(
                         curve.points[index - 1][0] + MIN_POINT_X_GAP,
