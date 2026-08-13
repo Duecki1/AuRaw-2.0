@@ -690,7 +690,6 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    #[cfg(target_os = "android")]
     fn capture_mask_source_from_active_preview(
         &self,
         frame: &eframe::Frame,
@@ -707,12 +706,21 @@ impl AurawApp {
             .as_ref()
             .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
 
-        // The expanded processing graph no longer reliably leaves enough of
-        // Android's GPU budget for a second full RawGpuPipeline. Render the
-        // canonical unedited source through the already-resident preview graph,
-        // read it back, then restore the current edited preview before this UI
-        // frame is painted. This is also the path used while reconstructing
-        // saved range-mask sources during image load.
+        // The expanded processing graph does not always leave enough GPU budget
+        // for a second full RawGpuPipeline. Render the canonical unedited source
+        // through the already-resident preview graph, read it back, then restore
+        // the current edited preview before this UI frame is painted. This is
+        // also the path used while reconstructing saved range-mask sources
+        // during image load.
+        //
+        // Desktop previews may use a monitor ICC transform, while mask models
+        // require the canonical sRGB rendition produced by a fresh pipeline.
+        // Install sRGB before the reference render and restore the monitor
+        // transform before recomputing the visible edited preview.
+        #[cfg(not(target_os = "android"))]
+        pipeline
+            .reset_display_to_srgb(&render_state.queue)
+            .map_err(|error| format!("Could not prepare mask-source color output: {error:#}"))?;
         let reference_exposure = ExposureParams::scene_referred_default();
         let reference_masks = MaskStack::default();
         let reference_params = GpuParams::new(&reference_exposure, &reference_masks, raw);
@@ -737,8 +745,14 @@ impl AurawApp {
             GpuParams::new(&self.target_exposure, &self.masks, raw)
                 .with_vignette_geometry(self.geometry)
         };
+        #[cfg(not(target_os = "android"))]
+        let display_restore = pipeline
+            .write_output_transform(&render_state.queue, &self.display_output_transform)
+            .map_err(|error| format!("Could not restore the preview color output: {error:#}"));
         pipeline.recompute(&render_state.queue, &render_state.device, &restore_params);
 
+        #[cfg(not(target_os = "android"))]
+        display_restore?;
         let rgba = readback
             .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;
         MaskRgbImage::new(pipeline.width, pipeline.height, rgba)
@@ -791,7 +805,7 @@ impl AurawApp {
             // reserving the normal 32-layer 2048px editing atlas wastes 256
             // MiB and can reject an otherwise valid 4K capture on a 1.5 GiB
             // GPU budget. An explicit atlas allocates one tiny unused layer.
-            let reference_pipeline =
+            let reference_pipeline_result =
                 RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
                 &render_state.device,
                 &render_state.queue,
@@ -800,10 +814,27 @@ impl AurawApp {
                 ProcessingQuality::Preview,
                 &program_template,
                 64,
-            )
-            .map_err(|error| {
-                format!("Could not prepare the original RAW for masking: {error:#}")
-            })?;
+            );
+            let reference_pipeline = match reference_pipeline_result {
+                Ok(pipeline) => pipeline,
+                Err(error)
+                    if error
+                        .to_string()
+                        .contains("GPU pipelines already reserve") =>
+                {
+                    crate::diagnostics::record(format!(
+                        "Dedicated AI mask-source graph exceeded the coexistence budget; using the active preview graph: {error:#}"
+                    ));
+                    let source = self.capture_mask_source_from_active_preview(frame)?;
+                    self.mask_source_cache = Some(source);
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Could not prepare the original RAW for masking: {error:#}"
+                    ));
+                }
+            };
             reference_pipeline
                 .update_inpaint_layer(
                     &render_state.queue,
