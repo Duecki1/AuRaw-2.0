@@ -277,7 +277,7 @@ impl MatrixShaperProfile {
 }
 
 pub(super) fn convert_input_rgb_to_rec2020(bytes: &[u8], rgb: &mut [f32]) -> Result<()> {
-    if rgb.len() % 3 != 0 {
+    if !rgb.len().is_multiple_of(3) {
         bail!("ICC source RGB buffer length must be divisible by three");
     }
     match MatrixShaperProfile::parse_input(bytes) {

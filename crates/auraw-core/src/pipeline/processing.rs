@@ -986,20 +986,10 @@ pub fn extract_padded_tile_into(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mu
         tile_raw.width = tile.padded_width;
         tile_raw.height = tile.padded_height;
         if dimensions_changed {
-            tile_raw.color_indices = CompactPixelMap::repeating(
-                tile.padded_width,
-                tile.padded_height,
-                1,
-                1,
-                vec![1],
-            );
-            tile_raw.black_levels_per_pixel = CompactPixelMap::repeating(
-                tile.padded_width,
-                tile.padded_height,
-                1,
-                1,
-                vec![0.0],
-            );
+            tile_raw.color_indices =
+                CompactPixelMap::repeating(tile.padded_width, tile.padded_height, 1, 1, vec![1]);
+            tile_raw.black_levels_per_pixel =
+                CompactPixelMap::repeating(tile.padded_width, tile.padded_height, 1, 1, vec![0.0]);
         }
         let expected = (tile.padded_width as usize)
             .saturating_mul(tile.padded_height as usize)

@@ -1756,6 +1756,7 @@ impl Sidebar {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn show_vertical_mask_properties(
         ui: &mut Ui,
         mask: &mut crate::pipeline::LocalMask,

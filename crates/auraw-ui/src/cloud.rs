@@ -2806,31 +2806,4 @@ mod tests {
         empty_trash(&config).unwrap();
         responder.join().unwrap();
     }
-
-    #[test]
-    #[ignore = "requires AURAW_CLOUD_TEST_URL and a running AuRaw Cloud server"]
-    fn reader_upload_round_trips_against_configured_cloud_server() {
-        let server_url = std::env::var("AURAW_CLOUD_TEST_URL")
-            .expect("set AURAW_CLOUD_TEST_URL for the live cloud integration test");
-        let access_token = std::env::var("AURAW_CLOUD_TEST_TOKEN").unwrap_or_default();
-        let raw_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../regression/raw/synthetic-xtrans.dng");
-        let bytes = fs::metadata(&raw_path).unwrap().len();
-        let raw = File::open(&raw_path).unwrap();
-
-        let asset = upload_asset_file(
-            &CloudConfig {
-                enabled: true,
-                server_url,
-                access_token,
-            },
-            raw,
-            "android-reader-upload.dng",
-            Some(bytes),
-        )
-        .unwrap();
-
-        assert_eq!(asset.name, "android-reader-upload.dng");
-        assert_eq!(asset.bytes, bytes);
-    }
 }

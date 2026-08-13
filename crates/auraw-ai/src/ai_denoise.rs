@@ -1790,7 +1790,7 @@ mod tests {
         let sha = crate::ai_masks::sha256_file_hex(&runtime).unwrap();
         crate::ai_masks::initialize_runtime(Some(&runtime), Some(&sha)).unwrap();
         let mut session = create_session_with_fallback(
-            &model_dir.join("model_linear.onnx"),
+            model_dir.join("model_linear.onnx"),
             SessionOptions::new("RawNIND linear"),
         )
         .unwrap();

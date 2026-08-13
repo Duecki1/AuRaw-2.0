@@ -6,23 +6,14 @@
 // Copyright (C) 2020-2026 darktable developers.
 // Copyright (C) 2026 AuRaw contributors (WGSL port).
 // GPL-3.0-or-later.
-//
-// AuRaw's Highlights/Whites and Shadows are separate scene-referred controls.
-// Blacks is deliberately view-adjacent in display-linear space so
-// the selected profile/sigmoid view cannot compress away black/toe authority.
-// The scene-to-display transform below includes darktable's generalized
-// log-logistic sigmoid path and color processing.
 
 @group(0) @binding(16) var<storage, read> tone_stats: ToneCommon::ToneStats;
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;
 
-// This file implements the scene-to-display sigmoid view transform.
-// DCP ProfileToneCurve is never stacked ahead of this path.
+// Sigmoid
 
 fn adaptive_tone_user_exposure_ev() -> f32 {
-    // The histogram/guide remain cached in pre-user-exposure scene space so
-    // moving Exposure stays cheap. Reintroduce the user-facing edit here. The
-    // camera/DNG default rendering exposure is deliberately excluded here.
+    // Exposure
     return clamp(bitcast<f32>(Common::camera_uniforms.user_exposure_bits), -5.0, 5.0);
 }
 
@@ -45,20 +36,14 @@ fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
                 textureLoad(tone_guide_tex, p10, 0).x, fraction.x);
     let b = mix(textureLoad(tone_guide_tex, p01, 0).x,
                 textureLoad(tone_guide_tex, p11, 0).x, fraction.x);
-    // Evaluate the local guide at the post-Exposure brightness. This makes a
-    // large positive Exposure naturally move more pixels into Highlights and
-    // Whites, while a negative Exposure moves them toward Shadows/Blacks.
+    // Guide
     return mix(a, b, fraction.y) + adaptive_tone_user_exposure_ev();
 }
 
 fn tone_percentiles() -> ToneCommon::TonePercentiles {
     let p0 = tone_stats.percentiles_0_field;
     let p1 = tone_stats.percentiles_1_field;
-    // Partially follow base Exposure instead of shifting the entire analysis
-    // by the same amount. A full equal shift would cancel out and reproduce
-    // the old pre-exposure masks; keeping 65% of the relative movement gives
-    // recovery controls a more photographic, exposure-aware response without
-    // making their target ranges jump abruptly after large edits.
+    // Follow
     let guide_follow = adaptive_tone_user_exposure_ev() * 0.35;
     return ToneCommon::TonePercentiles(
         p0.x + guide_follow,
@@ -73,10 +58,7 @@ fn tone_percentiles() -> ToneCommon::TonePercentiles {
 fn basic_low_tone_control(value: f32) -> f32 {
     let normalized = clamp(value / 100.0, -1.0, 1.0);
     let magnitude = abs(normalized);
-    // The former linear mapping made the useful centre of Shadows/Blacks feel
-    // almost inert after the view transform. This concave response preserves
-    // exact endpoints and fine zero control while giving +/-25..60 materially
-    // more authority without a discontinuity.
+    // Shape
     let shaped = magnitude * (1.45 - 0.45 * magnitude);
     return sign(normalized) * shaped;
 }
@@ -88,12 +70,7 @@ fn adaptive_low_tone_ev(rgb: vec3<f32>, pos: vec2<i32>, guide_ev: f32) -> f32 {
         ToneCommon::TONE_EV_MAX,
     );
     let mismatch = abs(pixel_ev - guide_ev);
-    // The guide may suppress halos, but it may not reclassify a
-    // truly dark subject as a bright one merely because the reduced cell is
-    // dominated by a window/sky/background. Bound the guide's classification
-    // displacement asymmetrically: bright neighbours may pull a dark pixel by
-    // at most +0.75 EV, while dark neighbours may pull by -1.25 EV. Actual
-    // pixel luminance therefore remains authoritative across strong edges.
+    // Bound
     let bounded_guide_ev = pixel_ev + clamp(guide_ev - pixel_ev, -1.25, 0.75);
     let guide_weight = mix(0.42, 0.22, smoothstep(0.50, 3.00, mismatch));
     return mix(pixel_ev, bounded_guide_ev, guide_weight);
@@ -104,10 +81,7 @@ fn adaptive_tone_masks(
     high_ev: f32,
     percentiles: ToneCommon::TonePercentiles,
 ) -> vec4<f32> {
-    // Blacks is implemented by a dedicated monotone display-linear toe, so
-    // its mask is retained only for diagnostics/future use. Shadows reaches
-    // farther into lower midtones while still rolling out before the bright
-    // half of the image. Highlight/White semantics remain unchanged.
+    // Masks
     let black_fade_end = min(percentiles.p50_field - 0.55, percentiles.p05_field + 3.35);
     let black_mask = 1.0 - ToneCommon::tone_smoothstep(
         percentiles.p005_field - 0.75,
@@ -132,7 +106,7 @@ fn adaptive_tone_masks(
     return vec4<f32>(black_mask, shadow_mask, highlight_mask, white_mask);
 }
 
-fn lightroom_shadow_offset_ev(
+fn basic_shadow_offset_ev(
     shadows: f32,
     mask: f32,
     percentiles: ToneCommon::TonePercentiles,
@@ -141,13 +115,7 @@ fn lightroom_shadow_offset_ev(
         return 0.0;
     }
 
-    // Lightroom's Shadows endpoint is a low-pass range: the deepest visible
-    // detail receives full authority, then the response rolls continuously
-    // through lower midtones. The measured post-view +/-100 endpoints on the
-    // calibration RAW are about +3.2/-2.6 EV; a roughly 2 EV scene displacement
-    // reaches those endpoints after the default view transform. Cap that request by the
-    // complete transition width so 1 - smoothstep(...) remains strictly
-    // monotone even for an unusually compressed histogram.
+    // Shadows
     let lower = percentiles.p05_field - 0.90;
     let upper = percentiles.p50_field + 1.35;
     let monotone_limit = 0.64 * max(upper - lower, 0.25);
@@ -155,7 +123,7 @@ fn lightroom_shadow_offset_ev(
     return sign(shadows) * min(requested, monotone_limit) * mask;
 }
 
-fn lightroom_positive_whites_offset_ev(
+fn basic_positive_whites_offset_ev(
     whites: f32,
     low_ev: f32,
     percentiles: ToneCommon::TonePercentiles,
@@ -164,7 +132,7 @@ fn lightroom_positive_whites_offset_ev(
         return 0.0;
     }
 
-    // The 16-bit Lightroom endpoint is a broad but restrained hump: nearly
+    // The 16-bit reference endpoint is a broad but restrained hump: nearly
     // neutral in the bottom decile, strongest from upper midtones into diffuse
     // white, then rolling away from the clipped endpoint. The previous 20%
     // floor and 2.35 EV request turned Whites into a second Exposure control.
@@ -209,7 +177,7 @@ fn apply_local_basic_tone_values_with_low_strength(
     let low_ev = adaptive_low_tone_ev(rgb, pos, guide_ev);
     let masks = adaptive_tone_masks(low_ev, guide_ev, percentiles);
 
-    let shadow_ev = lightroom_shadow_offset_ev(shadows, masks.y, percentiles);
+    let shadow_ev = basic_shadow_offset_ev(shadows, masks.y, percentiles);
     // Highlights peak in the top decile while staying gentle below the median.
     let highlight_mask = 0.10 + 0.90 * ToneCommon::tone_smoothstep(
         percentiles.p50_field - 0.35,
@@ -219,7 +187,7 @@ fn apply_local_basic_tone_values_with_low_strength(
     let highlight_ev = signed_tone_range(highlights, 1.35, 1.00) * highlight_mask;
     let white_ev = select(
         signed_tone_range(whites, 0.30, 1.40) * masks.w,
-        lightroom_positive_whites_offset_ev(whites, low_ev, percentiles),
+        basic_positive_whites_offset_ev(whites, low_ev, percentiles),
         whites >= 0.0,
     );
     return rgb * exp2(clamp(shadow_ev + highlight_ev + white_ev, -6.5, 6.5));
@@ -698,7 +666,7 @@ fn apply_display_blacks_toe_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     return apply_display_blacks_toe_amount(rgb, basic_low_tone_control(value));
 }
 
-fn apply_lightroom_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
+fn apply_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     let basic = apply_local_basic_tone(rgb, pos);
     return apply_rgb_point_curves(apply_point_tone_curve(basic));
 }

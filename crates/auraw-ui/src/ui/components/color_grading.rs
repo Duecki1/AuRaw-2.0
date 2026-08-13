@@ -104,7 +104,7 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
     let mut changed = false;
     // Respect the true remaining content width. A forced minimum can place the
     // wheel under the scrollbar when the Develop panel is narrowed.
-    let size = ui.available_width().min(WHEEL_MAX_SIZE).max(1.0);
+    let size = ui.available_width().clamp(1.0, WHEEL_MAX_SIZE);
 
     crate::ui::theme::toolbar_row(ui, |ui| {
         ui.strong("Hue / Saturation");

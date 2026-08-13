@@ -104,9 +104,9 @@ fn find_workspace_manifest(manifest_dir: &Path) -> Result<PathBuf, String> {
 }
 
 fn parse_workspace_metadata(path: &Path, source: &str) -> Result<Table, String> {
-    let document = source.parse::<DocumentMut>().map_err(|error| {
-        format!("cannot parse {} as TOML: {error}", path.display())
-    })?;
+    let document = source
+        .parse::<DocumentMut>()
+        .map_err(|error| format!("cannot parse {} as TOML: {error}", path.display()))?;
     let metadata = document
         .get("workspace")
         .and_then(Item::as_table)

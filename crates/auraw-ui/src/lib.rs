@@ -8,7 +8,7 @@ pub mod file_ops {
     pub use auraw_core::file_ops::*;
 }
 
-pub mod performance_settings;
+pub(crate) mod performance_settings;
 
 pub mod cloud;
 
@@ -61,9 +61,7 @@ fn native_options() -> eframe::NativeOptions {
     }
 
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-        // Ask supported native backends to reject new allocations before
-        // memory pressure is severe enough to lose the whole device. AuRaw
-        // handles that recoverable OOM below instead of allowing wgpu to panic.
+        // Memory
         setup.instance_descriptor.memory_budget_thresholds = eframe::wgpu::MemoryBudgetThresholds {
             for_resource_creation: Some(90),
             for_device_loss: Some(97),

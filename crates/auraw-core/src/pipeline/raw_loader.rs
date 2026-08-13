@@ -579,13 +579,7 @@ impl LoadedRaw {
                 [0.0, 0.0, 1.0, 0.0],
             ],
             black_levels: [0.0; 4],
-            black_levels_per_pixel: CompactPixelMap::repeating(
-                width,
-                height,
-                1,
-                1,
-                vec![0.0],
-            ),
+            black_levels_per_pixel: CompactPixelMap::repeating(width, height, 1, 1, vec![0.0]),
             white_levels: [1.0; 4],
             noise_profile: NoiseProfile::default(),
             camera_profile: CameraProfile::default(),
@@ -1001,13 +995,11 @@ impl LoadedRaw {
             .max(y0 + 1)
             .min(self.height);
 
-        // Keep a full-frame picker bounded on very large RAWs. An odd stride
-        // that is not divisible by three walks every Bayer and X-Trans phase
-        // instead of repeatedly landing on one CFA colour.
+        // Sampling
         const MAX_PICKER_SAMPLES: f64 = 262_144.0;
         let area_pixels = f64::from(x1 - x0) * f64::from(y1 - y0);
         let mut stride = (area_pixels / MAX_PICKER_SAMPLES).sqrt().ceil().max(1.0) as usize;
-        while stride % 2 == 0 || stride % 3 == 0 {
+        while stride.is_multiple_of(2) || stride.is_multiple_of(3) {
             stride += 1;
         }
 

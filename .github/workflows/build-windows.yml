@@ -30,8 +30,7 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
 
     steps:
-      # GitHub's Windows Git and MSYS2 Git can otherwise disagree about
-      # CRLF/LF normalization and report every tracked source file as dirty.
+      # Line endings
       - name: Configure deterministic Git line endings
         shell: pwsh
         run: |
@@ -105,8 +104,6 @@ jobs:
           export AURAW_SOURCE_REVISION="$revision"
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$revision")"
 
-          # Build only the end-user application. The regression renderer is an
-          # internal CI/test helper and must never be shipped in release artifacts.
           cargo build \
             --locked \
             --release \
@@ -117,8 +114,7 @@ jobs:
           release_dir="target/x86_64-pc-windows-gnu/release"
           test -f "$release_dir/auraw.exe"
           objdump -h "$release_dir/auraw.exe" | grep -q '\.rsrc'
-          # A desktop GUI binary must use the Windows GUI subsystem; otherwise
-          # Windows opens an extra command-prompt window beside the application.
+          # GUI subsystem
           objdump -p "$release_dir/auraw.exe" | grep -Eq 'Subsystem[[:space:]]+00000002[[:space:]]+\(Windows GUI\)'
           test "$(git rev-parse --verify HEAD)" = "$revision"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
@@ -142,9 +138,7 @@ jobs:
           cp -a "$lensfun_db"/. "$package_dir/lensfun/"
           test -n "$(find "$package_dir/lensfun" -name '*.xml' -print -quit)"
 
-          # Copy every non-system MinGW DLL needed by the executables and their
-          # dependent DLLs. The loop repeats because ldd may expose additional
-          # transitive dependencies after each DLL is copied.
+          # DLLs
           changed=1
           while [ "$changed" -eq 1 ]; do
             changed=0
@@ -172,13 +166,9 @@ jobs:
             echo "Lensfun: $lensfun_version"
           } > "$package_dir/BUILD-INFO.txt"
 
-          # Do not pre-zip the package before upload-artifact. GitHub already
-          # presents workflow artifacts as a downloadable ZIP, and pre-zipping
-          # caused a confusing ZIP-inside-ZIP download.
+          # Artifact
           test -f "$package_dir/auraw.exe"
-          test ! -e "$package_dir/auraw-regression-render.exe"
-
-          # Publish hashes so downloaded binaries can be verified independently.
+          # Checksums
           (cd "$package_dir" && sha256sum auraw.exe *.dll 2>/dev/null | sort -k2 > SHA256SUMS.txt || true)
           test -s "$package_dir/SHA256SUMS.txt"
 

@@ -17,7 +17,7 @@ const MIN_TIFF_ICC_BYTES: u64 = 132;
 const MAX_TIFF_ICC_BYTES: u64 = 16 * 1024 * 1024;
 
 const REC709_TO_REC2020: [[f32; 3]; 3] = [
-    [0.627_403_9, 0.329_283_0, 0.043_313_1],
+    [0.627_403_9, 0.329_283, 0.043_313_1],
     [0.069_097_3, 0.919_540_4, 0.011_362_3],
     [0.016_391_4, 0.088_013_3, 0.895_595_3],
 ];
@@ -84,7 +84,10 @@ pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
     };
     let magic = order.u16([header[2], header[3]]);
     let (big_tiff, first_ifd) = match magic {
-        42 => (false, u64::from(order.u32(header[4..8].try_into().unwrap()))),
+        42 => (
+            false,
+            u64::from(order.u32(header[4..8].try_into().unwrap())),
+        ),
         43 => {
             file.read_exact(&mut header[8..16])
                 .with_context(|| format!("read BigTIFF header {}", path.display()))?;
@@ -242,6 +245,7 @@ fn field_width(field_type: u16) -> Option<u64> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scalar_u64(
     file: &mut File,
     order: ByteOrder,
@@ -293,7 +297,9 @@ fn integer_values(
         value_or_offset
     };
     anyhow::ensure!(
-        data_offset.checked_add(total).is_some_and(|end| end <= file_len),
+        data_offset
+            .checked_add(total)
+            .is_some_and(|end| end <= file_len),
         "TIFF tag data extends outside the file"
     );
     let current = file.stream_position()?;
@@ -339,7 +345,9 @@ fn decode_scene_linear_rec2020(path: &Path) -> Result<(u32, u32, Vec<f32>)> {
         super::color_profile::convert_embedded_icc_rgb_to_rec2020(&icc, &mut rgb)
             .with_context(|| format!("apply embedded TIFF ICC profile from {}", path.display()))?;
         if rgb.par_iter().any(|value| !value.is_finite()) {
-            return Err(anyhow!("embedded TIFF ICC conversion produced NaN or infinity"));
+            return Err(anyhow!(
+                "embedded TIFF ICC conversion produced NaN or infinity"
+            ));
         }
     } else if source_is_float {
         // Untagged float TIFFs remain AuRaw's scene-linear Rec.2020 interchange
@@ -348,7 +356,7 @@ fn decode_scene_linear_rec2020(path: &Path) -> Result<(u32, u32, Vec<f32>)> {
     } else {
         // TIFF has no universal default RGB color space. sRGB is the practical
         // fallback for untagged integer files, but an embedded profile must take
-        // precedence. Lightroom commonly writes ProPhoto RGB / Adobe RGB here.
+        // precedence.
         rgb.par_chunks_exact_mut(3).for_each(|pixel| {
             let r = srgb_to_linear(pixel[0]);
             let g = srgb_to_linear(pixel[1]);
@@ -399,15 +407,18 @@ pub fn load_raster_tiff_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawT
     let rgb = image.into_rgb32f().into_raw();
     let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
     for pixel in rgb.chunks_exact(3) {
-        let encoded = super::color_profile::display_linear_rec2020_to_srgb([
-            pixel[0], pixel[1], pixel[2],
-        ]);
+        let encoded =
+            super::color_profile::display_linear_rec2020_to_srgb([pixel[0], pixel[1], pixel[2]]);
         for value in encoded {
             rgba.push((value.clamp(0.0, 1.0) * 255.0).round() as u8);
         }
         rgba.push(255);
     }
-    Ok(RawThumbnail { width, height, rgba })
+    Ok(RawThumbnail {
+        width,
+        height,
+        rgba,
+    })
 }
 
 fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -426,7 +437,10 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
     };
     let magic = order.u16([header[2], header[3]]);
     let (big_tiff, first_ifd) = match magic {
-        42 => (false, u64::from(order.u32(header[4..8].try_into().unwrap()))),
+        42 => (
+            false,
+            u64::from(order.u32(header[4..8].try_into().unwrap())),
+        ),
         43 => {
             file.read_exact(&mut header[8..16])
                 .with_context(|| format!("read BigTIFF header {}", path.display()))?;
@@ -499,8 +513,7 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
                 u64::from(read_u32(&mut file, order)?)
             };
 
-            // TIFF/EP ICC Profile tag. Lightroom writes its selected export
-            // color space here (commonly ProPhoto RGB, Adobe RGB, or sRGB).
+            // TIFF/EP ICC Profile tag stores the selected export color space.
             if tag == 34675 {
                 anyhow::ensure!(
                     matches!(field_type, 1 | 7),
@@ -523,10 +536,8 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
                     "TIFF ICC profile extends outside the file"
                 );
                 file.seek(SeekFrom::Start(data_offset))?;
-                let mut bytes = vec![
-                    0u8;
-                    usize::try_from(count).context("TIFF ICC profile size overflow")?
-                ];
+                let mut bytes =
+                    vec![0u8; usize::try_from(count).context("TIFF ICC profile size overflow")?];
                 file.read_exact(&mut bytes)?;
                 return Ok(Some(normalize_icc_profile(bytes)?));
             }
@@ -631,7 +642,10 @@ mod tests {
         bytes.extend_from_slice(&0u16.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         std::fs::write(&path, bytes).unwrap();
-        assert_eq!(inspect_tiff_container(&path).unwrap(), TiffContainerKind::Sensor);
+        assert_eq!(
+            inspect_tiff_container(&path).unwrap(),
+            TiffContainerKind::Sensor
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -708,7 +722,10 @@ mod tests {
         ));
         let image = ImageBuffer::<Rgb<u16>, Vec<u16>>::from_raw(1, 1, vec![65535, 0, 0]).unwrap();
         image.save_with_format(&path, ImageFormat::Tiff).unwrap();
-        assert_eq!(inspect_tiff_container(&path).unwrap(), TiffContainerKind::Raster);
+        assert_eq!(
+            inspect_tiff_container(&path).unwrap(),
+            TiffContainerKind::Raster
+        );
         let loaded = load_raster_tiff(&path).unwrap();
         assert!(loaded.is_pre_demosaiced_raster());
         let rgb = loaded.scene_linear_raster().unwrap();
@@ -728,12 +745,9 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let image = ImageBuffer::<Rgb<u16>, Vec<u16>>::from_raw(
-            2,
-            1,
-            vec![0, 0, 0, 65535, 65535, 65535],
-        )
-        .unwrap();
+        let image =
+            ImageBuffer::<Rgb<u16>, Vec<u16>>::from_raw(2, 1, vec![0, 0, 0, 65535, 65535, 65535])
+                .unwrap();
         image.save_with_format(&path, ImageFormat::Tiff).unwrap();
 
         let thumbnail = load_raster_tiff_thumbnail(&path, 512).unwrap();
