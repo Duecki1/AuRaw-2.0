@@ -2281,7 +2281,7 @@ impl RawGpuPipeline {
         );
 
         // Preserve a scene-linear camera-RGB result between demosaic and the
-        // display pass. This is what lets local Lightroom controls read true
+        // display pass. This lets local controls read true
         // RGB neighbourhoods instead of raw Bayer samples.
         let scene_texture = create_demosaic_texture(
             device,

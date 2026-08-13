@@ -1663,7 +1663,7 @@ pub struct LocalAdjustments {
     pub blacks: f32,
     pub temperature: f32,
     pub tint: f32,
-    /// Lightroom-style uniform hue rotation in degrees.
+    /// Uniform hue rotation in degrees.
     #[serde(default)]
     pub hue: f32,
     pub saturation: f32,

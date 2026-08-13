@@ -68,7 +68,7 @@ fn apply_texture_and_clarity_values(
     let positive_texture = SceneAdjustments::soft_detail_threshold(texture_band_ev, texture_threshold);
     var negative_texture_base_ev = fine_base_ev;
     if texture < 0.0 {
-        // Lightroom's negative endpoint smooths a wider surface band than its
+        // The negative endpoint smooths a wider surface band than the
         // positive microcontrast control. The lower range weight follows
         // surface variation while continuing to reject hard silhouettes.
         negative_texture_base_ev = SceneAdjustments::bilateral_log_luminance(

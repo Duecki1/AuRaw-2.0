@@ -356,7 +356,7 @@ fn decode_scene_linear_rec2020(path: &Path) -> Result<(u32, u32, Vec<f32>)> {
     } else {
         // TIFF has no universal default RGB color space. sRGB is the practical
         // fallback for untagged integer files, but an embedded profile must take
-        // precedence. Lightroom commonly writes ProPhoto RGB / Adobe RGB here.
+        // precedence.
         rgb.par_chunks_exact_mut(3).for_each(|pixel| {
             let r = srgb_to_linear(pixel[0]);
             let g = srgb_to_linear(pixel[1]);
@@ -513,8 +513,7 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
                 u64::from(read_u32(&mut file, order)?)
             };
 
-            // TIFF/EP ICC Profile tag. Lightroom writes its selected export
-            // color space here (commonly ProPhoto RGB, Adobe RGB, or sRGB).
+            // TIFF/EP ICC Profile tag stores the selected export color space.
             if tag == 34675 {
                 anyhow::ensure!(
                     matches!(field_type, 1 | 7),

@@ -140,7 +140,7 @@ fn nr_finish_signal(
 fn nr_perceptual_strength(requested: f32, response: f32) -> f32 {
     let x = clamp(requested, 0.0, 1.0);
     if x <= 1e-6 { return 0.0; }
-    // Normalized exponential response: low Lightroom-style values are useful,
+    // Normalized exponential response: low values remain useful,
     // the transition is continuous, and 100 remains an exact full blend.
     return (1.0 - exp(-response * x)) / (1.0 - exp(-response));
 }

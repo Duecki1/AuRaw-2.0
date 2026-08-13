@@ -3680,7 +3680,7 @@ impl AurawApp {
         self.white_balance_picker_drag = None;
 
         // Highlight reconstruction is an application-level processing preference,
-        // not one of the Lightroom-style Develop adjustments.
+        // not a Develop adjustment.
         self.exposure.highlight_method = previous.highlight_method;
         self.exposure.highlight_clip = previous.highlight_clip;
         self.exposure.highlight_reconstruction = previous.highlight_reconstruction;

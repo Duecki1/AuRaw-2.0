@@ -106,7 +106,7 @@ fn adaptive_tone_masks(
     return vec4<f32>(black_mask, shadow_mask, highlight_mask, white_mask);
 }
 
-fn lightroom_shadow_offset_ev(
+fn basic_shadow_offset_ev(
     shadows: f32,
     mask: f32,
     percentiles: ToneCommon::TonePercentiles,
@@ -123,7 +123,7 @@ fn lightroom_shadow_offset_ev(
     return sign(shadows) * min(requested, monotone_limit) * mask;
 }
 
-fn lightroom_positive_whites_offset_ev(
+fn basic_positive_whites_offset_ev(
     whites: f32,
     low_ev: f32,
     percentiles: ToneCommon::TonePercentiles,
@@ -132,7 +132,7 @@ fn lightroom_positive_whites_offset_ev(
         return 0.0;
     }
 
-    // The 16-bit Lightroom endpoint is a broad but restrained hump: nearly
+    // The 16-bit reference endpoint is a broad but restrained hump: nearly
     // neutral in the bottom decile, strongest from upper midtones into diffuse
     // white, then rolling away from the clipped endpoint. The previous 20%
     // floor and 2.35 EV request turned Whites into a second Exposure control.
@@ -177,7 +177,7 @@ fn apply_local_basic_tone_values_with_low_strength(
     let low_ev = adaptive_low_tone_ev(rgb, pos, guide_ev);
     let masks = adaptive_tone_masks(low_ev, guide_ev, percentiles);
 
-    let shadow_ev = lightroom_shadow_offset_ev(shadows, masks.y, percentiles);
+    let shadow_ev = basic_shadow_offset_ev(shadows, masks.y, percentiles);
     // Highlights peak in the top decile while staying gentle below the median.
     let highlight_mask = 0.10 + 0.90 * ToneCommon::tone_smoothstep(
         percentiles.p50_field - 0.35,
@@ -187,7 +187,7 @@ fn apply_local_basic_tone_values_with_low_strength(
     let highlight_ev = signed_tone_range(highlights, 1.35, 1.00) * highlight_mask;
     let white_ev = select(
         signed_tone_range(whites, 0.30, 1.40) * masks.w,
-        lightroom_positive_whites_offset_ev(whites, low_ev, percentiles),
+        basic_positive_whites_offset_ev(whites, low_ev, percentiles),
         whites >= 0.0,
     );
     return rgb * exp2(clamp(shadow_ev + highlight_ev + white_ev, -6.5, 6.5));
@@ -666,7 +666,7 @@ fn apply_display_blacks_toe_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     return apply_display_blacks_toe_amount(rgb, basic_low_tone_control(value));
 }
 
-fn apply_lightroom_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
+fn apply_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     let basic = apply_local_basic_tone(rgb, pos);
     return apply_rgb_point_curves(apply_point_tone_curve(basic));
 }

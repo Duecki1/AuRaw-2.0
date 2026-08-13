@@ -183,7 +183,7 @@ fn apply_capture_sharpening(
     let edge_strength = capture_sharpen_edge_strength(pos, 1);
     // A sensor-aware threshold belongs in flat/weakly textured regions, not
     // across an unambiguous structural edge. Relieving it continuously on
-    // strong edges keeps Amount 40 at Lightroom-like acutance without turning
+    // strong edges keeps Amount 40 crisp without turning
     // the same ISO noise into crisp grain in sky, snow, or painted panels.
     let edge_noise_relief = smoothstep(
         Common::effects_uniforms.capture_thresholds.z,

@@ -1,25 +1,16 @@
-# Development guide
+# Development
 
-Use Rust 1.92 and install LibRaw, Lensfun, libclang, and the platform graphics
-dependencies before building.
+Use Rust 1.92 with LibRaw, Lensfun, libclang, and the platform graphics
+dependencies.
 
 ```sh
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo run -p auraw-ui --bin auraw --release
-```
-
-Repository and release helpers live in `xtask`:
-
-```sh
-cargo xtask --help
 cargo xtask check-all
-cargo xtask icons
 ```
 
-Android builds use the versions in the root `[workspace.metadata]` table. See
-[`ANDROID.md`](../ANDROID.md) for setup and packaging commands.
-
-`data/wb_presets.json` is a compact subset of darktable's GPL-licensed camera
-white-balance database.
+Run `cargo xtask --help` for repository and release helpers. Android setup is in
+[ANDROID.md](../ANDROID.md). `data/wb_presets.json` contains a GPL-licensed
+subset of darktable's camera white-balance data.

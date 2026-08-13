@@ -224,7 +224,7 @@ impl NoiseProfile {
         }
     }
 
-    /// Choose conservative Lightroom-like opening values from noise at an
+    /// Choose conservative opening values from noise at an
     /// 18%-signal reference. The metadata fallback is retained as a floor so a
     /// highly textured frame cannot convince the single-image fit that a high
     /// ISO capture is clean. White-balance gains matter because red/blue sensor
