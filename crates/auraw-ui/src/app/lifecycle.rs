@@ -418,7 +418,7 @@ impl AurawApp {
             onnx_runtime_sha256,
             #[cfg(not(target_os = "android"))]
             desktop_picker_receiver: None,
-            status: "Open a RAW file to get started.".to_owned(),
+            status: "Open a RAW or TIFF file to get started.".to_owned(),
             expert_mode: false,
             lens_correction,
             edit_history,
@@ -469,7 +469,7 @@ impl AurawApp {
             library_batch_export: None,
             library_ai_mask_refresh: None,
             export_publish_pending: false,
-            image_status: "Open a RAW file to get started.".to_owned(),
+            image_status: "Open a RAW or TIFF file to get started.".to_owned(),
             current_label: None,
             notice: None,
             dirty_mask_layers: [false; MAX_LOCAL_MASKS],
@@ -741,7 +741,7 @@ impl AurawApp {
             ai_mask_update_object_queue: VecDeque::new(),
             ai_mask_update_landscape_queue: VecDeque::new(),
             ai_mask_update_failed: false,
-            status: "Open a RAW file to get started.".to_owned(),
+            status: "Open a RAW or TIFF file to get started.".to_owned(),
             expert_mode: false,
             lens_correction,
             edit_history,
@@ -790,7 +790,7 @@ impl AurawApp {
             library_batch_export: None,
             library_ai_mask_refresh: None,
             export_publish_pending: false,
-            image_status: "Open a RAW file to get started.".to_owned(),
+            image_status: "Open a RAW or TIFF file to get started.".to_owned(),
             current_label: None,
             notice: None,
             dirty_mask_layers: [false; MAX_LOCAL_MASKS],
@@ -892,7 +892,7 @@ impl AurawApp {
             .as_deref()
             .and_then(selected_picker_directory)
             .or_else(|| self.library.folder().map(std::path::Path::to_path_buf));
-        let mut dialog = rfd::AsyncFileDialog::new().add_filter("RAW images", &extensions);
+        let mut dialog = rfd::AsyncFileDialog::new().add_filter("RAW and TIFF images", &extensions);
         if let Some(directory) = initial_directory {
             dialog = dialog.set_directory(directory);
         }
@@ -925,7 +925,7 @@ impl AurawApp {
                     .as_deref()
                     .and_then(selected_picker_directory)
             });
-        let mut dialog = rfd::AsyncFileDialog::new().add_filter("RAW images", &extensions);
+        let mut dialog = rfd::AsyncFileDialog::new().add_filter("RAW and TIFF images", &extensions);
         if let Some(directory) = initial_directory {
             dialog = dialog.set_directory(directory);
         }
@@ -1227,7 +1227,7 @@ impl AurawApp {
             Ok(()) => {
                 self.picker_pending = true;
                 self.notice = None;
-                self.status = "Choose one or more RAW files…".to_owned();
+                self.status = "Choose one or more RAW or TIFF files…".to_owned();
             }
             Err(error) => self.notice = Some(error),
         }
@@ -1250,7 +1250,7 @@ impl AurawApp {
             Ok(()) => {
                 self.picker_pending = true;
                 self.notice = None;
-                self.status = "Choose one or more RAW files for AuRaw Cloud…".to_owned();
+                self.status = "Choose one or more RAW or TIFF files for AuRaw Cloud…".to_owned();
             }
             Err(error) => self.notice = Some(error),
         }

@@ -36,7 +36,7 @@ fn run() -> Result<()> {
         Some(profile) => load_raw_file_with_dcp(&args.input, profile),
         None => load_raw_file(&args.input),
     }
-    .with_context(|| format!("load RAW {}", args.input.display()))?;
+    .with_context(|| format!("load source image {}", args.input.display()))?;
     let adaptive_exposure = default_exposure_for_raw(&raw);
     if args.report_detail_defaults {
         eprintln!(

@@ -119,6 +119,20 @@ impl AurawApp {
         if self
             .loaded_raw
             .as_ref()
+            .is_some_and(|raw| raw.is_pre_demosaiced_raster())
+        {
+            self.exposure.ai_denoise_enabled = false;
+            self.target_exposure.ai_denoise_enabled = false;
+            self.notice = Some(
+                "AI denoise is a sensor-RAW operation; rendered TIFFs use the standard Detail controls."
+                    .to_owned(),
+            );
+            self.egui_ctx.request_repaint();
+            return;
+        }
+        if self
+            .loaded_raw
+            .as_ref()
             .is_some_and(|raw| raw.ai_denoised_image().is_some())
         {
             self.exposure.ai_denoise_enabled = true;

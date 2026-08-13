@@ -1,10 +1,10 @@
-// The matrix-shaper parser is the Android fallback. It remains compiled in
-// tests so its cross-platform contract can be validated on desktop CI.
+// Matrix-shaper ICC parsing is shared by TIFF input color management and the
+// Android display-profile fallback. Desktop LUT profiles can additionally fall
+// through to LCMS2 when they cannot be represented as a matrix + per-channel TRC.
 #![cfg_attr(test, allow(dead_code))]
 
 use super::*;
 
-#[cfg(any(target_os = "android", test))]
 #[derive(Clone, Debug)]
 enum TransferCurve {
     Identity,
@@ -13,8 +13,8 @@ enum TransferCurve {
     Parametric { kind: u16, params: Vec<f32> },
 }
 
-#[cfg(any(target_os = "android", test))]
 impl TransferCurve {
+    #[cfg(any(target_os = "android", test))]
     /// ICC TRCs encode device -> PCS. Output conversion needs the inverse.
     fn inverse(&self, linear: f32) -> f32 {
         let target = linear.clamp(0.0, 1.0);
@@ -55,6 +55,35 @@ impl TransferCurve {
         }
     }
 
+    fn forward_extended(&self, x: f32) -> f32 {
+        match self {
+            Self::Identity => x,
+            Self::Gamma(gamma) => x.signum() * x.abs().powf(*gamma),
+            Self::Sampled(values) => {
+                if values.is_empty() {
+                    return x;
+                }
+                if values.len() == 1 {
+                    return values[0];
+                }
+                if x <= 0.0 {
+                    let slope = (values[1] - values[0]) * (values.len() - 1) as f32;
+                    return values[0] + slope * x;
+                }
+                if x >= 1.0 {
+                    let last = values.len() - 1;
+                    let slope = (values[last] - values[last - 1]) * last as f32;
+                    return values[last] + slope * (x - 1.0);
+                }
+                let location = x * (values.len() - 1) as f32;
+                let i = location.floor() as usize;
+                let j = (i + 1).min(values.len() - 1);
+                values[i] + (values[j] - values[i]) * (location - i as f32)
+            }
+            Self::Parametric { kind, params } => parametric_curve(*kind, params, x),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         let first = self.forward(0.0);
         let mut previous = first;
@@ -78,29 +107,46 @@ impl TransferCurve {
     }
 }
 
-#[cfg(any(target_os = "android", test))]
 #[derive(Clone, Debug)]
 pub(super) struct MatrixShaperProfile {
+    device_to_pcs: [[f32; 3]; 3],
+    #[cfg(any(target_os = "android", test))]
     pcs_to_device_linear: [[f32; 3]; 3],
     curves: [TransferCurve; 3],
+    #[cfg(any(target_os = "android", test))]
     media_white: [f32; 3],
 }
 
-#[cfg(any(target_os = "android", test))]
 impl MatrixShaperProfile {
+    #[cfg(any(target_os = "android", test))]
     pub(super) fn parse(bytes: &[u8]) -> Result<Self> {
+        Self::parse_impl(bytes, true)
+    }
+
+    fn parse_input(bytes: &[u8]) -> Result<Self> {
+        // RGB working-space profiles sometimes carry optional A2B/B2A tables in
+        // addition to authoritative matrix/TRC tags. For TIFF source conversion
+        // the matrix/TRC representation is sufficient and keeps Android native.
+        Self::parse_impl(bytes, false)
+    }
+
+    fn parse_impl(bytes: &[u8], reject_lut_tags: bool) -> Result<Self> {
         if bytes.len() < 132 || &bytes[36..40] != b"acsp" {
             bail!("invalid ICC profile header");
         }
         if !matches!(bytes[8], 2 | 4) {
-            bail!("ICC output profile must be version 2 or version 4");
+            bail!("ICC profile must be version 2 or version 4");
         }
         let profile_class = &bytes[12..16];
-        if profile_class != b"mntr" && profile_class != b"prtr" && profile_class != b"spac" {
-            bail!("ICC profile class must be display, output, or color-space");
+        if profile_class != b"mntr"
+            && profile_class != b"prtr"
+            && profile_class != b"spac"
+            && profile_class != b"scnr"
+        {
+            bail!("ICC profile class must be input, display, output, or color-space");
         }
         if &bytes[16..20] != b"RGB " || &bytes[20..24] != b"XYZ " {
-            bail!("ICC output profile must use RGB device space and XYZ PCS");
+            bail!("ICC matrix-shaper profile must use RGB device space and XYZ PCS");
         }
         let declared = be_u32(&bytes[0..4], "ICC profile size")? as usize;
         if declared > bytes.len() || declared < 132 {
@@ -131,11 +177,12 @@ impl MatrixShaperProfile {
             }
             tags.push((signature, &bytes[offset..end]));
         }
-        if tags
-            .iter()
-            .any(|(signature, _)| is_icc_lut_transform_signature(signature))
+        if reject_lut_tags
+            && tags
+                .iter()
+                .any(|(signature, _)| is_icc_lut_transform_signature(signature))
         {
-            bail!("LUT-based ICC output profiles are not supported by the built-in matrix-shaper engine");
+            bail!("LUT-based ICC profiles are not supported by the built-in matrix-shaper engine");
         }
         let r_xyz = parse_icc_xyz(find_icc_tag(&tags, b"rXYZ")?)?;
         let g_xyz = parse_icc_xyz(find_icc_tag(&tags, b"gXYZ")?)?;
@@ -145,6 +192,7 @@ impl MatrixShaperProfile {
             [r_xyz[1], g_xyz[1], b_xyz[1]],
             [r_xyz[2], g_xyz[2], b_xyz[2]],
         ];
+        #[cfg(any(target_os = "android", test))]
         let pcs_to_device_linear =
             invert3(device_to_pcs).ok_or_else(|| anyhow!("ICC RGB colorant matrix is singular"))?;
         let curves = [
@@ -153,20 +201,48 @@ impl MatrixShaperProfile {
             parse_icc_curve(find_icc_tag(&tags, b"bTRC")?)?,
         ];
         curves.iter().try_for_each(TransferCurve::validate)?;
-        let media_white = find_icc_tag_optional(&tags, b"wtpt")
-            .map(parse_icc_xyz)
-            .transpose()?
-            .unwrap_or(D50_XYZ);
-        if media_white.iter().any(|value| *value <= 0.0) {
-            bail!("ICC media white point must contain positive XYZ values");
-        }
+        #[cfg(any(target_os = "android", test))]
+        let media_white = {
+            let media_white = find_icc_tag_optional(&tags, b"wtpt")
+                .map(parse_icc_xyz)
+                .transpose()?
+                .unwrap_or(D50_XYZ);
+            if media_white.iter().any(|value| *value <= 0.0) {
+                bail!("ICC media white point must contain positive XYZ values");
+            }
+            media_white
+        };
         Ok(Self {
+            device_to_pcs,
+            #[cfg(any(target_os = "android", test))]
             pcs_to_device_linear,
             curves,
+            #[cfg(any(target_os = "android", test))]
             media_white,
         })
     }
 
+    fn transform_input_to_rec2020(&self, encoded: [f32; 3]) -> [f32; 3] {
+        const D50_TO_D65: [[f32; 3]; 3] = [
+            [0.955_473_4, -0.023_098_5, 0.063_259_3],
+            [-0.028_369_7, 1.009_995_5, 0.021_041_4],
+            [0.012_314_0, -0.020_507_7, 1.330_365_9],
+        ];
+        const XYZ_D65_TO_REC2020: [[f32; 3]; 3] = [
+            [1.716_651_1, -0.355_670_8, -0.253_366_3],
+            [-0.666_684_3, 1.616_481_2, 0.015_768_5],
+            [0.017_639_9, -0.042_770_6, 0.942_103_1],
+        ];
+        let linear = [
+            self.curves[0].forward_extended(encoded[0]),
+            self.curves[1].forward_extended(encoded[1]),
+            self.curves[2].forward_extended(encoded[2]),
+        ];
+        let xyz_d50 = mul3(self.device_to_pcs, linear);
+        mul3(XYZ_D65_TO_REC2020, mul3(D50_TO_D65, xyz_d50))
+    }
+
+    #[cfg(any(target_os = "android", test))]
     pub(super) fn transform(&self, rec2020: [f32; 3], intent: RenderingIntent) -> [f32; 3] {
         const REC2020_TO_XYZ_D65: [[f32; 3]; 3] = [
             [0.636_958_06, 0.144_616_9, 0.168_880_98],
@@ -198,6 +274,105 @@ impl MatrixShaperProfile {
             self.curves[2].inverse(linear[2]),
         ]
     }
+}
+
+pub(super) fn convert_input_rgb_to_rec2020(bytes: &[u8], rgb: &mut [f32]) -> Result<()> {
+    if rgb.len() % 3 != 0 {
+        bail!("ICC source RGB buffer length must be divisible by three");
+    }
+    match MatrixShaperProfile::parse_input(bytes) {
+        Ok(profile) => {
+            for pixel in rgb.chunks_exact_mut(3) {
+                let converted = profile.transform_input_to_rec2020([pixel[0], pixel[1], pixel[2]]);
+                pixel.copy_from_slice(&converted);
+            }
+            Ok(())
+        }
+        Err(matrix_error) => {
+            #[cfg(not(target_os = "android"))]
+            {
+                convert_input_rgb_to_rec2020_lcms(bytes, rgb).map_err(|lcms_error| {
+                    anyhow!(
+                        "embedded ICC profile is unsupported by both matrix-shaper and LCMS2 paths: matrix-shaper: {matrix_error}; LCMS2: {lcms_error}"
+                    )
+                })
+            }
+            #[cfg(target_os = "android")]
+            {
+                Err(anyhow!(
+                    "embedded ICC profile is not a supported RGB matrix-shaper profile: {matrix_error}"
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn convert_input_rgb_to_rec2020_lcms(bytes: &[u8], rgb: &mut [f32]) -> Result<()> {
+    use lcms2::{
+        CIExyY, CIExyYTRIPLE, Flags, Intent, PixelFormat, Profile, ToneCurve as LcmsToneCurve,
+        Transform,
+    };
+
+    let input = Profile::new_icc(bytes)
+        .map_err(|error| anyhow!("LCMS2 could not open embedded ICC profile: {error}"))?;
+    let white = CIExyY {
+        x: 0.3127,
+        y: 0.3290,
+        Y: 1.0,
+    };
+    let primaries = CIExyYTRIPLE {
+        Red: CIExyY {
+            x: 0.708,
+            y: 0.292,
+            Y: 1.0,
+        },
+        Green: CIExyY {
+            x: 0.170,
+            y: 0.797,
+            Y: 1.0,
+        },
+        Blue: CIExyY {
+            x: 0.131,
+            y: 0.046,
+            Y: 1.0,
+        },
+    };
+    let linear = LcmsToneCurve::new(1.0);
+    let output = Profile::new_rgb(&white, &primaries, &[&linear, &linear, &linear])
+        .map_err(|error| anyhow!("LCMS2 could not create linear Rec.2020 profile: {error}"))?;
+    let transform: Transform<[f32; 3], [f32; 3]> = Transform::new_flags(
+        &input,
+        PixelFormat::RGB_FLT,
+        &output,
+        PixelFormat::RGB_FLT,
+        Intent::RelativeColorimetric,
+        Flags::HIGHRES_PRECALC,
+    )
+    .map_err(|error| anyhow!("LCMS2 could not build embedded-profile transform: {error}"))?;
+
+    const CHUNK_PIXELS: usize = 16_384;
+    let mut source = Vec::<[f32; 3]>::with_capacity(CHUNK_PIXELS);
+    let mut destination = vec![[0.0_f32; 3]; CHUNK_PIXELS];
+    for chunk in rgb.chunks_mut(CHUNK_PIXELS * 3) {
+        source.clear();
+        source.extend(
+            chunk
+                .chunks_exact(3)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]]),
+        );
+        transform.transform_pixels(&source, &mut destination[..source.len()]);
+        for (pixel, converted) in chunk
+            .chunks_exact_mut(3)
+            .zip(destination[..source.len()].iter())
+        {
+            if converted.iter().any(|value| !value.is_finite()) {
+                bail!("LCMS2 embedded-profile transform produced a non-finite value");
+            }
+            pixel.copy_from_slice(converted);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "android"))]
@@ -302,7 +477,6 @@ pub(super) fn build_lcms_output_lut(
         .collect())
 }
 
-#[cfg(any(target_os = "android", test))]
 fn is_icc_lut_transform_signature(signature: &[u8; 4]) -> bool {
     matches!(
         signature,
@@ -325,7 +499,6 @@ fn is_icc_lut_transform_signature(signature: &[u8; 4]) -> bool {
     )
 }
 
-#[cfg(any(target_os = "android", test))]
 fn find_icc_tag<'a>(tags: &'a [([u8; 4], &'a [u8])], signature: &[u8; 4]) -> Result<&'a [u8]> {
     find_icc_tag_optional(tags, signature).ok_or_else(|| {
         anyhow!(
@@ -335,7 +508,6 @@ fn find_icc_tag<'a>(tags: &'a [([u8; 4], &'a [u8])], signature: &[u8; 4]) -> Res
     })
 }
 
-#[cfg(any(target_os = "android", test))]
 fn find_icc_tag_optional<'a>(
     tags: &'a [([u8; 4], &'a [u8])],
     signature: &[u8; 4],
@@ -345,7 +517,6 @@ fn find_icc_tag_optional<'a>(
         .map(|(_, data)| *data)
 }
 
-#[cfg(any(target_os = "android", test))]
 fn parse_icc_xyz(data: &[u8]) -> Result<[f32; 3]> {
     if data.len() < 20 || &data[0..4] != b"XYZ " {
         bail!("invalid ICC XYZ tag");
@@ -357,7 +528,6 @@ fn parse_icc_xyz(data: &[u8]) -> Result<[f32; 3]> {
     ])
 }
 
-#[cfg(any(target_os = "android", test))]
 fn parse_icc_curve(data: &[u8]) -> Result<TransferCurve> {
     if data.len() < 12 {
         bail!("truncated ICC TRC tag");
@@ -415,7 +585,6 @@ fn parse_icc_curve(data: &[u8]) -> Result<TransferCurve> {
     }
 }
 
-#[cfg(any(target_os = "android", test))]
 fn parametric_curve(kind: u16, p: &[f32], x: f32) -> f32 {
     match kind {
         0 => x.max(0.0).powf(p[0]),
@@ -455,24 +624,20 @@ fn parametric_curve(kind: u16, p: &[f32], x: f32) -> f32 {
     }
 }
 
-#[cfg(any(target_os = "android", test))]
 fn checked_array<const N: usize>(bytes: &[u8], label: &str) -> Result<[u8; N]> {
     bytes
         .try_into()
         .map_err(|_| anyhow!("{label} requires exactly {N} bytes, got {}", bytes.len()))
 }
 
-#[cfg(any(target_os = "android", test))]
 fn be_u16(bytes: &[u8], label: &str) -> Result<u16> {
     Ok(u16::from_be_bytes(checked_array(bytes, label)?))
 }
 
-#[cfg(any(target_os = "android", test))]
 fn be_u32(bytes: &[u8], label: &str) -> Result<u32> {
     Ok(u32::from_be_bytes(checked_array(bytes, label)?))
 }
 
-#[cfg(any(target_os = "android", test))]
 fn s15_fixed16(bytes: &[u8], label: &str) -> Result<f32> {
     Ok(i32::from_be_bytes(checked_array(bytes, label)?) as f32 / 65_536.0)
 }
@@ -484,6 +649,11 @@ mod tests {
     #[test]
     fn absolute_intent_maps_media_white_to_device_white() {
         let profile = MatrixShaperProfile {
+            device_to_pcs: [
+                [D50_XYZ[0], 0.0, 0.0],
+                [0.0, D50_XYZ[1], 0.0],
+                [0.0, 0.0, D50_XYZ[2]],
+            ],
             pcs_to_device_linear: [
                 [1.0 / D50_XYZ[0], 0.0, 0.0],
                 [0.0, 1.0 / D50_XYZ[1], 0.0],
@@ -503,6 +673,31 @@ mod tests {
         for channel in 0..3 {
             assert!((relative[channel] - 0.8).abs() < 2e-4);
             assert!((absolute[channel] - 1.0).abs() < 2e-4);
+        }
+    }
+
+    #[test]
+    fn input_matrix_profile_round_trips_linear_rec2020() {
+        // Rec.2020 D65 colorants adapted into the ICC D50 PCS.
+        let device_to_pcs = [
+            [0.673_515_44, 0.165_697_22, 0.125_083_01],
+            [0.279_059_02, 0.675_318_06, 0.045_622_99],
+            [-0.001_932_4, 0.029_977_84, 0.797_059_24],
+        ];
+        let profile = MatrixShaperProfile {
+            device_to_pcs,
+            pcs_to_device_linear: invert3(device_to_pcs).unwrap(),
+            curves: [
+                TransferCurve::Identity,
+                TransferCurve::Identity,
+                TransferCurve::Identity,
+            ],
+            media_white: D50_XYZ,
+        };
+        let source = [0.18, 0.42, 0.91];
+        let converted = profile.transform_input_to_rec2020(source);
+        for channel in 0..3 {
+            assert!((converted[channel] - source[channel]).abs() < 5e-5);
         }
     }
 }
