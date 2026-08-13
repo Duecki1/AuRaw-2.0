@@ -2733,9 +2733,7 @@ impl AurawApp {
                     let initial_params =
                         GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw)
                             .with_vignette_geometry(geometry);
-                    // Interactive previews use bounded half-float working
-                    // surfaces on every platform. Full-float remains mandatory
-                    // for regression rendering and tiled export readback.
+                    // Preview
                     let preview_quality = ProcessingQuality::Preview;
                     let mut startup_gpu_prewarm_template = None;
                     if reusable_preview_pipeline.is_none()

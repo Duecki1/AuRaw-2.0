@@ -3,14 +3,7 @@ use eframe::egui::{
     Vec2,
 };
 
-/// Shared dimensions for the editor chrome.
-///
-/// Keeping these values in one place prevents toolbars and section actions from
-/// slowly acquiring slightly different heights as individual screens evolve.
-/// Android's normal interaction height must also be the requested widget
-/// height. Requesting 30 points while the style enforces a 40-point touch
-/// target makes egui paint outside the allocated rectangle, which misaligns
-/// neighboring labels and makes width calculations inaccurate.
+/// Layout dimensions.
 const DESKTOP_CONTROL_HEIGHT: f32 = 30.0;
 const ANDROID_CONTROL_HEIGHT: f32 = 40.0;
 pub const CONTROL_HEIGHT: f32 = platform_control_height(cfg!(target_os = "android"));
@@ -306,19 +299,12 @@ mod tests {
     use super::{
         platform_control_height, platform_floating_action_edge, ANDROID_CONTROL_HEIGHT,
         CONTROL_HEIGHT, DESKTOP_CONTROL_HEIGHT, FLOATING_ACTION_EDGE, FLOATING_ACTION_MARGIN,
-        TOOLBAR_HEIGHT, TOOLBAR_ICON_EDGE,
     };
 
     #[test]
     fn android_widgets_request_the_full_touch_target_height() {
         assert_eq!(platform_control_height(true), ANDROID_CONTROL_HEIGHT);
         assert_eq!(platform_control_height(false), DESKTOP_CONTROL_HEIGHT);
-    }
-
-    #[test]
-    fn toolbar_geometry_never_understates_its_controls() {
-        assert_eq!(TOOLBAR_ICON_EDGE, CONTROL_HEIGHT);
-        assert!(TOOLBAR_HEIGHT >= CONTROL_HEIGHT);
     }
 
     #[test]

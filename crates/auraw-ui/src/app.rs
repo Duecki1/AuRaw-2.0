@@ -29,7 +29,6 @@ use crate::ui::components::adjustment_slider::slider_scroll_locked;
 use crate::ui::develop::Develop;
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::{Library, LibraryState};
-use crate::ui::preview::Preview;
 use crate::ui::settings::Settings;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::top_bar::TopBar;
@@ -111,6 +110,10 @@ impl DevelopReferenceState {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+type DevelopThumbnailResult = (PathBuf, Result<Option<RawThumbnail>, String>);
+
+#[derive(Default)]
 pub(crate) struct DevelopLoadingThumbnailState {
     #[cfg(not(target_os = "android"))]
     pub(crate) path: Option<PathBuf>,
@@ -119,22 +122,7 @@ pub(crate) struct DevelopLoadingThumbnailState {
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) texture_size: Option<[u32; 2]>,
     #[cfg(not(target_os = "android"))]
-    pub(crate) receiver: Option<mpsc::Receiver<(PathBuf, Result<Option<RawThumbnail>, String>)>>,
-}
-
-impl Default for DevelopLoadingThumbnailState {
-    fn default() -> Self {
-        Self {
-            #[cfg(not(target_os = "android"))]
-            path: None,
-            #[cfg(target_os = "android")]
-            source_uri: None,
-            texture: None,
-            texture_size: None,
-            #[cfg(not(target_os = "android"))]
-            receiver: None,
-        }
-    }
+    pub(crate) receiver: Option<mpsc::Receiver<DevelopThumbnailResult>>,
 }
 
 impl DevelopLoadingThumbnailState {

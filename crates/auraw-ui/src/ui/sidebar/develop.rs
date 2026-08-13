@@ -75,7 +75,7 @@ impl Sidebar {
                         } else {
                             state.selected_maker.as_str()
                         })
-                        .width(ui.available_width().min(240.0).max(1.0))
+                        .width(ui.available_width().clamp(1.0, 240.0))
                         .truncate()
                         .show_ui(ui, |ui| {
                             for maker in &makers {
@@ -110,7 +110,7 @@ impl Sidebar {
                         } else {
                             state.selected_model.as_str()
                         })
-                        .width(ui.available_width().min(240.0).max(1.0))
+                        .width(ui.available_width().clamp(1.0, 240.0))
                         .truncate()
                         .show_ui(ui, |ui| {
                             for model in &models {
@@ -324,19 +324,19 @@ impl Sidebar {
                     "as shot".to_owned()
                 } else if raw
                     .white_balance_offsets_from_temperature_tint(6504.0, 1.0)
-                    .is_some_and(|candidate| matches_current(candidate))
+                    .is_some_and(&matches_current)
                 {
                     "camera reference (D65)".to_owned()
                 } else if let Some(preset) = presets.iter().find(|preset| {
                     raw.white_balance_offsets_from_coefficients(preset.coefficients)
-                        .is_some_and(|candidate| matches_current(candidate))
+                        .is_some_and(&matches_current)
                 }) {
                     preset.name.clone()
                 } else if let Some(temperature) = [2500.0, 3200.0, 4500.0, 6000.0, 8500.0]
                     .into_iter()
                     .find(|temperature| {
                         raw.white_balance_offsets_from_temperature_tint(*temperature, 1.0)
-                            .is_some_and(|candidate| matches_current(candidate))
+                            .is_some_and(&matches_current)
                     })
                 {
                     format!("{temperature:.0}K")
@@ -345,10 +345,10 @@ impl Sidebar {
                 };
                 ui.horizontal(|ui| {
                     let picker_width = crate::ui::theme::TOOLBAR_ICON_EDGE;
-                    let combo_width =
-                        (ui.available_width() - picker_width - ui.spacing().item_spacing.x)
-                            .min(240.0)
-                            .max(1.0);
+                    let combo_width = (ui.available_width()
+                        - picker_width
+                        - ui.spacing().item_spacing.x)
+                        .clamp(1.0, 240.0);
                     egui::ComboBox::from_id_salt("global-white-balance-preset")
                         .selected_text(selection)
                         .width(combo_width)

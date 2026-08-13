@@ -616,19 +616,17 @@ fn desktop_raw_stamp(raw_path: &Path) -> Result<String, String> {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    // The cache generation is part of the decoder contract. TIFF thumbnail
-    // color management changed after first-class TIFF support landed; without
-    // a generation token, previews produced by an older build survive forever
-    // because source size/mtime are unchanged. Keep existing camera-RAW caches
-    // valid while forcing TIFFs through the current color-managed renderer.
-    let generation = raw_path
+    // Cache version
+    let generation = if raw_path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
             extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff")
-        })
-        .then_some(2)
-        .unwrap_or(1);
+        }) {
+        2
+    } else {
+        1
+    };
     Ok(format!("v{generation}:{}:{modified}", metadata.len()))
 }
 

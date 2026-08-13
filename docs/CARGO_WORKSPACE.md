@@ -10,7 +10,7 @@ dependency versions, and release profiles; production code lives in six focused 
 | `auraw-ai` | BiRefNet, SAM 2.1, LaMa, and RAW-denoise ONNX bindings | Sole owner of `ort`; depends on core/GPU data types |
 | `auraw-ui` | egui/eframe application, Develop panels, touch controls | Sole owner of `eframe`; composes core, GPU, and AI |
 | `auraw-ffi` | C ABI and Android JNI/storage bridge | Sole owner of `jni`; emits `cdylib` and `rlib` |
-| `auraw-cli` | Headless regression renderers, deterministic exports, benchmarks | Depends on core/GPU; no UI or ONNX runtime |
+| `auraw-cli` | Headless exports | Depends on core/GPU; no UI or ONNX runtime |
 
 The dependency graph is acyclic:
 
@@ -39,7 +39,7 @@ cargo check --workspace --all-targets
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo run -p auraw-ui --bin auraw --release
-cargo run -p auraw-cli --bin auraw-regression-render -- --help
+cargo run -p auraw-cli --bin auraw-develop-export -- --help
 ./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
 cargo xtask check-all
 ```

@@ -12,7 +12,7 @@ pub use export::{
     MAX_EXPORT_PIXELS,
 };
 pub use gpu::{
-    ComputeWorkgroupSize, GpuOutputSnapshot, GpuParams, GpuProgramPrewarm, GpuShaderTuning,
-    ProcessingQuality, RawGpuPipeline, RawGpuProgramTemplate,
+    GpuOutputSnapshot, GpuParams, GpuProgramPrewarm, ProcessingQuality, RawGpuPipeline,
+    RawGpuProgramTemplate,
 };
 pub use gpu_cache::PersistentGpuPipelineCache;

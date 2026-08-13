@@ -388,9 +388,7 @@ fn contrast_text_color(color: Color32) -> Color32 {
 }
 
 fn picker_width(screen_width: f32) -> f32 {
-    (screen_width - PICKER_SCREEN_MARGIN)
-        .min(PICKER_MAX_WIDTH)
-        .max(PICKER_MIN_WIDTH)
+    (screen_width - PICKER_SCREEN_MARGIN).clamp(PICKER_MIN_WIDTH, PICKER_MAX_WIDTH)
 }
 
 fn picker_plane_edge(picker_width: f32, screen_height: f32) -> f32 {

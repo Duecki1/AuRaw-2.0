@@ -4,14 +4,12 @@ use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskEffect,
-    SigmoidParams,
-    MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
+    MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
     GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES,
     MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
-use std::borrow::Cow;
 use std::sync::{Arc, Condvar, Mutex};
 use wgpu::util::DeviceExt;
 
@@ -47,140 +45,17 @@ const GPU_STAGE_UNIFORM_SIZE_BYTES: u32 =
 const GPU_STAGE_UNIFORM_ALLOCATION_BYTES: u64 = 512 + 768 + 256;
 const MASK_DATA_SIZE_BYTES: u64 = (std::mem::size_of::<MaskData>() * MAX_LOCAL_MASKS) as u64;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
-const DEFAULT_WORKGROUP_ATTRIBUTE: &str = "@workgroup_size(8, 8, 1)";
+const WORKGROUP_EDGE: u32 = 8;
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
 const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
 
-/// Two-dimensional compute workgroup shape used by image and tone-guide
-/// shaders. The Z dimension remains one because every dispatch targets a 2D
-/// texture. The default preserves AuRaw's historical 8x8 configuration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ComputeWorkgroupSize {
-    pub x: u32,
-    pub y: u32,
-}
-
-impl ComputeWorkgroupSize {
-    pub const DEFAULT: Self = Self { x: 8, y: 8 };
-
-    pub fn new(x: u32, y: u32) -> Result<Self> {
-        if x == 0 || y == 0 {
-            return Err(anyhow!("compute workgroup dimensions must be non-zero"));
-        }
-        x.checked_mul(y)
-            .ok_or_else(|| anyhow!("compute workgroup dimensions overflow"))?;
-        Ok(Self { x, y })
-    }
-
-    pub fn validate_for_limits(self, limits: &wgpu::Limits) -> Result<()> {
-        let invocations = self
-            .x
-            .checked_mul(self.y)
-            .ok_or_else(|| anyhow!("compute workgroup dimensions overflow"))?;
-        if self.x > limits.max_compute_workgroup_size_x
-            || self.y > limits.max_compute_workgroup_size_y
-            || invocations > limits.max_compute_invocations_per_workgroup
-        {
-            return Err(anyhow!(
-                "compute workgroup {}x{} exceeds device limits ({}x{}, {} invocations)",
-                self.x,
-                self.y,
-                limits.max_compute_workgroup_size_x,
-                limits.max_compute_workgroup_size_y,
-                limits.max_compute_invocations_per_workgroup,
-            ));
-        }
-        Ok(())
-    }
-
-    fn dispatch_for_extent(self, width: u32, height: u32) -> [u32; 3] {
-        [width.div_ceil(self.x), height.div_ceil(self.y), 1]
-    }
-}
-
-impl Default for ComputeWorkgroupSize {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-pub(super) fn specialize_compute_workgroup_size<'a>(
-    source: &'a str,
-    workgroup_size: ComputeWorkgroupSize,
-) -> Cow<'a, str> {
-    if workgroup_size == ComputeWorkgroupSize::DEFAULT
-        || !source.contains(DEFAULT_WORKGROUP_ATTRIBUTE)
-    {
-        return Cow::Borrowed(source);
-    }
-    Cow::Owned(source.replace(
-        DEFAULT_WORKGROUP_ATTRIBUTE,
-        &format!(
-            "@workgroup_size({}, {}, 1)",
-            workgroup_size.x, workgroup_size.y
-        ),
-    ))
-}
-
-/// Logical domains carried by the post-demosaic graph. These contracts are
-/// independent of pass fusion: multiple adjacent nodes may execute in one GPU
-/// pass, but a scene-domain edit may never consume display-referred pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RenderDomain {
-    CameraLinear,
-    SceneLinear,
-    LookAdjustedScene,
-    DisplayLinear,
-    OutputEncoded,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RenderStageContract {
-    name: &'static str,
-    input: RenderDomain,
-    output: RenderDomain,
-}
-
-const EXPLICIT_RENDER_GRAPH: [RenderStageContract; 6] = [
-    RenderStageContract {
-        name: "camera_characterization",
-        input: RenderDomain::CameraLinear,
-        output: RenderDomain::SceneLinear,
-    },
-    RenderStageContract {
-        name: "scene_edits",
-        input: RenderDomain::SceneLinear,
-        output: RenderDomain::SceneLinear,
-    },
-    RenderStageContract {
-        name: "optional_look",
-        input: RenderDomain::SceneLinear,
-        output: RenderDomain::LookAdjustedScene,
-    },
-    RenderStageContract {
-        name: "view_transform",
-        input: RenderDomain::LookAdjustedScene,
-        output: RenderDomain::DisplayLinear,
-    },
-    RenderStageContract {
-        name: "display_black_toe",
-        input: RenderDomain::DisplayLinear,
-        output: RenderDomain::DisplayLinear,
-    },
-    RenderStageContract {
-        name: "output_encoding",
-        input: RenderDomain::DisplayLinear,
-        output: RenderDomain::OutputEncoded,
-    },
-];
-
-fn explicit_render_graph_contracts_are_contiguous() -> bool {
-    EXPLICIT_RENDER_GRAPH
-        .windows(2)
-        .all(|pair| pair[0].output == pair[1].input)
-        && EXPLICIT_RENDER_GRAPH[0].name == "camera_characterization"
-        && EXPLICIT_RENDER_GRAPH[3].name == "view_transform"
+fn dispatch_for_extent(width: u32, height: u32) -> [u32; 3] {
+    [
+        width.div_ceil(WORKGROUP_EDGE),
+        height.div_ceil(WORKGROUP_EDGE),
+        1,
+    ]
 }
 
 const SHADER_COMMON: &str = include_str!("../shaders/common.wgsl");
@@ -194,9 +69,6 @@ const SHADER_TONEMAP: &str = include_str!("../shaders/tonemap.wgsl");
 const SHADER_NOISE_CA_FINISH: &str = include_str!("../shaders/noise_ca_finish.wgsl");
 const SHADER_DETAIL_CAPTURE: &str = include_str!("../shaders/detail_capture.wgsl");
 const SHADER_DETAIL_SCALE_SPACE: &str = include_str!("../shaders/detail_scale_space.wgsl");
-
-#[cfg(test)]
-const SHADER_COMMON_FOR_TESTS: &str = SHADER_COMMON;
 
 const SHADER_HIGHLIGHTS: &str = include_str!("../shaders/highlights.wgsl");
 
@@ -237,7 +109,7 @@ const SHADER_XTRANS_DEMOSAIC: &str = include_str!("../shaders/xtrans_demosaic.wg
 const SHADER_XTRANS_FINISH: &str = include_str!("../shaders/xtrans_finish.wgsl");
 const SHADER_COLOR_DENOISE: &str = include_str!("../shaders/color_denoise.wgsl");
 const SHADER_TONE_ANALYSIS: &str = include_str!("../shaders/tone_analysis.wgsl");
-const SHADER_REGRESSION_SCENE: &str = include_str!("../shaders/regression_scene.wgsl");
+const SHADER_INPAINT_SCENE: &str = include_str!("../shaders/inpaint_scene.wgsl");
 
 const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
 const SHADER_MASK_EFFECTS_SHARED: &str = include_str!("../shaders/mask_effects/shared.wgsl");
@@ -523,57 +395,6 @@ struct MaskData {
 
 const _: () = assert!(std::mem::size_of::<MaskData>() == 752);
 
-/// Runtime-adjustable shader calibration values. The defaults are byte-for-byte
-/// equivalents of the former WGSL file-level constants.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GpuShaderTuning {
-    pub rec2020_to_xyz: [[f32; 4]; 3],
-    pub xyz_to_rec2020: [[f32; 4]; 3],
-    pub xyz_to_bradford: [[f32; 4]; 3],
-    pub bradford_to_xyz: [[f32; 4]; 3],
-    pub vignette_dark_half_fit: [f32; 4],
-    pub vignette_dark_full_fit: [f32; 4],
-    pub vignette_light_half_fit: [f32; 4],
-    pub vignette_light_full_fit: [f32; 4],
-    pub capture_scale_sigma: [f32; 4],
-    pub capture_thresholds: [f32; 4],
-    pub capture_mask_coherence: [f32; 4],
-}
-
-impl Default for GpuShaderTuning {
-    fn default() -> Self {
-        Self {
-            rec2020_to_xyz: [
-                [0.6369580, 0.2627002, 0.0000000, 0.0],
-                [0.1446169, 0.6779981, 0.0280727, 0.0],
-                [0.1688809, 0.0593017, 1.0609851, 0.0],
-            ],
-            xyz_to_rec2020: [
-                [1.7166512, -0.6666844, 0.0176399, 0.0],
-                [-0.3556708, 1.6164812, -0.0427706, 0.0],
-                [-0.2533663, 0.0157685, 0.9421031, 0.0],
-            ],
-            xyz_to_bradford: [
-                [0.8951000, -0.7502000, 0.0389000, 0.0],
-                [0.2664000, 1.7135000, -0.0685000, 0.0],
-                [-0.1614000, 0.0367000, 1.0296000, 0.0],
-            ],
-            bradford_to_xyz: [
-                [0.9869929, 0.4323053, -0.0085287, 0.0],
-                [-0.1470543, 0.5183603, 0.0400428, 0.0],
-                [0.1599627, 0.0492912, 0.9684867, 0.0],
-            ],
-            vignette_dark_half_fit: [0.10, 1.235, 2.88, 0.86],
-            vignette_dark_full_fit: [0.02, 1.135, 3.46, 1.0],
-            vignette_light_half_fit: [0.305, 1.24, 4.36, 0.90],
-            vignette_light_full_fit: [0.13, 1.075, 5.66, 1.0],
-            capture_scale_sigma: [0.74, 1.75, 0.58, 1.65],
-            capture_thresholds: [0.015, 0.0045, 0.055, 0.28],
-            capture_mask_coherence: [0.035, 0.62, 0.055, 0.22],
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct GpuParams {
     camera: CameraUniforms,
@@ -832,7 +653,6 @@ impl GpuParams {
         let mut sigmoid_params = exposure.sigmoid;
         sigmoid_params.contrast = sigmoid_contrast_from_percent(exposure.contrast);
         let sigmoid = sigmoid_coefficients(sigmoid_params);
-        let shader_tuning = GpuShaderTuning::default();
         // Sigmoid is the single view transform, so Contrast changes its
         // middle-grey slope without switching view operators.
         let mut mask_data = [MaskData::zeroed(); MAX_LOCAL_MASKS];
@@ -1230,8 +1050,13 @@ impl GpuParams {
             tint: exposure
                 .tint
                 .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
-            _pad_0: if raw.is_pre_demosaiced_raster() { 1.0 } else { 0.0 },
-            _pad_1: if !raw.is_pre_demosaiced_raster() || raster_uses_scene_view_transform(exposure) {
+            _pad_0: if raw.is_pre_demosaiced_raster() {
+                1.0
+            } else {
+                0.0
+            },
+            _pad_1: if !raw.is_pre_demosaiced_raster() || raster_uses_scene_view_transform(exposure)
+            {
                 1.0
             } else {
                 0.0
@@ -1461,10 +1286,26 @@ impl GpuParams {
             grade_highlights: pack_color_grade_wheel(exposure.color_grading.highlights),
             grade_global: pack_color_grade_wheel(exposure.color_grading.global),
             grade_options: pack_view_color_options(exposure.color_grading, exposure.hue),
-            rec2020_to_xyz: shader_tuning.rec2020_to_xyz,
-            xyz_to_rec2020: shader_tuning.xyz_to_rec2020,
-            xyz_to_bradford: shader_tuning.xyz_to_bradford,
-            bradford_to_xyz: shader_tuning.bradford_to_xyz,
+            rec2020_to_xyz: [
+                [0.636_958, 0.262_700_2, 0.0, 0.0],
+                [0.144_616_9, 0.677_998_1, 0.028_072_7, 0.0],
+                [0.168_880_9, 0.059_301_7, 1.060_985_1, 0.0],
+            ],
+            xyz_to_rec2020: [
+                [1.716_651_2, -0.666_684_4, 0.017_639_9, 0.0],
+                [-0.355_670_8, 1.616_481_2, -0.042_770_6, 0.0],
+                [-0.253_366_3, 0.015_768_5, 0.942_103_1, 0.0],
+            ],
+            xyz_to_bradford: [
+                [0.8951, -0.7502, 0.0389, 0.0],
+                [0.2664, 1.7135, -0.0685, 0.0],
+                [-0.1614, 0.0367, 1.0296, 0.0],
+            ],
+            bradford_to_xyz: [
+                [0.986_992_9, 0.432_305_3, -0.008_528_7, 0.0],
+                [-0.147_054_3, 0.518_360_3, 0.040_042_8, 0.0],
+                [0.159_962_7, 0.049_291_2, 0.968_486_7, 0.0],
+            ],
         };
         // Global and masked Glow share one linear diffusion chain. Using the
         // widest active request preserves every halo's support while avoiding
@@ -1510,13 +1351,13 @@ impl GpuParams {
                 full_height.max(1) as f32,
             ],
             vignette_transform: [1.0, 0.0, 0.0, 1.0],
-            vignette_dark_half_fit: shader_tuning.vignette_dark_half_fit,
-            vignette_dark_full_fit: shader_tuning.vignette_dark_full_fit,
-            vignette_light_half_fit: shader_tuning.vignette_light_half_fit,
-            vignette_light_full_fit: shader_tuning.vignette_light_full_fit,
-            capture_scale_sigma: shader_tuning.capture_scale_sigma,
-            capture_thresholds: shader_tuning.capture_thresholds,
-            capture_mask_coherence: shader_tuning.capture_mask_coherence,
+            vignette_dark_half_fit: [0.10, 1.235, 2.88, 0.86],
+            vignette_dark_full_fit: [0.02, 1.135, 3.46, 1.0],
+            vignette_light_half_fit: [0.305, 1.24, 4.36, 0.90],
+            vignette_light_full_fit: [0.13, 1.075, 5.66, 1.0],
+            capture_scale_sigma: [0.74, 1.75, 0.58, 1.65],
+            capture_thresholds: [0.015, 0.0045, 0.055, 0.28],
+            capture_mask_coherence: [0.035, 0.62, 0.055, 0.22],
         };
         Self {
             camera,
@@ -1580,27 +1421,6 @@ impl GpuParams {
             forward[3] * source_height / output_height,
         ];
         self
-    }
-
-    /// Replaces shader calibration lanes. A subsequent `recompute` uploads only
-    /// the changed stage uniform buffers; compute pipelines are reused.
-    pub fn with_shader_tuning(mut self, tuning: GpuShaderTuning) -> Self {
-        self.set_shader_tuning(tuning);
-        self
-    }
-
-    pub fn set_shader_tuning(&mut self, tuning: GpuShaderTuning) {
-        self.scene_tone.rec2020_to_xyz = tuning.rec2020_to_xyz;
-        self.scene_tone.xyz_to_rec2020 = tuning.xyz_to_rec2020;
-        self.scene_tone.xyz_to_bradford = tuning.xyz_to_bradford;
-        self.scene_tone.bradford_to_xyz = tuning.bradford_to_xyz;
-        self.effects.vignette_dark_half_fit = tuning.vignette_dark_half_fit;
-        self.effects.vignette_dark_full_fit = tuning.vignette_dark_full_fit;
-        self.effects.vignette_light_half_fit = tuning.vignette_light_half_fit;
-        self.effects.vignette_light_full_fit = tuning.vignette_light_full_fit;
-        self.effects.capture_scale_sigma = tuning.capture_scale_sigma;
-        self.effects.capture_thresholds = tuning.capture_thresholds;
-        self.effects.capture_mask_coherence = tuning.capture_mask_coherence;
     }
 
     pub fn with_tone_histogram_bounds(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {
@@ -1768,21 +1588,18 @@ struct Pass {
 #[derive(Clone, Copy, Debug, Default)]
 struct RawGpuPipelineConfig {
     mask_atlas_edge_override: Option<u32>,
-    workgroup_size: ComputeWorkgroupSize,
 }
 
 #[derive(Clone)]
 pub struct RawGpuProgramTemplate {
     cfa_kind: CfaKind,
     processing_quality: ProcessingQuality,
-    workgroup_size: ComputeWorkgroupSize,
     pipelines: Vec<wgpu::ComputePipeline>,
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
 }
 
-/// Shared completion state for the startup export-program prewarm.
-/// Export workers can wait on this without blocking the UI thread, then reuse
-/// the same immutable compute-pipeline handles for every subsequent export.
+/// Prewarm state.
+#[derive(Default)]
 pub struct GpuProgramPrewarm {
     result: Mutex<Option<std::result::Result<Arc<RawGpuProgramTemplate>, String>>>,
     ready: Condvar,
@@ -1790,10 +1607,7 @@ pub struct GpuProgramPrewarm {
 
 impl GpuProgramPrewarm {
     pub fn new() -> Self {
-        Self {
-            result: Mutex::new(None),
-            ready: Condvar::new(),
-        }
+        Self::default()
     }
 
     pub fn publish(&self, result: std::result::Result<RawGpuProgramTemplate, String>) {
@@ -1829,7 +1643,6 @@ pub struct RawGpuPipeline {
     pub height: u32,
     cfa_kind: CfaKind,
     processing_quality: ProcessingQuality,
-    workgroup_size: ComputeWorkgroupSize,
     camera_uniforms_buffer: wgpu::Buffer,
     scene_tone_uniforms_buffer: wgpu::Buffer,
     effects_uniforms_buffer: wgpu::Buffer,
@@ -1982,7 +1795,6 @@ impl RawGpuPipeline {
         RawGpuProgramTemplate {
             cfa_kind: self.cfa_kind,
             processing_quality: self.processing_quality,
-            workgroup_size: self.workgroup_size,
             pipelines: self
                 .passes
                 .iter()
@@ -1996,7 +1808,6 @@ impl RawGpuPipeline {
         RawGpuProgramTemplate {
             cfa_kind: self.cfa_kind,
             processing_quality: self.processing_quality,
-            workgroup_size: self.workgroup_size,
             pipelines: self.passes.into_iter().map(|pass| pass.pipeline).collect(),
             pipeline_cache: self.pipeline_cache,
         }
@@ -2131,11 +1942,7 @@ impl RawGpuPipeline {
             &params,
             quality,
             RawGpuPipelineConfig {
-                // When requested for the export template, keep the local-mask
-                // allocation small. Its textures are never rendered; only the
-                // compiled program handles are retained and reused later.
                 mask_atlas_edge_override,
-                ..Default::default()
             },
         )
     }
@@ -2206,33 +2013,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Creates a headless pipeline whose 2D compute entrypoints and dispatch
-    /// counts use the same explicit workgroup shape. This is intended for
-    /// device-specific benchmarking; normal callers retain the 8x8 default.
-    pub fn new_headless_with_quality_and_workgroup_size(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        raw: &LoadedRaw,
-        params: &GpuParams,
-        quality: ProcessingQuality,
-        workgroup_size: ComputeWorkgroupSize,
-    ) -> Result<Self> {
-        Self::new_internal(
-            device,
-            queue,
-            None,
-            None,
-            None,
-            raw,
-            params,
-            quality,
-            RawGpuPipelineConfig {
-                workgroup_size,
-                ..Default::default()
-            },
-        )
-    }
-
     /// Creates a headless pipeline with an explicit normalized-mask atlas edge.
     /// Full-quality export uses a larger atlas than the interactive preview so
     /// fine mask edges are not limited to preview resolution.
@@ -2255,7 +2035,6 @@ impl RawGpuPipeline {
             quality,
             RawGpuPipelineConfig {
                 mask_atlas_edge_override: Some(mask_edge),
-                ..Default::default()
             },
         )
     }
@@ -2282,10 +2061,7 @@ impl RawGpuPipeline {
             raw,
             params,
             quality,
-            RawGpuPipelineConfig {
-                workgroup_size: program_template.workgroup_size,
-                ..Default::default()
-            },
+            RawGpuPipelineConfig::default(),
         )
     }
 
@@ -2313,7 +2089,6 @@ impl RawGpuPipeline {
             quality,
             RawGpuPipelineConfig {
                 mask_atlas_edge_override: Some(mask_edge),
-                workgroup_size: program_template.workgroup_size,
             },
         )
     }
@@ -2340,7 +2115,6 @@ impl RawGpuPipeline {
             quality,
             RawGpuPipelineConfig {
                 mask_atlas_edge_override: Some(mask_edge),
-                workgroup_size: template.workgroup_size,
             },
         )
     }
@@ -2365,10 +2139,7 @@ impl RawGpuPipeline {
             raw,
             params,
             quality,
-            RawGpuPipelineConfig {
-                workgroup_size: template.workgroup_size,
-                ..Default::default()
-            },
+            RawGpuPipelineConfig::default(),
         )
     }
 
@@ -2385,13 +2156,9 @@ impl RawGpuPipeline {
         config: RawGpuPipelineConfig,
     ) -> Result<Self> {
         validate_raw(raw)?;
-        config
-            .workgroup_size
-            .validate_for_limits(&device.limits())?;
         if let Some(template) = program_template {
             if template.cfa_kind != raw.cfa_kind
                 || template.processing_quality != quality
-                || template.workgroup_size != config.workgroup_size
                 || template.pipelines.len() != expected_pass_count(raw.cfa_kind)
             {
                 return Err(anyhow!(
@@ -2410,12 +2177,8 @@ impl RawGpuPipeline {
             raw.height.div_ceil(tone_scale),
         );
         let tone_format = tone_guide_format();
-        let image_workgroups = config
-            .workgroup_size
-            .dispatch_for_extent(raw.width, raw.height);
-        let tone_workgroups = config
-            .workgroup_size
-            .dispatch_for_extent(tone_size.width, tone_size.height);
+        let image_workgroups = dispatch_for_extent(raw.width, raw.height);
+        let tone_workgroups = dispatch_for_extent(tone_size.width, tone_size.height);
         let single_workgroup = [1, 1, 1];
 
         // A full-frame mask atlas cannot add spatial detail beyond the image
@@ -4359,7 +4122,7 @@ impl RawGpuPipeline {
 
         let mut shader_manager = program_template
             .is_none()
-            .then(|| ShaderManager::new_with_workgroup_size(work_format, config.workgroup_size))
+            .then(|| ShaderManager::new(work_format))
             .transpose()
             .context("initialize WGSL shader composer")?;
         let mut create_shader =
@@ -4502,7 +4265,6 @@ impl RawGpuPipeline {
                 )
             })
             .transpose()?;
-        debug_assert!(explicit_render_graph_contracts_are_contiguous());
 
         let mut next_program_index = 0usize;
         let mut make_pipeline = |shader: Option<&wgpu::ShaderModule>,
@@ -4986,7 +4748,6 @@ impl RawGpuPipeline {
             height: raw.height,
             cfa_kind: raw.cfa_kind,
             processing_quality: quality,
-            workgroup_size: config.workgroup_size,
             camera_uniforms_buffer,
             scene_tone_uniforms_buffer,
             effects_uniforms_buffer,
@@ -5736,10 +5497,7 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Reads the internal demosaiced scene texture as tightly packed RGB32F.
-    /// The raw stage must have been submitted before this call. Regression
-    /// renders use `ProcessingQuality::High`, because half-float preview
-    /// intermediates are intentionally rejected rather than silently widened.
+    /// Reads the demosaiced scene as RGB32F after the raw stage.
     pub fn read_scene_texture_blocking(
         &self,
         device: &wgpu::Device,
@@ -5784,27 +5542,7 @@ impl RawGpuPipeline {
         self.read_scene_texture_blocking(device, queue)
     }
 
-    /// Runs the raw stage and converts its camera-RGB scene texture into the
-    /// canonical scene-linear Rec.2020 representation used by the regression
-    /// harness. This deliberately stops before creative look/tone modules and
-    /// before the display transform.
-    pub fn render_regression_scene_blocking(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        params: &GpuParams,
-    ) -> Result<Vec<f32>> {
-        if self.scene_format != wgpu::TextureFormat::Rgba32Float {
-            return Err(anyhow!(
-                "regression scene conversion requires ProcessingQuality::High (RGBA32Float)"
-            ));
-        }
-        self.render_scene_conversion_blocking(device, queue, params, "write_regression_scene")
-    }
-
-    /// Renders the neutral scene-working image used as LaMa input. Unlike the
-    /// regression rendition this stops before DCP HueSatMap/default exposure so
-    /// an inpainted replacement can be reinserted at exactly the same stage.
+    /// Renders the neutral scene used as LaMa input.
     pub fn render_inpaint_working_scene_blocking(
         &self,
         device: &wgpu::Device,
@@ -5821,12 +5559,6 @@ impl RawGpuPipeline {
         params: &GpuParams,
         entry_point: &str,
     ) -> Result<Vec<f32>> {
-        // The conversion target/readback is always RGBA32Float. The local source
-        // pipeline may use RGBA16Float intermediates so its already-compiled preview
-        // programs can be reused without a brush-release compile stall. The readback
-        // remains scene-linear Rec.2020 f32 all the way to the explicit LaMa model
-        // boundary; no 8-bit intermediate is created here.
-
         self.upload_params(queue, params);
         let size = texture_size(self.width, self.height);
         let working_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -5903,16 +5635,14 @@ impl RawGpuPipeline {
                 },
             ],
         });
-        let mut shader_manager = ShaderManager::new_with_workgroup_size(
-            processing_work_format(self.processing_quality),
-            self.workgroup_size,
-        )
-        .context("initialize regression-scene WGSL composer")?;
+        let mut shader_manager =
+            ShaderManager::new(processing_work_format(self.processing_quality))
+                .context("initialize scene-conversion WGSL composer")?;
         let shader = shader_manager.create_shader_module(
             device,
             "auraw scene conversion shader",
-            SHADER_REGRESSION_SCENE,
-            "regression_scene.wgsl",
+            SHADER_INPAINT_SCENE,
+            "inpaint_scene.wgsl",
         )?;
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("auraw scene conversion pipeline layout"),
@@ -5939,15 +5669,9 @@ impl RawGpuPipeline {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = self
-                .workgroup_size
-                .dispatch_for_extent(self.width, self.height);
+            let workgroups = dispatch_for_extent(self.width, self.height);
             pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
-        // Submit the render first, then use the shared chunked RGBA32F readback.
-        // Queue submission ordering guarantees every copy sees the completed
-        // working texture, while each MAP_READ buffer stays well below wgpu's
-        // max_buffer_size instead of allocating one crop-sized buffer.
         queue.submit(Some(encoder.finish()));
         read_rgba32_texture_rgb_blocking(
             device,
@@ -6049,11 +5773,9 @@ impl RawGpuPipeline {
                 },
             ],
         });
-        let resize_shader =
-            specialize_compute_workgroup_size(SHADER_INPAINT_DOWNSAMPLE, self.workgroup_size);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("auraw inpaint resize shader"),
-            source: wgpu::ShaderSource::Wgsl(resize_shader),
+            source: wgpu::ShaderSource::Wgsl(SHADER_INPAINT_DOWNSAMPLE.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("auraw inpaint resize pipeline layout"),
@@ -6080,9 +5802,7 @@ impl RawGpuPipeline {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = self
-                .workgroup_size
-                .dispatch_for_extent(output_width, output_height);
+            let workgroups = dispatch_for_extent(output_width, output_height);
             pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
         queue.submit(Some(encoder.finish()));
