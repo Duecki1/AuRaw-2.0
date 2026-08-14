@@ -1,5 +1,7 @@
+use super::*;
+
 impl AurawApp {
-    fn enqueue_background_action(
+    pub(super) fn enqueue_background_action(
         &mut self,
         kind: TaskKind,
         name: impl Into<String>,
@@ -15,7 +17,7 @@ impl AurawApp {
         id
     }
 
-    fn enqueue_lens_background_action(
+    pub(super) fn enqueue_lens_background_action(
         &mut self,
         request: LensCorrectionTaskRequest,
         name: impl Into<String>,
@@ -36,7 +38,7 @@ impl AurawApp {
         id
     }
 
-    fn drive_background_tasks(&mut self, frame: &eframe::Frame) {
+    pub(super) fn drive_background_tasks(&mut self, frame: &eframe::Frame) {
         let Some(id) = self.background_tasks.start_next() else {
             return;
         };
@@ -79,7 +81,7 @@ impl AurawApp {
         }
     }
 
-    fn start_export_task(
+    pub(super) fn start_export_task(
         &mut self,
         id: TaskId,
         request: ExportTaskRequest,
@@ -109,7 +111,7 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn start_library_batch_export_task(
+    pub(super) fn start_library_batch_export_task(
         &mut self,
         id: TaskId,
         jobs: VecDeque<LibraryBatchExportJob>,
@@ -162,7 +164,7 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    fn start_library_batch_export_task(
+    pub(super) fn start_library_batch_export_task(
         &mut self,
         id: TaskId,
         jobs: VecDeque<LibraryBatchExportJob>,
@@ -200,7 +202,7 @@ impl AurawApp {
         self.start_next_library_export(frame);
     }
 
-    fn start_subject_mask_task(&mut self, id: TaskId, request: SubjectMaskTaskRequest) {
+    pub(super) fn start_subject_mask_task(&mut self, id: TaskId, request: SubjectMaskTaskRequest) {
         let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
             self.clear_ai_mask_task_owner(id);
             self.fail_background_task(id, "Subject-mask task lost its cancellation state.");
@@ -245,7 +247,7 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    fn start_object_mask_task(&mut self, id: TaskId, request: ObjectMaskTaskRequest) {
+    pub(super) fn start_object_mask_task(&mut self, id: TaskId, request: ObjectMaskTaskRequest) {
         let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
             self.clear_ai_mask_task_owner(id);
             self.fail_background_task(id, "Object-mask task lost its cancellation state.");
@@ -285,7 +287,7 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    fn start_landscape_mask_task(&mut self, id: TaskId, request: LandscapeMaskTaskRequest) {
+    pub(super) fn start_landscape_mask_task(&mut self, id: TaskId, request: LandscapeMaskTaskRequest) {
         let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
             self.clear_ai_mask_task_owner(id);
             self.fail_background_task(id, "Landscape-mask task lost its cancellation state.");
@@ -328,7 +330,7 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    fn start_inpaint_task(&mut self, id: TaskId, request: InpaintTaskRequest) {
+    pub(super) fn start_inpaint_task(&mut self, id: TaskId, request: InpaintTaskRequest) {
         let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
             self.fail_background_task(id, "Inpainting task lost its cancellation state.");
             return;
@@ -359,7 +361,7 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    fn start_library_ai_mask_refresh_task(
+    pub(super) fn start_library_ai_mask_refresh_task(
         &mut self,
         id: TaskId,
         jobs: VecDeque<LibraryAiMaskRefreshJob>,
@@ -498,7 +500,7 @@ impl AurawApp {
         });
     }
 
-    fn background_task_progress_widget(task: &TaskSnapshot) -> egui::ProgressBar {
+    pub(super) fn background_task_progress_widget(task: &TaskSnapshot) -> egui::ProgressBar {
         match &task.progress.value {
             TaskProgressValue::Indeterminate => egui::ProgressBar::new(0.0).animate(true),
             TaskProgressValue::Fraction(fraction) => {
@@ -665,7 +667,7 @@ impl AurawApp {
         self.background_tasks.global_snapshots()
     }
 
-    fn global_primary_task_and_waiting_count(&self) -> (Option<TaskSnapshot>, usize) {
+    pub(super) fn global_primary_task_and_waiting_count(&self) -> (Option<TaskSnapshot>, usize) {
         self.background_tasks
             .global_primary_snapshot_and_waiting_count()
     }
@@ -836,16 +838,16 @@ impl AurawApp {
         self.background_tasks.dismiss_failure(id);
     }
 
-    fn background_task_cancelled(&self, id: TaskId) -> bool {
+    pub(super) fn background_task_cancelled(&self, id: TaskId) -> bool {
         self.background_tasks.cancellation_requested(id)
     }
 
-    fn finish_background_task(&mut self, id: TaskId) {
+    pub(super) fn finish_background_task(&mut self, id: TaskId) {
         self.background_tasks.complete(id);
         self.egui_ctx.request_repaint();
     }
 
-    fn fail_background_task(&mut self, id: TaskId, error: impl Into<String>) {
+    pub(super) fn fail_background_task(&mut self, id: TaskId, error: impl Into<String>) {
         self.background_tasks.fail(id, error);
         self.egui_ctx.request_repaint();
     }
@@ -854,7 +856,7 @@ impl AurawApp {
     /// or when a terminal task was retained only for its failure details.
     /// Keeping these IDs after the receiver is gone makes every later request
     /// look busy and suppresses both consent and progress dialogs.
-    fn clear_ai_mask_task_owner(&mut self, id: TaskId) {
+    pub(super) fn clear_ai_mask_task_owner(&mut self, id: TaskId) {
         if self.subject_task_id == Some(id) {
             self.subject_task_id = None;
             self.subject_receiver = None;
@@ -879,13 +881,13 @@ impl AurawApp {
         }
     }
 
-    fn update_background_progress(&mut self, id: Option<TaskId>, progress: TaskProgress) {
+    pub(super) fn update_background_progress(&mut self, id: Option<TaskId>, progress: TaskProgress) {
         if let Some(id) = id {
             self.background_tasks.update_progress(id, progress);
         }
     }
 
-    fn sync_library_batch_background_progress(&mut self) {
+    pub(super) fn sync_library_batch_background_progress(&mut self) {
         let Some(id) = self.library_batch_export_task_id else {
             return;
         };
@@ -940,7 +942,7 @@ impl AurawApp {
         self.background_tasks.update_progress(id, progress);
     }
 
-    fn sync_library_ai_mask_background_progress(&mut self) {
+    pub(super) fn sync_library_ai_mask_background_progress(&mut self) {
         let Some(id) = self.library_ai_mask_refresh_task_id else {
             return;
         };
@@ -1001,7 +1003,7 @@ impl AurawApp {
         self.background_tasks.update_progress(id, progress);
     }
 
-    fn cancel_document_bound_background_tasks(&mut self) {
+    pub(super) fn cancel_document_bound_background_tasks(&mut self) {
         let ids = self
             .background_task_snapshots()
             .into_iter()
@@ -1023,7 +1025,7 @@ impl AurawApp {
         }
     }
 
-    fn cancel_stale_document_background_tasks(&mut self) {
+    pub(super) fn cancel_stale_document_background_tasks(&mut self) {
         let current_document = self.sidecar_generation;
         let stale = self
             .background_task_snapshots()

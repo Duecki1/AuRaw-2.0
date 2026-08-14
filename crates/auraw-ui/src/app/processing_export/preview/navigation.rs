@@ -1,0 +1,200 @@
+use super::*;
+
+impl AurawApp {
+    pub(in crate::app) fn advance_navigation_preview(&mut self, frame: &eframe::Frame) {
+        if self.ai_denoise_receiver.is_some() {
+            return;
+        }
+        let zoomed = self.preview_zoom > DETAIL_ZOOM_START;
+        let should_update = self.navigation_pending_stage.is_some();
+        // The normal preview is already a complete full-frame fallback while the
+        // user only zooms or pans. Create the tiny navigation pipeline lazily when
+        // an actual edit needs its fast full-frame update, then retain it until fit.
+        // Eager creation here caused a visible hitch on the first pinch frame.
+        let should_exist = zoomed && (self.preview_navigation.is_some() || should_update);
+        if !should_exist && !should_update {
+            // Release the navigation proxy when fit view is stable.
+            if frame.wgpu_render_state().is_some() {
+                if let Some(old) = self.preview_navigation.take() {
+                    if let Some(texture_id) = old.pipeline.egui_texture_id {
+                        self.retire_egui_texture(texture_id);
+                    }
+                }
+            } else {
+                self.preview_navigation = None;
+            }
+            return;
+        }
+        let Some(full_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
+            self.navigation_pending_stage = None;
+            return;
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+
+        let navigation_capacity_stale = self.preview_navigation.as_ref().is_some_and(|preview| {
+            preview.pipeline.mask_layer_capacity() < self.masks.masks.len().max(1)
+        });
+        if navigation_capacity_stale {
+            if let Some(old) = self.preview_navigation.take() {
+                if let Some(texture_id) = old.pipeline.egui_texture_id {
+                    self.retire_egui_texture(texture_id);
+                }
+            }
+        }
+
+        if self.preview_navigation.is_none() {
+            if !should_exist {
+                self.navigation_pending_stage = None;
+                return;
+            }
+            let raw = if full_raw.width.max(full_raw.height) <= navigation_proxy_edge() {
+                Arc::clone(&full_raw)
+            } else {
+                Arc::new(build_proxy(
+                    &full_raw,
+                    ProxySpec {
+                        max_edge: navigation_proxy_edge(),
+                    },
+                ))
+            };
+            let params = GpuParams::new(&self.target_exposure, &self.masks, &raw)
+                .with_vignette_geometry(self.geometry);
+            let Some(template) = self.gpu_pipeline.as_ref() else {
+                return;
+            };
+            let mut pipeline = match RawGpuPipeline::new_headless_reusing_programs_with_mask_edge(
+                &render_state.device,
+                &render_state.queue,
+                &raw,
+                &params,
+                ProcessingQuality::Preview,
+                template,
+                navigation_mask_edge(),
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(error) => {
+                    self.notice = Some(format!(
+                        "Could not prepare the adjusted navigation preview: {error:#}"
+                    ));
+                    return;
+                }
+            };
+            #[cfg(not(target_os = "android"))]
+            if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+                self.notice = Some(
+                    "Could not prepare the preview color profile. The previous complete preview remains available."
+                        .to_owned(),
+                );
+                crate::diagnostics::record(format!(
+                    "preview pipeline display-profile install failed: {error:#}"
+                ));
+                return;
+            }
+            if let Err(error) =
+                Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks, &raw)
+            {
+                self.notice = Some(error);
+                return;
+            }
+            if let Err(error) = pipeline.update_inpaint_layer(
+                &render_state.queue,
+                self.inpaint_layer.as_ref(),
+                0,
+                0,
+                raw.width,
+                raw.height,
+            ) {
+                self.notice = Some(format!("Could not update navigation inpainting: {error:#}"));
+                return;
+            }
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            let mut renderer = render_state.renderer.write();
+            pipeline.register_egui_texture(&render_state.device, &mut renderer);
+            drop(renderer);
+            self.preview_navigation = Some(PreviewNavigation { pipeline, raw });
+            self.navigation_pending_stage = None;
+            self.navigation_dirty_mask_layers.fill(false);
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
+        let Some(stage) = self.navigation_pending_stage else {
+            return;
+        };
+        let Some(preview) = self.preview_navigation.as_mut() else {
+            return;
+        };
+        if self.navigation_dirty_mask_layers.iter().any(|dirty| *dirty) {
+            let edge = preview.pipeline.mask_atlas_edge();
+            for layer in 0..MAX_LOCAL_MASKS {
+                if !self.navigation_dirty_mask_layers[layer] {
+                    continue;
+                }
+                let bytes = self.masks.rasterize_layer_f16(
+                    layer,
+                    edge,
+                    edge,
+                    preview.raw.width,
+                    preview.raw.height,
+                );
+                if let Err(error) =
+                    preview
+                        .pipeline
+                        .update_mask_layer(&render_state.queue, layer, &bytes)
+                {
+                    self.notice = Some(format!(
+                        "Could not update the navigation local mask: {error:#}"
+                    ));
+                    return;
+                }
+                self.navigation_dirty_mask_layers[layer] = false;
+            }
+            if let Err(error) = preview.pipeline.update_light_rays_mask_layers(
+                &render_state.queue,
+                &self.masks,
+                preview.raw.width,
+                preview.raw.height,
+            ) {
+                self.notice = Some(format!(
+                    "Could not update the navigation Light Rays mask: {error:#}"
+                ));
+                return;
+            }
+        }
+
+        if let Err(error) = preview.pipeline.update_inpaint_layer(
+            &render_state.queue,
+            self.inpaint_layer.as_ref(),
+            0,
+            0,
+            preview.raw.width,
+            preview.raw.height,
+        ) {
+            self.notice = Some(format!("Could not update navigation inpainting: {error:#}"));
+            return;
+        }
+        let params = GpuParams::new(&self.target_exposure, &self.masks, &preview.raw)
+            .with_vignette_geometry(self.geometry);
+        let stages = match stage {
+            ProcessingStage::Raw => &[
+                ProcessingStage::Raw,
+                ProcessingStage::Tone,
+                ProcessingStage::Output,
+            ][..],
+            ProcessingStage::Tone => &[ProcessingStage::Tone, ProcessingStage::Output][..],
+            ProcessingStage::Output => &[ProcessingStage::Output][..],
+        };
+        for stage in stages {
+            preview.pipeline.dispatch_stage(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                *stage,
+            );
+        }
+        self.navigation_pending_stage = None;
+        self.egui_ctx.request_repaint();
+    }
+}

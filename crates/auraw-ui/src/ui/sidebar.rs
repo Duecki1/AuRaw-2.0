@@ -92,7 +92,7 @@ impl Sidebar {
 }
 
 include!("sidebar/navigation.rs");
-include!("sidebar/masks.rs");
+mod masks;
 include!("sidebar/inpainting.rs");
 include!("sidebar/export.rs");
 include!("sidebar/develop.rs");
@@ -100,10 +100,8 @@ include!("sidebar/crop.rs");
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        mask_component_badge, mask_creation_icon, mobile_tab_text_geometry, MaskCardSize,
-        MaskCombineMode, MaskStripOrientation,
-    };
+    use super::masks::{mask_component_badge, mask_creation_icon};
+    use super::{mobile_tab_text_geometry, MaskCardSize, MaskCombineMode, MaskStripOrientation};
 
     #[test]
     fn mask_badges_match_base_and_combine_semantics() {

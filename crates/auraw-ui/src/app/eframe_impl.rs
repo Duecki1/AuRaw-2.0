@@ -1,3 +1,5 @@
+use super::*;
+
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if auraw_gpu::take_gpu_out_of_memory() {
@@ -397,7 +399,7 @@ impl eframe::App for AurawApp {
 }
 
 #[cfg(target_os = "android")]
-fn show_android_foreground_task_blocker(ctx: &egui::Context) {
+pub(super) fn show_android_foreground_task_blocker(ctx: &egui::Context) {
     let content_rect = ctx.content_rect();
     egui::Area::new(egui::Id::new("android-foreground-task-input-blocker"))
         .order(egui::Order::Middle)
@@ -420,7 +422,7 @@ fn show_android_foreground_task_blocker(ctx: &egui::Context) {
 }
 
 #[cfg(not(target_os = "android"))]
-fn show_raw_drop_overlay(ui: &egui::Ui, folder: Option<&std::path::Path>) {
+pub(super) fn show_raw_drop_overlay(ui: &egui::Ui, folder: Option<&std::path::Path>) {
     let rect = ui.max_rect().shrink(18.0);
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
