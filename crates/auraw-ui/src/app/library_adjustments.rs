@@ -1,3 +1,5 @@
+use super::*;
+
 impl AurawApp {
     pub(crate) fn has_copied_adjustments(&self) -> bool {
         self.adjustment_clipboard.is_some()
@@ -10,7 +12,7 @@ impl AurawApp {
             .map(|clipboard| clipboard.source_label.as_str())
     }
 
-    fn install_adjustment_clipboard(&mut self, edits: SidecarEditState, source_label: String) {
+    pub(super) fn install_adjustment_clipboard(&mut self, edits: SidecarEditState, source_label: String) {
         #[cfg(target_os = "android")]
         drop(source_label);
         self.adjustment_clipboard = Some(LibraryAdjustmentClipboard {
@@ -21,7 +23,7 @@ impl AurawApp {
         });
     }
 
-    fn apply_adjustment_clipboard_to_current(
+    pub(super) fn apply_adjustment_clipboard_to_current(
         &mut self,
         clipboard: &LibraryAdjustmentClipboard,
         mode: AdjustmentPasteMode,
@@ -141,7 +143,7 @@ impl AurawApp {
         Ok(needs_ai_refresh)
     }
 
-    fn reload_current_after_adjustment_paste(
+    pub(super) fn reload_current_after_adjustment_paste(
         &mut self,
         frame: &eframe::Frame,
         profile_selection: Option<PathBuf>,
@@ -221,7 +223,7 @@ impl AurawApp {
         }
     }
 
-    fn desktop_library_edit_state(
+    pub(super) fn desktop_library_edit_state(
         &mut self,
         raw_path: &std::path::Path,
     ) -> Result<SidecarEditState, String> {
@@ -341,7 +343,7 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    fn current_android_library_target_matches(&self, raw_uri: &str, display_name: &str) -> bool {
+    pub(super) fn current_android_library_target_matches(&self, raw_uri: &str, display_name: &str) -> bool {
         matches!(
             self.sidecar_target.as_ref(),
             Some(crate::sidecar::SidecarTarget::Android {
@@ -352,7 +354,7 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    fn android_library_edit_state(
+    pub(super) fn android_library_edit_state(
         &mut self,
         raw_uri: &str,
         display_name: &str,
@@ -492,7 +494,7 @@ impl AurawApp {
     }
 }
 
-fn desktop_library_sidecar_edits(
+pub(super) fn desktop_library_sidecar_edits(
     raw_path: &std::path::Path,
 ) -> Result<Option<SidecarEditState>, String> {
     match crate::sidecar::load_desktop(raw_path) {
@@ -512,7 +514,7 @@ fn desktop_library_sidecar_edits(
     }
 }
 
-fn ai_mask_refresh_target_count(masks: &crate::pipeline::MaskStack) -> usize {
+pub(super) fn ai_mask_refresh_target_count(masks: &crate::pipeline::MaskStack) -> usize {
     masks
         .masks
         .iter()
@@ -542,7 +544,7 @@ fn ai_mask_refresh_target_count(masks: &crate::pipeline::MaskStack) -> usize {
         .count()
 }
 
-fn complete_library_ai_mask_refresh_item(state: &mut LibraryAiMaskRefreshState) {
+pub(super) fn complete_library_ai_mask_refresh_item(state: &mut LibraryAiMaskRefreshState) {
     if let Some(job) = state.current.take() {
         state.completed += 1;
         state.mask_completed += job.mask_targets;
@@ -698,7 +700,7 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn start_next_library_ai_mask_refresh(&mut self, frame: &eframe::Frame) {
+    pub(super) fn start_next_library_ai_mask_refresh(&mut self, frame: &eframe::Frame) {
         loop {
             let next = {
                 let Some(state) = self.library_ai_mask_refresh.as_mut() else {
@@ -740,7 +742,7 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    fn start_next_library_ai_mask_refresh(&mut self, _frame: &eframe::Frame) {
+    pub(super) fn start_next_library_ai_mask_refresh(&mut self, _frame: &eframe::Frame) {
         loop {
             let next = {
                 let Some(state) = self.library_ai_mask_refresh.as_mut() else {
@@ -969,7 +971,7 @@ impl AurawApp {
         }
     }
 
-    fn finish_library_ai_mask_refresh(&mut self) {
+    pub(super) fn finish_library_ai_mask_refresh(&mut self) {
         let Some(state) = self.library_ai_mask_refresh.take() else {
             return;
         };
