@@ -700,6 +700,7 @@ struct LibraryFolderClipboard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LibraryFolderDrag(PathBuf);
 
+#[cfg(not(target_os = "android"))]
 #[derive(Clone, Debug)]
 struct CloudFolderDrag(String);
 

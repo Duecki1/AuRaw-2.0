@@ -78,15 +78,20 @@ pub(super) fn show_cloud_folder_node(
             } else {
                 egui_phosphor::regular::FOLDER
             };
+            #[cfg(target_os = "android")]
+            let folder_sense = Sense::click();
+            #[cfg(not(target_os = "android"))]
+            let folder_sense = Sense::click_and_drag();
             let response = crate::ui::theme::navigation_row(
                 ui,
                 egui::RichText::new(format!("{icon}  {name}")),
                 selected,
-                Sense::click_and_drag(),
+                folder_sense,
             );
             if response.clicked() {
                 *requested_action = Some(CloudFolderUiAction::Select(folder_id.to_owned()));
             }
+            #[cfg(not(target_os = "android"))]
             if let Some(folder) = folder {
                 response.dnd_set_drag_payload(CloudFolderDrag(folder.id.clone()));
             }
@@ -161,6 +166,7 @@ pub(super) fn show_cloud_folder_node(
                 }
             });
 
+            #[cfg(not(target_os = "android"))]
             if let Some(payload) = response.dnd_hover_payload::<CloudFolderDrag>() {
                 let source_id = &payload.0;
                 let can_drop = !action_in_progress
