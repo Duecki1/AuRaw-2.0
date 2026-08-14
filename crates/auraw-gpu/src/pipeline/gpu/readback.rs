@@ -1,27 +1,50 @@
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+pub(super) struct TextureReadbackRegion {
+    pub origin: [u32; 2],
+    pub extent: [u32; 2],
+    pub texture_extent: [u32; 2],
+    pub label: &'static str,
+}
+
+impl TextureReadbackRegion {
+    pub(super) fn full(width: u32, height: u32, label: &'static str) -> Self {
+        Self {
+            origin: [0, 0],
+            extent: [width, height],
+            texture_extent: [width, height],
+            label,
+        }
+    }
+
+    fn validate(self, format: &'static str) -> Result<()> {
+        let [x, y] = self.origin;
+        let [width, height] = self.extent;
+        let [texture_width, texture_height] = self.texture_extent;
+        let right = x
+            .checked_add(width)
+            .ok_or_else(|| anyhow!("GPU readback rectangle overflows horizontally"))?;
+        let bottom = y
+            .checked_add(height)
+            .ok_or_else(|| anyhow!("GPU readback rectangle overflows vertically"))?;
+        if width == 0 || height == 0 || right > texture_width || bottom > texture_height {
+            return Err(anyhow!("invalid GPU {format} readback rectangle"));
+        }
+        Ok(())
+    }
+}
+
 pub(super) fn read_rgba8_texture_region_blocking(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    texture_width: u32,
-    texture_height: u32,
-    label: &'static str,
+    region: TextureReadbackRegion,
 ) -> Result<Vec<u8>> {
-    let right = x
-        .checked_add(width)
-        .ok_or_else(|| anyhow!("GPU readback rectangle overflows horizontally"))?;
-    let bottom = y
-        .checked_add(height)
-        .ok_or_else(|| anyhow!("GPU readback rectangle overflows vertically"))?;
-    if width == 0 || height == 0 || right > texture_width || bottom > texture_height {
-        return Err(anyhow!("invalid GPU RGBA8 readback rectangle"));
-    }
+    region.validate("RGBA8")?;
+    let [x, y] = region.origin;
+    let [width, height] = region.extent;
+    let label = region.label;
 
     let unpadded_bytes_per_row = width
         .checked_mul(4)
@@ -189,28 +212,16 @@ impl PendingRgba32Readback {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn begin_rgba32_texture_region_rgb_readback(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    texture_width: u32,
-    texture_height: u32,
-    label: &'static str,
+    region: TextureReadbackRegion,
 ) -> Result<PendingRgba32Readback> {
-    let right = x
-        .checked_add(width)
-        .ok_or_else(|| anyhow!("GPU readback rectangle overflows horizontally"))?;
-    let bottom = y
-        .checked_add(height)
-        .ok_or_else(|| anyhow!("GPU readback rectangle overflows vertically"))?;
-    if width == 0 || height == 0 || right > texture_width || bottom > texture_height {
-        return Err(anyhow!("invalid GPU RGBA32F readback rectangle"));
-    }
+    region.validate("RGBA32F")?;
+    let [x, y] = region.origin;
+    let [width, height] = region.extent;
+    let label = region.label;
 
     let (readback, padded_bytes_per_row) =
         create_rgba32_readback_buffer(device, width, height, label)?;
@@ -274,28 +285,16 @@ fn rgba32_readback_rows_per_chunk(width: u32) -> Result<u32> {
     Ok(rows.min(u64::from(u32::MAX)) as u32)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn read_rgba32_texture_region_rgb_blocking(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    texture_width: u32,
-    texture_height: u32,
-    label: &'static str,
+    region: TextureReadbackRegion,
 ) -> Result<Vec<f32>> {
-    let right = x
-        .checked_add(width)
-        .ok_or_else(|| anyhow!("GPU readback rectangle overflows horizontally"))?;
-    let bottom = y
-        .checked_add(height)
-        .ok_or_else(|| anyhow!("GPU readback rectangle overflows vertically"))?;
-    if width == 0 || height == 0 || right > texture_width || bottom > texture_height {
-        return Err(anyhow!("invalid GPU RGBA32F readback rectangle"));
-    }
+    region.validate("RGBA32F")?;
+    let [x, y] = region.origin;
+    let [width, height] = region.extent;
+    let label = region.label;
 
     // WebGPU adapters commonly expose a 256 MiB max_buffer_size. A large
     // full-resolution inpainting crop can legitimately exceed that even though
@@ -368,7 +367,10 @@ pub(super) fn read_rgba32_texture_rgb_blocking(
     label: &'static str,
 ) -> Result<Vec<f32>> {
     read_rgba32_texture_region_rgb_blocking(
-        device, queue, texture, 0, 0, width, height, width, height, label,
+        device,
+        queue,
+        texture,
+        TextureReadbackRegion::full(width, height, label),
     )
 }
 
@@ -457,7 +459,9 @@ pub(super) fn map_rgba32_readback_rgb(
 
 #[cfg(test)]
 mod tests {
-    use super::{rgba32_readback_rows_per_chunk, MAX_RGBA32_READBACK_CHUNK_BYTES};
+    use super::{
+        rgba32_readback_rows_per_chunk, TextureReadbackRegion, MAX_RGBA32_READBACK_CHUNK_BYTES,
+    };
 
     #[test]
     fn rgba32_readback_chunks_stay_below_the_safe_buffer_budget() {
@@ -471,5 +475,41 @@ mod tests {
     #[test]
     fn rgba32_readback_rejects_zero_width() {
         assert!(rgba32_readback_rows_per_chunk(0).is_err());
+    }
+
+    #[test]
+    fn texture_readback_region_validates_bounds_and_overflow() {
+        let valid = TextureReadbackRegion {
+            origin: [7, 11],
+            extent: [13, 17],
+            texture_extent: [20, 28],
+            label: "valid",
+        };
+        assert!(valid.validate("test").is_ok());
+
+        let out_of_bounds = TextureReadbackRegion {
+            extent: [14, 17],
+            ..valid
+        };
+        assert!(out_of_bounds.validate("test").is_err());
+
+        let overflowing = TextureReadbackRegion {
+            origin: [u32::MAX, 0],
+            extent: [2, 1],
+            texture_extent: [u32::MAX, 1],
+            label: "overflow",
+        };
+        assert!(overflowing.validate("test").is_err());
+    }
+
+    #[test]
+    fn texture_readback_region_rejects_empty_extent() {
+        let region = TextureReadbackRegion {
+            origin: [0, 0],
+            extent: [0, 1],
+            texture_extent: [1, 1],
+            label: "empty",
+        };
+        assert!(region.validate("test").is_err());
     }
 }

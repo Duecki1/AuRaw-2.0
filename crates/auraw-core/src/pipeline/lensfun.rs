@@ -348,13 +348,14 @@ mod imp {
         // mosaic destroys X-Trans locality and forces an early u16 requantization.
         let (early_modifier, early_flags) = initialize_modifier(
             lens,
-            crop,
-            width,
-            height,
-            focal,
-            aperture,
-            distance,
-            LF_MODIFY_TCA | LF_MODIFY_VIGNETTING,
+            ModifierConfig {
+                crop,
+                dimensions: [width, height],
+                focal,
+                aperture,
+                distance,
+                requested_flags: LF_MODIFY_TCA | LF_MODIFY_VIGNETTING,
+            },
         )?;
 
         // Build a second modifier for the common geometric component. Its
@@ -363,13 +364,14 @@ mod imp {
         // only once.
         let (geometry_modifier, mut geometry_flags) = initialize_modifier(
             lens,
-            crop,
-            width,
-            height,
-            focal,
-            aperture,
-            distance,
-            LF_MODIFY_DISTORTION,
+            ModifierConfig {
+                crop,
+                dimensions: [width, height],
+                focal,
+                aperture,
+                distance,
+                requested_flags: LF_MODIFY_DISTORTION,
+            },
         )?;
 
         // Auto-scale must still account for the complete coordinate correction,
@@ -378,13 +380,14 @@ mod imp {
         // geometry modifier so channel-relative TCA is not applied twice.
         let (scale_probe_modifier, scale_probe_flags) = initialize_modifier(
             lens,
-            crop,
-            width,
-            height,
-            focal,
-            aperture,
-            distance,
-            LF_MODIFY_TCA | LF_MODIFY_DISTORTION,
+            ModifierConfig {
+                crop,
+                dimensions: [width, height],
+                focal,
+                aperture,
+                distance,
+                requested_flags: LF_MODIFY_TCA | LF_MODIFY_DISTORTION,
+            },
         )?;
         if scale_probe_flags & (LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_TCA) != 0 {
             // SAFETY: Lensfun computes a scale for the configured live modifier.
@@ -416,17 +419,28 @@ mod imp {
         correct_mosaic(raw, &early_modifier, early_flags, lens_geometry)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn initialize_modifier(
-        lens: *const lfLens,
+    #[derive(Clone, Copy)]
+    struct ModifierConfig {
         crop: f32,
-        width: c_int,
-        height: c_int,
+        dimensions: [c_int; 2],
         focal: f32,
         aperture: f32,
         distance: f32,
         requested_flags: c_int,
+    }
+
+    fn initialize_modifier(
+        lens: *const lfLens,
+        config: ModifierConfig,
     ) -> Result<(Modifier, c_int)> {
+        let ModifierConfig {
+            crop,
+            dimensions: [width, height],
+            focal,
+            aperture,
+            distance,
+            requested_flags,
+        } = config;
         // SAFETY: all pointers and scalar parameters are valid. Lensfun 0.3.x
         // configures focal/aperture/distance through `lf_modifier_initialize`.
         let pointer = unsafe { lf_modifier_new(lens, crop.max(0.1), width, height) };
@@ -625,14 +639,16 @@ mod imp {
                         let source_x = coordinate_batch[coordinate_index];
                         let source_y = coordinate_batch[coordinate_index + 1];
                         let (corrected, black) = sample_corrected_cfa_subpixel(
-                            raw,
-                            source_x,
-                            source_y,
-                            cfa_index,
-                            x,
-                            y,
-                            vignette_enabled,
-                            &vignette_gains,
+                            CfaCorrectionContext {
+                                raw,
+                                vignette_enabled,
+                                vignette_gains: &vignette_gains,
+                            },
+                            CfaSample {
+                                position: [source_x, source_y],
+                                channel: cfa_index,
+                                output: [x, y],
+                            },
                         );
                         *output_sample = corrected.round().clamp(0.0, f32::from(u16::MAX)) as u16;
                         *output_black = black;
@@ -652,14 +668,16 @@ mod imp {
                         let source_x = coordinate_batch[coordinate_index];
                         let source_y = coordinate_batch[coordinate_index + 1];
                         let (corrected, _black) = sample_corrected_cfa_subpixel(
-                            raw,
-                            source_x,
-                            source_y,
-                            cfa_index,
-                            x,
-                            y,
-                            vignette_enabled,
-                            &vignette_gains,
+                            CfaCorrectionContext {
+                                raw,
+                                vignette_enabled,
+                                vignette_gains: &vignette_gains,
+                            },
+                            CfaSample {
+                                position: [source_x, source_y],
+                                channel: cfa_index,
+                                output: [x, y],
+                            },
                         );
                         *output_sample = corrected.round().clamp(0.0, f32::from(u16::MAX)) as u16;
                     });
@@ -788,13 +806,12 @@ mod imp {
                             let source_y = coordinate_batch[coordinate_index + 1];
                             *value = sample_raster_channel_bilinear(
                                 &shaded,
-                                width,
-                                height,
-                                source_x,
-                                source_y,
-                                x,
-                                batch_y + local_y,
-                                channel,
+                                [width, height],
+                                RasterChannelSample {
+                                    position: [source_x, source_y],
+                                    fallback: [x, batch_y + local_y],
+                                    channel,
+                                },
                             );
                         }
                     });
@@ -860,17 +877,24 @@ mod imp {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[derive(Clone, Copy)]
+    struct RasterChannelSample {
+        position: [f32; 2],
+        fallback: [usize; 2],
+        channel: usize,
+    }
+
     fn sample_raster_channel_bilinear(
         source: &[f32],
-        width: usize,
-        height: usize,
-        x: f32,
-        y: f32,
-        fallback_x: usize,
-        fallback_y: usize,
-        channel: usize,
+        dimensions: [usize; 2],
+        sample: RasterChannelSample,
     ) -> f32 {
+        let [width, height] = dimensions;
+        let RasterChannelSample {
+            position: [x, y],
+            fallback: [fallback_x, fallback_y],
+            channel,
+        } = sample;
         if !x.is_finite() || !y.is_finite() || width == 0 || height == 0 {
             return source[(fallback_y * width + fallback_x) * 3 + channel];
         }
@@ -958,28 +982,36 @@ mod imp {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn sample_corrected_cfa_subpixel(
-        raw: &LoadedRaw,
-        x: f32,
-        y: f32,
-        channel: u8,
-        output_x: usize,
-        output_y: usize,
+    #[derive(Clone, Copy)]
+    struct CfaCorrectionContext<'a> {
+        raw: &'a LoadedRaw,
         vignette_enabled: bool,
-        vignette_gains: &[f32],
+        vignette_gains: &'a [f32],
+    }
+
+    #[derive(Clone, Copy)]
+    struct CfaSample {
+        position: [f32; 2],
+        channel: u8,
+        output: [usize; 2],
+    }
+
+    fn sample_corrected_cfa_subpixel(
+        context: CfaCorrectionContext<'_>,
+        sample: CfaSample,
     ) -> (f32, f32) {
+        let CfaCorrectionContext {
+            raw,
+            vignette_enabled,
+            vignette_gains,
+        } = context;
+        let CfaSample {
+            position: [x, y],
+            channel,
+            ..
+        } = sample;
         if raw.cfa_kind == crate::pipeline::CfaKind::Bayer && x.is_finite() && y.is_finite() {
-            if let Some(sample) = sample_bayer_phase_bilinear(
-                raw,
-                x,
-                y,
-                channel,
-                output_x,
-                output_y,
-                vignette_enabled,
-                vignette_gains,
-            ) {
+            if let Some(sample) = sample_bayer_phase_bilinear(context, sample) {
                 return sample;
             }
         }
@@ -1080,17 +1112,20 @@ mod imp {
         (weight_sum > 1e-6).then(|| (value_sum / weight_sum, black_sum / weight_sum))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn sample_bayer_phase_bilinear(
-        raw: &LoadedRaw,
-        x: f32,
-        y: f32,
-        channel: u8,
-        output_x: usize,
-        output_y: usize,
-        vignette_enabled: bool,
-        vignette_gains: &[f32],
+        context: CfaCorrectionContext<'_>,
+        sample: CfaSample,
     ) -> Option<(f32, f32)> {
+        let CfaCorrectionContext {
+            raw,
+            vignette_enabled,
+            vignette_gains,
+        } = context;
+        let CfaSample {
+            position: [x, y],
+            channel,
+            output: [output_x, output_y],
+        } = sample;
         let (x0, x1, tx) = bayer_axis_samples(x, raw.width, (output_x as u32) & 1)?;
         let (y0, y1, ty) = bayer_axis_samples(y, raw.height, (output_y as u32) & 1)?;
         let indices = [
