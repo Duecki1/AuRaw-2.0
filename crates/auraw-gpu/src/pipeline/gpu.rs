@@ -4,7 +4,7 @@ use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskEffect,
-    MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
+    LocalMask, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
     GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES,
     MAX_LOCAL_MASKS,
 };
@@ -428,22 +428,37 @@ fn split_eight(values: [f32; 8]) -> ([f32; 4], [f32; 4]) {
     )
 }
 
-fn pack_local_point_curve(curve: &PointCurve) -> [[f32; 4]; 8] {
-    let mut packed = [[0.0; 4]; 8];
-    for (pair, values) in packed.iter_mut().take(4).enumerate() {
-        *values = [
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PackedPointCurve {
+    pairs: [[f32; 4]; 4],
+    meta: [f32; 4],
+}
+
+fn pack_point_curve(curve: &PointCurve) -> PackedPointCurve {
+    let pairs = std::array::from_fn(|pair| {
+        [
             curve.points[pair * 2][0],
             curve.points[pair * 2][1],
             curve.points[pair * 2 + 1][0],
             curve.points[pair * 2 + 1][1],
-        ];
+        ]
+    });
+    PackedPointCurve {
+        pairs,
+        meta: [
+            curve.len.clamp(2, 8) as f32,
+            if curve.is_identity() { 1.0 } else { 0.0 },
+            0.0,
+            0.0,
+        ],
     }
-    packed[4] = [
-        curve.len.clamp(2, 8) as f32,
-        if curve.is_identity() { 1.0 } else { 0.0 },
-        0.0,
-        0.0,
-    ];
+}
+
+fn pack_local_point_curve(curve: &PointCurve) -> [[f32; 4]; 8] {
+    let curve = pack_point_curve(curve);
+    let mut packed = [[0.0; 4]; 8];
+    packed[..4].copy_from_slice(&curve.pairs);
+    packed[4] = curve.meta;
     packed
 }
 
@@ -616,6 +631,618 @@ fn canonicalize_green_noise(mut coefficients: [f32; 4], green2_present: bool) ->
     coefficients
 }
 
+#[derive(Clone, Copy)]
+struct GpuTileInfo {
+    origin_x: i32,
+    origin_y: i32,
+    full_width: u32,
+    full_height: u32,
+}
+
+struct GpuParamContext<'a> {
+    exposure: &'a ExposureParams,
+    masks: &'a MaskStack,
+    raw: &'a LoadedRaw,
+    tile: GpuTileInfo,
+}
+
+fn effect_mask_data(
+    effect: MaskEffect,
+    active: bool,
+    adjust_0: [f32; 4],
+    adjust_1: [f32; 4],
+    adjust_2: [f32; 4],
+) -> MaskData {
+    MaskData {
+        metadata: [
+            u32::from(active),
+            u32::from(active),
+            0,
+            effect.shader_id() << MASK_EFFECT_ID_SHIFT,
+        ],
+        adjust_0,
+        adjust_1,
+        adjust_2,
+        ..MaskData::zeroed()
+    }
+}
+
+fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
+    let zero = [0.0; 4];
+    let data = match mask.effect {
+        MaskEffect::Blur => {
+            let effect = mask.effect_settings.blur;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [effect.amount.clamp(0.0, 100.0), effect.radius.clamp(0.0, 16.0), 0.0, 0.0],
+                zero,
+                zero,
+            )
+        }
+        MaskEffect::LensBlur => {
+            let effect = mask.effect_settings.lens_blur;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.radius.clamp(0.0, 48.0),
+                    effect.blades.clamp(3.0, 12.0).round(),
+                    effect.rotation.clamp(-180.0, 180.0),
+                ],
+                [effect.highlight_boost.clamp(0.0, 100.0), 0.0, 0.0, 0.0],
+                zero,
+            )
+        }
+        MaskEffect::MotionBlur => {
+            let effect = mask.effect_settings.motion_blur;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.distance.clamp(0.0, 96.0),
+                    effect.angle.clamp(-180.0, 180.0),
+                    0.0,
+                ],
+                zero,
+                zero,
+            )
+        }
+        MaskEffect::RadialBlur => {
+            let effect = mask.effect_settings.radial_blur;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.strength.clamp(0.0, 96.0),
+                    effect.center[0].clamp(-50.0, 150.0),
+                    effect.center[1].clamp(-50.0, 150.0),
+                ],
+                [effect.mode.shader_value(), 0.0, 0.0, 0.0],
+                zero,
+            )
+        }
+        MaskEffect::TiltShift => {
+            let effect = mask.effect_settings.tilt_shift;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.radius.clamp(0.0, 48.0),
+                    effect.center[0].clamp(-50.0, 150.0),
+                    effect.center[1].clamp(-50.0, 150.0),
+                ],
+                [
+                    effect.angle.clamp(-180.0, 180.0),
+                    effect.focus_width.clamp(0.0, 100.0),
+                    effect.feather.clamp(0.1, 100.0),
+                    0.0,
+                ],
+                zero,
+            )
+        }
+        MaskEffect::EdgeGlow => {
+            let effect = mask.effect_settings.edge_glow;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.edge_width.clamp(0.5, 8.0),
+                    effect.detail.clamp(0.0, 100.0),
+                    effect.glow.clamp(0.0, 100.0),
+                ],
+                [
+                    effect.color[0].clamp(0.0, 1.0),
+                    effect.color[1].clamp(0.0, 1.0),
+                    effect.color[2].clamp(0.0, 1.0),
+                    0.0,
+                ],
+                zero,
+            )
+        }
+        MaskEffect::Glow => {
+            let effect = mask.effect_settings.glow;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.radius.clamp(0.0, 100.0),
+                    effect.core.clamp(0.0, 100.0),
+                    0.0,
+                ],
+                [
+                    effect.color[0].clamp(0.0, 1.0),
+                    effect.color[1].clamp(0.0, 1.0),
+                    effect.color[2].clamp(0.0, 1.0),
+                    0.0,
+                ],
+                zero,
+            )
+        }
+        MaskEffect::Neon => {
+            let effect = mask.effect_settings.neon;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.edge_width.clamp(0.5, 8.0),
+                    effect.detail.clamp(0.0, 100.0),
+                    effect.glow.clamp(0.0, 100.0),
+                ],
+                [
+                    effect.color[0].clamp(0.0, 1.0),
+                    effect.color[1].clamp(0.0, 1.0),
+                    effect.color[2].clamp(0.0, 1.0),
+                    effect.background.clamp(0.0, 100.0),
+                ],
+                zero,
+            )
+        }
+        MaskEffect::LightRays => {
+            let effect = mask.effect_settings.light_rays;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.length.clamp(0.0, 200.0),
+                    effect.source[0].clamp(-50.0, 150.0),
+                    effect.source[1].clamp(-50.0, 150.0),
+                ],
+                [
+                    effect.color[0].clamp(0.0, 1.0),
+                    effect.color[1].clamp(0.0, 1.0),
+                    effect.color[2].clamp(0.0, 1.0),
+                    effect.fade.clamp(0.0, 100.0),
+                ],
+                [
+                    effect.spread.clamp(0.0, 45.0),
+                    effect.ray_count.clamp(4.0, 96.0),
+                    effect.variation.clamp(0.0, 100.0),
+                    effect.softness.clamp(0.0, 100.0),
+                ],
+            )
+        }
+        MaskEffect::Pixelate => {
+            let effect = mask.effect_settings.pixelate;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [effect.amount.clamp(0.0, 100.0), effect.block_size.clamp(2.0, 32.0), 0.0, 0.0],
+                zero,
+                zero,
+            )
+        }
+        MaskEffect::Fog => {
+            let effect = mask.effect_settings.fog;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.density.clamp(0.0, 100.0),
+                    effect.scale.clamp(1.0, 100.0),
+                    effect.softness.clamp(0.0, 100.0),
+                ],
+                [
+                    effect.color[0].clamp(0.0, 1.0),
+                    effect.color[1].clamp(0.0, 1.0),
+                    effect.color[2].clamp(0.0, 1.0),
+                    effect.variation.clamp(0.0, 100.0),
+                ],
+                [effect.seed.clamp(0.0, 1_000.0), 0.0, 0.0, 0.0],
+            )
+        }
+        MaskEffect::Smoke => {
+            let effect = mask.effect_settings.smoke;
+            effect_mask_data(
+                mask.effect,
+                mask.enabled && effect.is_active(),
+                [
+                    effect.amount.clamp(0.0, 100.0),
+                    effect.density.clamp(0.0, 100.0),
+                    effect.scale.clamp(1.0, 100.0),
+                    effect.turbulence.clamp(0.0, 100.0),
+                ],
+                [
+                    effect.color[0].clamp(0.0, 1.0),
+                    effect.color[1].clamp(0.0, 1.0),
+                    effect.color[2].clamp(0.0, 1.0),
+                    effect.angle.clamp(-180.0, 180.0),
+                ],
+                [
+                    effect.softness.clamp(0.0, 100.0),
+                    effect.seed.clamp(0.0, 1_000.0),
+                    0.0,
+                    0.0,
+                ],
+            )
+        }
+        _ => return None,
+    };
+    Some(data)
+}
+
+fn pack_adjustment_mask(mask: &LocalMask) -> MaskData {
+    let adjustment = mask.adjustments;
+    // Placeholder effect types retain adjustment values for reversible UI
+    // switching, but only the Adjustment variant is allowed to apply them.
+    let adjustment_enabled = mask.enabled && mask.effect.uses_adjustments();
+    let has_hsl = adjustment.has_color_mixer();
+    let curve_flags = adjustment.curve_feature_flags();
+    let has_grading = adjustment.has_color_grading();
+    let has_hue = adjustment.hue.abs() > 1e-6;
+    let (hsl_hue_0, hsl_hue_1) = split_eight(adjustment.hsl_hue);
+    let (hsl_saturation_0, hsl_saturation_1) = split_eight(adjustment.hsl_saturation);
+    let (hsl_luminance_0, hsl_luminance_1) = split_eight(adjustment.hsl_luminance);
+    MaskData {
+        metadata: [
+            u32::from(adjustment_enabled),
+            u32::from(!adjustment.is_neutral()),
+            curve_flags,
+            u32::from(has_hsl) | (u32::from(has_grading) << 1) | (u32::from(has_hue) << 2),
+        ],
+        adjust_0: [
+            adjustment.exposure.clamp(-5.0, 5.0),
+            adjustment.contrast.clamp(-100.0, 100.0),
+            adjustment.highlights.clamp(-100.0, 100.0),
+            adjustment.shadows.clamp(-100.0, 100.0),
+        ],
+        adjust_1: [
+            adjustment.whites.clamp(-100.0, 100.0),
+            adjustment.blacks.clamp(-100.0, 100.0),
+            adjustment.temperature.clamp(-100.0, 100.0),
+            adjustment.tint.clamp(-100.0, 100.0),
+        ],
+        adjust_2: [
+            adjustment.saturation.clamp(-100.0, 100.0),
+            adjustment.texture.clamp(-100.0, 100.0),
+            adjustment.clarity.clamp(-100.0, 100.0),
+            adjustment.dehaze.clamp(-100.0, 100.0),
+        ],
+        curves: pack_local_point_curve(&adjustment.tone_curve),
+        grade_shadows: pack_color_grade_wheel(adjustment.color_grading.shadows),
+        grade_midtones: pack_color_grade_wheel(adjustment.color_grading.midtones),
+        grade_highlights: pack_color_grade_wheel(adjustment.color_grading.highlights),
+        grade_global: pack_color_grade_wheel(adjustment.color_grading.global),
+        grade_options: pack_view_color_options(adjustment.color_grading, adjustment.hue),
+        curves_red: pack_local_point_curve(&adjustment.tone_curve_red),
+        curves_green: pack_local_point_curve(&adjustment.tone_curve_green),
+        curves_blue: pack_local_point_curve(&adjustment.tone_curve_blue),
+        hsl_hue_0,
+        hsl_hue_1,
+        hsl_saturation_0,
+        hsl_saturation_1,
+        hsl_luminance_0,
+        hsl_luminance_1,
+    }
+}
+
+fn pack_mask_params(masks: &MaskStack) -> Box<[MaskData]> {
+    let mut packed = [MaskData::zeroed(); MAX_LOCAL_MASKS];
+    for (destination, mask) in packed.iter_mut().zip(masks.masks.iter()) {
+        *destination = pack_effect_mask(mask).unwrap_or_else(|| pack_adjustment_mask(mask));
+    }
+    Box::new(packed)
+}
+
+fn pack_camera_params(ctx: &GpuParamContext<'_>) -> CameraUniforms {
+    let exposure = ctx.exposure;
+    let raw = ctx.raw;
+    let GpuTileInfo {
+        origin_x: tile_origin_x,
+        origin_y: tile_origin_y,
+        full_width,
+        full_height,
+    } = ctx.tile;
+    let (white_balance, camera_transform, profile_weight) = raw
+        .adjusted_white_balance_and_camera_transform(
+            exposure
+                .temperature
+                .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
+            exposure
+                .tint
+                .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
+        );
+    let inpaint_wb_transform = inpaint_neutral_to_current_transform(
+        camera_transform_with_white_balance(raw.cam_to_srgb, raw.wb_coeffs),
+        camera_transform_with_white_balance(camera_transform, white_balance),
+    );
+    let mut profile_layout = raw.camera_profile.gpu_layout();
+    profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
+    let profile_stages = profile_layout.stages();
+    debug_assert_eq!(
+        profile_stages.characterization.hue_sat_2,
+        profile_layout.hue_sat_2
+    );
+    let highlight_method = if raw.is_pre_demosaiced_raster() {
+        // Highlight reconstruction is a sensor/CFA operation. A rendered
+        // TIFF already supplies RGB scene values, including any HDR headroom.
+        0.0
+    } else {
+        shader_highlight_method(raw.cfa_kind, exposure.highlight_method)
+    };
+    let opposed_chroma = if highlight_method >= 1.5 {
+        raw.inpaint_opposed_chroma(
+            exposure.black_point,
+            exposure.highlight_clip,
+            exposure.ai_denoise_enabled,
+        )
+    } else {
+        [0.0; 3]
+    };
+
+    CameraUniforms {
+        black_point: exposure.black_point,
+        temperature: exposure
+            .temperature
+            .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
+        highlight_clip: exposure.highlight_clip,
+        chroma_denoise: exposure.chroma_denoise,
+        ca_red: exposure.ca_red,
+        ca_blue: exposure.ca_blue,
+        highlight_reconstruction: exposure.highlight_reconstruction,
+        tone_analysis_scale: tone_analysis_scale() as f32,
+        tone_guide_radius: if cfg!(target_os = "android") {
+            3.0
+        } else {
+            5.0
+        },
+        demosaic_mode: exposure.demosaic_mode.shader_value(),
+        dual_threshold: exposure.dual_threshold.clamp(0.0, 100.0),
+        frequency_chroma: exposure.frequency_chroma.clamp(0.0, 1.0),
+        tint: exposure
+            .tint
+            .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
+        _pad_0: if raw.is_pre_demosaiced_raster() {
+            1.0
+        } else {
+            0.0
+        },
+        _pad_1: if !raw.is_pre_demosaiced_raster() || raster_uses_scene_view_transform(exposure)
+        {
+            1.0
+        } else {
+            0.0
+        },
+        _pad_2: 0.0,
+        highlight_options: [
+            highlight_method,
+            opposed_chroma[0],
+            opposed_chroma[1],
+            opposed_chroma[2],
+        ],
+        noise_shot: canonicalize_green_noise(
+            std::array::from_fn(|channel| {
+                raw.noise_profile.shot[channel] * white_balance[channel].max(0.0)
+            }),
+            raw.noise_profile.green2_present,
+        ),
+        noise_read: canonicalize_green_noise(
+            std::array::from_fn(|channel| {
+                let wb = white_balance[channel].max(0.0);
+                raw.noise_profile.read[channel] * wb * wb
+            }),
+            raw.noise_profile.green2_present,
+        ),
+        noise_options: [
+            (exposure.luminance_denoise / 100.0).clamp(0.0, 1.0),
+            (exposure.denoise_detail / 100.0).clamp(0.0, 1.0),
+            exposure.denoise_quality.shader_value(),
+            raw.noise_profile.confidence.clamp(0.0, 1.0),
+        ],
+        wb: white_balance,
+        cam_to_srgb_0: camera_transform[0],
+        cam_to_srgb_1: camera_transform[1],
+        cam_to_srgb_2: camera_transform[2],
+        inpaint_wb_0: inpaint_wb_transform[0],
+        inpaint_wb_1: inpaint_wb_transform[1],
+        inpaint_wb_2: inpaint_wb_transform[2],
+        black_levels: raw.black_levels,
+        white_levels: raw.white_levels,
+        width: raw.width,
+        height: raw.height,
+        tile_origin_x,
+        tile_origin_y,
+        full_width,
+        full_height,
+        abi_version: GPU_PARAMS_ABI_VERSION,
+        abi_size_bytes: GPU_PARAMS_ABI_SIZE_BYTES,
+        tone_histogram_bounds: [0, 0, raw.width, raw.height],
+        profile_hue_sat: profile_stages.characterization.hue_sat,
+        profile_look: profile_stages.optional_look.look_table,
+        profile_tone: profile_stages.view.profile_tone,
+        output_lut: profile_stages.output.output_lut,
+        profile_flags: profile_layout.flags,
+        ai_denoise_enabled: u32::from(exposure.ai_denoise_enabled),
+        user_exposure_bits: exposure.exposure.to_bits(),
+        _pad_camera_0: 0,
+        _pad_camera_1: 0,
+    }
+}
+
+fn pack_scene_tone_params(ctx: &GpuParamContext<'_>) -> SceneToneUniforms {
+    let exposure = ctx.exposure;
+    let masks = ctx.masks;
+    let mut sigmoid_params = exposure.sigmoid;
+    sigmoid_params.contrast = sigmoid_contrast_from_percent(exposure.contrast);
+    let sigmoid = sigmoid_coefficients(sigmoid_params);
+    // Sigmoid is the single view transform, so Contrast changes its
+    // middle-grey slope without switching view operators.
+    let (hsl_hue_0, hsl_hue_1) = split_eight(exposure.hsl_hue);
+    let (hsl_saturation_0, hsl_saturation_1) = split_eight(exposure.hsl_saturation);
+    let (hsl_luminance_0, hsl_luminance_1) = split_eight(exposure.hsl_luminance);
+    let tone_curve = pack_point_curve(&exposure.tone_curve);
+    let tone_curve_red = pack_point_curve(&exposure.tone_curve_red);
+    let tone_curve_green = pack_point_curve(&exposure.tone_curve_green);
+    let tone_curve_blue = pack_point_curve(&exposure.tone_curve_blue);
+
+    SceneToneUniforms {
+        exposure: exposure.exposure,
+        saturation: exposure.saturation,
+        vibrance: exposure.vibrance,
+        _pad_0: 0.0,
+        basic_tone: [
+            exposure.highlights,
+            exposure.shadows,
+            exposure.whites,
+            exposure.blacks,
+        ],
+        sigmoid_curve: [
+            sigmoid.white_target,
+            sigmoid.black_target,
+            sigmoid.paper_exposure,
+            sigmoid.film_fog,
+        ],
+        sigmoid_power: [
+            sigmoid.film_power,
+            sigmoid.paper_power,
+            sigmoid.hue_preservation,
+            sigmoid.color_processing,
+        ],
+        tone_curve_0: tone_curve.pairs[0],
+        tone_curve_1: tone_curve.pairs[1],
+        tone_curve_2: tone_curve.pairs[2],
+        tone_curve_3: tone_curve.pairs[3],
+        tone_curve_meta: tone_curve.meta,
+        tone_curve_red_0: tone_curve_red.pairs[0],
+        tone_curve_red_1: tone_curve_red.pairs[1],
+        tone_curve_red_2: tone_curve_red.pairs[2],
+        tone_curve_red_3: tone_curve_red.pairs[3],
+        tone_curve_red_meta: tone_curve_red.meta,
+        tone_curve_green_0: tone_curve_green.pairs[0],
+        tone_curve_green_1: tone_curve_green.pairs[1],
+        tone_curve_green_2: tone_curve_green.pairs[2],
+        tone_curve_green_3: tone_curve_green.pairs[3],
+        tone_curve_green_meta: tone_curve_green.meta,
+        tone_curve_blue_0: tone_curve_blue.pairs[0],
+        tone_curve_blue_1: tone_curve_blue.pairs[1],
+        tone_curve_blue_2: tone_curve_blue.pairs[2],
+        tone_curve_blue_3: tone_curve_blue.pairs[3],
+        tone_curve_blue_meta: tone_curve_blue.meta,
+        hsl_hue_0,
+        hsl_hue_1,
+        hsl_saturation_0,
+        hsl_saturation_1,
+        hsl_luminance_0,
+        hsl_luminance_1,
+        mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
+        grade_shadows: pack_color_grade_wheel(exposure.color_grading.shadows),
+        grade_midtones: pack_color_grade_wheel(exposure.color_grading.midtones),
+        grade_highlights: pack_color_grade_wheel(exposure.color_grading.highlights),
+        grade_global: pack_color_grade_wheel(exposure.color_grading.global),
+        grade_options: pack_view_color_options(exposure.color_grading, exposure.hue),
+        rec2020_to_xyz: [
+            [0.636_958, 0.262_700_2, 0.0, 0.0],
+            [0.144_616_9, 0.677_998_1, 0.028_072_7, 0.0],
+            [0.168_880_9, 0.059_301_7, 1.060_985_1, 0.0],
+        ],
+        xyz_to_rec2020: [
+            [1.716_651_2, -0.666_684_4, 0.017_639_9, 0.0],
+            [-0.355_670_8, 1.616_481_2, -0.042_770_6, 0.0],
+            [-0.253_366_3, 0.015_768_5, 0.942_103_1, 0.0],
+        ],
+        xyz_to_bradford: [
+            [0.8951, -0.7502, 0.0389, 0.0],
+            [0.2664, 1.7135, -0.0685, 0.0],
+            [-0.1614, 0.0367, 1.0296, 0.0],
+        ],
+        bradford_to_xyz: [
+            [0.986_992_9, 0.432_305_3, -0.008_528_7, 0.0],
+            [-0.147_054_3, 0.518_360_3, 0.040_042_8, 0.0],
+            [0.159_962_7, 0.049_291_2, 0.968_486_7, 0.0],
+        ],
+    }
+}
+
+fn pack_effect_params(ctx: &GpuParamContext<'_>, mask_data: &[MaskData]) -> EffectsUniforms {
+    let exposure = ctx.exposure;
+    let GpuTileInfo {
+        full_width,
+        full_height,
+        ..
+    } = ctx.tile;
+    // Global and masked Glow share one linear diffusion chain. Using the
+    // widest active request preserves every halo's support while avoiding
+    // another full-resolution texture stack for a non-destructive local
+    // effect.
+    let local_glow_radius = mask_data
+        .iter()
+        .filter(|mask| {
+            mask.metadata[0] != 0
+                && mask.metadata[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Glow.shader_id()
+        })
+        .map(|mask| mask.adjust_0[1])
+        .fold(0.0_f32, f32::max);
+    let global_glow_radius = if exposure.glow_amount.abs() > 1e-6 {
+        exposure.glow_radius.clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    EffectsUniforms {
+        presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
+        creative_effects: [
+            exposure.glow_amount.clamp(0.0, 100.0),
+            global_glow_radius.max(local_glow_radius),
+            exposure.glow_threshold.clamp(0.0, 100.0),
+            exposure.sharpen_amount.clamp(0.0, 150.0),
+        ],
+        vignette: [
+            exposure.vignette_amount.clamp(-100.0, 100.0),
+            exposure.vignette_midpoint.clamp(0.0, 100.0),
+            exposure.vignette_roundness.clamp(-100.0, 100.0),
+            exposure.vignette_feather.clamp(0.0, 100.0),
+        ],
+        vignette_options: [
+            exposure.vignette_highlights.clamp(0.0, 100.0),
+            exposure.sharpen_radius.clamp(0.5, 3.0),
+            exposure.sharpen_detail.clamp(0.0, 100.0),
+            exposure.sharpen_masking.clamp(0.0, 100.0),
+        ],
+        vignette_frame: [
+            0.5,
+            0.5,
+            full_width.max(1) as f32,
+            full_height.max(1) as f32,
+        ],
+        vignette_transform: [1.0, 0.0, 0.0, 1.0],
+        vignette_dark_half_fit: [0.10, 1.235, 2.88, 0.86],
+        vignette_dark_full_fit: [0.02, 1.135, 3.46, 1.0],
+        vignette_light_half_fit: [0.305, 1.24, 4.36, 0.90],
+        vignette_light_full_fit: [0.13, 1.075, 5.66, 1.0],
+        capture_scale_sigma: [0.74, 1.75, 0.58, 1.65],
+        capture_thresholds: [0.015, 0.0045, 0.055, 0.28],
+        capture_mask_coherence: [0.035, 0.62, 0.055, 0.22],
+    }
+}
+
 impl GpuParams {
     pub fn new(exposure: &ExposureParams, masks: &MaskStack, raw: &LoadedRaw) -> Self {
         Self::new_for_tile(exposure, masks, raw, 0, 0, raw.width, raw.height)
@@ -630,740 +1257,23 @@ impl GpuParams {
         full_width: u32,
         full_height: u32,
     ) -> Self {
-        let (white_balance, camera_transform, profile_weight) = raw
-            .adjusted_white_balance_and_camera_transform(
-                exposure
-                    .temperature
-                    .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
-                exposure
-                    .tint
-                    .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
-            );
-        let inpaint_wb_transform = inpaint_neutral_to_current_transform(
-            camera_transform_with_white_balance(raw.cam_to_srgb, raw.wb_coeffs),
-            camera_transform_with_white_balance(camera_transform, white_balance),
-        );
-        let mut profile_layout = raw.camera_profile.gpu_layout();
-        profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
-        let profile_stages = profile_layout.stages();
-        debug_assert_eq!(
-            profile_stages.characterization.hue_sat_2,
-            profile_layout.hue_sat_2
-        );
-        let mut sigmoid_params = exposure.sigmoid;
-        sigmoid_params.contrast = sigmoid_contrast_from_percent(exposure.contrast);
-        let sigmoid = sigmoid_coefficients(sigmoid_params);
-        // Sigmoid is the single view transform, so Contrast changes its
-        // middle-grey slope without switching view operators.
-        let mut mask_data = [MaskData::zeroed(); MAX_LOCAL_MASKS];
-        for (index, mask) in masks.masks.iter().take(MAX_LOCAL_MASKS).enumerate() {
-            if mask.effect == MaskEffect::Blur {
-                let blur = mask.effect_settings.blur;
-                let active = mask.enabled && blur.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        blur.amount.clamp(0.0, 100.0),
-                        blur.radius.clamp(0.0, 16.0),
-                        0.0,
-                        0.0,
-                    ],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::LensBlur {
-                let lens_blur = mask.effect_settings.lens_blur;
-                let active = mask.enabled && lens_blur.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        lens_blur.amount.clamp(0.0, 100.0),
-                        lens_blur.radius.clamp(0.0, 48.0),
-                        lens_blur.blades.clamp(3.0, 12.0).round(),
-                        lens_blur.rotation.clamp(-180.0, 180.0),
-                    ],
-                    adjust_1: [lens_blur.highlight_boost.clamp(0.0, 100.0), 0.0, 0.0, 0.0],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::MotionBlur {
-                let motion_blur = mask.effect_settings.motion_blur;
-                let active = mask.enabled && motion_blur.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        motion_blur.amount.clamp(0.0, 100.0),
-                        motion_blur.distance.clamp(0.0, 96.0),
-                        motion_blur.angle.clamp(-180.0, 180.0),
-                        0.0,
-                    ],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::RadialBlur {
-                let radial_blur = mask.effect_settings.radial_blur;
-                let active = mask.enabled && radial_blur.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        radial_blur.amount.clamp(0.0, 100.0),
-                        radial_blur.strength.clamp(0.0, 96.0),
-                        radial_blur.center[0].clamp(-50.0, 150.0),
-                        radial_blur.center[1].clamp(-50.0, 150.0),
-                    ],
-                    adjust_1: [radial_blur.mode.shader_value(), 0.0, 0.0, 0.0],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::TiltShift {
-                let tilt_shift = mask.effect_settings.tilt_shift;
-                let active = mask.enabled && tilt_shift.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        tilt_shift.amount.clamp(0.0, 100.0),
-                        tilt_shift.radius.clamp(0.0, 48.0),
-                        tilt_shift.center[0].clamp(-50.0, 150.0),
-                        tilt_shift.center[1].clamp(-50.0, 150.0),
-                    ],
-                    adjust_1: [
-                        tilt_shift.angle.clamp(-180.0, 180.0),
-                        tilt_shift.focus_width.clamp(0.0, 100.0),
-                        tilt_shift.feather.clamp(0.1, 100.0),
-                        0.0,
-                    ],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::EdgeGlow {
-                let edge_glow = mask.effect_settings.edge_glow;
-                let active = mask.enabled && edge_glow.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        edge_glow.amount.clamp(0.0, 100.0),
-                        edge_glow.edge_width.clamp(0.5, 8.0),
-                        edge_glow.detail.clamp(0.0, 100.0),
-                        edge_glow.glow.clamp(0.0, 100.0),
-                    ],
-                    adjust_1: [
-                        edge_glow.color[0].clamp(0.0, 1.0),
-                        edge_glow.color[1].clamp(0.0, 1.0),
-                        edge_glow.color[2].clamp(0.0, 1.0),
-                        0.0,
-                    ],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::Glow {
-                let glow = mask.effect_settings.glow;
-                let active = mask.enabled && glow.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        glow.amount.clamp(0.0, 100.0),
-                        glow.radius.clamp(0.0, 100.0),
-                        glow.core.clamp(0.0, 100.0),
-                        0.0,
-                    ],
-                    adjust_1: [
-                        glow.color[0].clamp(0.0, 1.0),
-                        glow.color[1].clamp(0.0, 1.0),
-                        glow.color[2].clamp(0.0, 1.0),
-                        0.0,
-                    ],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::Neon {
-                let neon = mask.effect_settings.neon;
-                let active = mask.enabled && neon.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        neon.amount.clamp(0.0, 100.0),
-                        neon.edge_width.clamp(0.5, 8.0),
-                        neon.detail.clamp(0.0, 100.0),
-                        neon.glow.clamp(0.0, 100.0),
-                    ],
-                    adjust_1: [
-                        neon.color[0].clamp(0.0, 1.0),
-                        neon.color[1].clamp(0.0, 1.0),
-                        neon.color[2].clamp(0.0, 1.0),
-                        neon.background.clamp(0.0, 100.0),
-                    ],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::LightRays {
-                let light_rays = mask.effect_settings.light_rays;
-                let active = mask.enabled && light_rays.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        light_rays.amount.clamp(0.0, 100.0),
-                        light_rays.length.clamp(0.0, 200.0),
-                        light_rays.source[0].clamp(-50.0, 150.0),
-                        light_rays.source[1].clamp(-50.0, 150.0),
-                    ],
-                    adjust_1: [
-                        light_rays.color[0].clamp(0.0, 1.0),
-                        light_rays.color[1].clamp(0.0, 1.0),
-                        light_rays.color[2].clamp(0.0, 1.0),
-                        light_rays.fade.clamp(0.0, 100.0),
-                    ],
-                    adjust_2: [
-                        light_rays.spread.clamp(0.0, 45.0),
-                        light_rays.ray_count.clamp(4.0, 96.0),
-                        light_rays.variation.clamp(0.0, 100.0),
-                        light_rays.softness.clamp(0.0, 100.0),
-                    ],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::Pixelate {
-                let pixelate = mask.effect_settings.pixelate;
-                let active = mask.enabled && pixelate.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        pixelate.amount.clamp(0.0, 100.0),
-                        pixelate.block_size.clamp(2.0, 32.0),
-                        0.0,
-                        0.0,
-                    ],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::Fog {
-                let fog = mask.effect_settings.fog;
-                let active = mask.enabled && fog.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        fog.amount.clamp(0.0, 100.0),
-                        fog.density.clamp(0.0, 100.0),
-                        fog.scale.clamp(1.0, 100.0),
-                        fog.softness.clamp(0.0, 100.0),
-                    ],
-                    adjust_1: [
-                        fog.color[0].clamp(0.0, 1.0),
-                        fog.color[1].clamp(0.0, 1.0),
-                        fog.color[2].clamp(0.0, 1.0),
-                        fog.variation.clamp(0.0, 100.0),
-                    ],
-                    adjust_2: [fog.seed.clamp(0.0, 1_000.0), 0.0, 0.0, 0.0],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            if mask.effect == MaskEffect::Smoke {
-                let smoke = mask.effect_settings.smoke;
-                let active = mask.enabled && smoke.is_active();
-                mask_data[index] = MaskData {
-                    metadata: [
-                        u32::from(active),
-                        u32::from(active),
-                        0,
-                        mask.effect.shader_id() << MASK_EFFECT_ID_SHIFT,
-                    ],
-                    adjust_0: [
-                        smoke.amount.clamp(0.0, 100.0),
-                        smoke.density.clamp(0.0, 100.0),
-                        smoke.scale.clamp(1.0, 100.0),
-                        smoke.turbulence.clamp(0.0, 100.0),
-                    ],
-                    adjust_1: [
-                        smoke.color[0].clamp(0.0, 1.0),
-                        smoke.color[1].clamp(0.0, 1.0),
-                        smoke.color[2].clamp(0.0, 1.0),
-                        smoke.angle.clamp(-180.0, 180.0),
-                    ],
-                    adjust_2: [
-                        smoke.softness.clamp(0.0, 100.0),
-                        smoke.seed.clamp(0.0, 1_000.0),
-                        0.0,
-                        0.0,
-                    ],
-                    ..MaskData::zeroed()
-                };
-                continue;
-            }
-            let adjustment = mask.adjustments;
-            // Placeholder effect types retain any adjustment values so a user
-            // can switch back without losing work, but they must not apply
-            // those hidden values to the image.
-            let adjustment_enabled = mask.enabled && mask.effect.uses_adjustments();
-            let has_hsl = adjustment.has_color_mixer();
-            let curve_flags = adjustment.curve_feature_flags();
-            let has_grading = adjustment.has_color_grading();
-            let has_hue = adjustment.hue.abs() > 1e-6;
-            let (hsl_hue_0, hsl_hue_1) = split_eight(adjustment.hsl_hue);
-            let (hsl_saturation_0, hsl_saturation_1) = split_eight(adjustment.hsl_saturation);
-            let (hsl_luminance_0, hsl_luminance_1) = split_eight(adjustment.hsl_luminance);
-            mask_data[index] = MaskData {
-                metadata: [
-                    u32::from(adjustment_enabled),
-                    u32::from(!adjustment.is_neutral()),
-                    curve_flags,
-                    u32::from(has_hsl) | (u32::from(has_grading) << 1) | (u32::from(has_hue) << 2),
-                ],
-                adjust_0: [
-                    adjustment.exposure.clamp(-5.0, 5.0),
-                    adjustment.contrast.clamp(-100.0, 100.0),
-                    adjustment.highlights.clamp(-100.0, 100.0),
-                    adjustment.shadows.clamp(-100.0, 100.0),
-                ],
-                adjust_1: [
-                    adjustment.whites.clamp(-100.0, 100.0),
-                    adjustment.blacks.clamp(-100.0, 100.0),
-                    adjustment.temperature.clamp(-100.0, 100.0),
-                    adjustment.tint.clamp(-100.0, 100.0),
-                ],
-                adjust_2: [
-                    adjustment.saturation.clamp(-100.0, 100.0),
-                    adjustment.texture.clamp(-100.0, 100.0),
-                    adjustment.clarity.clamp(-100.0, 100.0),
-                    adjustment.dehaze.clamp(-100.0, 100.0),
-                ],
-                curves: pack_local_point_curve(&adjustment.tone_curve),
-                grade_shadows: pack_color_grade_wheel(adjustment.color_grading.shadows),
-                grade_midtones: pack_color_grade_wheel(adjustment.color_grading.midtones),
-                grade_highlights: pack_color_grade_wheel(adjustment.color_grading.highlights),
-                grade_global: pack_color_grade_wheel(adjustment.color_grading.global),
-                grade_options: pack_view_color_options(adjustment.color_grading, adjustment.hue),
-                curves_red: pack_local_point_curve(&adjustment.tone_curve_red),
-                curves_green: pack_local_point_curve(&adjustment.tone_curve_green),
-                curves_blue: pack_local_point_curve(&adjustment.tone_curve_blue),
-                hsl_hue_0,
-                hsl_hue_1,
-                hsl_saturation_0,
-                hsl_saturation_1,
-                hsl_luminance_0,
-                hsl_luminance_1,
-            };
-        }
-        let (hsl_hue_0, hsl_hue_1) = split_eight(exposure.hsl_hue);
-        let (hsl_saturation_0, hsl_saturation_1) = split_eight(exposure.hsl_saturation);
-        let (hsl_luminance_0, hsl_luminance_1) = split_eight(exposure.hsl_luminance);
-        let highlight_method = if raw.is_pre_demosaiced_raster() {
-            // Highlight reconstruction is a sensor/CFA operation. A rendered
-            // TIFF already supplies RGB scene values, including any HDR headroom.
-            0.0
-        } else {
-            shader_highlight_method(raw.cfa_kind, exposure.highlight_method)
-        };
-        let opposed_chroma = if highlight_method >= 1.5 {
-            raw.inpaint_opposed_chroma(
-                exposure.black_point,
-                exposure.highlight_clip,
-                exposure.ai_denoise_enabled,
-            )
-        } else {
-            [0.0; 3]
-        };
-
-        let camera = CameraUniforms {
-            black_point: exposure.black_point,
-            temperature: exposure
-                .temperature
-                .clamp(-GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TEMPERATURE_LIMIT),
-            highlight_clip: exposure.highlight_clip,
-            chroma_denoise: exposure.chroma_denoise,
-            ca_red: exposure.ca_red,
-            ca_blue: exposure.ca_blue,
-            highlight_reconstruction: exposure.highlight_reconstruction,
-            tone_analysis_scale: tone_analysis_scale() as f32,
-            tone_guide_radius: if cfg!(target_os = "android") {
-                3.0
-            } else {
-                5.0
+        let context = GpuParamContext {
+            exposure,
+            masks,
+            raw,
+            tile: GpuTileInfo {
+                origin_x: tile_origin_x,
+                origin_y: tile_origin_y,
+                full_width,
+                full_height,
             },
-            demosaic_mode: exposure.demosaic_mode.shader_value(),
-            dual_threshold: exposure.dual_threshold.clamp(0.0, 100.0),
-            frequency_chroma: exposure.frequency_chroma.clamp(0.0, 1.0),
-            tint: exposure
-                .tint
-                .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
-            _pad_0: if raw.is_pre_demosaiced_raster() {
-                1.0
-            } else {
-                0.0
-            },
-            _pad_1: if !raw.is_pre_demosaiced_raster() || raster_uses_scene_view_transform(exposure)
-            {
-                1.0
-            } else {
-                0.0
-            },
-            _pad_2: 0.0,
-            highlight_options: [
-                highlight_method,
-                opposed_chroma[0],
-                opposed_chroma[1],
-                opposed_chroma[2],
-            ],
-            noise_shot: canonicalize_green_noise(
-                std::array::from_fn(|channel| {
-                    raw.noise_profile.shot[channel] * white_balance[channel].max(0.0)
-                }),
-                raw.noise_profile.green2_present,
-            ),
-            noise_read: canonicalize_green_noise(
-                std::array::from_fn(|channel| {
-                    let wb = white_balance[channel].max(0.0);
-                    raw.noise_profile.read[channel] * wb * wb
-                }),
-                raw.noise_profile.green2_present,
-            ),
-            noise_options: [
-                (exposure.luminance_denoise / 100.0).clamp(0.0, 1.0),
-                (exposure.denoise_detail / 100.0).clamp(0.0, 1.0),
-                exposure.denoise_quality.shader_value(),
-                raw.noise_profile.confidence.clamp(0.0, 1.0),
-            ],
-            wb: white_balance,
-            cam_to_srgb_0: camera_transform[0],
-            cam_to_srgb_1: camera_transform[1],
-            cam_to_srgb_2: camera_transform[2],
-            inpaint_wb_0: inpaint_wb_transform[0],
-            inpaint_wb_1: inpaint_wb_transform[1],
-            inpaint_wb_2: inpaint_wb_transform[2],
-            black_levels: raw.black_levels,
-            white_levels: raw.white_levels,
-            width: raw.width,
-            height: raw.height,
-            tile_origin_x,
-            tile_origin_y,
-            full_width,
-            full_height,
-            abi_version: GPU_PARAMS_ABI_VERSION,
-            abi_size_bytes: GPU_PARAMS_ABI_SIZE_BYTES,
-            tone_histogram_bounds: [0, 0, raw.width, raw.height],
-            profile_hue_sat: profile_stages.characterization.hue_sat,
-            profile_look: profile_stages.optional_look.look_table,
-            profile_tone: profile_stages.view.profile_tone,
-            output_lut: profile_stages.output.output_lut,
-            profile_flags: profile_layout.flags,
-            ai_denoise_enabled: u32::from(exposure.ai_denoise_enabled),
-            user_exposure_bits: exposure.exposure.to_bits(),
-            _pad_camera_0: 0,
-            _pad_camera_1: 0,
         };
-        let scene_tone = SceneToneUniforms {
-            exposure: exposure.exposure,
-            saturation: exposure.saturation,
-            vibrance: exposure.vibrance,
-            _pad_0: 0.0,
-            basic_tone: [
-                exposure.highlights,
-                exposure.shadows,
-                exposure.whites,
-                exposure.blacks,
-            ],
-            sigmoid_curve: [
-                sigmoid.white_target,
-                sigmoid.black_target,
-                sigmoid.paper_exposure,
-                sigmoid.film_fog,
-            ],
-            sigmoid_power: [
-                sigmoid.film_power,
-                sigmoid.paper_power,
-                sigmoid.hue_preservation,
-                sigmoid.color_processing,
-            ],
-            tone_curve_0: [
-                exposure.tone_curve.points[0][0],
-                exposure.tone_curve.points[0][1],
-                exposure.tone_curve.points[1][0],
-                exposure.tone_curve.points[1][1],
-            ],
-            tone_curve_1: [
-                exposure.tone_curve.points[2][0],
-                exposure.tone_curve.points[2][1],
-                exposure.tone_curve.points[3][0],
-                exposure.tone_curve.points[3][1],
-            ],
-            tone_curve_2: [
-                exposure.tone_curve.points[4][0],
-                exposure.tone_curve.points[4][1],
-                exposure.tone_curve.points[5][0],
-                exposure.tone_curve.points[5][1],
-            ],
-            tone_curve_3: [
-                exposure.tone_curve.points[6][0],
-                exposure.tone_curve.points[6][1],
-                exposure.tone_curve.points[7][0],
-                exposure.tone_curve.points[7][1],
-            ],
-            tone_curve_meta: [
-                exposure.tone_curve.len.clamp(2, 8) as f32,
-                if exposure.tone_curve.is_identity() {
-                    1.0
-                } else {
-                    0.0
-                },
-                0.0,
-                0.0,
-            ],
-            tone_curve_red_0: [
-                exposure.tone_curve_red.points[0][0],
-                exposure.tone_curve_red.points[0][1],
-                exposure.tone_curve_red.points[1][0],
-                exposure.tone_curve_red.points[1][1],
-            ],
-            tone_curve_red_1: [
-                exposure.tone_curve_red.points[2][0],
-                exposure.tone_curve_red.points[2][1],
-                exposure.tone_curve_red.points[3][0],
-                exposure.tone_curve_red.points[3][1],
-            ],
-            tone_curve_red_2: [
-                exposure.tone_curve_red.points[4][0],
-                exposure.tone_curve_red.points[4][1],
-                exposure.tone_curve_red.points[5][0],
-                exposure.tone_curve_red.points[5][1],
-            ],
-            tone_curve_red_3: [
-                exposure.tone_curve_red.points[6][0],
-                exposure.tone_curve_red.points[6][1],
-                exposure.tone_curve_red.points[7][0],
-                exposure.tone_curve_red.points[7][1],
-            ],
-            tone_curve_red_meta: [
-                exposure.tone_curve_red.len.clamp(2, 8) as f32,
-                if exposure.tone_curve_red.is_identity() {
-                    1.0
-                } else {
-                    0.0
-                },
-                0.0,
-                0.0,
-            ],
-            tone_curve_green_0: [
-                exposure.tone_curve_green.points[0][0],
-                exposure.tone_curve_green.points[0][1],
-                exposure.tone_curve_green.points[1][0],
-                exposure.tone_curve_green.points[1][1],
-            ],
-            tone_curve_green_1: [
-                exposure.tone_curve_green.points[2][0],
-                exposure.tone_curve_green.points[2][1],
-                exposure.tone_curve_green.points[3][0],
-                exposure.tone_curve_green.points[3][1],
-            ],
-            tone_curve_green_2: [
-                exposure.tone_curve_green.points[4][0],
-                exposure.tone_curve_green.points[4][1],
-                exposure.tone_curve_green.points[5][0],
-                exposure.tone_curve_green.points[5][1],
-            ],
-            tone_curve_green_3: [
-                exposure.tone_curve_green.points[6][0],
-                exposure.tone_curve_green.points[6][1],
-                exposure.tone_curve_green.points[7][0],
-                exposure.tone_curve_green.points[7][1],
-            ],
-            tone_curve_green_meta: [
-                exposure.tone_curve_green.len.clamp(2, 8) as f32,
-                if exposure.tone_curve_green.is_identity() {
-                    1.0
-                } else {
-                    0.0
-                },
-                0.0,
-                0.0,
-            ],
-            tone_curve_blue_0: [
-                exposure.tone_curve_blue.points[0][0],
-                exposure.tone_curve_blue.points[0][1],
-                exposure.tone_curve_blue.points[1][0],
-                exposure.tone_curve_blue.points[1][1],
-            ],
-            tone_curve_blue_1: [
-                exposure.tone_curve_blue.points[2][0],
-                exposure.tone_curve_blue.points[2][1],
-                exposure.tone_curve_blue.points[3][0],
-                exposure.tone_curve_blue.points[3][1],
-            ],
-            tone_curve_blue_2: [
-                exposure.tone_curve_blue.points[4][0],
-                exposure.tone_curve_blue.points[4][1],
-                exposure.tone_curve_blue.points[5][0],
-                exposure.tone_curve_blue.points[5][1],
-            ],
-            tone_curve_blue_3: [
-                exposure.tone_curve_blue.points[6][0],
-                exposure.tone_curve_blue.points[6][1],
-                exposure.tone_curve_blue.points[7][0],
-                exposure.tone_curve_blue.points[7][1],
-            ],
-            tone_curve_blue_meta: [
-                exposure.tone_curve_blue.len.clamp(2, 8) as f32,
-                if exposure.tone_curve_blue.is_identity() {
-                    1.0
-                } else {
-                    0.0
-                },
-                0.0,
-                0.0,
-            ],
-            hsl_hue_0,
-            hsl_hue_1,
-            hsl_saturation_0,
-            hsl_saturation_1,
-            hsl_luminance_0,
-            hsl_luminance_1,
-            mask_counts: [masks.masks.len().min(MAX_LOCAL_MASKS) as u32, 0, 0, 0],
-            grade_shadows: pack_color_grade_wheel(exposure.color_grading.shadows),
-            grade_midtones: pack_color_grade_wheel(exposure.color_grading.midtones),
-            grade_highlights: pack_color_grade_wheel(exposure.color_grading.highlights),
-            grade_global: pack_color_grade_wheel(exposure.color_grading.global),
-            grade_options: pack_view_color_options(exposure.color_grading, exposure.hue),
-            rec2020_to_xyz: [
-                [0.636_958, 0.262_700_2, 0.0, 0.0],
-                [0.144_616_9, 0.677_998_1, 0.028_072_7, 0.0],
-                [0.168_880_9, 0.059_301_7, 1.060_985_1, 0.0],
-            ],
-            xyz_to_rec2020: [
-                [1.716_651_2, -0.666_684_4, 0.017_639_9, 0.0],
-                [-0.355_670_8, 1.616_481_2, -0.042_770_6, 0.0],
-                [-0.253_366_3, 0.015_768_5, 0.942_103_1, 0.0],
-            ],
-            xyz_to_bradford: [
-                [0.8951, -0.7502, 0.0389, 0.0],
-                [0.2664, 1.7135, -0.0685, 0.0],
-                [-0.1614, 0.0367, 1.0296, 0.0],
-            ],
-            bradford_to_xyz: [
-                [0.986_992_9, 0.432_305_3, -0.008_528_7, 0.0],
-                [-0.147_054_3, 0.518_360_3, 0.040_042_8, 0.0],
-                [0.159_962_7, 0.049_291_2, 0.968_486_7, 0.0],
-            ],
-        };
-        // Global and masked Glow share one linear diffusion chain. Using the
-        // widest active request preserves every halo's support while avoiding
-        // another full-resolution texture stack for a non-destructive local
-        // effect.
-        let local_glow_radius = mask_data
-            .iter()
-            .filter(|mask| {
-                mask.metadata[0] != 0
-                    && mask.metadata[3] >> MASK_EFFECT_ID_SHIFT == MaskEffect::Glow.shader_id()
-            })
-            .map(|mask| mask.adjust_0[1])
-            .fold(0.0_f32, f32::max);
-        let global_glow_radius = if exposure.glow_amount.abs() > 1e-6 {
-            exposure.glow_radius.clamp(0.0, 100.0)
-        } else {
-            0.0
-        };
-        let effects = EffectsUniforms {
-            presence: [exposure.texture, exposure.clarity, exposure.dehaze, 0.0],
-            creative_effects: [
-                exposure.glow_amount.clamp(0.0, 100.0),
-                global_glow_radius.max(local_glow_radius),
-                exposure.glow_threshold.clamp(0.0, 100.0),
-                exposure.sharpen_amount.clamp(0.0, 150.0),
-            ],
-            vignette: [
-                exposure.vignette_amount.clamp(-100.0, 100.0),
-                exposure.vignette_midpoint.clamp(0.0, 100.0),
-                exposure.vignette_roundness.clamp(-100.0, 100.0),
-                exposure.vignette_feather.clamp(0.0, 100.0),
-            ],
-            vignette_options: [
-                exposure.vignette_highlights.clamp(0.0, 100.0),
-                exposure.sharpen_radius.clamp(0.5, 3.0),
-                exposure.sharpen_detail.clamp(0.0, 100.0),
-                exposure.sharpen_masking.clamp(0.0, 100.0),
-            ],
-            vignette_frame: [
-                0.5,
-                0.5,
-                full_width.max(1) as f32,
-                full_height.max(1) as f32,
-            ],
-            vignette_transform: [1.0, 0.0, 0.0, 1.0],
-            vignette_dark_half_fit: [0.10, 1.235, 2.88, 0.86],
-            vignette_dark_full_fit: [0.02, 1.135, 3.46, 1.0],
-            vignette_light_half_fit: [0.305, 1.24, 4.36, 0.90],
-            vignette_light_full_fit: [0.13, 1.075, 5.66, 1.0],
-            capture_scale_sigma: [0.74, 1.75, 0.58, 1.65],
-            capture_thresholds: [0.015, 0.0045, 0.055, 0.28],
-            capture_mask_coherence: [0.035, 0.62, 0.055, 0.22],
-        };
+        let mask_data = pack_mask_params(masks);
         Self {
-            camera,
-            scene_tone,
-            effects,
-            mask_data: Box::new(mask_data),
+            camera: pack_camera_params(&context),
+            scene_tone: pack_scene_tone_params(&context),
+            effects: pack_effect_params(&context, &mask_data),
+            mask_data,
         }
     }
 
@@ -1731,13 +1641,11 @@ impl GpuOutputSnapshot {
             device,
             queue,
             &self.texture,
-            0,
-            0,
-            self.width,
-            self.height,
-            self.width,
-            self.height,
-            "auraw developed thumbnail readback",
+            TextureReadbackRegion::full(
+                self.width,
+                self.height,
+                "auraw developed thumbnail readback",
+            ),
         )?;
         let image = image::RgbaImage::from_raw(self.width, self.height, rgba)
             .ok_or_else(|| anyhow!("developed thumbnail readback has an invalid byte count"))?;
@@ -1753,6 +1661,18 @@ impl GpuOutputSnapshot {
             rgba: image.into_raw(),
         })
     }
+}
+
+struct RawGpuPipelineBuild<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    renderer: Option<&'a mut egui_wgpu::Renderer>,
+    program_template: Option<&'a RawGpuProgramTemplate>,
+    pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
+    raw: &'a LoadedRaw,
+    params: &'a GpuParams,
+    quality: ProcessingQuality,
+    config: RawGpuPipelineConfig,
 }
 
 impl RawGpuPipeline {
@@ -1932,19 +1852,19 @@ impl RawGpuPipeline {
         let exposure = ExposureParams::scene_referred_default();
         let masks = MaskStack::default();
         let params = GpuParams::new(&exposure, &masks, &raw);
-        Self::new_internal(
+        Self::new_internal(RawGpuPipelineBuild {
             device,
             queue,
-            None,
-            None,
+            renderer: None,
+            program_template: None,
             pipeline_cache,
-            &raw,
-            &params,
+            raw: &raw,
+            params: &params,
             quality,
-            RawGpuPipelineConfig {
+            config: RawGpuPipelineConfig {
                 mask_atlas_edge_override,
             },
-        )
+        })
     }
 
     pub fn output_snapshot(&self) -> GpuOutputSnapshot {
@@ -1980,17 +1900,17 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
-        Self::new_internal(
+        Self::new_internal(RawGpuPipelineBuild {
             device,
             queue,
-            Some(renderer),
-            None,
-            None,
+            renderer: Some(renderer),
+            program_template: None,
+            pipeline_cache: None,
             raw,
             params,
             quality,
-            RawGpuPipelineConfig::default(),
-        )
+            config: RawGpuPipelineConfig::default(),
+        })
     }
 
     pub fn new_headless_with_quality(
@@ -2000,17 +1920,17 @@ impl RawGpuPipeline {
         params: &GpuParams,
         quality: ProcessingQuality,
     ) -> Result<Self> {
-        Self::new_internal(
+        Self::new_internal(RawGpuPipelineBuild {
             device,
             queue,
-            None,
-            None,
-            None,
+            renderer: None,
+            program_template: None,
+            pipeline_cache: None,
             raw,
             params,
             quality,
-            RawGpuPipelineConfig::default(),
-        )
+            config: RawGpuPipelineConfig::default(),
+        })
     }
 
     /// Creates a headless pipeline with an explicit normalized-mask atlas edge.
@@ -2024,19 +1944,19 @@ impl RawGpuPipeline {
         quality: ProcessingQuality,
         mask_edge: u32,
     ) -> Result<Self> {
-        Self::new_internal(
+        Self::new_internal(RawGpuPipelineBuild {
             device,
             queue,
-            None,
-            None,
-            None,
+            renderer: None,
+            program_template: None,
+            pipeline_cache: None,
             raw,
             params,
             quality,
-            RawGpuPipelineConfig {
+            config: RawGpuPipelineConfig {
                 mask_atlas_edge_override: Some(mask_edge),
             },
-        )
+        })
     }
 
     /// Allocates a new set of textures and bind groups while reusing the
@@ -2052,17 +1972,17 @@ impl RawGpuPipeline {
         template: &Self,
     ) -> Result<Self> {
         let program_template = template.program_template();
-        Self::new_internal(
+        Self::new_internal(RawGpuPipelineBuild {
             device,
             queue,
-            None,
-            Some(&program_template),
-            program_template.pipeline_cache.clone(),
+            renderer: None,
+            program_template: Some(&program_template),
+            pipeline_cache: program_template.pipeline_cache.clone(),
             raw,
             params,
             quality,
-            RawGpuPipelineConfig::default(),
-        )
+            config: RawGpuPipelineConfig::default(),
+        })
     }
 
     /// Reuses compiled programs while allocating a smaller local-mask atlas.
@@ -2078,19 +1998,19 @@ impl RawGpuPipeline {
         mask_edge: u32,
     ) -> Result<Self> {
         let program_template = template.program_template();
-        Self::new_internal(
+        Self::new_internal(RawGpuPipelineBuild {
             device,
             queue,
-            None,
-            Some(&program_template),
-            program_template.pipeline_cache.clone(),
+            renderer: None,
+            program_template: Some(&program_template),
+            pipeline_cache: program_template.pipeline_cache.clone(),
             raw,
             params,
             quality,
-            RawGpuPipelineConfig {
+            config: RawGpuPipelineConfig {
                 mask_atlas_edge_override: Some(mask_edge),
             },
-        )
+        })
     }
 
     /// Allocates export-sized resources while cloning compute pipelines from a
@@ -2104,19 +2024,19 @@ impl RawGpuPipeline {
         template: &RawGpuProgramTemplate,
         mask_edge: u32,
     ) -> Result<Self> {
-        Self::new_internal(
+        Self::new_internal(RawGpuPipelineBuild {
             device,
             queue,
-            None,
-            Some(template),
-            template.pipeline_cache.clone(),
+            renderer: None,
+            program_template: Some(template),
+            pipeline_cache: template.pipeline_cache.clone(),
             raw,
             params,
             quality,
-            RawGpuPipelineConfig {
+            config: RawGpuPipelineConfig {
                 mask_atlas_edge_override: Some(mask_edge),
             },
-        )
+        })
     }
 
     /// Reuses an owned program template for a normal interactive preview.
@@ -2130,31 +2050,32 @@ impl RawGpuPipeline {
         quality: ProcessingQuality,
         template: &RawGpuProgramTemplate,
     ) -> Result<Self> {
-        Self::new_internal(
+        Self::new_internal(RawGpuPipelineBuild {
             device,
             queue,
-            None,
-            Some(template),
-            template.pipeline_cache.clone(),
+            renderer: None,
+            program_template: Some(template),
+            pipeline_cache: template.pipeline_cache.clone(),
             raw,
             params,
             quality,
-            RawGpuPipelineConfig::default(),
-        )
+            config: RawGpuPipelineConfig::default(),
+        })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn new_internal(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        mut renderer: Option<&mut egui_wgpu::Renderer>,
-        program_template: Option<&RawGpuProgramTemplate>,
-        pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
-        raw: &LoadedRaw,
-        params: &GpuParams,
-        quality: ProcessingQuality,
-        config: RawGpuPipelineConfig,
-    ) -> Result<Self> {
+    fn new_internal(build: RawGpuPipelineBuild<'_>) -> Result<Self> {
+        let RawGpuPipelineBuild {
+            device,
+            queue,
+            renderer,
+            program_template,
+            pipeline_cache,
+            raw,
+            params,
+            quality,
+            config,
+        } = build;
+        let mut renderer = renderer;
         validate_raw(raw)?;
         if let Some(template) = program_template {
             if template.cfa_kind != raw.cfa_kind
@@ -2514,18 +2435,12 @@ impl RawGpuPipeline {
         let scene_tone_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg scene-tone uniforms"),
             layout: &bgl_scene_tone,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: scene_tone_uniforms_buffer.as_entire_binding(),
-            }],
+            entries: &[buffer_binding(0, &scene_tone_uniforms_buffer)],
         });
         let effects_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg effects uniforms"),
             layout: &bgl_effects,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: effects_uniforms_buffer.as_entire_binding(),
-            }],
+            entries: &[buffer_binding(0, &effects_uniforms_buffer)],
         });
 
         let demosaic_start_for_programs = 1;
@@ -3027,26 +2942,11 @@ impl RawGpuPipeline {
             label: Some("bg highlight reconstruction"),
             layout: &bgl_highlights,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
             ],
         });
 
@@ -3054,30 +2954,12 @@ impl RawGpuPipeline {
             label: Some("bg1"),
             layout: &bgl1,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(4, &tex1_view),
             ],
         });
 
@@ -3085,34 +2967,13 @@ impl RawGpuPipeline {
             label: Some("bg2"),
             layout: &bgl2,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(5, &tex1_view),
+                texture_binding(6, &tex2_view),
             ],
         });
 
@@ -3120,34 +2981,13 @@ impl RawGpuPipeline {
             label: Some("bg3"),
             layout: &bgl3,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(7, &tex2_view),
+                texture_binding(8, &tex1_view),
             ],
         });
 
@@ -3160,30 +3000,12 @@ impl RawGpuPipeline {
             label: Some("bg dual demosaic green"),
             layout: &bgl_dual_green,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 20,
-                    resource: wgpu::BindingResource::TextureView(dual_green_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(20, dual_green_view),
             ],
         });
 
@@ -3191,34 +3013,13 @@ impl RawGpuPipeline {
             label: Some("bg dual demosaic rgb"),
             layout: &bgl_dual_rgb,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 21,
-                    resource: wgpu::BindingResource::TextureView(dual_green_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 22,
-                    resource: wgpu::BindingResource::TextureView(dual_low_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(21, dual_green_view),
+                texture_binding(22, dual_low_view),
             ],
         });
 
@@ -3226,42 +3027,15 @@ impl RawGpuPipeline {
             label: Some("bg4"),
             layout: &bgl4,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 23,
-                    resource: wgpu::BindingResource::TextureView(dual_low_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 10,
-                    resource: wgpu::BindingResource::TextureView(&scene_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(7, &tex2_view),
+                texture_binding(9, &tex1_view),
+                texture_binding(23, dual_low_view),
+                texture_binding(10, &scene_view),
             ],
         });
 
@@ -3269,38 +3043,14 @@ impl RawGpuPipeline {
             label: Some("bg X-Trans derivatives"),
             layout: &bgl_xtrans_derivatives,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 20,
-                    resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 21,
-                    resource: wgpu::BindingResource::TextureView(&highlight_work_b_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(9, &tex2_view),
+                texture_binding(20, &highlight_work_a_view),
+                texture_binding(21, &highlight_work_b_view),
             ],
         });
 
@@ -3308,42 +3058,15 @@ impl RawGpuPipeline {
             label: Some("bg X-Trans homogeneity"),
             layout: &bgl_xtrans_homogeneity,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::TextureView(&highlight_work_b_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 24,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 25,
-                    resource: wgpu::BindingResource::TextureView(&scene_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(27, &highlight_work_a_view),
+                texture_binding(28, &highlight_work_b_view),
+                texture_binding(24, &tex1_view),
+                texture_binding(25, &scene_view),
             ],
         });
 
@@ -3351,42 +3074,15 @@ impl RawGpuPipeline {
             label: Some("bg X-Trans accumulate"),
             layout: &bgl_xtrans_accumulate,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 29,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 30,
-                    resource: wgpu::BindingResource::TextureView(&scene_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 26,
-                    resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(9, &tex2_view),
+                texture_binding(29, &tex1_view),
+                texture_binding(30, &scene_view),
+                texture_binding(26, &highlight_work_a_view),
             ],
         });
 
@@ -3394,38 +3090,14 @@ impl RawGpuPipeline {
             label: Some("bg X-Trans finish"),
             layout: &bgl_xtrans_finish,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&reconstructed_raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 26,
-                    resource: wgpu::BindingResource::TextureView(&highlight_work_a_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 23,
-                    resource: wgpu::BindingResource::TextureView(dual_low_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 10,
-                    resource: wgpu::BindingResource::TextureView(&scene_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(3, &reconstructed_raw_view),
+                texture_binding(26, &highlight_work_a_view),
+                texture_binding(23, dual_low_view),
+                texture_binding(10, &scene_view),
             ],
         });
 
@@ -3435,18 +3107,9 @@ impl RawGpuPipeline {
                     label: Some(label),
                     layout: &bgl_color_denoise,
                     entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: camera_uniforms_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 10,
-                            resource: wgpu::BindingResource::TextureView(write_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 11,
-                            resource: wgpu::BindingResource::TextureView(read_view),
-                        },
+                        buffer_binding(0, &camera_uniforms_buffer),
+                        texture_binding(10, write_view),
+                        texture_binding(11, read_view),
                     ],
                 })
             };
@@ -3469,30 +3132,12 @@ impl RawGpuPipeline {
             label: Some("bg tone prepare"),
             layout: &bgl_tone_prepare,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: wgpu::BindingResource::TextureView(&scene_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 15,
-                    resource: tone_histogram_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 20,
-                    resource: profile_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 18,
-                    resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 32,
-                    resource: wgpu::BindingResource::TextureView(&inpaint_view),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(11, &scene_view),
+                buffer_binding(15, &tone_histogram_buffer),
+                buffer_binding(20, &profile_buffer),
+                texture_binding(18, &tone_guide_a_view),
+                texture_binding(32, &inpaint_view),
             ],
         });
 
@@ -3502,18 +3147,9 @@ impl RawGpuPipeline {
                     label: Some(label),
                     layout: &bgl_tone_blur,
                     entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: camera_uniforms_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 17,
-                            resource: wgpu::BindingResource::TextureView(read_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 18,
-                            resource: wgpu::BindingResource::TextureView(write_view),
-                        },
+                        buffer_binding(0, &camera_uniforms_buffer),
+                        texture_binding(17, read_view),
+                        texture_binding(18, write_view),
                     ],
                 })
             };
@@ -3532,14 +3168,8 @@ impl RawGpuPipeline {
             label: Some("bg tone histogram reduction"),
             layout: &bgl_tone_reduce,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 15,
-                    resource: tone_histogram_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 16,
-                    resource: tone_stats_buffer.as_entire_binding(),
-                },
+                buffer_binding(15, &tone_histogram_buffer),
+                buffer_binding(16, &tone_stats_buffer),
             ],
         });
 
@@ -3547,216 +3177,68 @@ impl RawGpuPipeline {
             label: Some("bg adjustment preparation"),
             layout: &bgl_adjust_prepare,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: wgpu::BindingResource::TextureView(&scene_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 21,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 16,
-                    resource: tone_stats_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 17,
-                    resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 20,
-                    resource: profile_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 32,
-                    resource: wgpu::BindingResource::TextureView(&inpaint_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
+                buffer_binding(0, &camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(11, &scene_view),
+                texture_binding(21, &tex1_view),
+                buffer_binding(16, &tone_stats_buffer),
+                texture_binding(17, &tone_guide_a_view),
+                buffer_binding(20, &profile_buffer),
+                texture_binding(27, &mask_view),
+                sampler_binding(28, &mask_sampler),
+                texture_binding(32, &inpaint_view),
+                buffer_binding(33, &mask_data_buffer),
             ],
         });
 
-        let bg_adjust_tone = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg scene tone edits"),
-            layout: &bgl_adjust_tone,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 22,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 23,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 16,
-                    resource: tone_stats_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 17,
-                    resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 20,
-                    resource: profile_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let make_adjust_tone_bind_group =
+            |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &bgl_adjust_tone,
+                    entries: &[
+                        buffer_binding(0, &camera_uniforms_buffer),
+                        texture_binding(22, input),
+                        texture_binding(23, output),
+                        buffer_binding(16, &tone_stats_buffer),
+                        texture_binding(17, &tone_guide_a_view),
+                        buffer_binding(20, &profile_buffer),
+                        texture_binding(27, &mask_view),
+                        sampler_binding(28, &mask_sampler),
+                        buffer_binding(33, &mask_data_buffer),
+                    ],
+                })
+            };
+        let bg_adjust_tone =
+            make_adjust_tone_bind_group("bg scene tone edits", &tex1_view, &tex2_view);
+        let bg_adjust_local_tone =
+            make_adjust_tone_bind_group("bg local scene tone edits", &tex2_view, &tex1_view);
 
-        let bg_adjust_local_tone = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg local scene tone edits"),
-            layout: &bgl_adjust_tone,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 22,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 23,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 16,
-                    resource: tone_stats_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 17,
-                    resource: wgpu::BindingResource::TextureView(&tone_guide_a_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 20,
-                    resource: profile_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let bg_adjust_effects = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg scene presence and color"),
-            layout: &bgl_adjust_effects,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 22,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 23,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 16,
-                    resource: tone_stats_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let bg_adjust_effects_copy = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg scene effects copy"),
-            layout: &bgl_adjust_effects,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 22,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 23,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 16,
-                    resource: tone_stats_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let make_adjust_effects_bind_group =
+            |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &bgl_adjust_effects,
+                    entries: &[
+                        buffer_binding(0, &camera_uniforms_buffer),
+                        texture_binding(22, input),
+                        texture_binding(23, output),
+                        buffer_binding(16, &tone_stats_buffer),
+                        texture_binding(27, &mask_view),
+                        sampler_binding(28, &mask_sampler),
+                        buffer_binding(33, &mask_data_buffer),
+                    ],
+                })
+            };
+        let bg_adjust_effects = make_adjust_effects_bind_group(
+            "bg scene presence and color",
+            &tex1_view,
+            &tex2_view,
+        );
+        let bg_adjust_effects_copy =
+            make_adjust_effects_bind_group("bg scene effects copy", &tex2_view, &tex1_view);
 
         // Mask Blur diffuses the completed local-effects image through five
         // adjacent scales. It ends in tex2 and keeps tex1 available until the
@@ -3767,30 +3249,12 @@ impl RawGpuPipeline {
                     label: Some(label),
                     layout: &bgl_mask_blur,
                     entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: camera_uniforms_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 24,
-                            resource: wgpu::BindingResource::TextureView(read_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 25,
-                            resource: wgpu::BindingResource::TextureView(write_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 27,
-                            resource: wgpu::BindingResource::TextureView(&mask_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 28,
-                            resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 33,
-                            resource: mask_data_buffer.as_entire_binding(),
-                        },
+                        buffer_binding(0, &camera_uniforms_buffer),
+                        texture_binding(24, read_view),
+                        texture_binding(25, write_view),
+                        texture_binding(27, &mask_view),
+                        sampler_binding(28, &mask_sampler),
+                        buffer_binding(33, &mask_data_buffer),
                     ],
                 })
             };
@@ -3809,36 +3273,26 @@ impl RawGpuPipeline {
         // Five adjacent B3-spline diffusion stages then ping-pong through tex2
         // and the display-linear surface. The latter is safe scratch here: the
         // final render overwrites it only after the creative composite.
-        let bg_glow_prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg Glow source extraction"),
-            layout: &bgl_glow_prepare,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 24,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 31,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let make_glow_prepare_bind_group =
+            |label: &str, source: &wgpu::TextureView, extracted: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &bgl_glow_prepare,
+                    entries: &[
+                        buffer_binding(0, &camera_uniforms_buffer),
+                        texture_binding(24, source),
+                        texture_binding(31, extracted),
+                        texture_binding(27, &mask_view),
+                        sampler_binding(28, &mask_sampler),
+                        buffer_binding(33, &mask_data_buffer),
+                    ],
+                })
+            };
+        let bg_glow_prepare = make_glow_prepare_bind_group(
+            "bg Glow source extraction",
+            &tex1_view,
+            &tex2_view,
+        );
 
         let make_glow_blur_bind_group =
             |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
@@ -3846,18 +3300,9 @@ impl RawGpuPipeline {
                     label: Some(label),
                     layout: &bgl_glow_blur,
                     entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: camera_uniforms_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 30,
-                            resource: wgpu::BindingResource::TextureView(read_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 31,
-                            resource: wgpu::BindingResource::TextureView(write_view),
-                        },
+                        buffer_binding(0, &camera_uniforms_buffer),
+                        texture_binding(30, read_view),
+                        texture_binding(31, write_view),
                     ],
                 })
             };
@@ -3875,36 +3320,11 @@ impl RawGpuPipeline {
         // When mask Blur ran first, tex2 contains the new creative base. Glow
         // uses tex1/display-linear as scratch so that base remains available
         // for the final creative composite.
-        let bg_glow_prepare_after_blur = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg Glow source extraction after mask Blur"),
-            layout: &bgl_glow_prepare,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 24,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 31,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let bg_glow_prepare_after_blur = make_glow_prepare_bind_group(
+            "bg Glow source extraction after mask Blur",
+            &tex2_view,
+            &tex1_view,
+        );
         let bg_glow_blur_after_blur_0 = make_glow_blur_bind_group(
             "bg Glow diffusion after mask Blur 0",
             &tex1_view,
@@ -3935,169 +3355,54 @@ impl RawGpuPipeline {
         // composites the final Glow diffusion from display_linear and writes
         // the result into tex2. The post-crop vignette is applied later in the
         // always-dispatched display-linear view pass.
-        let bg_adjust_creative = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg creative glow"),
-            layout: &bgl_adjust_creative,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 24,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 25,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 30,
-                    resource: wgpu::BindingResource::TextureView(&display_linear_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 34,
-                    resource: wgpu::BindingResource::TextureView(&light_rays_mask_view),
-                },
-            ],
-        });
+        let make_adjust_creative_bind_group =
+            |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &bgl_adjust_creative,
+                    entries: &[
+                        buffer_binding(0, &camera_uniforms_buffer),
+                        texture_binding(24, input),
+                        texture_binding(25, output),
+                        texture_binding(30, &display_linear_view),
+                        texture_binding(27, &mask_view),
+                        sampler_binding(28, &mask_sampler),
+                        buffer_binding(33, &mask_data_buffer),
+                        texture_binding(34, &light_rays_mask_view),
+                    ],
+                })
+            };
+        let bg_adjust_creative =
+            make_adjust_creative_bind_group("bg creative glow", &tex1_view, &tex2_view);
+        let bg_adjust_creative_after_blur = make_adjust_creative_bind_group(
+            "bg creative effects after mask Blur",
+            &tex2_view,
+            &tex1_view,
+        );
 
-        let bg_adjust_creative_after_blur = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg creative effects after mask Blur"),
-            layout: &bgl_adjust_creative,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 24,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 25,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 30,
-                    resource: wgpu::BindingResource::TextureView(&display_linear_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 34,
-                    resource: wgpu::BindingResource::TextureView(&light_rays_mask_view),
-                },
-            ],
-        });
-
-        let bg_adjust_render = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg scene look view and output"),
-            layout: &bgl_adjust_render,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: wgpu::BindingResource::TextureView(&out_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 26,
-                    resource: wgpu::BindingResource::TextureView(&tex2_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 16,
-                    resource: tone_stats_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 20,
-                    resource: profile_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 29,
-                    resource: wgpu::BindingResource::TextureView(&display_linear_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let bg_adjust_render_after_blur = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg scene look view and output after mask Blur"),
-            layout: &bgl_adjust_render,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: wgpu::BindingResource::TextureView(&out_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 26,
-                    resource: wgpu::BindingResource::TextureView(&tex1_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 16,
-                    resource: tone_stats_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 20,
-                    resource: profile_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 27,
-                    resource: wgpu::BindingResource::TextureView(&mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 28,
-                    resource: wgpu::BindingResource::Sampler(&mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 29,
-                    resource: wgpu::BindingResource::TextureView(&display_linear_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 33,
-                    resource: mask_data_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let make_adjust_render_bind_group = |label: &str, source: &wgpu::TextureView| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &bgl_adjust_render,
+                entries: &[
+                    buffer_binding(0, &camera_uniforms_buffer),
+                    texture_binding(12, &out_view),
+                    texture_binding(26, source),
+                    buffer_binding(16, &tone_stats_buffer),
+                    buffer_binding(20, &profile_buffer),
+                    texture_binding(27, &mask_view),
+                    sampler_binding(28, &mask_sampler),
+                    texture_binding(29, &display_linear_view),
+                    buffer_binding(33, &mask_data_buffer),
+                ],
+            })
+        };
+        let bg_adjust_render =
+            make_adjust_render_bind_group("bg scene look view and output", &tex2_view);
+        let bg_adjust_render_after_blur = make_adjust_render_bind_group(
+            "bg scene look view and output after mask Blur",
+            &tex1_view,
+        );
 
         // Storage texture declarations are format-specific in the demosaic and
         // scene shaders. Highlight reconstruction writes its fixed R32F CFA.
@@ -5425,13 +4730,12 @@ impl RawGpuPipeline {
             device,
             queue,
             &self.out_texture,
-            x,
-            y,
-            width,
-            height,
-            self.width,
-            self.height,
-            "auraw tiled export readback",
+            TextureReadbackRegion {
+                origin: [x, y],
+                extent: [width, height],
+                texture_extent: [self.width, self.height],
+                label: "auraw tiled export readback",
+            },
         )
     }
 
@@ -5456,13 +4760,12 @@ impl RawGpuPipeline {
             device,
             queue,
             &self.display_linear_texture,
-            x,
-            y,
-            width,
-            height,
-            self.width,
-            self.height,
-            "auraw pipelined display-linear export readback",
+            TextureReadbackRegion {
+                origin: [x, y],
+                extent: [width, height],
+                texture_extent: [self.width, self.height],
+                label: "auraw pipelined display-linear export readback",
+            },
         )
     }
 
@@ -5487,13 +4790,12 @@ impl RawGpuPipeline {
             device,
             queue,
             &self.display_linear_texture,
-            x,
-            y,
-            width,
-            height,
-            self.width,
-            self.height,
-            "auraw display-linear export readback",
+            TextureReadbackRegion {
+                origin: [x, y],
+                extent: [width, height],
+                texture_extent: [self.width, self.height],
+                label: "auraw display-linear export readback",
+            },
         )
     }
 
@@ -5605,34 +4907,13 @@ impl RawGpuPipeline {
             label: Some("auraw scene conversion bind group"),
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.camera_uniforms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&raw_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: wgpu::BindingResource::TextureView(&black_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: wgpu::BindingResource::TextureView(&scene_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: wgpu::BindingResource::TextureView(&working_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 20,
-                    resource: self.profile_buffer.as_entire_binding(),
-                },
+                buffer_binding(0, &self.camera_uniforms_buffer),
+                texture_binding(1, &raw_view),
+                texture_binding(2, &color_view),
+                texture_binding(19, &black_view),
+                texture_binding(11, &scene_view),
+                texture_binding(12, &working_view),
+                buffer_binding(20, &self.profile_buffer),
             ],
         });
         let mut shader_manager =
@@ -5759,18 +5040,9 @@ impl RawGpuPipeline {
             label: Some("auraw inpaint resize bind group"),
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: resize_params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&scene_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&output_view),
-                },
+                buffer_binding(0, &resize_params_buffer),
+                texture_binding(1, &scene_view),
+                texture_binding(2, &output_view),
             ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {

@@ -1,8 +1,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use auraw_cli::pipeline::{
-    crop_raw, export_mask_atlas_edge, load_raw_file, load_raw_file_with_dcp,
-    spawn_tiled_png_export, DenoiseQuality, ExportEvent, ExportMetadata, ExportSettings,
-    ExposureParams, GeometryTransform, MaskStack, TileSpec, GLOBAL_TINT_OFFSET_LIMIT,
+    crop_raw, export_mask_atlas_edge, load_raw_file, load_raw_file_with_dcp, spawn_tiled_export,
+    DenoiseQuality, ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams,
+    GeometryTransform, MaskStack, TiledExportJob, TileSpec, GLOBAL_TINT_OFFSET_LIMIT,
     HUE_ROTATION_LIMIT_DEGREES,
 };
 use auraw_gpu::wgpu;
@@ -109,6 +109,14 @@ fn run() -> Result<()> {
         ..ExportSettings::default()
     };
 
+    let exporter = ExportHarness {
+        device: &device,
+        queue: &queue,
+        settings: &settings,
+        metadata: &metadata,
+        backend: adapter_info.backend,
+    };
+
     if let Some(directory) = &args.suite_output {
         std::fs::create_dir_all(directory)
             .with_context(|| format!("create suite directory {}", directory.display()))?;
@@ -125,16 +133,7 @@ fn run() -> Result<()> {
             if let Some((name, value)) = adjustment {
                 set_adjustment(&mut exposure, name, *value)?;
             }
-            export_one(
-                &device,
-                &queue,
-                Arc::clone(&raw),
-                exposure,
-                &output,
-                &settings,
-                &metadata,
-                adapter_info.backend,
-            )?;
+            exporter.export_one(Arc::clone(&raw), exposure, &output)?;
         }
         return Ok(());
     }
@@ -143,77 +142,81 @@ fn run() -> Result<()> {
     for (name, value) in &args.adjustments {
         set_adjustment(&mut exposure, name, *value)?;
     }
-    export_one(
-        &device,
-        &queue,
+    exporter.export_one(
         raw,
         exposure,
         args.output.as_deref().context("missing output path")?,
-        &settings,
-        &metadata,
-        adapter_info.backend,
     )
+}
+
+struct ExportHarness<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    settings: &'a ExportSettings,
+    metadata: &'a ExportMetadata,
+    backend: wgpu::Backend,
+}
+
+impl ExportHarness<'_> {
+    fn export_one(
+        &self,
+        raw: Arc<auraw_cli::pipeline::LoadedRaw>,
+        exposure: ExposureParams,
+        output: &Path,
+    ) -> Result<()> {
+        let source_dimensions = (self.metadata.source_width, self.metadata.source_height);
+        let receiver = spawn_tiled_export(
+            ExportFormat::Png,
+            TiledExportJob {
+                device: self.device.clone(),
+                queue: self.queue.clone(),
+                raw,
+                geometry: GeometryTransform::default(),
+                exposure,
+                masks: MaskStack::default(),
+                inpaint: None,
+                path: output.to_owned(),
+                tile_spec: TileSpec::default(),
+                settings: self.settings.clone(),
+                metadata: self.metadata.clone(),
+                cancellation: Arc::new(AtomicBool::new(false)),
+                program_prewarm: None,
+            },
+        );
+
+        let mut finished = None;
+        while let Ok(event) = receiver.recv() {
+            match event {
+                ExportEvent::Progress {
+                    completed_tiles,
+                    total_tiles,
+                } => eprintln!("rendered {completed_tiles}/{total_tiles} tiles"),
+                ExportEvent::Finished(result) => {
+                    finished = Some(result.map_err(|error| anyhow!(error))?);
+                    break;
+                }
+            }
+        }
+        let output = finished.context("export worker exited without a completion event")?;
+        // The completion event is sent at the end of the worker, but wait for its
+        // sender to disconnect before releasing the final device handle. This
+        // avoids racing Vulkan teardown in short-lived headless invocations.
+        while receiver.recv().is_ok() {}
+        println!(
+            "wrote {} ({}x{}, sRGB PNG, {:?})",
+            output.display(),
+            source_dimensions.0,
+            source_dimensions.1,
+            self.backend,
+        );
+        Ok(())
+    }
 }
 
 fn default_exposure_for_raw(raw: &auraw_cli::pipeline::LoadedRaw) -> ExposureParams {
     let mut exposure = ExposureParams::default();
     raw.apply_adaptive_detail_defaults(&mut exposure);
     exposure
-}
-
-#[allow(clippy::too_many_arguments)]
-fn export_one(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    raw: Arc<auraw_cli::pipeline::LoadedRaw>,
-    exposure: ExposureParams,
-    output: &Path,
-    settings: &ExportSettings,
-    metadata: &ExportMetadata,
-    backend: wgpu::Backend,
-) -> Result<()> {
-    let source_dimensions = (metadata.source_width, metadata.source_height);
-    let receiver = spawn_tiled_png_export(
-        device.clone(),
-        queue.clone(),
-        raw,
-        GeometryTransform::default(),
-        exposure,
-        MaskStack::default(),
-        None,
-        output.to_owned(),
-        TileSpec::default(),
-        settings.clone(),
-        metadata.clone(),
-        Arc::new(AtomicBool::new(false)),
-    );
-
-    let mut finished = None;
-    while let Ok(event) = receiver.recv() {
-        match event {
-            ExportEvent::Progress {
-                completed_tiles,
-                total_tiles,
-            } => eprintln!("rendered {completed_tiles}/{total_tiles} tiles"),
-            ExportEvent::Finished(result) => {
-                finished = Some(result.map_err(|error| anyhow!(error))?);
-                break;
-            }
-        }
-    }
-    let output = finished.context("export worker exited without a completion event")?;
-    // The completion event is sent at the end of the worker, but wait for its
-    // sender to disconnect before releasing the final device handle. This
-    // avoids racing Vulkan teardown in short-lived headless invocations.
-    while receiver.recv().is_ok() {}
-    println!(
-        "wrote {} ({}x{}, sRGB PNG, {:?})",
-        output.display(),
-        source_dimensions.0,
-        source_dimensions.1,
-        backend,
-    );
-    Ok(())
 }
 
 const LIGHTROOM_COMPARISON_SUITE: &[(&str, Option<(&str, f32)>)] = &[
