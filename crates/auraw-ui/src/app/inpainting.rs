@@ -1,3 +1,5 @@
+use super::*;
+
 impl AurawApp {
     pub(crate) fn inpaint_busy(&self) -> bool {
         self.inpaint_task_id.is_some()
@@ -223,7 +225,7 @@ impl AurawApp {
         }
     }
 
-    fn capture_inpaint_source(
+    pub(super) fn capture_inpaint_source(
         &self,
         frame: &eframe::Frame,
         dabs: &[BrushDab],
@@ -248,7 +250,7 @@ impl AurawApp {
         })
     }
 
-    fn capture_inpaint_scene_square(
+    pub(super) fn capture_inpaint_scene_square(
         &self,
         frame: &eframe::Frame,
         patch: InpaintPatchRect,
@@ -370,7 +372,7 @@ impl AurawApp {
         Ok(rgb_rec2020)
     }
 
-    fn request_source_retouch(
+    pub(super) fn request_source_retouch(
         &mut self,
         frame: &eframe::Frame,
         kind: InpaintStrokeKind,
@@ -516,7 +518,7 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    fn start_inpaint_worker(&mut self, model_path: PathBuf) {
+    pub(super) fn start_inpaint_worker(&mut self, model_path: PathBuf) {
         if self.inpaint_task_id.is_some() || self.inpaint_receiver.is_some() {
             return;
         }
@@ -586,26 +588,10 @@ impl AurawApp {
         let Some(task_id) = self.inpaint_task_id else {
             return;
         };
-        let mut events = Vec::new();
-        let mut disconnected = false;
-        if let Some(receiver) = &self.inpaint_receiver {
-            loop {
-                match receiver.try_recv() {
-                    Ok(event) => {
-                        let finished = matches!(event, InpaintEvent::Finished(_));
-                        events.push(event);
-                        if finished {
-                            break;
-                        }
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-        }
+        let (events, disconnected) = drain_worker_events(
+            self.inpaint_receiver.as_ref(),
+            |event| matches!(event, InpaintEvent::Finished(_)),
+        );
 
         let mut finished = None;
         for event in events {
@@ -791,7 +777,7 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn lama_model_path(&self) -> PathBuf {
+    pub(super) fn lama_model_path(&self) -> PathBuf {
         let root = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
@@ -800,7 +786,7 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    fn lama_model_path(&self) -> PathBuf {
+    pub(super) fn lama_model_path(&self) -> PathBuf {
         self.android_app
             .internal_data_path()
             .unwrap_or_else(std::env::temp_dir)
@@ -862,58 +848,26 @@ impl AurawApp {
                 .inpaint_task_id
                 .is_some_and(|id| self.background_task_details_open(id))
         {
-            #[cfg(not(target_os = "android"))]
-            let mut minimize = false;
-            let mut cancel = false;
-            crate::ui::responsive_popup(egui::Window::new("Erasing selection"), ctx, 420.0)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    if let Some((downloaded, total)) = self.inpaint_download_progress {
-                        let fraction = downloaded as f32 / total.max(1) as f32;
-                        ui.label("Downloading lama_fp32.onnx…");
-                        ui.add(
-                            egui::ProgressBar::new(fraction)
-                                .show_percentage()
-                                .text(format!(
-                                    "{:.1} / {:.1} MB",
-                                    downloaded as f64 / 1_000_000.0,
-                                    total as f64 / 1_000_000.0
-                                )),
-                        );
-                    } else if self.inpaint_inferencing {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Running local LaMa inpainting…");
-                        });
-                    } else {
-                        ui.spinner();
-                    }
-                    ui.add_space(8.0);
+            let action = show_cancellable_worker_popup(ctx, "Erasing selection", 420.0, |ui| {
+                if let Some((downloaded, total)) = self.inpaint_download_progress {
+                    show_download_progress(ui, "Downloading lama_fp32.onnx…", downloaded, total);
+                } else if self.inpaint_inferencing {
                     ui.horizontal(|ui| {
-                        #[cfg(not(target_os = "android"))]
-                        {
-                            minimize = ui.button("Minimize").clicked();
-                        }
-                        cancel = ui.button("Cancel").clicked();
+                        ui.spinner();
+                        ui.label("Running local LaMa inpainting…");
                     });
-                });
-            if let Some(task_id) = self.inpaint_task_id {
-                #[cfg(not(target_os = "android"))]
-                if minimize {
-                    self.set_background_task_details_open(task_id, false);
+                } else {
+                    ui.spinner();
                 }
-                if cancel {
-                    self.cancel_background_task(task_id);
-                }
-            }
+            });
+            let task_id = self.inpaint_task_id;
+            self.apply_worker_dialog_action(task_id, action);
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 }
 
-fn flatten_inpaint_source_model_region(
+pub(super) fn flatten_inpaint_source_model_region(
     mut rgb_rec2020: Vec<f32>,
     layer: &InpaintLayer,
     origin: [u32; 2],

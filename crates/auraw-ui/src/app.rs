@@ -49,6 +49,10 @@ use background_tasks::{
 };
 mod edit_history;
 use edit_history::EditHistory;
+mod worker;
+use worker::{
+    drain_worker_events, show_cancellable_worker_popup, show_download_progress, spawn_ui_worker,
+};
 
 #[cfg(not(target_os = "android"))]
 pub(crate) enum DesktopPickerEvent {
@@ -1220,14 +1224,20 @@ impl AurawApp {
     }
 }
 
-include!("app/lifecycle.rs");
-include!("app/masks_ai.rs");
-include!("app/inpainting.rs");
-include!("app/processing_export.rs");
-include!("app/library_adjustments.rs");
-include!("app/sidecar_persistence.rs");
-include!("app/background_task_runtime.rs");
-include!("app/eframe_impl.rs");
+mod lifecycle;
+mod masks_ai;
+mod inpainting;
+mod processing_export;
+mod library_adjustments;
+mod sidecar_persistence;
+mod background_task_runtime;
+mod eframe_impl;
+
+use lifecycle::{install_missing_range_sources, needs_canonical_mask_source};
+use processing_export::{batch_export_overall_fraction, spawn_export_request};
+#[cfg(not(target_os = "android"))]
+use processing_export::spawn_desktop_library_batch_export;
+use sidecar_persistence::sidecar_interaction_active;
 
 #[cfg(test)]
 mod transactional_pipeline_tests {

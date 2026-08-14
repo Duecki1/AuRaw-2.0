@@ -1,4 +1,4 @@
-use super::AurawApp;
+use super::{show_download_progress, AurawApp};
 use crate::ai_denoise::{AiDenoiseEvent, RAWNIND_PACKAGE_BYTES};
 use eframe::egui;
 use std::{
@@ -499,16 +499,11 @@ impl AurawApp {
                 .show(ctx, |ui| {
                     ui.label("RawNIND is being applied before sharpening. This dialog stays open until the operation finishes or is cancelled.");
                     if let Some((downloaded, total)) = self.ai_denoise_download_progress {
-                        let fraction = downloaded as f32 / total.max(1) as f32;
-                        ui.label("Downloading verified darktable-ai model package…");
-                        ui.add(
-                            egui::ProgressBar::new(fraction)
-                                .show_percentage()
-                                .text(format!(
-                                    "{:.1} / {:.1} MB",
-                                    downloaded as f64 / 1_000_000.0,
-                                    total as f64 / 1_000_000.0
-                                )),
+                        show_download_progress(
+                            ui,
+                            "Downloading verified darktable-ai model package…",
+                            downloaded,
+                            total,
                         );
                     } else if let Some((phase, completed, total)) =
                         self.ai_denoise_apply_progress

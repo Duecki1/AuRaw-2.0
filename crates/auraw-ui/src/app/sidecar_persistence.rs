@@ -1,7 +1,9 @@
+use super::*;
+
 const SIDECAR_AUTOSAVE_INTERVAL: Duration = Duration::from_millis(900);
 const SIDECAR_AUTOSAVE_ACTIVE_POLL: Duration = Duration::from_millis(100);
 
-fn autosave_deadline(
+pub(super) fn autosave_deadline(
     existing: Option<SidecarAutosaveDeadline>,
     generation: u64,
     now: Instant,
@@ -14,7 +16,7 @@ fn autosave_deadline(
         })
 }
 
-fn sidecar_interaction_active(ctx: &egui::Context) -> bool {
+pub(super) fn sidecar_interaction_active(ctx: &egui::Context) -> bool {
     ctx.input(|input| input.pointer.any_down()) || ctx.egui_wants_keyboard_input()
 }
 
@@ -33,7 +35,7 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    fn report_sidecar_save_failure(&mut self, revision: Option<u64>, detail: impl AsRef<str>) {
+    pub(super) fn report_sidecar_save_failure(&mut self, revision: Option<u64>, detail: impl AsRef<str>) {
         self.sidecar_save_feedback_until = None;
         self.sidecar_conflict_resolution_error = None;
         if let Some(revision) = revision {
@@ -173,7 +175,7 @@ impl AurawApp {
         }
     }
 
-    fn start_cloud_sidecar_conflict_resolution(
+    pub(super) fn start_cloud_sidecar_conflict_resolution(
         &mut self,
         raw_path: PathBuf,
         resolution: CloudSidecarConflictResolution,
@@ -304,7 +306,7 @@ impl AurawApp {
         }
     }
 
-    fn abandon_current_sidecar_for_cloud_conflict(&mut self) {
+    pub(super) fn abandon_current_sidecar_for_cloud_conflict(&mut self) {
         let generation = self.sidecar_generation;
         self.sidecar_target = None;
         self.sidecar_saved_revision = None;
@@ -344,7 +346,7 @@ impl AurawApp {
     /// Finalize and enqueue the old image before any per-image state is reset.
     /// Requests own both their target and edit snapshot, so a slow completion
     /// can never be redirected to the next RAW.
-    fn begin_sidecar_open(&mut self) -> u64 {
+    pub(super) fn begin_sidecar_open(&mut self) -> u64 {
         self.commit_edit_history_now();
         let revision = self.edit_commit_revision();
         let pending_latest = self
@@ -374,7 +376,7 @@ impl AurawApp {
         self.sidecar_generation
     }
 
-    fn install_sidecar_target(
+    pub(super) fn install_sidecar_target(
         &mut self,
         target: crate::sidecar::SidecarTarget,
         generation: u64,
@@ -411,7 +413,7 @@ impl AurawApp {
         self.start_next_sidecar_save();
     }
 
-    fn queue_current_sidecar_save(&mut self, explicit: bool) {
+    pub(super) fn queue_current_sidecar_save(&mut self, explicit: bool) {
         let Some(target) = self.sidecar_target.clone() else {
             return;
         };
@@ -450,7 +452,7 @@ impl AurawApp {
         }
     }
 
-    fn schedule_sidecar_autosave(&mut self, ctx: &egui::Context, interaction_active: bool) {
+    pub(super) fn schedule_sidecar_autosave(&mut self, ctx: &egui::Context, interaction_active: bool) {
         if self.loaded_raw.is_none() || self.sidecar_target.is_none() {
             self.sidecar_autosave_deadline = None;
             return;
@@ -614,7 +616,7 @@ impl AurawApp {
         result
     }
 
-    fn detach_current_sidecar_target_for_library_action(&mut self) -> bool {
+    pub(super) fn detach_current_sidecar_target_for_library_action(&mut self) -> bool {
         // Finish any immutable save request before the caller removes or
         // replaces the files. Detaching the target then prevents autosave from
         // recreating the deleted sidecar while the Library tab remains open.
@@ -667,7 +669,7 @@ impl AurawApp {
         }
     }
 
-    fn start_next_sidecar_save(&mut self) {
+    pub(super) fn start_next_sidecar_save(&mut self) {
         if self.sidecar_in_flight.is_some() {
             return;
         }
@@ -737,7 +739,7 @@ impl AurawApp {
         }
     }
 
-    fn poll_sidecar_save(&mut self) {
+    pub(super) fn poll_sidecar_save(&mut self) {
         let received = self
             .sidecar_receiver
             .as_ref()
@@ -770,7 +772,7 @@ impl AurawApp {
         self.start_next_sidecar_save();
     }
 
-    fn finish_sidecar_save(&mut self, event: SidecarSaveEvent) {
+    pub(super) fn finish_sidecar_save(&mut self, event: SidecarSaveEvent) {
         self.sidecar_receiver = None;
         self.sidecar_in_flight = None;
         if let Some(raw_path) = event.raw_path.as_deref() {
@@ -808,7 +810,7 @@ impl AurawApp {
         }
     }
 
-    fn install_developed_thumbnail_result(
+    pub(super) fn install_developed_thumbnail_result(
         &mut self,
         target: &crate::sidecar::SidecarTarget,
         thumbnail: crate::pipeline::RawThumbnail,
@@ -838,7 +840,7 @@ impl AurawApp {
         }
     }
 
-    fn load_developed_thumbnail_for_target(
+    pub(super) fn load_developed_thumbnail_for_target(
         &self,
         target: &crate::sidecar::SidecarTarget,
     ) -> Result<Option<crate::pipeline::RawThumbnail>, String> {
@@ -862,7 +864,7 @@ impl AurawApp {
         }
     }
 
-    fn queue_developed_thumbnail_refresh(&mut self, generation: u64, revision: u64) {
+    pub(super) fn queue_developed_thumbnail_refresh(&mut self, generation: u64, revision: u64) {
         if generation != self.sidecar_generation {
             return;
         }
@@ -901,7 +903,7 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    fn poll_developed_thumbnail(&mut self, frame: &eframe::Frame) {
+    pub(super) fn poll_developed_thumbnail(&mut self, frame: &eframe::Frame) {
         let received = self
             .developed_thumbnail_receiver
             .as_ref()
@@ -1080,7 +1082,7 @@ impl AurawApp {
         }
     }
 
-    fn flush_sidecar_on_exit(&mut self) {
+    pub(super) fn flush_sidecar_on_exit(&mut self) {
         self.commit_edit_history_now();
         let revision = self.edit_commit_revision();
         for request in &mut self.sidecar_pending {
@@ -1143,7 +1145,7 @@ impl AurawApp {
     }
 }
 
-fn save_sidecar_request(
+pub(super) fn save_sidecar_request(
     request: SidecarSaveRequest,
     #[cfg(target_os = "android")] android_app: &auraw_ffi::AndroidApp,
 ) -> Result<String, String> {
