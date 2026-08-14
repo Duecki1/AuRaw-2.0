@@ -37,21 +37,53 @@ pub(in crate::app) fn batch_export_overall_fraction(
 }
 
 #[cfg(not(target_os = "android"))]
-#[allow(clippy::too_many_arguments)]
-pub(in crate::app) fn spawn_desktop_library_batch_export(
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    jobs: VecDeque<LibraryBatchExportJob>,
+pub(in crate::app) struct DesktopLibraryBatchExportRequest {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub jobs: VecDeque<LibraryBatchExportJob>,
+    pub format: ExportFormat,
+    pub settings: ExportSettings,
+    pub camera_profile_mode: CameraProfileMode,
+    pub camera_profile_folder: Option<PathBuf>,
+    pub last_camera_profile: Option<PathBuf>,
+    pub default_exposure: ExposureParams,
+    pub decode_gate: Arc<std::sync::RwLock<()>>,
+    pub cancellation: Arc<std::sync::atomic::AtomicBool>,
+    pub repaint: egui::Context,
+}
+
+#[cfg(not(target_os = "android"))]
+struct DesktopLibraryExportContext<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
     format: ExportFormat,
-    settings: ExportSettings,
+    settings: &'a ExportSettings,
     camera_profile_mode: CameraProfileMode,
-    camera_profile_folder: Option<PathBuf>,
-    last_camera_profile: Option<PathBuf>,
+    camera_profile_folder: Option<&'a std::path::Path>,
+    last_camera_profile: Option<&'a std::path::Path>,
     default_exposure: ExposureParams,
-    decode_gate: Arc<std::sync::RwLock<()>>,
-    cancellation: Arc<std::sync::atomic::AtomicBool>,
-    repaint: egui::Context,
+    decode_gate: &'a std::sync::RwLock<()>,
+    cancellation: &'a std::sync::atomic::AtomicBool,
+}
+
+#[cfg(not(target_os = "android"))]
+pub(in crate::app) fn spawn_desktop_library_batch_export(
+    request: DesktopLibraryBatchExportRequest,
 ) -> mpsc::Receiver<LibraryBatchExportEvent> {
+    let DesktopLibraryBatchExportRequest {
+        device,
+        queue,
+        jobs,
+        format,
+        settings,
+        camera_profile_mode,
+        camera_profile_folder,
+        last_camera_profile,
+        default_exposure,
+        decode_gate,
+        cancellation,
+        repaint,
+    } = request;
     use std::sync::atomic::Ordering;
 
     let (sender, receiver) = mpsc::channel();
@@ -72,19 +104,19 @@ pub(in crate::app) fn spawn_desktop_library_batch_export(
                 });
                 repaint.request_repaint();
 
-                let request = prepare_desktop_library_export_request(
-                    &device,
-                    &queue,
-                    &job,
+                let context = DesktopLibraryExportContext {
+                    device: &device,
+                    queue: &queue,
                     format,
-                    &settings,
+                    settings: &settings,
                     camera_profile_mode,
-                    camera_profile_folder.as_deref(),
-                    last_camera_profile.as_deref(),
+                    camera_profile_folder: camera_profile_folder.as_deref(),
+                    last_camera_profile: last_camera_profile.as_deref(),
                     default_exposure,
-                    &decode_gate,
-                    &cancellation,
-                );
+                    decode_gate: &decode_gate,
+                    cancellation: &cancellation,
+                };
+                let request = prepare_desktop_library_export_request(&job, &context);
 
                 if cancellation.load(Ordering::Acquire) {
                     break;
@@ -166,20 +198,22 @@ pub(in crate::app) fn spawn_desktop_library_batch_export(
 }
 
 #[cfg(not(target_os = "android"))]
-#[allow(clippy::too_many_arguments)]
-pub(in crate::app) fn prepare_desktop_library_export_request(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+fn prepare_desktop_library_export_request(
     job: &LibraryBatchExportJob,
-    format: ExportFormat,
-    settings: &ExportSettings,
-    camera_profile_mode: CameraProfileMode,
-    camera_profile_folder: Option<&std::path::Path>,
-    last_camera_profile: Option<&std::path::Path>,
-    default_exposure: ExposureParams,
-    decode_gate: &std::sync::RwLock<()>,
-    cancellation: &std::sync::atomic::AtomicBool,
+    context: &DesktopLibraryExportContext<'_>,
 ) -> Result<ExportTaskRequest, String> {
+    let DesktopLibraryExportContext {
+        device,
+        queue,
+        format,
+        settings,
+        camera_profile_mode,
+        camera_profile_folder,
+        last_camera_profile,
+        default_exposure,
+        decode_gate,
+        cancellation,
+    } = *context;
     use std::sync::atomic::Ordering;
 
     if cancellation.load(Ordering::Acquire) {

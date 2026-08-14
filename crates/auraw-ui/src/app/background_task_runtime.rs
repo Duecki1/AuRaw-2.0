@@ -146,18 +146,20 @@ impl AurawApp {
             ),
         );
         self.library_batch_export_receiver = Some(spawn_desktop_library_batch_export(
-            render_state.device.clone(),
-            render_state.queue.clone(),
-            jobs,
-            format,
-            settings,
-            self.camera_profile_mode,
-            self.camera_profile_folder.clone(),
-            self.last_camera_profile.clone(),
-            self.new_image_exposure(),
-            self.library.decode_gate(),
-            cancellation,
-            self.egui_ctx.clone(),
+            DesktopLibraryBatchExportRequest {
+                device: render_state.device.clone(),
+                queue: render_state.queue.clone(),
+                jobs,
+                format,
+                settings,
+                camera_profile_mode: self.camera_profile_mode,
+                camera_profile_folder: self.camera_profile_folder.clone(),
+                last_camera_profile: self.last_camera_profile.clone(),
+                default_exposure: self.new_image_exposure(),
+                decode_gate: self.library.decode_gate(),
+                cancellation,
+                repaint: self.egui_ctx.clone(),
+            },
         ));
     }
 

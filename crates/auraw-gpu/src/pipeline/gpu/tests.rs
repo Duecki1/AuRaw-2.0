@@ -1,10 +1,12 @@
 use super::{
-    composite_inpaint_rgba16f, processing_work_format, shader_manager::ShaderManager,
+    composite_inpaint_rgba16f, pack_effect_mask, pack_local_point_curve, pack_point_curve,
+    processing_work_format, shader_manager::ShaderManager,
     work_shader_source, ProcessingQuality, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2,
     SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4, SHADER_COLOR_DENOISE, SHADER_CREATIVE_EFFECTS,
     SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_INPAINT_SCENE, SHADER_SCENE_ADJUSTMENTS,
     SHADER_TONE_ANALYSIS, SHADER_VIEW_TRANSFORM, SHADER_XTRANS_DEMOSAIC, SHADER_XTRANS_FINISH,
 };
+use crate::pipeline::{LocalMask, MaskEffect, MaskKind, PointCurve};
 
 fn validate_shader(name: &str, source: &str, quality: ProcessingQuality) {
     let format = processing_work_format(quality);
@@ -74,4 +76,52 @@ fn soft_inpaint_composites_color_and_alpha() {
     for (actual, expected) in output.into_iter().zip([0.44, 0.32, 0.4, 0.625]) {
         assert!((actual - expected).abs() < 1e-3);
     }
+}
+
+#[test]
+fn point_curve_packing_is_shared_between_global_and_local_uniforms() {
+    let mut curve = PointCurve::default();
+    curve.points = [
+        [0.0, 0.0],
+        [0.2, 0.1],
+        [0.4, 0.5],
+        [0.7, 0.8],
+        [1.0, 1.0],
+        [1.0, 1.0],
+        [1.0, 1.0],
+        [1.0, 1.0],
+    ];
+    curve.len = 5;
+
+    let packed = pack_point_curve(&curve);
+    assert_eq!(packed.pairs[0], [0.0, 0.0, 0.2, 0.1]);
+    assert_eq!(packed.pairs[1], [0.4, 0.5, 0.7, 0.8]);
+    assert_eq!(packed.pairs[2], [1.0, 1.0, 1.0, 1.0]);
+    assert_eq!(packed.meta, [5.0, 0.0, 0.0, 0.0]);
+
+    let local = pack_local_point_curve(&curve);
+    assert_eq!(&local[..4], &packed.pairs);
+    assert_eq!(local[4], packed.meta);
+    assert_eq!(&local[5..], &[[0.0; 4]; 3]);
+}
+
+#[test]
+fn mask_effect_packing_preserves_shader_id_activity_and_clamps() {
+    let mut mask = LocalMask::new(MaskKind::Fullscreen, 1);
+    mask.effect = MaskEffect::Blur;
+    mask.effect_settings.blur.amount = 150.0;
+    mask.effect_settings.blur.radius = 99.0;
+
+    let packed = pack_effect_mask(&mask).expect("Blur is a GPU-backed mask effect");
+    assert_eq!(packed.metadata[0], 1);
+    assert_eq!(packed.metadata[1], 1);
+    assert_eq!(packed.metadata[2], 0);
+    assert_eq!(packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT, MaskEffect::Blur.shader_id());
+    assert_eq!(packed.adjust_0, [100.0, 16.0, 0.0, 0.0]);
+
+    mask.enabled = false;
+    let disabled = pack_effect_mask(&mask).expect("Blur remains representable when disabled");
+    assert_eq!(disabled.metadata[0], 0);
+    assert_eq!(disabled.metadata[1], 0);
+    assert_eq!(disabled.adjust_0, packed.adjust_0);
 }

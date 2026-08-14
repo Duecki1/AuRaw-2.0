@@ -63,6 +63,16 @@ pub enum SliderGradient {
     Luminance(egui::Color32),
 }
 
+#[derive(Clone, Copy)]
+struct SliderOptions<'a> {
+    decimals: usize,
+    speed: f64,
+    hover_text: Option<&'a str>,
+    explicit_reset_value: Option<f64>,
+    accent: Option<egui::Color32>,
+    gradient: Option<SliderGradient>,
+}
+
 fn slider_scroll_lock_id() -> egui::Id {
     egui::Id::new("auraw-adjustment-slider-scroll-lock")
 }
@@ -115,7 +125,18 @@ where
     Num: egui::emath::Numeric + Copy,
 {
     adjustment_slider_impl(
-        ui, label, value, range, decimals, speed, hover_text, None, None, None,
+        ui,
+        label,
+        value,
+        range,
+        SliderOptions {
+            decimals,
+            speed,
+            hover_text,
+            explicit_reset_value: None,
+            accent: None,
+            gradient: None,
+        },
     )
 }
 
@@ -139,12 +160,14 @@ where
         label,
         value,
         range,
-        decimals,
-        speed,
-        hover_text,
-        None,
-        None,
-        Some(gradient),
+        SliderOptions {
+            decimals,
+            speed,
+            hover_text,
+            explicit_reset_value: None,
+            accent: None,
+            gradient: Some(gradient),
+        },
     )
 }
 
@@ -169,12 +192,14 @@ where
         label,
         value,
         range,
-        decimals,
-        speed,
-        hover_text,
-        None,
-        Some(accent),
-        Some(gradient),
+        SliderOptions {
+            decimals,
+            speed,
+            hover_text,
+            explicit_reset_value: None,
+            accent: Some(accent),
+            gradient: Some(gradient),
+        },
     )
 }
 
@@ -187,15 +212,17 @@ pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&s
         "Hue",
         value,
         -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES..=crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
-        1,
-        1.0,
-        hover_text,
-        Some(0.0),
-        None,
-        Some(SliderGradient::HueDegrees {
-            start: -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
-            end: crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
-        }),
+        SliderOptions {
+            decimals: 1,
+            speed: 1.0,
+            hover_text,
+            explicit_reset_value: Some(0.0),
+            accent: None,
+            gradient: Some(SliderGradient::HueDegrees {
+                start: -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
+                end: crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
+            }),
+        },
     )
 }
 
@@ -219,31 +246,35 @@ where
         label,
         value,
         range,
-        decimals,
-        speed,
-        hover_text,
-        Some(reset_value.to_f64()),
-        None,
-        None,
+        SliderOptions {
+            decimals,
+            speed,
+            hover_text,
+            explicit_reset_value: Some(reset_value.to_f64()),
+            accent: None,
+            gradient: None,
+        },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn adjustment_slider_impl<Num>(
     ui: &mut Ui,
     label: &str,
     value: &mut Num,
     range: RangeInclusive<Num>,
-    decimals: usize,
-    speed: f64,
-    hover_text: Option<&str>,
-    explicit_reset_value: Option<f64>,
-    accent: Option<egui::Color32>,
-    gradient: Option<SliderGradient>,
+    options: SliderOptions<'_>,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
 {
+    let SliderOptions {
+        decimals,
+        speed,
+        hover_text,
+        explicit_reset_value,
+        accent,
+        gradient,
+    } = options;
     let mut changed = false;
 
     ui.push_id(label, |ui| {
@@ -312,18 +343,7 @@ where
                 },
             );
 
-            changed |= guarded_slider(
-                ui,
-                value,
-                range,
-                decimals,
-                speed,
-                control_width,
-                hover_text,
-                reset_value,
-                accent,
-                gradient,
-            );
+            changed |= guarded_slider(ui, value, range, control_width, reset_value, options);
             ui.add_space(ROW_BOTTOM_SPACE);
         });
     });
@@ -349,22 +369,25 @@ fn touch_value_field(ui: &mut Ui, value: f64, decimals: usize) -> egui::Response
     response
 }
 
-#[allow(clippy::too_many_arguments)]
 fn guarded_slider<Num>(
     ui: &mut Ui,
     value: &mut Num,
     range: RangeInclusive<Num>,
-    decimals: usize,
-    keyboard_step: f64,
     width: f32,
-    hover_text: Option<&str>,
     reset_value: f64,
-    accent: Option<egui::Color32>,
-    gradient: Option<SliderGradient>,
+    options: SliderOptions<'_>,
 ) -> bool
 where
     Num: egui::emath::Numeric + Copy,
 {
+    let SliderOptions {
+        decimals,
+        speed: keyboard_step,
+        hover_text,
+        explicit_reset_value: _,
+        accent,
+        gradient,
+    } = options;
     let start = (*range.start()).to_f64();
     let end = (*range.end()).to_f64();
     let span = end - start;

@@ -1245,21 +1245,20 @@ unsafe fn loaded_raw_from_context(
     let cfa_map = canonical_cfa_map(cdesc)?;
     let physical_black_levels = black_levels(color.black, &color.cblack);
     let (width, height, raw_pixels, color_indices, black_levels_per_pixel) = copy_active_pixels(
-        ctx.raw,
-        rawdata.raw_image,
-        raw_width,
-        raw_height,
-        crop_x,
-        crop_y,
-        width,
-        height,
-        sizes.raw_pitch as usize,
-        sizes.flip,
-        cfa_kind,
-        cdesc,
-        cfa_map,
-        color.black,
-        &color.cblack,
+        ActivePixelCopy {
+            raw: ctx.raw,
+            raw_image: rawdata.raw_image,
+            raw_dimensions: [raw_width, raw_height],
+            crop_origin: [crop_x, crop_y],
+            dimensions: [width, height],
+            raw_pitch: sizes.raw_pitch as usize,
+            flip: sizes.flip,
+            cfa_kind,
+            cdesc,
+            cfa_map,
+            shared_black: color.black,
+            cblack: &color.cblack,
+        },
     )?;
     let physical_wb = white_balance(color.cam_mul, cdesc);
     let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
@@ -1369,24 +1368,36 @@ type ActivePixelData = (
     CompactPixelMap<f32>,
 );
 
-#[allow(clippy::too_many_arguments)]
-unsafe fn copy_active_pixels(
+struct ActivePixelCopy<'a> {
     raw: *mut ffi::libraw_data_t,
     raw_image: *const u16,
-    raw_width: u32,
-    raw_height: u32,
-    crop_x: u32,
-    crop_y: u32,
-    width: u32,
-    height: u32,
+    raw_dimensions: [u32; 2],
+    crop_origin: [u32; 2],
+    dimensions: [u32; 2],
     raw_pitch: usize,
     flip: i32,
     cfa_kind: CfaKind,
     cdesc: [u8; 4],
     cfa_map: [u8; 4],
     shared_black: u32,
-    cblack: &[u32],
-) -> Result<ActivePixelData> {
+    cblack: &'a [u32],
+}
+
+unsafe fn copy_active_pixels(request: ActivePixelCopy<'_>) -> Result<ActivePixelData> {
+    let ActivePixelCopy {
+        raw,
+        raw_image,
+        raw_dimensions: [raw_width, raw_height],
+        crop_origin: [crop_x, crop_y],
+        dimensions: [width, height],
+        raw_pitch,
+        flip,
+        cfa_kind,
+        cdesc,
+        cfa_map,
+        shared_black,
+        cblack,
+    } = request;
     let raw_width = raw_width as usize;
     let raw_height = raw_height as usize;
     let crop_x = crop_x as usize;
@@ -1437,6 +1448,8 @@ unsafe fn copy_active_pixels(
             let row_offset = raw_y
                 .checked_mul(pitch)
                 .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
+            // SAFETY: the active crop and pitch were validated above, and LibRaw keeps
+            // the decoded mosaic allocation alive and immutable for this entire call.
             let row_ptr = (raw_image as *const u8).add(row_offset) as *const u16;
             let source = std::slice::from_raw_parts(row_ptr.add(crop_x), width);
             let destination = &mut pixels[y * out_width..(y + 1) * out_width];

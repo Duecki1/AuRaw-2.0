@@ -261,11 +261,196 @@ pub enum ExportEvent {
     Finished(Result<PathBuf, String>),
 }
 
-/// Runs export on a worker thread. The source mosaic always remains at its
-/// native dimensions. Each halo-padded tile is demosaiced and tone-mapped on
-/// the GPU, read back as display-linear Rec.2020, stitched into source rows,
-/// resized in linear light, then encoded to sRGB. The destination is published
-/// only after the PNG has completed successfully.
+/// Owns one high-quality tiled export operation.
+///
+/// Keeping the resources and processing state together makes the worker
+/// boundary explicit and avoids threading the same argument list through each
+/// output format. The legacy format-specific entry points below remain as
+/// compatibility wrappers.
+pub struct TiledExportJob {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub raw: Arc<LoadedRaw>,
+    pub geometry: GeometryTransform,
+    pub exposure: ExposureParams,
+    pub masks: MaskStack,
+    pub inpaint: Option<InpaintLayer>,
+    pub path: PathBuf,
+    pub tile_spec: TileSpec,
+    pub settings: ExportSettings,
+    pub metadata: ExportMetadata,
+    pub cancellation: Arc<AtomicBool>,
+    pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
+}
+
+impl ExportFormat {
+    fn worker_name(self) -> &'static str {
+        match self {
+            Self::Png => "auraw-tiled-export",
+            Self::Jpeg => "auraw-tiled-jpeg-export",
+            Self::Tiff => "auraw-tiled-tiff-export",
+        }
+    }
+
+    fn worker_spawn_error(self) -> &'static str {
+        match self {
+            Self::Png => "could not start export worker",
+            Self::Jpeg => "could not start JPEG export worker",
+            Self::Tiff => "could not start TIFF export worker",
+        }
+    }
+}
+
+/// Runs an export on a worker thread. The source mosaic remains at native
+/// dimensions; the format-specific encoders share the same tiled linear render
+/// and publication/cancellation path.
+pub fn spawn_tiled_export(
+    format: ExportFormat,
+    job: TiledExportJob,
+) -> mpsc::Receiver<ExportEvent> {
+    let (sender, receiver) = mpsc::channel();
+    let worker_sender = sender.clone();
+    let worker_path = job.path.clone();
+    let worker_name = format.worker_name();
+
+    let spawn_result = std::thread::Builder::new()
+        .name(worker_name.to_owned())
+        .spawn(move || {
+            let worker_started = Instant::now();
+            record_export_worker_started(format, &job);
+            let result = run_export_worker(format, &job, &worker_sender, &worker_path);
+            record_export_worker_finished(format, worker_started, &result);
+            let _ = worker_sender.send(ExportEvent::Finished(
+                result
+                    .map(|_| worker_path)
+                    .map_err(|error| format!("{error:#}")),
+            ));
+        });
+
+    if let Err(error) = spawn_result {
+        let _ = sender.send(ExportEvent::Finished(Err(format!(
+            "{}: {error}",
+            format.worker_spawn_error()
+        ))));
+    }
+    receiver
+}
+
+fn record_export_worker_started(format: ExportFormat, job: &TiledExportJob) {
+    match format {
+        ExportFormat::Png => crate::diagnostics::record(format!(
+            "PNG export worker started: source={}x{} cfa={:?} requested_tile_core={} halo={} exposure={:.3} temperature={:.3} tint={:.3} demosaic={:?} highlight={:?}",
+            job.raw.width,
+            job.raw.height,
+            job.raw.cfa_kind,
+            job.tile_spec.core_edge,
+            job.tile_spec.halo,
+            job.exposure.exposure,
+            job.exposure.temperature,
+            job.exposure.tint,
+            job.exposure.demosaic_mode,
+            job.exposure.highlight_method,
+        )),
+        ExportFormat::Jpeg => crate::diagnostics::record(format!(
+            "JPEG export worker started: source={}x{} quality={} cfa={:?} requested_tile_core={} halo={}",
+            job.raw.width,
+            job.raw.height,
+            job.settings.jpeg_quality,
+            job.raw.cfa_kind,
+            job.tile_spec.core_edge,
+            job.tile_spec.halo,
+        )),
+        ExportFormat::Tiff => {}
+    }
+}
+
+fn record_export_worker_finished(format: ExportFormat, started: Instant, result: &Result<()>) {
+    let format_name = match format {
+        ExportFormat::Png => "PNG",
+        ExportFormat::Jpeg => "JPEG",
+        ExportFormat::Tiff => return,
+    };
+    match result {
+        Ok(()) => crate::diagnostics::record(format!(
+            "{format_name} export worker finished successfully in {:.3}s",
+            started.elapsed().as_secs_f64()
+        )),
+        Err(error) => crate::diagnostics::record(format!(
+            "{format_name} export worker failed after {:.3}s: {error:#}",
+            started.elapsed().as_secs_f64()
+        )),
+    }
+}
+
+fn run_export_worker(
+    format: ExportFormat,
+    job: &TiledExportJob,
+    events: &mpsc::Sender<ExportEvent>,
+    destination: &Path,
+) -> Result<()> {
+    let program_template = (job.raw.cfa_kind == CfaKind::Bayer)
+        .then(|| await_export_program_template(job.program_prewarm.as_deref()))
+        .flatten();
+    let geometry = job.geometry.sanitized();
+    let (geometry_width, geometry_height) =
+        geometry.crop_pixel_dimensions(job.raw.width, job.raw.height);
+    let (output_width, output_height) = job
+        .settings
+        .checked_output_dimensions(geometry_width, geometry_height)?;
+    let tile_spec = resolved_export_tile_spec(
+        job.tile_spec,
+        &job.exposure,
+        &job.masks,
+        job.raw.width,
+    )?;
+
+    let color_settings = match format {
+        ExportFormat::Jpeg => {
+            let mut settings = job.settings.clone();
+            settings.bit_depth = ExportBitDepth::Eight;
+            Cow::Owned(settings)
+        }
+        ExportFormat::Png | ExportFormat::Tiff => Cow::Borrowed(&job.settings),
+    };
+    let color = resolve_export_color(color_settings.as_ref())?;
+    let bit_depth = if format == ExportFormat::Jpeg {
+        ExportBitDepth::Eight
+    } else {
+        job.settings.bit_depth
+    };
+
+    export_to_destination(destination, &job.cancellation, |path| {
+        let context = ExportContext {
+            device: &job.device,
+            queue: &job.queue,
+            events,
+            cancellation: &job.cancellation,
+            program_template: program_template.as_deref(),
+        };
+        let request = ExportRequest {
+            raw: &job.raw,
+            exposure: &job.exposure,
+            masks: &job.masks,
+            inpaint: job.inpaint.as_ref(),
+            path,
+            tile_spec,
+            output_width,
+            output_height,
+            keep_metadata: job.settings.keep_metadata,
+            metadata: &job.metadata,
+            geometry,
+            bit_depth,
+            color: &color,
+        };
+        match format {
+            ExportFormat::Png => export_tiled_png(context, request),
+            ExportFormat::Jpeg => export_tiled_jpeg(context, request, job.settings.jpeg_quality),
+            ExportFormat::Tiff => export_tiled_tiff(context, request),
+        }
+    })
+}
+
+/// Compatibility wrapper for callers using the original PNG API.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tiled_png_export(
     device: wgpu::Device,
@@ -282,22 +467,12 @@ pub fn spawn_tiled_png_export(
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
     spawn_tiled_png_export_with_program_prewarm(
-        device,
-        queue,
-        raw,
-        geometry,
-        exposure,
-        masks,
-        inpaint,
-        path,
-        tile_spec,
-        settings,
-        metadata,
-        cancellation,
-        None,
+        device, queue, raw, geometry, exposure, masks, inpaint, path, tile_spec, settings, metadata,
+        cancellation, None,
     )
 }
 
+/// Compatibility wrapper for callers using the original PNG prewarm API.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tiled_png_export_with_program_prewarm(
     device: wgpu::Device,
@@ -314,94 +489,27 @@ pub fn spawn_tiled_png_export_with_program_prewarm(
     cancellation: Arc<AtomicBool>,
     program_prewarm: Option<Arc<GpuProgramPrewarm>>,
 ) -> mpsc::Receiver<ExportEvent> {
-    let (sender, receiver) = mpsc::channel();
-    let worker_sender = sender.clone();
-    let worker_path = path.clone();
-
-    let spawn_result = std::thread::Builder::new()
-        .name("auraw-tiled-export".to_owned())
-        .spawn(move || {
-            let worker_started = Instant::now();
-            crate::diagnostics::record(format!(
-                "PNG export worker started: source={}x{} cfa={:?} requested_tile_core={} halo={} exposure={:.3} temperature={:.3} tint={:.3} demosaic={:?} highlight={:?}",
-                raw.width,
-                raw.height,
-                raw.cfa_kind,
-                tile_spec.core_edge,
-                tile_spec.halo,
-                exposure.exposure,
-                exposure.temperature,
-                exposure.tint,
-                exposure.demosaic_mode,
-                exposure.highlight_method,
-            ));
-            let program_template = (raw.cfa_kind == CfaKind::Bayer)
-                .then(|| await_export_program_template(program_prewarm.as_deref()))
-                .flatten();
-            let result = (|| -> Result<()> {
-                let geometry = geometry.sanitized();
-                let (geometry_width, geometry_height) =
-                    geometry.crop_pixel_dimensions(raw.width, raw.height);
-                let (output_width, output_height) =
-                    settings.checked_output_dimensions(geometry_width, geometry_height)?;
-                let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
-                let color = resolve_export_color(&settings)?;
-                export_to_destination(&worker_path, &cancellation, |path| {
-                    export_tiled_png(
-                        ExportContext {
-                            device: &device,
-                            queue: &queue,
-                            events: &worker_sender,
-                            cancellation: &cancellation,
-                            program_template: program_template.as_deref(),
-                        },
-                        ExportRequest {
-                            raw: &raw,
-                            exposure: &exposure,
-                            masks: &masks,
-                            inpaint: inpaint.as_ref(),
-                            path,
-                            tile_spec,
-                            output_width,
-                            output_height,
-                            keep_metadata: settings.keep_metadata,
-                            metadata: &metadata,
-                            geometry,
-                            bit_depth: settings.bit_depth,
-                            color: &color,
-                        },
-                    )
-                })
-            })();
-            match &result {
-                Ok(()) => crate::diagnostics::record(format!(
-                    "PNG export worker finished successfully in {:.3}s",
-                    worker_started.elapsed().as_secs_f64()
-                )),
-                Err(error) => crate::diagnostics::record(format!(
-                    "PNG export worker failed after {:.3}s: {error:#}",
-                    worker_started.elapsed().as_secs_f64()
-                )),
-            }
-            let _ = worker_sender.send(ExportEvent::Finished(
-                result
-                    .map(|_| worker_path)
-                    .map_err(|error| format!("{error:#}")),
-            ));
-        });
-
-    if let Err(error) = spawn_result {
-        let _ = sender.send(ExportEvent::Finished(Err(format!(
-            "could not start export worker: {error}"
-        ))));
-    }
-
-    receiver
+    spawn_tiled_export(
+        ExportFormat::Png,
+        TiledExportJob {
+            device,
+            queue,
+            raw,
+            geometry,
+            exposure,
+            masks,
+            inpaint,
+            path,
+            tile_spec,
+            settings,
+            metadata,
+            cancellation,
+            program_prewarm,
+        },
+    )
 }
 
-/// JPEG export uses the exact same full-quality tiled render as PNG/TIFF,
-/// converting the float render through the selected output profile before
-/// writing RGB8 rows into a bounded disk-backed staging raster for compression.
+/// Compatibility wrapper for callers using the original JPEG API.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tiled_jpeg_export(
     device: wgpu::Device,
@@ -418,22 +526,12 @@ pub fn spawn_tiled_jpeg_export(
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
     spawn_tiled_jpeg_export_with_program_prewarm(
-        device,
-        queue,
-        raw,
-        geometry,
-        exposure,
-        masks,
-        inpaint,
-        path,
-        tile_spec,
-        settings,
-        metadata,
-        cancellation,
-        None,
+        device, queue, raw, geometry, exposure, masks, inpaint, path, tile_spec, settings, metadata,
+        cancellation, None,
     )
 }
 
+/// Compatibility wrapper for callers using the original JPEG prewarm API.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tiled_jpeg_export_with_program_prewarm(
     device: wgpu::Device,
@@ -450,92 +548,27 @@ pub fn spawn_tiled_jpeg_export_with_program_prewarm(
     cancellation: Arc<AtomicBool>,
     program_prewarm: Option<Arc<GpuProgramPrewarm>>,
 ) -> mpsc::Receiver<ExportEvent> {
-    let (sender, receiver) = mpsc::channel();
-    let worker_sender = sender.clone();
-    let worker_path = path.clone();
-
-    let spawn_result = std::thread::Builder::new()
-        .name("auraw-tiled-jpeg-export".to_owned())
-        .spawn(move || {
-            let worker_started = Instant::now();
-            crate::diagnostics::record(format!(
-                "JPEG export worker started: source={}x{} quality={} cfa={:?} requested_tile_core={} halo={}",
-                raw.width,
-                raw.height,
-                settings.jpeg_quality,
-                raw.cfa_kind,
-                tile_spec.core_edge,
-                tile_spec.halo,
-            ));
-            let program_template = (raw.cfa_kind == CfaKind::Bayer)
-                .then(|| await_export_program_template(program_prewarm.as_deref()))
-                .flatten();
-            let result = (|| -> Result<()> {
-                let geometry = geometry.sanitized();
-                let (geometry_width, geometry_height) =
-                    geometry.crop_pixel_dimensions(raw.width, raw.height);
-                let (output_width, output_height) =
-                    settings.checked_output_dimensions(geometry_width, geometry_height)?;
-                let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
-                let mut jpeg_settings = settings.clone();
-                jpeg_settings.bit_depth = ExportBitDepth::Eight;
-                let color = resolve_export_color(&jpeg_settings)?;
-                export_to_destination(&worker_path, &cancellation, |path| {
-                    export_tiled_jpeg(
-                        ExportContext {
-                            device: &device,
-                            queue: &queue,
-                            events: &worker_sender,
-                            cancellation: &cancellation,
-                            program_template: program_template.as_deref(),
-                        },
-                        ExportRequest {
-                            raw: &raw,
-                            exposure: &exposure,
-                            masks: &masks,
-                            inpaint: inpaint.as_ref(),
-                            path,
-                            tile_spec,
-                            output_width,
-                            output_height,
-                            keep_metadata: settings.keep_metadata,
-                            metadata: &metadata,
-                            geometry,
-                            bit_depth: ExportBitDepth::Eight,
-                            color: &color,
-                        },
-                        settings.jpeg_quality,
-                    )
-                })
-            })();
-            match &result {
-                Ok(()) => crate::diagnostics::record(format!(
-                    "JPEG export worker finished successfully in {:.3}s",
-                    worker_started.elapsed().as_secs_f64()
-                )),
-                Err(error) => crate::diagnostics::record(format!(
-                    "JPEG export worker failed after {:.3}s: {error:#}",
-                    worker_started.elapsed().as_secs_f64()
-                )),
-            }
-            let _ = worker_sender.send(ExportEvent::Finished(
-                result
-                    .map(|_| worker_path)
-                    .map_err(|error| format!("{error:#}")),
-            ));
-        });
-
-    if let Err(error) = spawn_result {
-        let _ = sender.send(ExportEvent::Finished(Err(format!(
-            "could not start JPEG export worker: {error}"
-        ))));
-    }
-
-    receiver
+    spawn_tiled_export(
+        ExportFormat::Jpeg,
+        TiledExportJob {
+            device,
+            queue,
+            raw,
+            geometry,
+            exposure,
+            masks,
+            inpaint,
+            path,
+            tile_spec,
+            settings,
+            metadata,
+            cancellation,
+            program_prewarm,
+        },
+    )
 }
 
-/// TIFF export shares the same full-quality tiled linear render, with 8/16-bit
-/// ICC-managed delivery or a 32-bit float linear Rec.2020 master.
+/// Compatibility wrapper for callers using the original TIFF API.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tiled_tiff_export(
     device: wgpu::Device,
@@ -552,22 +585,12 @@ pub fn spawn_tiled_tiff_export(
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
     spawn_tiled_tiff_export_with_program_prewarm(
-        device,
-        queue,
-        raw,
-        geometry,
-        exposure,
-        masks,
-        inpaint,
-        path,
-        tile_spec,
-        settings,
-        metadata,
-        cancellation,
-        None,
+        device, queue, raw, geometry, exposure, masks, inpaint, path, tile_spec, settings, metadata,
+        cancellation, None,
     )
 }
 
+/// Compatibility wrapper for callers using the original TIFF prewarm API.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_tiled_tiff_export_with_program_prewarm(
     device: wgpu::Device,
@@ -584,64 +607,24 @@ pub fn spawn_tiled_tiff_export_with_program_prewarm(
     cancellation: Arc<AtomicBool>,
     program_prewarm: Option<Arc<GpuProgramPrewarm>>,
 ) -> mpsc::Receiver<ExportEvent> {
-    let (sender, receiver) = mpsc::channel();
-    let worker_sender = sender.clone();
-    let worker_path = path.clone();
-
-    let spawn_result = std::thread::Builder::new()
-        .name("auraw-tiled-tiff-export".to_owned())
-        .spawn(move || {
-            let program_template = (raw.cfa_kind == CfaKind::Bayer)
-                .then(|| await_export_program_template(program_prewarm.as_deref()))
-                .flatten();
-            let result = (|| -> Result<()> {
-                let geometry = geometry.sanitized();
-                let (geometry_width, geometry_height) =
-                    geometry.crop_pixel_dimensions(raw.width, raw.height);
-                let (output_width, output_height) =
-                    settings.checked_output_dimensions(geometry_width, geometry_height)?;
-                let tile_spec = resolved_export_tile_spec(tile_spec, &exposure, &masks, raw.width)?;
-                let color = resolve_export_color(&settings)?;
-                export_to_destination(&worker_path, &cancellation, |path| {
-                    export_tiled_tiff(
-                        ExportContext {
-                            device: &device,
-                            queue: &queue,
-                            events: &worker_sender,
-                            cancellation: &cancellation,
-                            program_template: program_template.as_deref(),
-                        },
-                        ExportRequest {
-                            raw: &raw,
-                            exposure: &exposure,
-                            masks: &masks,
-                            inpaint: inpaint.as_ref(),
-                            path,
-                            tile_spec,
-                            output_width,
-                            output_height,
-                            keep_metadata: settings.keep_metadata,
-                            metadata: &metadata,
-                            geometry,
-                            bit_depth: settings.bit_depth,
-                            color: &color,
-                        },
-                    )
-                })
-            })();
-            let _ = worker_sender.send(ExportEvent::Finished(
-                result
-                    .map(|_| worker_path)
-                    .map_err(|error| format!("{error:#}")),
-            ));
-        });
-
-    if let Err(error) = spawn_result {
-        let _ = sender.send(ExportEvent::Finished(Err(format!(
-            "could not start TIFF export worker: {error}"
-        ))));
-    }
-    receiver
+    spawn_tiled_export(
+        ExportFormat::Tiff,
+        TiledExportJob {
+            device,
+            queue,
+            raw,
+            geometry,
+            exposure,
+            masks,
+            inpaint,
+            path,
+            tile_spec,
+            settings,
+            metadata,
+            cancellation,
+            program_prewarm,
+        },
+    )
 }
 
 fn resolved_export_tile_spec(
@@ -742,178 +725,8 @@ struct ExportRequest<'a> {
     color: &'a ResolvedExportColor,
 }
 
-struct ResolvedExportColor {
-    transform: Option<IccOutputTransform>,
-    embedded_icc: Option<Vec<u8>>,
-    srgb: bool,
-}
-
-#[derive(Clone, Copy)]
-enum IccTransfer {
-    Linear,
-    Srgb,
-}
-
-fn built_in_srgb_icc() -> Vec<u8> {
-    build_matrix_shaper_icc(
-        "sRGB",
-        [
-            [0.436_074_7, 0.385_064_9, 0.143_080_4],
-            [0.222_504_5, 0.716_878_6, 0.060_616_9],
-            [0.013_932_2, 0.097_104_5, 0.714_173_3],
-        ],
-        IccTransfer::Srgb,
-    )
-}
-
-fn build_matrix_shaper_icc(_name: &str, matrix: [[f32; 3]; 3], transfer: IccTransfer) -> Vec<u8> {
-    fn fixed(value: f32) -> [u8; 4] {
-        ((value as f64 * 65_536.0).round() as i32).to_be_bytes()
-    }
-    fn xyz_tag(xyz: [f32; 3]) -> Vec<u8> {
-        let mut data = Vec::with_capacity(20);
-        data.extend_from_slice(b"XYZ ");
-        data.extend_from_slice(&[0; 4]);
-        for value in xyz {
-            data.extend_from_slice(&fixed(value));
-        }
-        data
-    }
-    fn curve_tag(transfer: IccTransfer) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"curv");
-        data.extend_from_slice(&[0; 4]);
-        match transfer {
-            IccTransfer::Linear => {
-                data.extend_from_slice(&0u32.to_be_bytes());
-            }
-            IccTransfer::Srgb => {
-                const SAMPLES: u32 = 1024;
-                data.extend_from_slice(&SAMPLES.to_be_bytes());
-                for index in 0..SAMPLES {
-                    let encoded = index as f32 / (SAMPLES - 1) as f32;
-                    let linear = if encoded <= 0.04045 {
-                        encoded / 12.92
-                    } else {
-                        ((encoded + 0.055) / 1.055).powf(2.4)
-                    };
-                    let sample = (linear.clamp(0.0, 1.0) * 65_535.0).round() as u16;
-                    data.extend_from_slice(&sample.to_be_bytes());
-                }
-            }
-        }
-        while data.len() % 4 != 0 {
-            data.push(0);
-        }
-        data
-    }
-
-    let tags = [
-        (*b"wtpt", xyz_tag([0.9642, 1.0, 0.8249])),
-        (
-            *b"rXYZ",
-            xyz_tag([matrix[0][0], matrix[1][0], matrix[2][0]]),
-        ),
-        (
-            *b"gXYZ",
-            xyz_tag([matrix[0][1], matrix[1][1], matrix[2][1]]),
-        ),
-        (
-            *b"bXYZ",
-            xyz_tag([matrix[0][2], matrix[1][2], matrix[2][2]]),
-        ),
-        (*b"rTRC", curve_tag(transfer)),
-        (*b"gTRC", curve_tag(transfer)),
-        (*b"bTRC", curve_tag(transfer)),
-    ];
-
-    let table_size = 128usize + 4 + tags.len() * 12;
-    let mut offsets = Vec::with_capacity(tags.len());
-    let mut cursor = table_size;
-    for (_, data) in &tags {
-        cursor = (cursor + 3) & !3;
-        offsets.push(cursor);
-        cursor += data.len();
-    }
-    let profile_size = cursor;
-
-    let mut profile = vec![0u8; table_size];
-    profile[0..4].copy_from_slice(&(profile_size as u32).to_be_bytes());
-    profile[8..12].copy_from_slice(&0x0210_0000u32.to_be_bytes());
-    profile[12..16].copy_from_slice(b"mntr");
-    profile[16..20].copy_from_slice(b"RGB ");
-    profile[20..24].copy_from_slice(b"XYZ ");
-    profile[24..26].copy_from_slice(&2026u16.to_be_bytes());
-    profile[26..28].copy_from_slice(&1u16.to_be_bytes());
-    profile[28..30].copy_from_slice(&1u16.to_be_bytes());
-    profile[36..40].copy_from_slice(b"acsp");
-    profile[40..44].copy_from_slice(b"APPL");
-    profile[64..68].copy_from_slice(&0u32.to_be_bytes());
-    profile[68..72].copy_from_slice(&fixed(0.9642));
-    profile[72..76].copy_from_slice(&fixed(1.0));
-    profile[76..80].copy_from_slice(&fixed(0.8249));
-    profile[80..84].copy_from_slice(b"AuRw");
-    profile[128..132].copy_from_slice(&(tags.len() as u32).to_be_bytes());
-    for (index, ((signature, data), offset)) in tags.iter().zip(&offsets).enumerate() {
-        let base = 132 + index * 12;
-        profile[base..base + 4].copy_from_slice(signature);
-        profile[base + 4..base + 8].copy_from_slice(&(*offset as u32).to_be_bytes());
-        profile[base + 8..base + 12].copy_from_slice(&(data.len() as u32).to_be_bytes());
-    }
-    for ((_, data), offset) in tags.iter().zip(offsets) {
-        while profile.len() < offset {
-            profile.push(0);
-        }
-        profile.extend_from_slice(data);
-    }
-    profile
-}
-
-fn resolve_export_color(settings: &ExportSettings) -> Result<ResolvedExportColor> {
-    if settings.bit_depth.is_float() {
-        return Ok(ResolvedExportColor {
-            transform: None,
-            embedded_icc: Some(build_matrix_shaper_icc(
-                "Linear Rec.2020",
-                [
-                    [0.673_424_1, 0.165_641_1, 0.125_128_6],
-                    [0.279_017_7, 0.675_340_2, 0.045_637_7],
-                    [-0.001_930_0, 0.029_978_4, 0.797_333],
-                ],
-                IccTransfer::Linear,
-            )),
-            srgb: false,
-        });
-    }
-
-    match settings.color_profile {
-        ExportColorProfile::Srgb => Ok(ResolvedExportColor {
-            transform: Some(IccOutputTransform::srgb()),
-            embedded_icc: None,
-            srgb: true,
-        }),
-        ExportColorProfile::CustomIcc => {
-            let path = settings
-                .custom_icc_path
-                .as_deref()
-                .context("select a custom ICC profile before exporting")?;
-            let bytes = fs::read(path)
-                .with_context(|| format!("read output ICC profile {}", path.display()))?;
-            anyhow::ensure!(
-                (132..=64 * 1024 * 1024).contains(&bytes.len()),
-                "output ICC profile has an invalid size"
-            );
-            let transform =
-                IccOutputTransform::from_icc(&bytes, super::RenderingIntent::RelativeColorimetric)
-                    .with_context(|| format!("build output transform from {}", path.display()))?;
-            Ok(ResolvedExportColor {
-                transform: Some(transform),
-                embedded_icc: Some(bytes),
-                srgb: false,
-            })
-        }
-    }
-}
+mod color;
+use color::{built_in_srgb_icc, resolve_export_color, ResolvedExportColor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExportRowFormat {
@@ -1551,16 +1364,16 @@ fn export_tiled_jpeg_geometry(
             request.output_height,
         )?;
 
-        encode_jpeg_rgb(
-            &transformed_map,
-            request.path,
-            request.output_width,
-            request.output_height,
+        encode_jpeg_rgb(JpegEncodeRequest {
+            rgb: &transformed_map,
+            output_path: request.path,
+            width: request.output_width,
+            height: request.output_height,
             quality,
-            request.keep_metadata,
-            request.metadata,
-            request.color.embedded_icc.as_deref(),
-        )?;
+            keep_metadata: request.keep_metadata,
+            metadata: request.metadata,
+            icc_profile: request.color.embedded_icc.as_deref(),
+        })?;
         drop(transformed_map);
         drop(transformed_file);
         Ok(())
@@ -2382,16 +2195,16 @@ fn export_tiled_jpeg(
             "staged RGB raster length does not match its dimensions"
         );
 
-        encode_jpeg_rgb(
-            &mapped,
-            request.path,
-            request.output_width,
-            request.output_height,
+        encode_jpeg_rgb(JpegEncodeRequest {
+            rgb: &mapped,
+            output_path: request.path,
+            width: request.output_width,
+            height: request.output_height,
             quality,
-            request.keep_metadata,
-            request.metadata,
-            request.color.embedded_icc.as_deref(),
-        )?;
+            keep_metadata: request.keep_metadata,
+            metadata: request.metadata,
+            icc_profile: request.color.embedded_icc.as_deref(),
+        })?;
         drop(mapped);
         drop(rgb_file);
         Ok(())
@@ -2403,17 +2216,28 @@ fn export_tiled_jpeg(
     encode_result
 }
 
-#[allow(clippy::too_many_arguments)]
-fn encode_jpeg_rgb(
-    rgb: &[u8],
-    output_path: &Path,
-    output_width: u32,
-    output_height: u32,
+struct JpegEncodeRequest<'a> {
+    rgb: &'a [u8],
+    output_path: &'a Path,
+    width: u32,
+    height: u32,
     quality: u8,
     keep_metadata: bool,
-    metadata: &ExportMetadata,
-    icc_profile: Option<&[u8]>,
-) -> Result<()> {
+    metadata: &'a ExportMetadata,
+    icc_profile: Option<&'a [u8]>,
+}
+
+fn encode_jpeg_rgb(request: JpegEncodeRequest<'_>) -> Result<()> {
+    let JpegEncodeRequest {
+        rgb,
+        output_path,
+        width: output_width,
+        height: output_height,
+        quality,
+        keep_metadata,
+        metadata,
+        icc_profile,
+    } = request;
     validate_rgb_raster_len(rgb, output_width, output_height)?;
     let width = u16::try_from(output_width).context("JPEG width exceeds baseline limit")?;
     let height = u16::try_from(output_height).context("JPEG height exceeds baseline limit")?;
@@ -3325,838 +3149,8 @@ fn upload_mask_atlas(
     Ok(())
 }
 
-fn add_png_text_metadata<W: Write>(
-    encoder: &mut png::Encoder<'_, W>,
-    metadata: &ExportMetadata,
-    output_width: u32,
-    output_height: u32,
-) -> Result<()> {
-    encoder
-        .add_itxt_chunk("Software".to_owned(), "AuRaw 2.0".to_owned())
-        .context("write PNG software metadata")?;
-    if let Some(source) = metadata
-        .source_file_name
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        encoder
-            .add_itxt_chunk("Source".to_owned(), source.to_owned())
-            .context("write PNG source metadata")?;
-    }
-    let camera = joined_metadata_label(&metadata.camera_make, &metadata.camera_model);
-    if !camera.is_empty() {
-        encoder
-            .add_itxt_chunk("Camera".to_owned(), camera)
-            .context("write PNG camera metadata")?;
-    }
-    let lens = joined_metadata_label(&metadata.lens_make, &metadata.lens_model);
-    if !lens.is_empty() {
-        encoder
-            .add_itxt_chunk("Lens".to_owned(), lens)
-            .context("write PNG lens metadata")?;
-    }
-    if metadata.focal_length.is_finite() && metadata.focal_length > 0.0 {
-        encoder
-            .add_itxt_chunk(
-                "Focal length".to_owned(),
-                format!("{:.1} mm", metadata.focal_length),
-            )
-            .context("write PNG focal-length metadata")?;
-    }
-    if metadata.aperture.is_finite() && metadata.aperture > 0.0 {
-        encoder
-            .add_itxt_chunk("Aperture".to_owned(), format!("f/{:.1}", metadata.aperture))
-            .context("write PNG aperture metadata")?;
-    }
-    if metadata.focus_distance.is_finite() && metadata.focus_distance > 0.0 {
-        encoder
-            .add_itxt_chunk(
-                "Focus distance".to_owned(),
-                format!("{:.2} m", metadata.focus_distance),
-            )
-            .context("write PNG focus-distance metadata")?;
-    }
-    if metadata.iso_speed.is_finite() && metadata.iso_speed > 0.0 {
-        encoder
-            .add_itxt_chunk("ISO speed".to_owned(), format!("{:.0}", metadata.iso_speed))
-            .context("write PNG ISO metadata")?;
-    }
-    if metadata.shutter_seconds.is_finite() && metadata.shutter_seconds > 0.0 {
-        encoder
-            .add_itxt_chunk(
-                "Exposure time".to_owned(),
-                format_exposure_time(metadata.shutter_seconds),
-            )
-            .context("write PNG exposure-time metadata")?;
-    }
-    if !metadata.artist.trim().is_empty() {
-        encoder
-            .add_itxt_chunk("Artist".to_owned(), metadata.artist.trim().to_owned())
-            .context("write PNG artist metadata")?;
-    }
-    if !metadata.description.trim().is_empty() {
-        encoder
-            .add_itxt_chunk(
-                "Image description".to_owned(),
-                metadata.description.trim().to_owned(),
-            )
-            .context("write PNG image-description metadata")?;
-    }
-    encoder
-        .add_itxt_chunk(
-            "Original dimensions".to_owned(),
-            format!("{}x{}", metadata.source_width, metadata.source_height),
-        )
-        .context("write original dimensions metadata")?;
-    encoder
-        .add_itxt_chunk(
-            "Export dimensions".to_owned(),
-            format!("{output_width}x{output_height}"),
-        )
-        .context("write export dimensions metadata")?;
-    encoder
-        .add_itxt_chunk("Orientation".to_owned(), "1 (normal)".to_owned())
-        .context("write PNG orientation metadata")?;
-    Ok(())
-}
-
-fn format_exposure_time(seconds: f32) -> String {
-    if seconds > 0.0 && seconds < 1.0 {
-        let reciprocal = (1.0 / seconds).round().max(1.0);
-        if ((1.0 / reciprocal) - seconds).abs() <= seconds * 0.02 {
-            return format!("1/{reciprocal:.0} s");
-        }
-    }
-    format!("{seconds:.4} s")
-}
-
-fn joined_metadata_label(make: &str, model: &str) -> String {
-    match (make.trim(), model.trim()) {
-        ("", "") => String::new(),
-        ("", model) => model.to_owned(),
-        (make, "") => make.to_owned(),
-        (make, model) if model.starts_with(make) => model.to_owned(),
-        (make, model) => format!("{make} {model}"),
-    }
-}
-
-fn export_metadata_description(metadata: &ExportMetadata) -> String {
-    let mut parts = Vec::with_capacity(3);
-    if let Some(source) = metadata
-        .source_file_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        parts.push(format!("Processed from {source}"));
-    } else {
-        parts.push("Processed from a RAW image".to_owned());
-    }
-    if metadata.source_width > 0 && metadata.source_height > 0 {
-        parts.push(format!(
-            "original dimensions {}x{}",
-            metadata.source_width, metadata.source_height
-        ));
-    }
-    parts.push("exported by AuRaw 2.0".to_owned());
-    parts.join("; ")
-}
-
-fn combined_image_description(metadata: &ExportMetadata) -> String {
-    let export_description = export_metadata_description(metadata);
-    match metadata.description.trim() {
-        "" => export_description,
-        original => format!("{original}; {export_description}"),
-    }
-}
-
-#[derive(Clone)]
-enum ExifValue {
-    Short(u16),
-    Long(u32),
-    Ascii(Vec<u8>),
-    Rational(u32, u32),
-    Undefined(Vec<u8>),
-}
-
-#[derive(Clone)]
-struct ExifEntry {
-    tag: u16,
-    value: ExifValue,
-}
-
-fn nul_terminated_exif_ascii(value: &str) -> Vec<u8> {
-    let mut output = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii() && character != '\0' {
-                character as u8
-            } else {
-                b'?'
-            }
-        })
-        .collect::<Vec<_>>();
-    output.push(0);
-    output
-}
-
-fn exif_rational(value: f32) -> Option<(u32, u32)> {
-    if !value.is_finite() || value <= 0.0 {
-        return None;
-    }
-    let denominator = 10_000u32;
-    let numerator = (f64::from(value) * f64::from(denominator))
-        .round()
-        .clamp(1.0, f64::from(u32::MAX)) as u32;
-    let divisor = greatest_common_divisor(numerator, denominator);
-    Some((numerator / divisor, denominator / divisor))
-}
-
-fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
-    while right != 0 {
-        let remainder = left % right;
-        left = right;
-        right = remainder;
-    }
-    left.max(1)
-}
-
-fn exif_value_parts(value: &ExifValue) -> (u16, u32, Vec<u8>) {
-    match value {
-        ExifValue::Short(value) => (3, 1, value.to_le_bytes().to_vec()),
-        ExifValue::Long(value) => (4, 1, value.to_le_bytes().to_vec()),
-        ExifValue::Ascii(value) => (2, value.len() as u32, value.clone()),
-        ExifValue::Rational(numerator, denominator) => {
-            let mut bytes = Vec::with_capacity(8);
-            bytes.extend_from_slice(&numerator.to_le_bytes());
-            bytes.extend_from_slice(&(*denominator).max(1).to_le_bytes());
-            (5, 1, bytes)
-        }
-        ExifValue::Undefined(value) => (7, value.len() as u32, value.clone()),
-    }
-}
-
-fn encoded_ifd_block_len(entries: &[ExifEntry]) -> u32 {
-    let directory_len = 2usize
-        .saturating_add(entries.len().saturating_mul(12))
-        .saturating_add(4);
-    let data_len = entries
-        .iter()
-        .map(|entry| {
-            let (_, _, bytes) = exif_value_parts(&entry.value);
-            if bytes.len() <= 4 {
-                0
-            } else {
-                bytes.len() + (bytes.len() & 1)
-            }
-        })
-        .sum::<usize>();
-    u32::try_from(directory_len.saturating_add(data_len)).unwrap_or(u32::MAX)
-}
-
-fn encode_ifd_block(entries: &[ExifEntry], ifd_offset: u32) -> Vec<u8> {
-    let directory_len = 2usize + entries.len() * 12 + 4;
-    let data_offset = ifd_offset.saturating_add(directory_len as u32);
-    let mut directory = Vec::with_capacity(directory_len);
-    let mut data = Vec::new();
-    directory.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-
-    for entry in entries {
-        directory.extend_from_slice(&entry.tag.to_le_bytes());
-        let (field_type, count, bytes) = exif_value_parts(&entry.value);
-        directory.extend_from_slice(&field_type.to_le_bytes());
-        directory.extend_from_slice(&count.to_le_bytes());
-        if bytes.len() <= 4 {
-            directory.extend_from_slice(&bytes);
-            directory.resize(directory.len() + 4 - bytes.len(), 0);
-        } else {
-            let value_offset = data_offset.saturating_add(data.len() as u32);
-            directory.extend_from_slice(&value_offset.to_le_bytes());
-            data.extend_from_slice(&bytes);
-            if data.len() & 1 != 0 {
-                data.push(0);
-            }
-        }
-    }
-    directory.extend_from_slice(&0u32.to_le_bytes());
-    directory.extend_from_slice(&data);
-    directory
-}
-
-/// Builds a compact, standards-shaped TIFF/EXIF payload used by both JPEG's
-/// APP1 segment and PNG's eXIf chunk. The output pixels have already been
-/// physically oriented, so Orientation is always normalized to 1.
-fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_height: u32) -> Vec<u8> {
-    let mut ifd0_entries = vec![
-        ExifEntry {
-            tag: 0x0100,
-            value: ExifValue::Long(output_width),
-        },
-        ExifEntry {
-            tag: 0x0101,
-            value: ExifValue::Long(output_height),
-        },
-        ExifEntry {
-            tag: 0x010e,
-            value: ExifValue::Ascii(nul_terminated_exif_ascii(&combined_image_description(
-                metadata,
-            ))),
-        },
-        ExifEntry {
-            tag: 0x0112,
-            value: ExifValue::Short(1),
-        },
-        ExifEntry {
-            tag: 0x0131,
-            value: ExifValue::Ascii(nul_terminated_exif_ascii("AuRaw 2.0")),
-        },
-    ];
-    if !metadata.camera_make.trim().is_empty() {
-        ifd0_entries.push(ExifEntry {
-            tag: 0x010f,
-            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.camera_make)),
-        });
-    }
-    if !metadata.camera_model.trim().is_empty() {
-        ifd0_entries.push(ExifEntry {
-            tag: 0x0110,
-            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.camera_model)),
-        });
-    }
-    if !metadata.artist.trim().is_empty() {
-        ifd0_entries.push(ExifEntry {
-            tag: 0x013b,
-            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.artist)),
-        });
-    }
-
-    let mut exif_entries = vec![
-        ExifEntry {
-            tag: 0x9000,
-            value: ExifValue::Undefined(b"0232".to_vec()),
-        },
-        ExifEntry {
-            tag: 0xa002,
-            value: ExifValue::Long(output_width),
-        },
-        ExifEntry {
-            tag: 0xa003,
-            value: ExifValue::Long(output_height),
-        },
-    ];
-    if let Some((numerator, denominator)) = exif_rational(metadata.shutter_seconds) {
-        exif_entries.push(ExifEntry {
-            tag: 0x829a,
-            value: ExifValue::Rational(numerator, denominator),
-        });
-    }
-    if metadata.iso_speed.is_finite() && metadata.iso_speed > 0.0 {
-        let iso = metadata.iso_speed.round().clamp(1.0, u32::MAX as f32) as u32;
-        exif_entries.push(ExifEntry {
-            tag: 0x8827,
-            value: if iso <= u32::from(u16::MAX) {
-                ExifValue::Short(iso as u16)
-            } else {
-                ExifValue::Long(iso)
-            },
-        });
-    }
-    if let Some((numerator, denominator)) = exif_rational(metadata.aperture) {
-        exif_entries.push(ExifEntry {
-            tag: 0x829d,
-            value: ExifValue::Rational(numerator, denominator),
-        });
-    }
-    if let Some((numerator, denominator)) = exif_rational(metadata.focal_length) {
-        exif_entries.push(ExifEntry {
-            tag: 0x920a,
-            value: ExifValue::Rational(numerator, denominator),
-        });
-    }
-    if let Some((numerator, denominator)) = exif_rational(metadata.focus_distance) {
-        exif_entries.push(ExifEntry {
-            tag: 0x9206,
-            value: ExifValue::Rational(numerator, denominator),
-        });
-    }
-    if !metadata.lens_make.trim().is_empty() {
-        exif_entries.push(ExifEntry {
-            tag: 0xa433,
-            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.lens_make)),
-        });
-    }
-    if !metadata.lens_model.trim().is_empty() {
-        exif_entries.push(ExifEntry {
-            tag: 0xa434,
-            value: ExifValue::Ascii(nul_terminated_exif_ascii(&metadata.lens_model)),
-        });
-    }
-    let mut user_comment = b"ASCII\0\0\0".to_vec();
-    user_comment
-        .extend_from_slice(&nul_terminated_exif_ascii(&combined_image_description(metadata))[..]);
-    exif_entries.push(ExifEntry {
-        tag: 0x9286,
-        value: ExifValue::Undefined(user_comment),
-    });
-
-    ifd0_entries.sort_by_key(|entry| entry.tag);
-    exif_entries.sort_by_key(|entry| entry.tag);
-
-    // Adding the ExifIFD pointer changes IFD0's directory length, so include a
-    // placeholder before calculating the nested IFD's final TIFF-relative offset.
-    ifd0_entries.push(ExifEntry {
-        tag: 0x8769,
-        value: ExifValue::Long(0),
-    });
-    ifd0_entries.sort_by_key(|entry| entry.tag);
-    let ifd0_offset = 8u32;
-    let exif_ifd_offset = ifd0_offset.saturating_add(encoded_ifd_block_len(&ifd0_entries));
-    if let Some(pointer) = ifd0_entries.iter_mut().find(|entry| entry.tag == 0x8769) {
-        pointer.value = ExifValue::Long(exif_ifd_offset);
-    }
-
-    let ifd0 = encode_ifd_block(&ifd0_entries, ifd0_offset);
-    let exif_ifd = encode_ifd_block(&exif_entries, exif_ifd_offset);
-    let mut output = Vec::with_capacity(8 + ifd0.len() + exif_ifd.len());
-    output.extend_from_slice(b"II");
-    output.extend_from_slice(&42u16.to_le_bytes());
-    output.extend_from_slice(&ifd0_offset.to_le_bytes());
-    output.extend_from_slice(&ifd0);
-    output.extend_from_slice(&exif_ifd);
-    output
-}
+mod metadata;
+use metadata::{add_png_text_metadata, build_exif_payload, combined_image_description};
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        bounded_tile_spec, build_exif_payload, build_lanczos_contributions, built_in_srgb_icc,
-        encode_jpeg_rgb, encode_srgb_row, encode_srgb_row_with_format, export_to_destination,
-        publish_completed_export, resolved_export_tile_spec, stitch_linear_tile_into_band,
-        tiff_strip_layout, tile_mask_source_region, validate_export_dimensions, ExportMetadata,
-        ExportResizeMode, ExportRowFormat, ExportSettings, GeometryResampler, LinearLightResizer,
-        EXPORT_TILE_HALO, MAX_EXPORT_EDGE, TIFF_TARGET_STRIP_BYTES,
-    };
-    use crate::pipeline::{
-        ExportTile, ExposureParams, GeometryTransform, IccOutputTransform, MaskStack, TileSpec,
-    };
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn resize_modes_preserve_aspect_ratio() {
-        let base = ExportSettings::default();
-        let cases = [
-            (ExportResizeMode::LongEdge, 3000, (3000, 2000)),
-            (ExportResizeMode::ShortEdge, 1000, (1500, 1000)),
-            (ExportResizeMode::Width, 1200, (1200, 800)),
-            (ExportResizeMode::Height, 800, (1200, 800)),
-        ];
-        for (resize_mode, edge_or_dimension, expected) in cases {
-            let settings = ExportSettings {
-                resize_mode,
-                edge_or_dimension,
-                ..base.clone()
-            };
-            assert_eq!(settings.output_dimensions(6000, 4000), expected);
-        }
-    }
-
-    #[test]
-    fn resizing_does_not_enlarge_by_default() {
-        let settings = ExportSettings {
-            resize_mode: ExportResizeMode::LongEdge,
-            edge_or_dimension: 12000,
-            ..ExportSettings::default()
-        };
-        assert_eq!(settings.output_dimensions(6000, 4000), (6000, 4000));
-    }
-
-    #[test]
-    fn export_mask_region_covers_the_padded_tile_and_clamps_to_source() {
-        let region =
-            tile_mask_source_region(&MaskStack::default(), -256, 744, 1536, 1536, 6000, 4000);
-        assert_eq!(region, [0, 742, 1282, 1540]);
-    }
-
-    #[test]
-    fn exif_payload_contains_source_camera_lens_and_exposure_metadata() {
-        let metadata = ExportMetadata {
-            source_file_name: Some("IMG_0042.CR3".to_owned()),
-            camera_make: "CameraCo".to_owned(),
-            camera_model: "Model X".to_owned(),
-            lens_make: "LensCo".to_owned(),
-            lens_model: "Prime 50".to_owned(),
-            focal_length: 50.0,
-            aperture: 2.8,
-            iso_speed: 640.0,
-            shutter_seconds: 1.0 / 125.0,
-            description: "Studio portrait".to_owned(),
-            artist: "Photographer".to_owned(),
-            source_width: 6000,
-            source_height: 4000,
-            ..ExportMetadata::default()
-        };
-        let exif = build_exif_payload(&metadata, 3000, 2000);
-        assert_eq!(&exif[..4], &[b'I', b'I', 42, 0]);
-        for expected in [
-            b"CameraCo\0".as_slice(),
-            b"Model X\0".as_slice(),
-            b"LensCo\0".as_slice(),
-            b"Prime 50\0".as_slice(),
-            b"IMG_0042.CR3".as_slice(),
-            b"Studio portrait".as_slice(),
-            b"Photographer\0".as_slice(),
-        ] {
-            assert!(exif
-                .windows(expected.len())
-                .any(|window| window == expected));
-        }
-
-        let read_u16 = |offset: usize| u16::from_le_bytes([exif[offset], exif[offset + 1]]);
-        let read_u32 = |offset: usize| {
-            u32::from_le_bytes([
-                exif[offset],
-                exif[offset + 1],
-                exif[offset + 2],
-                exif[offset + 3],
-            ])
-        };
-        let ifd0_offset = read_u32(4) as usize;
-        let ifd0_count = read_u16(ifd0_offset) as usize;
-        let mut exif_ifd_offset = None;
-        let mut ifd0_tags = Vec::new();
-        for index in 0..ifd0_count {
-            let entry = ifd0_offset + 2 + index * 12;
-            let tag = read_u16(entry);
-            ifd0_tags.push(tag);
-            if tag == 0x8769 {
-                exif_ifd_offset = Some(read_u32(entry + 8) as usize);
-            }
-        }
-        assert!(ifd0_tags.contains(&0x010e));
-        assert!(ifd0_tags.contains(&0x010f));
-        assert!(ifd0_tags.contains(&0x0110));
-        assert!(ifd0_tags.contains(&0x013b));
-
-        let exif_ifd_offset = exif_ifd_offset.expect("ExifIFD pointer");
-        let exif_count = read_u16(exif_ifd_offset) as usize;
-        let exif_tags = (0..exif_count)
-            .map(|index| read_u16(exif_ifd_offset + 2 + index * 12))
-            .collect::<Vec<_>>();
-        for tag in [
-            0x829a, 0x829d, 0x8827, 0x920a, 0x9286, 0xa002, 0xa003, 0xa433, 0xa434,
-        ] {
-            assert!(exif_tags.contains(&tag), "missing EXIF tag {tag:#06x}");
-        }
-    }
-
-    #[test]
-    fn jpeg_rows_omit_png_alpha_bytes() {
-        let transform = crate::pipeline::IccOutputTransform::srgb();
-        let rgba = encode_srgb_row(&[0.18, 0.18, 0.18], &transform).unwrap();
-        let rgb =
-            encode_srgb_row_with_format(&[0.18, 0.18, 0.18], &transform, ExportRowFormat::Rgb8)
-                .unwrap();
-        assert_eq!(rgba.len(), 4);
-        assert_eq!(rgb.len(), 3);
-        assert_eq!(&rgba[..3], &rgb);
-    }
-
-    #[test]
-    fn fast_jpeg_encoder_writes_decodable_pixels_exif_and_icc() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("auraw-jpeg-encoder-{}-{nonce}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let destination = directory.join("photo.jpg");
-        let width = 16u32;
-        let height = 8u32;
-        let rgb = (0..width as usize * height as usize * 3)
-            .map(|index| index.wrapping_mul(37) as u8)
-            .collect::<Vec<_>>();
-        let metadata = ExportMetadata {
-            camera_make: "CameraCo".to_owned(),
-            camera_model: "Fast JPEG".to_owned(),
-            ..ExportMetadata::default()
-        };
-        let icc = built_in_srgb_icc();
-
-        encode_jpeg_rgb(
-            &rgb,
-            &destination,
-            width,
-            height,
-            90,
-            true,
-            &metadata,
-            Some(&icc),
-        )
-        .unwrap();
-
-        let encoded = std::fs::read(&destination).unwrap();
-        assert_eq!(&encoded[..2], &[0xff, 0xd8]);
-        assert!(encoded
-            .windows(b"Exif\0\0".len())
-            .any(|window| window == b"Exif\0\0"));
-        assert!(encoded
-            .windows(b"ICC_PROFILE\0".len())
-            .any(|window| window == b"ICC_PROFILE\0"));
-        let decoded = image::load_from_memory_with_format(&encoded, image::ImageFormat::Jpeg)
-            .expect("fast JPEG should decode");
-        assert_eq!((decoded.width(), decoded.height()), (width, height));
-
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn tiff_strip_layout_is_chunked_and_covers_the_raster_exactly() {
-        let width = 4_000u32;
-        let height = 3_000u32;
-        let (rows_per_strip, byte_counts) = tiff_strip_layout(width, height, 16).unwrap();
-        assert!(rows_per_strip > 0);
-        assert!(byte_counts.len() > 1);
-        let row_bytes = u64::from(width) * 6;
-        assert!(u64::from(byte_counts[0]) <= TIFF_TARGET_STRIP_BYTES);
-        assert_eq!(
-            byte_counts
-                .iter()
-                .map(|value| u64::from(*value))
-                .sum::<u64>(),
-            u64::from(width) * u64::from(height) * 6
-        );
-        assert!(byte_counts
-            .iter()
-            .all(|count| u64::from(*count) % row_bytes == 0));
-    }
-
-    #[test]
-    fn tiff_strip_layout_uses_one_row_when_a_row_exceeds_the_target() {
-        let width = 100_000u32;
-        let height = 3u32;
-        let (rows_per_strip, byte_counts) = tiff_strip_layout(width, height, 32).unwrap();
-        assert_eq!(rows_per_strip, 1);
-        assert_eq!(byte_counts, vec![1_200_000; 3]);
-    }
-
-    #[test]
-    fn tile_rows_land_at_their_band_offset() {
-        let mut band = vec![0.0f32; 4 * 3];
-        let tile = ExportTile {
-            core_x: 1,
-            core_y: 2,
-            core_width: 2,
-            core_height: 1,
-            local_core_x: 48,
-            local_core_y: 48,
-            padded_width: 100,
-            padded_height: 100,
-            global_origin_x: -47,
-            global_origin_y: -46,
-        };
-        stitch_linear_tile_into_band(&mut band, 4, 2, tile, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-            .unwrap();
-        assert_eq!(&band[3..9], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-    }
-
-    #[test]
-    fn resize_kernels_are_bounded_and_normalized() {
-        let kernels = build_lanczos_contributions(32_768, 1).unwrap();
-        assert_eq!(kernels.len(), 1);
-        assert!(kernels[0].len() <= 32_768);
-        let sum: f32 = kernels[0].iter().map(|sample| sample.weight).sum();
-        assert!((sum - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn identity_resize_uses_one_exact_sample_per_pixel() {
-        let kernels = build_lanczos_contributions(8, 8).unwrap();
-        for (index, kernel) in kernels.iter().enumerate() {
-            assert_eq!(kernel.len(), 1);
-            assert_eq!(kernel[0].index, index as u32);
-            assert_eq!(kernel[0].weight, 1.0);
-        }
-    }
-
-    #[test]
-    fn geometry_resampler_identity_is_exact_in_linear_space() {
-        let source = (0..4 * 3 * 3)
-            .map(|index| index as f32 / 37.0)
-            .collect::<Vec<_>>();
-        let resampler =
-            GeometryResampler::new(&source, 4, 3, GeometryTransform::default(), 4, 3).unwrap();
-        let mut output = Vec::new();
-        for y in 0..3 {
-            output.extend_from_slice(&resampler.output_row(y).unwrap());
-        }
-        assert_eq!(output, source);
-    }
-
-    #[test]
-    fn geometry_resampler_quarter_turn_preserves_exact_pixels() {
-        let source = [
-            1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 5.0, 5.0, 5.0, 6.0, 6.0,
-            6.0,
-        ];
-        let geometry = GeometryTransform {
-            quarter_turns: 1,
-            ..Default::default()
-        };
-        let resampler = GeometryResampler::new(&source, 3, 2, geometry, 2, 3).unwrap();
-        let expected = [
-            4.0, 4.0, 4.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 2.0, 2.0, 2.0, 6.0, 6.0, 6.0, 3.0, 3.0,
-            3.0,
-        ];
-        let mut output = Vec::new();
-        for y in 0..3 {
-            output.extend_from_slice(&resampler.output_row(y).unwrap());
-        }
-        assert_eq!(output, expected);
-    }
-
-    #[test]
-    fn geometry_downsample_accumulates_linear_values_before_encoding() {
-        let source = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-        let resampler =
-            GeometryResampler::new(&source, 2, 1, GeometryTransform::default(), 1, 1).unwrap();
-        let row = resampler.output_row(0).unwrap();
-        for value in &row {
-            assert!((*value - 0.5).abs() < 1e-5);
-        }
-        let encoded =
-            encode_srgb_row_with_format(&row, &IccOutputTransform::srgb(), ExportRowFormat::Rgb8)
-                .unwrap();
-        assert!(encoded.iter().all(|value| *value > 170));
-    }
-
-    #[test]
-    fn export_dimension_limits_reject_oversized_images() {
-        assert!(validate_export_dimensions(MAX_EXPORT_EDGE + 1, 1).is_err());
-        assert!(validate_export_dimensions(MAX_EXPORT_EDGE, MAX_EXPORT_EDGE).is_err());
-    }
-
-    #[test]
-    fn wide_sources_reduce_band_height_to_stay_within_budget() {
-        let requested = crate::pipeline::TileSpec {
-            core_edge: if cfg!(target_os = "android") {
-                768
-            } else {
-                1024
-            },
-            halo: EXPORT_TILE_HALO,
-        };
-        let bounded = bounded_tile_spec(requested, MAX_EXPORT_EDGE).unwrap();
-        assert!(bounded.core_edge <= requested.core_edge);
-        assert!(bounded.core_edge >= 64);
-    }
-
-    #[test]
-    fn resolving_export_halo_never_enlarges_the_requested_tile() {
-        let requested = TileSpec {
-            core_edge: 768,
-            halo: EXPORT_TILE_HALO,
-        };
-        let resolved = resolved_export_tile_spec(
-            requested,
-            &ExposureParams::scene_referred_default(),
-            &MaskStack::default(),
-            8_640,
-        )
-        .unwrap();
-        assert_eq!(resolved.core_edge, requested.core_edge);
-        assert!(resolved.halo <= requested.halo);
-    }
-
-    #[test]
-    fn vertical_resize_streams_extreme_upscales_without_retaining_rows() {
-        let transform = crate::pipeline::IccOutputTransform::srgb();
-        let mut output = Vec::new();
-        let mut resizer = LinearLightResizer::new(1, 1, 1, 128).unwrap();
-        resizer
-            .push_source_row(0, &[0.18, 0.18, 0.18], Some(&transform), &mut output)
-            .unwrap();
-        assert!(resizer.pending_rows.iter().all(Option::is_none));
-        resizer.finish(Some(&transform), &mut output).unwrap();
-        assert_eq!(output.len(), 128 * 4);
-    }
-
-    #[test]
-    fn vertical_resize_streams_extreme_downscales_with_one_active_row() {
-        let transform = crate::pipeline::IccOutputTransform::srgb();
-        let mut output = Vec::new();
-        let mut resizer = LinearLightResizer::new(1, 128, 1, 1).unwrap();
-        for source_y in 0..128 {
-            resizer
-                .push_source_row(source_y, &[0.18, 0.18, 0.18], Some(&transform), &mut output)
-                .unwrap();
-            assert!(
-                resizer
-                    .pending_rows
-                    .iter()
-                    .filter(|row| row.is_some())
-                    .count()
-                    <= 1
-            );
-        }
-        resizer.finish(Some(&transform), &mut output).unwrap();
-        assert_eq!(output.len(), 4);
-    }
-
-    #[test]
-    fn srgb_encoding_outputs_opaque_rgba_and_rejects_non_finite_values() {
-        let transform = crate::pipeline::IccOutputTransform::srgb();
-        let encoded = encode_srgb_row(&[0.0, 0.18, 1.0], &transform).unwrap();
-        assert_eq!(encoded.len(), 4);
-        assert_eq!(encoded[3], 255);
-        assert!(encode_srgb_row(&[f32::NAN, 0.0, 0.0], &transform).is_err());
-    }
-
-    #[test]
-    fn cancelled_export_removes_temporary_output_before_publication() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "auraw-export-cancel-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        let destination = directory.join("photo.png");
-        let cancellation = AtomicBool::new(false);
-
-        let result = export_to_destination(&destination, &cancellation, |temporary| {
-            std::fs::write(temporary, b"complete but not published")?;
-            cancellation.store(true, Ordering::Release);
-            Ok(())
-        });
-
-        assert!(result.is_err());
-        assert!(!destination.exists());
-        assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn failed_export_publish_preserves_existing_destination() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "auraw-export-publish-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        let destination = directory.join("photo.png");
-        let missing_temporary = directory.join("missing.part");
-        std::fs::write(&destination, b"previous export").unwrap();
-
-        assert!(publish_completed_export(&missing_temporary, &destination).is_err());
-        assert_eq!(std::fs::read(&destination).unwrap(), b"previous export");
-
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-}
+mod tests;

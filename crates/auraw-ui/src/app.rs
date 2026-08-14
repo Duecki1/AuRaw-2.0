@@ -12,13 +12,13 @@ use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, build_retouch_patch,
     compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_jpeg_export_with_program_prewarm, spawn_tiled_png_export_with_program_prewarm,
-    spawn_tiled_tiff_export_with_program_prewarm, BrushDab, BrushMode, CameraProfileMode,
-    ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
+    spawn_tiled_export, BrushDab, BrushMode, CameraProfileMode, ExportEvent, ExportFormat,
+    ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
     GpuParams, GpuProgramPrewarm, InpaintLayer, InpaintStroke, InpaintStrokeKind,
     LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind,
     MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
-    RawGpuProgramTemplate, SubjectRefinement, TileSpec, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    RawGpuProgramTemplate, SubjectRefinement, TiledExportJob, TileSpec, EXPORT_TILE_HALO,
+    MAX_LOCAL_MASKS,
 };
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
@@ -1236,7 +1236,7 @@ mod eframe_impl;
 use lifecycle::{install_missing_range_sources, needs_canonical_mask_source};
 use processing_export::{batch_export_overall_fraction, spawn_export_request};
 #[cfg(not(target_os = "android"))]
-use processing_export::spawn_desktop_library_batch_export;
+use processing_export::{spawn_desktop_library_batch_export, DesktopLibraryBatchExportRequest};
 use sidecar_persistence::sidecar_interaction_active;
 
 #[cfg(test)]
