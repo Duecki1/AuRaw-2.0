@@ -862,7 +862,7 @@ pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize
         let spawn = std::thread::Builder::new()
             .name(format!("auraw-thumbnail-{worker_index}"))
             .spawn(move || {
-                run_one_thumbnail_worker(
+                run_one_thumbnail_worker(ThumbnailWorkerContext {
                     generation,
                     cancellation,
                     decoding_paused,
@@ -872,7 +872,7 @@ pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize
                     work_queue,
                     repaint,
                     load,
-                )
+                })
             });
         match spawn {
             Ok(handle) => handles.push(handle),
@@ -896,8 +896,7 @@ pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn run_one_thumbnail_worker(
+struct ThumbnailWorkerContext {
     generation: u64,
     cancellation: Arc<AtomicU64>,
     decoding_paused: Arc<AtomicBool>,
@@ -907,7 +906,20 @@ pub(super) fn run_one_thumbnail_worker(
     work_queue: Arc<Mutex<ThumbnailWorkQueue>>,
     repaint: egui::Context,
     load: ThumbnailLoader,
-) {
+}
+
+fn run_one_thumbnail_worker(context: ThumbnailWorkerContext) {
+    let ThumbnailWorkerContext {
+        generation,
+        cancellation,
+        decoding_paused,
+        decode_gate,
+        event_sender,
+        request_receiver,
+        work_queue,
+        repaint,
+        load,
+    } = context;
     while cancellation.load(Ordering::Acquire) == generation {
         let received = request_receiver
             .lock()

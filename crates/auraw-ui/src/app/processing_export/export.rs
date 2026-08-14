@@ -35,8 +35,9 @@ pub(in crate::app) fn spawn_export_request(
         display_name: _,
         gpu_export_prewarm,
     } = request;
-    match format {
-        ExportFormat::Png => spawn_tiled_png_export_with_program_prewarm(
+    spawn_tiled_export(
+        format,
+        TiledExportJob {
             device,
             queue,
             raw,
@@ -45,43 +46,13 @@ pub(in crate::app) fn spawn_export_request(
             masks,
             inpaint,
             path,
-            TileSpec::default(),
+            tile_spec: TileSpec::default(),
             settings,
             metadata,
             cancellation,
-            gpu_export_prewarm,
-        ),
-        ExportFormat::Jpeg => spawn_tiled_jpeg_export_with_program_prewarm(
-            device,
-            queue,
-            raw,
-            geometry,
-            exposure,
-            masks,
-            inpaint,
-            path,
-            TileSpec::default(),
-            settings,
-            metadata,
-            cancellation,
-            gpu_export_prewarm,
-        ),
-        ExportFormat::Tiff => spawn_tiled_tiff_export_with_program_prewarm(
-            device,
-            queue,
-            raw,
-            geometry,
-            exposure,
-            masks,
-            inpaint,
-            path,
-            TileSpec::default(),
-            settings,
-            metadata,
-            cancellation,
-            gpu_export_prewarm,
-        ),
-    }
+            program_prewarm: gpu_export_prewarm,
+        },
+    )
 }
 
 impl AurawApp {

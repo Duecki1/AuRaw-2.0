@@ -20,15 +20,13 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 
-/** Owns RAW import, library, sidecar, thumbnail-cache, and migration storage operations. */
+/** Coordinates RAW import, library, sidecar, and migration storage operations. */
 final class StorageManager {
     private static final String LOG_TAG = "AuRaw";
     private static final long MAX_RAW_IMPORT_BYTES = 2_000_000_000L;
@@ -38,8 +36,6 @@ final class StorageManager {
     private static final int MAX_RAW_LIBRARY_FILES = 20_000;
     private static final int MAX_RAW_LIBRARY_FOLDERS = 10_000;
     private static final int MAX_RAW_LIBRARY_FOLDER_DEPTH = 64;
-    private static final int MAX_THUMBNAIL_CACHE_ENTRIES = 512;
-    private static final long MAX_THUMBNAIL_CACHE_BYTES = 128L * 1024L * 1024L;
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
     private static final String LEGACY_MEDIASTORE_RAW_RELATIVE_PATH =
             Environment.DIRECTORY_DOWNLOADS + "/AuRaw/";
@@ -65,11 +61,13 @@ final class StorageManager {
 
     private final AuRawActivity activity;
     private final Callbacks callbacks;
+    private final ThumbnailCache thumbnailCache;
     private volatile String selectedRawLibraryFolder = "";
 
     StorageManager(AuRawActivity activity, Callbacks callbacks) {
         this.activity = activity;
         this.callbacks = callbacks;
+        this.thumbnailCache = new ThumbnailCache(activity);
     }
 
     Intent createRawDocumentPickerIntent() {
@@ -132,7 +130,7 @@ final class StorageManager {
             Uri uri = uris.get(index);
             String displayName = queryDisplayName(uri);
             try {
-                if (!isRawName(displayName)) {
+                if (!AndroidStorageContract.isRawName(displayName)) {
                     throw new IllegalArgumentException(
                             "Choose a supported RAW file (for example DNG, CR3, NEF, ARW, RAF, or RW2)");
                 }
@@ -291,7 +289,7 @@ final class StorageManager {
     }
 
     private StoredRaw importDocumentIntoLibrary(Uri uri, String displayName) throws Exception {
-        if (!isRawName(displayName)) {
+        if (!AndroidStorageContract.isRawName(displayName)) {
             throw new IllegalArgumentException(
                     "Choose a supported RAW file (for example DNG, CR3, NEF, ARW, RAF, or RW2)");
         }
@@ -375,78 +373,35 @@ final class StorageManager {
         return descriptor.detachFd();
     }
 
-    /**
-     * Returns a persistent private JPEG path for an unedited RAW thumbnail. The
-     * RAW identity is part of the key, so replacing a MediaStore item never
-     * reuses pixels from the older file.
-     */
+    /** Returns a persistent private JPEG path for an unedited RAW thumbnail. */
     String rawThumbnailCachePath(
             String uriText,
             long bytes,
             long modifiedSeconds,
             int maximumEdge) throws Exception {
-        return thumbnailCachePath(
-                // v2 invalidates previews generated before TIFF input color
-                // management and rendered-raster tone handling stabilized.
-                "raw-v2\n" + uriText + "\n" + bytes + "\n" + modifiedSeconds
-                        + "\n" + maximumEdge,
-                ".raw.jpg").getAbsolutePath();
+        return thumbnailCache.rawPath(uriText, bytes, modifiedSeconds, maximumEdge);
     }
 
     /** Edited thumbnails are validated by Rust against the exact sidecar bytes. */
     String developedThumbnailCachePath(String uriText) throws Exception {
-        return thumbnailCachePath("developed\n" + uriText, ".developed.jpg").getAbsolutePath();
+        return thumbnailCache.developedPath(uriText);
     }
 
     private void copyDevelopedThumbnailCache(String sourceUri, String destinationUri)
             throws Exception {
-        File source = new File(developedThumbnailCachePath(sourceUri));
-        File sourceFingerprint = new File(source.getPath() + ".fingerprint");
-        if (!source.isFile() || !sourceFingerprint.isFile()) {
-            return;
-        }
-        File destination = new File(developedThumbnailCachePath(destinationUri));
-        File destinationFingerprint = new File(destination.getPath() + ".fingerprint");
-        try {
-            copyThumbnailCacheFile(source, destination);
-            copyThumbnailCacheFile(sourceFingerprint, destinationFingerprint);
-        } catch (Exception error) {
-            deleteCacheFile(destination);
-            deleteCacheFile(destinationFingerprint);
-            throw error;
-        }
+        thumbnailCache.copyDeveloped(sourceUri, destinationUri);
     }
 
     private void clearDevelopedThumbnailCache(String uriText) {
-        try {
-            File thumbnail = new File(developedThumbnailCachePath(uriText));
-            deleteCacheFile(thumbnail);
-            deleteCacheFile(new File(thumbnail.getPath() + ".fingerprint"));
-        } catch (Exception error) {
-            Log.w(LOG_TAG, "Could not clear developed thumbnail cache for " + uriText, error);
-        }
+        thumbnailCache.clearDeveloped(uriText);
     }
 
-    private static void copyThumbnailCacheFile(File source, File destination) throws Exception {
-        try (FileInputStream input = new FileInputStream(source);
-             FileOutputStream output = new FileOutputStream(destination)) {
-            copy(input, output, MAX_THUMBNAIL_CACHE_BYTES);
-            output.getFD().sync();
-        }
-    }
-
-    /** Clears regenerable RAW and edited library previews from both cache generations. */
     void clearThumbnailCache() {
-        clearThumbnailCacheDirectory(persistentThumbnailCacheDirectory());
-        clearThumbnailCacheDirectory(
-                new File(activity.getCacheDir(), "library-thumbnails"));
+        thumbnailCache.clear();
     }
 
     long thumbnailCacheSizeBytes() {
-        long persistent = thumbnailCacheDirectorySize(persistentThumbnailCacheDirectory());
-        long legacy = thumbnailCacheDirectorySize(
-                new File(activity.getCacheDir(), "library-thumbnails"));
-        return persistent > Long.MAX_VALUE - legacy ? Long.MAX_VALUE : persistent + legacy;
+        return thumbnailCache.sizeBytes();
     }
 
     /**
@@ -458,7 +413,7 @@ final class StorageManager {
             throws Exception {
         Uri uri = Uri.parse(uriText);
         verifyRawLibraryIdentity(uri, displayName);
-        String safeName = safeRawName(displayName);
+        String safeName = AndroidStorageContract.safeRawName(displayName);
         int dot = safeName.lastIndexOf('.');
         String suffix = dot >= 0 ? safeName.substring(dot) : ".raw";
         File cached = File.createTempFile("auraw-thumbnail-", suffix, activity.getCacheDir());
@@ -553,7 +508,7 @@ final class StorageManager {
     /** Imports a RAW prepared in AuRaw's private cloud cache and its sidecar. */
     String importCachedRawLibraryDocument(String rawPath, String displayName) throws Exception {
         File sourceRaw = new File(rawPath);
-        if (!sourceRaw.isFile() || !isRawName(displayName)) {
+        if (!sourceRaw.isFile() || !AndroidStorageContract.isRawName(displayName)) {
             throw new IllegalArgumentException("The cached cloud RAW is missing or unsupported");
         }
         StoredRaw imported = null;
@@ -591,8 +546,8 @@ final class StorageManager {
             String requestedName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
-        String safeName = safeRawName(requestedName);
-        if (!safeName.equals(requestedName) || !isRawName(requestedName)) {
+        String safeName = AndroidStorageContract.safeRawName(requestedName);
+        if (!safeName.equals(requestedName) || !AndroidStorageContract.isRawName(requestedName)) {
             throw new IllegalArgumentException("Enter a safe supported RAW filename");
         }
         if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
@@ -606,8 +561,8 @@ final class StorageManager {
         }
         File parent = sourceRaw.getParentFile();
         File destinationRaw = new File(parent, requestedName);
-        File sourceSidecar = new File(parent, sidecarDisplayName(displayName));
-        File destinationSidecar = new File(parent, sidecarDisplayName(requestedName));
+        File sourceSidecar = new File(parent, AndroidStorageContract.sidecarDisplayName(displayName));
+        File destinationSidecar = new File(parent, AndroidStorageContract.sidecarDisplayName(requestedName));
         if (destinationRaw.exists() || destinationSidecar.exists()) {
             throw new IllegalStateException(requestedName + " already exists");
         }
@@ -667,7 +622,7 @@ final class StorageManager {
             return materializeRawSidecarLegacyMediaStore(displayName);
         }
         File sidecar = new File(
-                new File(rawUri.getPath()).getParentFile(), sidecarDisplayName(displayName));
+                new File(rawUri.getPath()).getParentFile(), AndroidStorageContract.sidecarDisplayName(displayName));
         if (!sidecar.isFile()) {
             return "";
         }
@@ -748,8 +703,8 @@ final class StorageManager {
             throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
         }
         ContentResolver resolver = activity.getContentResolver();
-        String displayName = sidecarDisplayName(rawDisplayName);
-        String stagedName = sidecarStagePrefix(rawDisplayName)
+        String displayName = AndroidStorageContract.sidecarDisplayName(rawDisplayName);
+        String stagedName = AndroidStorageContract.sidecarStagePrefix(rawDisplayName)
                 + Long.toUnsignedString(System.nanoTime());
         ArrayList<Uri> oldSidecars = legacyMediaStoreSidecarUris(rawDisplayName);
         ContentValues values = new ContentValues();
@@ -826,8 +781,8 @@ final class StorageManager {
             throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
         }
         ArrayList<Uri> result = new ArrayList<>();
-        String displayName = sidecarDisplayName(rawDisplayName);
-        String stagedPrefix = sidecarStagePrefix(rawDisplayName);
+        String displayName = AndroidStorageContract.sidecarDisplayName(rawDisplayName);
+        String stagedPrefix = AndroidStorageContract.sidecarStagePrefix(rawDisplayName);
         String[] projection = {
                 MediaStore.Downloads._ID,
                 MediaStore.Downloads.DISPLAY_NAME
@@ -863,8 +818,8 @@ final class StorageManager {
             throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
         }
         long generationId = ContentUris.parseId(generation);
-        String displayName = sidecarDisplayName(rawDisplayName);
-        String stagedPrefix = sidecarStagePrefix(rawDisplayName);
+        String displayName = AndroidStorageContract.sidecarDisplayName(rawDisplayName);
+        String stagedPrefix = AndroidStorageContract.sidecarStagePrefix(rawDisplayName);
         String selection = MediaStore.Downloads._ID + "=? AND ("
                 + legacyMediaStoreSidecarSelection() + ")";
         String[] sidecarArgs = legacyMediaStoreSidecarSelectionArgs(displayName, stagedPrefix);
@@ -927,7 +882,7 @@ final class StorageManager {
         }
         Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
         if (expectedDisplayName == null
-                || !isRawName(expectedDisplayName)
+                || !AndroidStorageContract.isRawName(expectedDisplayName)
                 || !ContentResolver.SCHEME_CONTENT.equals(rawUri.getScheme())
                 || !collection.getAuthority().equals(rawUri.getAuthority())) {
             throw new IllegalArgumentException("The RAW library URI is invalid");
@@ -986,163 +941,6 @@ final class StorageManager {
         }
     }
 
-    private static String sidecarDisplayName(String rawDisplayName) {
-        return AndroidStorageContract.sidecarDisplayName(rawDisplayName);
-    }
-
-    private File thumbnailCachePath(String identity, String suffix) throws Exception {
-        File directory = persistentThumbnailCacheDirectory();
-        byte[] digest = MessageDigest.getInstance("SHA-256").digest(
-                identity.getBytes(StandardCharsets.UTF_8));
-        StringBuilder name = new StringBuilder();
-        for (byte value : digest) {
-            name.append(String.format(Locale.ROOT, "%02x", value & 0xff));
-        }
-        File cached = new File(directory, name.append(suffix).toString());
-        migrateLegacyThumbnailCacheEntry(cached);
-        touchThumbnailCacheEntry(cached);
-        trimThumbnailCache(directory);
-        return cached;
-    }
-
-    /**
-     * Thumbnail JPEGs are regenerable, but keeping them in no-backup app storage
-     * prevents Android's cache scavenger from discarding the whole library
-     * between launches. They still disappear when app data is cleared or the
-     * app is uninstalled, and the bounded LRU below prevents unbounded growth.
-     */
-    private File persistentThumbnailCacheDirectory() {
-        File directory = new File(activity.getNoBackupFilesDir(), "library-thumbnails");
-        if (!directory.isDirectory() && !directory.mkdirs()) {
-            throw new IllegalStateException("Could not create the persistent thumbnail cache");
-        }
-        return directory;
-    }
-
-    private static void clearThumbnailCacheDirectory(File directory) {
-        if (!directory.exists()) {
-            return;
-        }
-        File[] entries = directory.listFiles();
-        if (entries == null) {
-            throw new IllegalStateException(
-                    "Could not inspect thumbnail cache " + directory);
-        }
-        for (File entry : entries) {
-            if (!entry.isFile() || (!entry.delete() && entry.exists())) {
-                throw new IllegalStateException(
-                        "Could not clear thumbnail cache entry " + entry);
-            }
-        }
-    }
-
-    private static long thumbnailCacheDirectorySize(File directory) {
-        if (!directory.isDirectory()) {
-            return 0L;
-        }
-        File[] entries = directory.listFiles();
-        if (entries == null) {
-            return 0L;
-        }
-        long total = 0L;
-        for (File entry : entries) {
-            long bytes = entry.isDirectory()
-                    ? thumbnailCacheDirectorySize(entry)
-                    : Math.max(0L, entry.length());
-            total = total > Long.MAX_VALUE - bytes ? Long.MAX_VALUE : total + bytes;
-        }
-        return total;
-    }
-
-    /** Lazily preserves cache entries written by releases that used getCacheDir(). */
-    private void migrateLegacyThumbnailCacheEntry(File destination) {
-        File legacyDirectory = new File(activity.getCacheDir(), "library-thumbnails");
-        if (!legacyDirectory.isDirectory()) {
-            return;
-        }
-        migrateLegacyThumbnailCacheFile(
-                new File(legacyDirectory, destination.getName()), destination);
-        File destinationFingerprint = new File(destination.getPath() + ".fingerprint");
-        migrateLegacyThumbnailCacheFile(
-                new File(legacyDirectory, destination.getName() + ".fingerprint"),
-                destinationFingerprint);
-    }
-
-    private static void migrateLegacyThumbnailCacheFile(File source, File destination) {
-        if (destination.isFile() || !source.isFile()) {
-            return;
-        }
-        try {
-            moveOrCopyLegacyFile(source, destination, MAX_THUMBNAIL_CACHE_BYTES);
-        } catch (Exception error) {
-            Log.w(LOG_TAG, "Could not migrate legacy thumbnail cache entry", error);
-        }
-    }
-
-    private static void touchThumbnailCacheEntry(File cached) {
-        if (!cached.isFile()) {
-            return;
-        }
-        long now = System.currentTimeMillis();
-        cached.setLastModified(now);
-        File fingerprint = new File(cached.getPath() + ".fingerprint");
-        if (fingerprint.isFile()) {
-            fingerprint.setLastModified(now);
-        }
-    }
-
-    private static void trimThumbnailCache(File directory) {
-        // PNG cache entries from older builds are intentionally discarded, not decoded.
-        File[] legacyPngs = directory.listFiles(
-                (parent, name) -> name.endsWith(".png")
-                        || name.endsWith(".png.fingerprint"));
-        if (legacyPngs != null) {
-            for (File legacyPng : legacyPngs) {
-                deleteCacheFile(legacyPng);
-            }
-        }
-
-        File[] thumbnails = directory.listFiles((parent, name) -> name.endsWith(".jpg"));
-        if (thumbnails != null && thumbnails.length > MAX_THUMBNAIL_CACHE_ENTRIES) {
-            Arrays.sort(
-                    thumbnails,
-                    (left, right) -> Long.compare(left.lastModified(), right.lastModified()));
-            int remove = thumbnails.length - MAX_THUMBNAIL_CACHE_ENTRIES;
-            for (int index = 0; index < remove; index++) {
-                deleteThumbnailCacheEntry(thumbnails[index]);
-            }
-        }
-
-        // A crash between the JPEG and fingerprint writes may leave an orphan.
-        File[] fingerprints = directory.listFiles(
-                (parent, name) -> name.endsWith(".developed.jpg.fingerprint"));
-        if (fingerprints == null) {
-            return;
-        }
-        for (File fingerprint : fingerprints) {
-            String name = fingerprint.getName();
-            String thumbnailName = name.substring(0, name.length() - ".fingerprint".length());
-            if (!new File(directory, thumbnailName).isFile()) {
-                deleteCacheFile(fingerprint);
-            }
-        }
-    }
-
-    private static void deleteThumbnailCacheEntry(File thumbnail) {
-        deleteCacheFile(thumbnail);
-        deleteCacheFile(new File(thumbnail.getPath() + ".fingerprint"));
-    }
-
-    private static void deleteCacheFile(File file) {
-        if (!file.delete() && file.exists()) {
-            file.deleteOnExit();
-        }
-    }
-
-    private static String sidecarStagePrefix(String rawDisplayName) {
-        return AndroidStorageContract.sidecarStagePrefix(rawDisplayName);
-    }
-
     private static String escapeLike(String value) {
         return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
     }
@@ -1156,7 +954,7 @@ final class StorageManager {
         if (!directory.isDirectory() && !directory.mkdirs()) {
             throw new IllegalStateException("Could not create " + directory);
         }
-        File destination = uniqueRawFile(directory, safeRawName(requestedName));
+        File destination = uniqueRawFile(directory, AndroidStorageContract.safeRawName(requestedName));
         File partial = uniqueRawFile(
                 directory,
                 AndroidStorageContract.importPartialName(destination.getName()));
@@ -1312,7 +1110,7 @@ final class StorageManager {
             // distinguish exactly 20,000 files from a truncated collection.
             while (result.size() <= MAX_RAW_LIBRARY_FILES && cursor.moveToNext()) {
                 String name = cursor.getString(nameColumn);
-                if (!isRawName(name)) {
+                if (!AndroidStorageContract.isRawName(name)) {
                     continue;
                 }
                 Uri uri = ContentUris.withAppendedId(
@@ -1342,7 +1140,7 @@ final class StorageManager {
             if (result.size() > MAX_RAW_LIBRARY_FILES) {
                 break;
             }
-            if (!file.isFile() || !isRawName(file.getName())) {
+            if (!file.isFile() || !AndroidStorageContract.isRawName(file.getName())) {
                 continue;
             }
             result.add(new RawLibraryRecord(
@@ -1448,7 +1246,7 @@ final class StorageManager {
             return;
         }
         for (File source : files) {
-            if (!source.isFile() || !isRawName(source.getName())) {
+            if (!source.isFile() || !AndroidStorageContract.isRawName(source.getName())) {
                 continue;
             }
             File destination = new File(library, source.getName());
@@ -1456,17 +1254,17 @@ final class StorageManager {
                 continue;
             }
             try {
-                moveOrCopyLegacyFile(source, destination, MAX_RAW_IMPORT_BYTES);
+                AndroidStorageContract.moveOrCopyLegacyFile(source, destination, MAX_RAW_IMPORT_BYTES);
             } catch (Exception error) {
                 Log.w(LOG_TAG, "Could not migrate legacy file RAW " + source.getName(), error);
                 continue;
             }
 
-            File sourceSidecar = new File(root, sidecarDisplayName(source.getName()));
-            File destinationSidecar = new File(library, sidecarDisplayName(source.getName()));
+            File sourceSidecar = new File(root, AndroidStorageContract.sidecarDisplayName(source.getName()));
+            File destinationSidecar = new File(library, AndroidStorageContract.sidecarDisplayName(source.getName()));
             if (sourceSidecar.isFile() && !destinationSidecar.exists()) {
                 try {
-                    moveOrCopyLegacyFile(sourceSidecar, destinationSidecar, MAX_SIDECAR_BYTES);
+                    AndroidStorageContract.moveOrCopyLegacyFile(sourceSidecar, destinationSidecar, MAX_SIDECAR_BYTES);
                 } catch (Exception error) {
                     Log.w(LOG_TAG, "Could not migrate legacy file sidecar " + sourceSidecar.getName(), error);
                 }
@@ -1491,7 +1289,7 @@ final class StorageManager {
                 continue;
             }
             try {
-                moveOrCopyLegacyFile(sourceSidecar, destinationSidecar, MAX_SIDECAR_BYTES);
+                AndroidStorageContract.moveOrCopyLegacyFile(sourceSidecar, destinationSidecar, MAX_SIDECAR_BYTES);
             } catch (Exception error) {
                 Log.w(LOG_TAG, "Could not recover legacy file sidecar " + sidecarName, error);
             }
@@ -1501,7 +1299,7 @@ final class StorageManager {
     private void migrateLegacyMediaStoreRawLibrary() {
         for (RawLibraryRecord record : listLegacyMediaStoreRawLibrary()) {
             Uri source = Uri.parse(record.uri);
-            File destination = new File(rawLibraryDirectory(), safeRawName(record.displayName));
+            File destination = new File(rawLibraryDirectory(), AndroidStorageContract.safeRawName(record.displayName));
             if (destination.exists()) {
                 continue;
             }
@@ -1545,7 +1343,7 @@ final class StorageManager {
                         destination.deleteOnExit();
                     }
                     File destinationSidecar = new File(
-                            rawLibraryDirectory(), sidecarDisplayName(destination.getName()));
+                            rawLibraryDirectory(), AndroidStorageContract.sidecarDisplayName(destination.getName()));
                     if (!destinationSidecar.delete() && destinationSidecar.exists()) {
                         destinationSidecar.deleteOnExit();
                     }
@@ -1562,11 +1360,6 @@ final class StorageManager {
                 }
             }
         }
-    }
-
-    private static void moveOrCopyLegacyFile(File source, File destination, long maximumBytes)
-            throws Exception {
-        AndroidStorageContract.moveOrCopyLegacyFile(source, destination, maximumBytes);
     }
 
     private void deleteStoredRaw(Uri uri) {
@@ -1595,14 +1388,6 @@ final class StorageManager {
                 return candidate;
             }
         }
-    }
-
-    private static String safeRawName(String requestedName) {
-        return AndroidStorageContract.safeRawName(requestedName);
-    }
-
-    private static boolean isRawName(String displayName) {
-        return AndroidStorageContract.isRawName(displayName);
     }
 
     private static final class RawLibraryRecord {

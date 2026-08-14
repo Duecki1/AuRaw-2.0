@@ -160,6 +160,15 @@ pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
             } else {
                 u64::from(read_u32(&mut file, order)?)
             };
+            let field = TiffFieldRef {
+                order,
+                big_tiff,
+                field_type,
+                count,
+                value_field_offset,
+                value_or_offset,
+                file_len,
+            };
 
             if matches!(
                 tag,
@@ -170,16 +179,7 @@ pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
             }
 
             if tag == 262 && count == 1 {
-                if let Some(value) = scalar_u64(
-                    &mut file,
-                    order,
-                    big_tiff,
-                    field_type,
-                    count,
-                    value_field_offset,
-                    value_or_offset,
-                    file_len,
-                )? {
+                if let Some(value) = scalar_u64(&mut file, field)? {
                     // 32803 = CFA, 34892 = LinearRaw (DNG).
                     if matches!(value, 32803 | 34892) {
                         return Ok(TiffContainerKind::Sensor);
@@ -188,17 +188,7 @@ pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
             }
 
             if tag == 330 && pending.len() < MAX_TIFF_SUBIFDS {
-                let offsets = integer_values(
-                    &mut file,
-                    order,
-                    big_tiff,
-                    field_type,
-                    count,
-                    value_field_offset,
-                    value_or_offset,
-                    file_len,
-                    MAX_TIFF_SUBIFDS - pending.len(),
-                )?;
+                let offsets = integer_values(&mut file, field, MAX_TIFF_SUBIFDS - pending.len())?;
                 pending.extend(offsets.into_iter().filter(|offset| *offset != 0));
             }
         }
@@ -245,9 +235,8 @@ fn field_width(field_type: u16) -> Option<u64> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn scalar_u64(
-    file: &mut File,
+#[derive(Clone, Copy)]
+struct TiffFieldRef {
     order: ByteOrder,
     big_tiff: bool,
     field_type: u16,
@@ -255,34 +244,36 @@ fn scalar_u64(
     value_field_offset: u64,
     value_or_offset: u64,
     file_len: u64,
-) -> Result<Option<u64>> {
-    Ok(integer_values(
-        file,
-        order,
-        big_tiff,
-        field_type,
-        count,
-        value_field_offset,
-        value_or_offset,
-        file_len,
-        1,
-    )?
-    .into_iter()
-    .next())
 }
 
-#[allow(clippy::too_many_arguments)]
+impl TiffFieldRef {
+    fn data_offset(self, total_bytes: u64) -> u64 {
+        let inline_bytes = if self.big_tiff { 8 } else { 4 };
+        if total_bytes <= inline_bytes {
+            self.value_field_offset
+        } else {
+            self.value_or_offset
+        }
+    }
+}
+
+fn scalar_u64(file: &mut File, field: TiffFieldRef) -> Result<Option<u64>> {
+    Ok(integer_values(file, field, 1)?.into_iter().next())
+}
+
 fn integer_values(
     file: &mut File,
-    order: ByteOrder,
-    big_tiff: bool,
-    field_type: u16,
-    count: u64,
-    value_field_offset: u64,
-    value_or_offset: u64,
-    file_len: u64,
+    field: TiffFieldRef,
     limit: usize,
 ) -> Result<Vec<u64>> {
+    let TiffFieldRef {
+        order,
+        field_type,
+        count,
+        file_len,
+        ..
+    } = field;
+
     let Some(width) = field_width(field_type) else {
         return Ok(Vec::new());
     };
@@ -290,12 +281,7 @@ fn integer_values(
         return Ok(Vec::new());
     }
     let total = width.checked_mul(count).context("TIFF tag size overflow")?;
-    let inline_bytes = if big_tiff { 8 } else { 4 };
-    let data_offset = if total <= inline_bytes {
-        value_field_offset
-    } else {
-        value_or_offset
-    };
+    let data_offset = field.data_offset(total);
     anyhow::ensure!(
         data_offset
             .checked_add(total)
@@ -512,6 +498,15 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
             } else {
                 u64::from(read_u32(&mut file, order)?)
             };
+            let field = TiffFieldRef {
+                order,
+                big_tiff,
+                field_type,
+                count,
+                value_field_offset,
+                value_or_offset,
+                file_len,
+            };
 
             // TIFF/EP ICC Profile tag stores the selected export color space.
             if tag == 34675 {
@@ -523,12 +518,7 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
                     (MIN_TIFF_ICC_BYTES..=MAX_TIFF_ICC_BYTES).contains(&count),
                     "TIFF ICC profile has an invalid size"
                 );
-                let inline_bytes = if big_tiff { 8u64 } else { 4u64 };
-                let data_offset = if count <= inline_bytes {
-                    value_field_offset
-                } else {
-                    value_or_offset
-                };
+                let data_offset = field.data_offset(count);
                 anyhow::ensure!(
                     data_offset
                         .checked_add(count)
@@ -543,17 +533,7 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
             }
 
             if tag == 330 && pending.len() < MAX_TIFF_SUBIFDS {
-                let offsets = integer_values(
-                    &mut file,
-                    order,
-                    big_tiff,
-                    field_type,
-                    count,
-                    value_field_offset,
-                    value_or_offset,
-                    file_len,
-                    MAX_TIFF_SUBIFDS - pending.len(),
-                )?;
+                let offsets = integer_values(&mut file, field, MAX_TIFF_SUBIFDS - pending.len())?;
                 pending.extend(offsets.into_iter().filter(|offset| *offset != 0));
             }
         }
