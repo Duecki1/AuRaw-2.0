@@ -14,6 +14,22 @@ pub fn color_grading_editor(
     grading: &mut ColorGrading,
     selected: &mut ColorGradeTab,
 ) -> bool {
+    // The Develop sidebar can render Color and Color Grading at the same time.
+    // Both contain controls named `Hue` and `Saturation`, and adjustment_slider
+    // derives its interaction IDs from the label. Keep every grading control in
+    // its own namespace so a grading drag can never be observed by the global
+    // Color controls (or by another editor that reuses the same labels).
+    ui.push_id("color-grading-editor", |ui| {
+        color_grading_editor_contents(ui, grading, selected)
+    })
+    .inner
+}
+
+fn color_grading_editor_contents(
+    ui: &mut Ui,
+    grading: &mut ColorGrading,
+    selected: &mut ColorGradeTab,
+) -> bool {
     let mut changed = false;
     let editor_width = ui.available_width().max(1.0);
     ui.set_width(editor_width);
@@ -68,13 +84,13 @@ pub fn color_grading_editor(
     ui.add_space(4.0);
 
     {
-        let wheel = match selected {
-            ColorGradeTab::Shadows => &mut grading.shadows,
-            ColorGradeTab::Midtones => &mut grading.midtones,
-            ColorGradeTab::Highlights => &mut grading.highlights,
-            ColorGradeTab::Global => &mut grading.global,
+        let (wheel_id, wheel) = match selected {
+            ColorGradeTab::Shadows => ("shadows", &mut grading.shadows),
+            ColorGradeTab::Midtones => ("midtones", &mut grading.midtones),
+            ColorGradeTab::Highlights => ("highlights", &mut grading.highlights),
+            ColorGradeTab::Global => ("global", &mut grading.global),
         };
-        changed |= color_wheel(ui, wheel);
+        changed |= ui.push_id(wheel_id, |ui| color_wheel(ui, wheel)).inner;
     }
 
     ui.separator();
