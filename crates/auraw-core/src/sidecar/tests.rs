@@ -1,5 +1,12 @@
 use super::*;
+#[cfg(not(target_os = "android"))]
+use super::desktop::{
+    developed_thumbnail_fingerprint_path_for_raw,
+    legacy_developed_thumbnail_fingerprint_path_for_raw, legacy_developed_thumbnail_path_for_raw,
+};
 use crate::pipeline::MaskKind;
+#[cfg(not(target_os = "android"))]
+use crate::pipeline::RawThumbnail;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn sample_edits() -> EditState {
@@ -655,6 +662,7 @@ fn malformed_current_mask_assets_are_rejected() {
     ));
 }
 
+#[cfg(not(target_os = "android"))]
 #[test]
 fn reset_all_adjustments_removes_sidecar_masks_and_thumbnail_caches() {
     let directory = temporary_directory("reset-all");

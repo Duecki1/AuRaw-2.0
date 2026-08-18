@@ -365,19 +365,6 @@ pub(super) fn thumbnail_selection_checkbox(
     })
 }
 
-#[cfg(test)]
-pub(super) fn format_file_size(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    match bytes {
-        0..=1023 => format!("{bytes} B"),
-        1024..=1_048_575 => format!("{:.1} KiB", bytes as f64 / KIB),
-        1_048_576..=1_073_741_823 => format!("{:.1} MiB", bytes as f64 / MIB),
-        _ => format!("{:.1} GiB", bytes as f64 / GIB),
-    }
-}
-
 pub(super) fn elide_middle(value: &str, maximum_chars: usize) -> String {
     let count = value.chars().count();
     if count <= maximum_chars || maximum_chars < 5 {
