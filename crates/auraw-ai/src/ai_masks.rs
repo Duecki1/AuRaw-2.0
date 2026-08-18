@@ -4,22 +4,23 @@ use crate::execution_provider::{
     create_session_with_fallback, lock_interactive_ai_model, CpuFallbackProfile, FallbackSession,
     SessionOptions,
 };
+use crate::model_artifact::{
+    ensure_artifact, verify_artifact, ArtifactSize, DownloadOptions, ModelArtifact,
+};
 use crate::pipeline::{LandscapeCategory, MaskImage};
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use ort::value::Tensor;
 use rayon::prelude::*;
-use ring::digest::{Context as Sha256Context, SHA256};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs::{self, File},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, MutexGuard, OnceLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 fn ensure_ai_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
@@ -29,6 +30,8 @@ fn ensure_ai_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
     );
     Ok(())
 }
+
+pub use crate::model_artifact::sha256_file_hex;
 
 pub const BIREFNET_LOW_MODEL_BYTES: u64 = 224_005_088;
 pub const BIREFNET_LOW_MODEL_URL: &str = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx";
@@ -66,6 +69,18 @@ pub struct BiRefNetModelSpec {
     pub input_width: u32,
     pub input_height: u32,
     pub explanation: &'static str,
+}
+
+impl BiRefNetModelSpec {
+    fn artifact(self) -> ModelArtifact {
+        ModelArtifact {
+            name: self.checkpoint,
+            url: Some(self.url),
+            sha256: self.sha256_hex,
+            size: ArtifactSize::Exact(self.bytes),
+            progress_total: self.bytes,
+        }
+    }
 }
 
 impl BiRefNetQuality {
@@ -125,6 +140,44 @@ pub const LANDSCAPE_MODEL_BYTES: u64 = 141_790_090;
 pub const LANDSCAPE_MODEL_URL: &str = "https://huggingface.co/onnx-community/maskformer-swin-base-ade/resolve/9366a4a18164800bcb3e01eb3ddb82160173c1c7/onnx/model_quantized.onnx";
 pub const LANDSCAPE_MODEL_SHA256_HEX: &str =
     "9d46ef6268d4d37d3ec3733d961e2462ef2d8ff1c2a54e1122c4bbba561ad738";
+
+const LANDSCAPE_ARTIFACT: ModelArtifact = ModelArtifact {
+    name: "MaskFormer model",
+    url: Some(LANDSCAPE_MODEL_URL),
+    sha256: LANDSCAPE_MODEL_SHA256_HEX,
+    size: ArtifactSize::Exact(LANDSCAPE_MODEL_BYTES),
+    progress_total: LANDSCAPE_MODEL_BYTES,
+};
+const LANDSCAPE_DOWNLOAD: DownloadOptions = DownloadOptions {
+    connect_timeout: Duration::from_secs(30),
+    response_timeout: Duration::from_secs(60),
+    body_timeout: Duration::from_secs(10 * 60),
+    attempts: 1,
+    resume: false,
+};
+
+const VITMATTE_ARTIFACT: ModelArtifact = ModelArtifact {
+    name: "ViTMatte model",
+    url: Some(VITMATTE_MODEL_URL),
+    sha256: VITMATTE_MODEL_SHA256_HEX,
+    size: ArtifactSize::Exact(VITMATTE_MODEL_BYTES),
+    progress_total: VITMATTE_MODEL_BYTES,
+};
+const VITMATTE_DOWNLOAD: DownloadOptions = DownloadOptions {
+    connect_timeout: Duration::from_secs(45),
+    response_timeout: Duration::from_secs(60),
+    body_timeout: Duration::from_secs(30 * 60),
+    attempts: 5,
+    resume: true,
+};
+
+const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
+    connect_timeout: Duration::from_secs(30),
+    response_timeout: Duration::from_secs(30),
+    body_timeout: Duration::from_secs(10 * 60),
+    attempts: 1,
+    resume: false,
+};
 const MASKFORMER_SHORTEST_EDGE: u32 = 800;
 const MASKFORMER_LONGEST_EDGE: u32 = 1333;
 const MASKFORMER_SIZE_DIVISOR: u32 = 32;
@@ -373,7 +426,7 @@ pub fn spawn_landscape_mask(
                             },
                         )?;
                     } else {
-                        verify_vitmatte_model(&vitmatte_path).context(
+                        verify_artifact(&vitmatte_path, VITMATTE_ARTIFACT).context(
                             "the pinned ViTMatte landscape refiner is unavailable or invalid; consent to its download again",
                         )?;
                     }
@@ -421,157 +474,36 @@ fn ensure_landscape_model<F>(
 where
     F: FnMut(u64, u64),
 {
-    match verify_landscape_model(path) {
-        Ok(()) => return Ok(()),
-        Err(error) if !allow_download => {
-            anyhow::bail!(
+    if !allow_download {
+        return verify_artifact(path, LANDSCAPE_ARTIFACT).map_err(|error| {
+            anyhow::anyhow!(
                 "the pinned MaskFormer model is unavailable or invalid ({error:#}); consent to its download again"
-            );
-        }
-        Err(error) if path.exists() => {
-            log::warn!(
-                "discarding invalid MaskFormer cache {}: {error:#}",
-                path.display()
-            );
-            fs::remove_file(path)
-                .with_context(|| format!("remove invalid MaskFormer model {}", path.display()))?;
-        }
-        Err(_) => {}
+            )
+        });
     }
-    download_pinned_landscape_model(path, cancellation, &mut progress)?;
-    verify_landscape_model(path).context("verify published MaskFormer landscape model")
-}
-
-fn verify_landscape_model(path: &Path) -> Result<()> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("read MaskFormer model metadata {}", path.display()))?;
-    anyhow::ensure!(metadata.is_file(), "MaskFormer cache is not a regular file");
-    anyhow::ensure!(
-        metadata.len() == LANDSCAPE_MODEL_BYTES,
-        "MaskFormer model size mismatch: found {}, expected {LANDSCAPE_MODEL_BYTES}",
-        metadata.len()
-    );
-    let actual = sha256_file_hex(path)?;
-    anyhow::ensure!(
-        actual == LANDSCAPE_MODEL_SHA256_HEX,
-        "MaskFormer model SHA-256 mismatch (expected {LANDSCAPE_MODEL_SHA256_HEX})"
-    );
-    Ok(())
+    ensure_artifact(
+        path,
+        LANDSCAPE_ARTIFACT,
+        LANDSCAPE_DOWNLOAD,
+        &mut progress,
+        || ensure_ai_not_cancelled(cancellation),
+    )
 }
 
 pub fn landscape_model_is_verified(path: &Path) -> bool {
-    verify_landscape_model(path).is_ok()
+    verify_artifact(path, LANDSCAPE_ARTIFACT).is_ok()
 }
 
 pub fn vitmatte_model_is_verified(path: &Path) -> bool {
-    verify_vitmatte_model(path).is_ok()
+    verify_artifact(path, VITMATTE_ARTIFACT).is_ok()
 }
 
 #[cfg(test)]
 #[allow(dead_code)]
 pub fn object_models_are_verified(encoder: &Path, decoder: &Path, vitmatte: &Path) -> bool {
-    object::verify_sha256_hex(
-        encoder,
-        object::SAM21_ENCODER_SHA256_HEX,
-        object::SAM21_ENCODER_MAX_BYTES,
-    )
-    .is_ok()
-        && object::verify_sha256_hex(
-            decoder,
-            object::SAM21_DECODER_SHA256_HEX,
-            object::SAM21_DECODER_MAX_BYTES,
-        )
-        .is_ok()
-        && verify_vitmatte_model(vitmatte).is_ok()
-}
-
-fn download_pinned_landscape_model<F>(
-    path: &Path,
-    cancellation: &AtomicBool,
-    progress: &mut F,
-) -> Result<()>
-where
-    F: FnMut(u64, u64),
-{
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create model cache {}", parent.display()))?;
-    }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
-    let result = (|| -> Result<()> {
-        let config = ureq::Agent::config_builder()
-            .https_only(true)
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(60)))
-            .timeout_recv_body(Some(Duration::from_secs(10 * 60)))
-            .build();
-        let agent: ureq::Agent = config.into();
-        let mut response = agent
-            .get(LANDSCAPE_MODEL_URL)
-            .call()
-            .context("download pinned MaskFormer ONNX model")?;
-        if let Some(length) = response.body().content_length() {
-            anyhow::ensure!(
-                length == LANDSCAPE_MODEL_BYTES,
-                "MaskFormer server declared {length} bytes, expected {LANDSCAPE_MODEL_BYTES}"
-            );
-        }
-        let mut reader = response.body_mut().as_reader();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        let mut downloaded = 0u64;
-        let mut hasher = Sha256Context::new(&SHA256);
-        let mut buffer = [0u8; 256 * 1024];
-        loop {
-            ensure_ai_not_cancelled(cancellation)?;
-            let read = reader
-                .read(&mut buffer)
-                .context("read MaskFormer download")?;
-            if read == 0 {
-                break;
-            }
-            downloaded = downloaded
-                .checked_add(read as u64)
-                .context("MaskFormer download byte count overflow")?;
-            anyhow::ensure!(
-                downloaded <= LANDSCAPE_MODEL_BYTES,
-                "MaskFormer download exceeded its pinned {LANDSCAPE_MODEL_BYTES}-byte size"
-            );
-            hasher.update(&buffer[..read]);
-            file.write_all(&buffer[..read])
-                .context("write MaskFormer ONNX model")?;
-            progress(downloaded, LANDSCAPE_MODEL_BYTES);
-        }
-        file.sync_all().context("flush MaskFormer ONNX model")?;
-        anyhow::ensure!(
-            downloaded == LANDSCAPE_MODEL_BYTES,
-            "MaskFormer model size mismatch: received {downloaded}, expected {LANDSCAPE_MODEL_BYTES}"
-        );
-        let digest = hasher
-            .finish()
-            .as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        anyhow::ensure!(
-            digest == LANDSCAPE_MODEL_SHA256_HEX,
-            "MaskFormer model SHA-256 mismatch (expected {LANDSCAPE_MODEL_SHA256_HEX})"
-        );
-        ensure_ai_not_cancelled(cancellation)?;
-        fs::rename(&temporary, path)
-            .with_context(|| format!("publish MaskFormer model to {}", path.display()))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    verify_artifact(encoder, object::SAM21_ENCODER_ARTIFACT).is_ok()
+        && verify_artifact(decoder, object::SAM21_DECODER_ARTIFACT).is_ok()
+        && verify_artifact(vitmatte, VITMATTE_ARTIFACT).is_ok()
 }
 
 pub struct SubjectMaskWorkerRequest {
@@ -647,167 +579,20 @@ fn ensure_model(
     events: &mpsc::Sender<SubjectMaskEvent>,
     cancellation: &AtomicBool,
 ) -> Result<()> {
-    match verify_model(quality, path) {
-        Ok(()) => return Ok(()),
-        Err(error) if path.exists() => {
-            log::warn!(
-                "discarding untrusted BiRefNet cache {}: {error:#}",
-                path.display()
-            );
-            fs::remove_file(path)
-                .with_context(|| format!("remove invalid model cache {}", path.display()))?;
-        }
-        Err(_) => {}
-    }
-    download_model(quality, path, events, cancellation)?;
-    verify_model(quality, path).context("verify published BiRefNet model")
-}
-
-fn verify_model(quality: BiRefNetQuality, path: &Path) -> Result<()> {
     let model = quality.model();
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("read BiRefNet model metadata {}", path.display()))?;
-    anyhow::ensure!(metadata.is_file(), "BiRefNet cache is not a regular file");
-    anyhow::ensure!(
-        metadata.len() == model.bytes,
-        "{} size mismatch: found {}, expected {}",
-        model.checkpoint,
-        metadata.len(),
-        model.bytes
-    );
-    let digest = sha256_file_hex(path)?;
-    anyhow::ensure!(
-        digest == model.sha256_hex,
-        "{} SHA-256 mismatch (expected {})",
-        model.checkpoint,
-        model.sha256_hex
-    );
-    Ok(())
-}
-
-fn sha256_file(path: &Path) -> Result<[u8; 32]> {
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    sha256_reader(&mut file).with_context(|| format!("hash {}", path.display()))
-}
-
-fn sha256_reader(reader: &mut impl Read) -> Result<[u8; 32]> {
-    let mut hasher = Sha256Context::new(&SHA256);
-    let mut buffer = [0u8; 256 * 1024];
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = hasher.finish();
-    digest
-        .as_ref()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("SHA-256 implementation returned the wrong digest length"))
-}
-
-pub fn sha256_file_hex(path: &Path) -> Result<String> {
-    Ok(hex::encode(sha256_file(path)?))
-}
-
-fn download_model(
-    quality: BiRefNetQuality,
-    path: &Path,
-    events: &mpsc::Sender<SubjectMaskEvent>,
-    cancellation: &AtomicBool,
-) -> Result<()> {
-    let model = quality.model();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create model cache {}", parent.display()))?;
-    }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
-    let result = (|| -> Result<()> {
-        let config = ureq::Agent::config_builder()
-            .https_only(true)
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(10 * 60)))
-            .build();
-        let agent: ureq::Agent = config.into();
-        let mut response = agent
-            .get(model.url)
-            .call()
-            .context("download BiRefNet ONNX model")?;
-        if let Some(length) = response.body().content_length() {
-            anyhow::ensure!(
-                length == model.bytes,
-                "{} server declared {length} bytes, expected {}",
-                model.checkpoint,
-                model.bytes
-            );
-        }
-        let mut reader = response.body_mut().as_reader();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        let mut downloaded = 0u64;
-        let mut hasher = Sha256Context::new(&SHA256);
-        let mut buffer = [0u8; 256 * 1024];
-        loop {
-            ensure_ai_not_cancelled(cancellation)?;
-            let read = reader.read(&mut buffer).context("read BiRefNet download")?;
-            if read == 0 {
-                break;
-            }
-            downloaded = downloaded
-                .checked_add(read as u64)
-                .context("BiRefNet download byte count overflow")?;
-            anyhow::ensure!(
-                downloaded <= model.bytes,
-                "{} download exceeded its pinned {}-byte size",
-                model.checkpoint,
-                model.bytes
-            );
-            hasher.update(&buffer[..read]);
-            file.write_all(&buffer[..read])
-                .context("write BiRefNet ONNX model")?;
+    ensure_artifact(
+        path,
+        model.artifact(),
+        BIREFNET_DOWNLOAD,
+        |downloaded, total| {
             let _ = events.send(SubjectMaskEvent::DownloadProgress {
                 label: model.download_label,
                 downloaded,
-                total: model.bytes,
+                total,
             });
-        }
-        file.sync_all().context("flush BiRefNet ONNX model")?;
-        anyhow::ensure!(
-            downloaded == model.bytes,
-            "{} size mismatch: received {downloaded}, expected {}",
-            model.checkpoint,
-            model.bytes
-        );
-        let digest = hasher
-            .finish()
-            .as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        anyhow::ensure!(
-            digest == model.sha256_hex,
-            "{} SHA-256 mismatch (expected {})",
-            model.checkpoint,
-            model.sha256_hex
-        );
-        ensure_ai_not_cancelled(cancellation)?;
-        fs::rename(&temporary, path)
-            .with_context(|| format!("publish BiRefNet model to {}", path.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+        },
+        || ensure_ai_not_cancelled(cancellation),
+    )
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1599,225 +1384,17 @@ fn restore_birefnet_output(
         .collect())
 }
 
-fn ensure_vitmatte_model<F>(path: &Path, cancellation: &AtomicBool, mut progress: F) -> Result<()>
+fn ensure_vitmatte_model<F>(path: &Path, cancellation: &AtomicBool, progress: F) -> Result<()>
 where
     F: FnMut(u64, u64),
 {
-    match verify_vitmatte_model(path) {
-        Ok(()) => return Ok(()),
-        Err(error) if path.exists() => {
-            log::warn!(
-                "discarding invalid ViTMatte cache {}: {error:#}",
-                path.display()
-            );
-            fs::remove_file(path)
-                .with_context(|| format!("remove invalid ViTMatte model {}", path.display()))?;
-        }
-        Err(_) => {}
-    }
-    download_vitmatte_model(path, &mut progress, cancellation)?;
-    verify_vitmatte_model(path).context("verify published ViTMatte ONNX model")
-}
-
-fn verify_vitmatte_model(path: &Path) -> Result<()> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("read ViTMatte model metadata {}", path.display()))?;
-    anyhow::ensure!(metadata.is_file(), "ViTMatte cache is not a regular file");
-    anyhow::ensure!(
-        metadata.len() == VITMATTE_MODEL_BYTES,
-        "ViTMatte model size mismatch: found {}, expected {VITMATTE_MODEL_BYTES}",
-        metadata.len()
-    );
-    let actual = sha256_file_hex(path)?;
-    anyhow::ensure!(
-        actual == VITMATTE_MODEL_SHA256_HEX,
-        "ViTMatte model SHA-256 mismatch (expected {VITMATTE_MODEL_SHA256_HEX})"
-    );
-    Ok(())
-}
-
-fn download_vitmatte_model<F>(
-    path: &Path,
-    progress: &mut F,
-    cancellation: &AtomicBool,
-) -> Result<()>
-where
-    F: FnMut(u64, u64),
-{
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create model cache {}", parent.display()))?;
-    }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
-    const MAX_ATTEMPTS: usize = 5;
-
-    let result = (|| -> Result<()> {
-        let config = ureq::Agent::config_builder()
-            .https_only(true)
-            .timeout_connect(Some(Duration::from_secs(45)))
-            .timeout_recv_response(Some(Duration::from_secs(60)))
-            .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
-            .build();
-        let agent: ureq::Agent = config.into();
-        let mut last_error: Option<anyhow::Error> = None;
-
-        for attempt in 0..MAX_ATTEMPTS {
-            ensure_ai_not_cancelled(cancellation)?;
-            let mut downloaded = fs::metadata(&temporary)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            if downloaded > VITMATTE_MODEL_BYTES {
-                fs::remove_file(&temporary).context("remove oversized partial ViTMatte model")?;
-                downloaded = 0;
-            }
-            if downloaded == VITMATTE_MODEL_BYTES
-                && sha256_file_hex(&temporary).ok().as_deref() == Some(VITMATTE_MODEL_SHA256_HEX)
-            {
-                ensure_ai_not_cancelled(cancellation)?;
-                fs::rename(&temporary, path).with_context(|| {
-                    format!("publish resumed ViTMatte model to {}", path.display())
-                })?;
-                return Ok(());
-            }
-            if downloaded > 0 {
-                progress(downloaded, VITMATTE_MODEL_BYTES);
-            }
-
-            let response_result = if downloaded > 0 {
-                let range = format!("bytes={downloaded}-");
-                agent
-                    .get(VITMATTE_MODEL_URL)
-                    .header("Range", range.as_str())
-                    .call()
-            } else {
-                agent.get(VITMATTE_MODEL_URL).call()
-            };
-            let mut response = match response_result {
-                Ok(response) => response,
-                Err(error) => {
-                    last_error = Some(anyhow::Error::new(error).context(format!(
-                        "download ViTMatte ONNX model (attempt {}/{MAX_ATTEMPTS})",
-                        attempt + 1
-                    )));
-                    if attempt + 1 < MAX_ATTEMPTS {
-                        std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-                        continue;
-                    }
-                    break;
-                }
-            };
-
-            let resuming = downloaded > 0 && response.status().as_u16() == 206;
-            if downloaded > 0 && !resuming {
-                downloaded = 0;
-            }
-            if let Some(length) = response.body().content_length() {
-                let declared_total = if resuming {
-                    downloaded
-                        .checked_add(length)
-                        .context("ViTMatte response length overflow")?
-                } else {
-                    length
-                };
-                anyhow::ensure!(
-                    declared_total == VITMATTE_MODEL_BYTES,
-                    "ViTMatte server declared {declared_total} total bytes, expected {VITMATTE_MODEL_BYTES}"
-                );
-            }
-
-            let mut options = OpenOptions::new();
-            options.write(true).create(true);
-            if resuming {
-                options.append(true);
-            } else {
-                options.truncate(true);
-            }
-            let mut file = options
-                .open(&temporary)
-                .with_context(|| format!("open partial ViTMatte model {}", temporary.display()))?;
-            let mut reader = response.body_mut().as_reader();
-            let mut buffer = [0u8; 256 * 1024];
-            let mut transfer_error: Option<anyhow::Error> = None;
-
-            loop {
-                ensure_ai_not_cancelled(cancellation)?;
-                let read = match reader.read(&mut buffer) {
-                    Ok(read) => read,
-                    Err(error) => {
-                        let _ = file.sync_data();
-                        transfer_error = Some(anyhow::Error::new(error).context(format!(
-                            "read ViTMatte download (attempt {}/{MAX_ATTEMPTS})",
-                            attempt + 1
-                        )));
-                        break;
-                    }
-                };
-                if read == 0 {
-                    break;
-                }
-                downloaded = downloaded
-                    .checked_add(read as u64)
-                    .context("ViTMatte download byte count overflow")?;
-                anyhow::ensure!(
-                    downloaded <= VITMATTE_MODEL_BYTES,
-                    "ViTMatte download exceeded its pinned {VITMATTE_MODEL_BYTES}-byte size"
-                );
-                file.write_all(&buffer[..read])
-                    .context("write ViTMatte ONNX model")?;
-                progress(downloaded, VITMATTE_MODEL_BYTES);
-            }
-
-            if let Some(error) = transfer_error {
-                last_error = Some(error);
-                if attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-                    continue;
-                }
-                break;
-            }
-
-            file.sync_all().context("flush ViTMatte ONNX model")?;
-            if downloaded < VITMATTE_MODEL_BYTES {
-                last_error = Some(anyhow::anyhow!(
-                    "ViTMatte download ended early at {downloaded} / {VITMATTE_MODEL_BYTES} bytes"
-                ));
-                if attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-                    continue;
-                }
-                break;
-            }
-
-            let actual = sha256_file_hex(&temporary).context("hash ViTMatte ONNX model")?;
-            if actual == VITMATTE_MODEL_SHA256_HEX {
-                ensure_ai_not_cancelled(cancellation)?;
-                fs::rename(&temporary, path)
-                    .with_context(|| format!("publish ViTMatte model to {}", path.display()))?;
-                return Ok(());
-            }
-
-            // The full byte count with a wrong digest is not a resumable
-            // prefix. Discard it and retry cleanly; the pinned SHA-256 remains
-            // the final trust boundary.
-            fs::remove_file(&temporary).context("remove corrupt ViTMatte partial")?;
-            last_error = Some(anyhow::anyhow!(
-                "ViTMatte model SHA-256 mismatch (expected {VITMATTE_MODEL_SHA256_HEX})"
-            ));
-            if attempt + 1 < MAX_ATTEMPTS {
-                std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("download ViTMatte ONNX model failed")))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    ensure_artifact(
+        path,
+        VITMATTE_ARTIFACT,
+        VITMATTE_DOWNLOAD,
+        progress,
+        || ensure_ai_not_cancelled(cancellation),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2329,8 +1906,8 @@ mod landscape_mask_tests {
         let missing = std::env::temp_dir().join(format!(
             "auraw-missing-maskformer-{}-{}.onnx",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

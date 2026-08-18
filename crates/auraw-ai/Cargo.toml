@@ -39,3 +39,4 @@ ort = { workspace = true, features = ["download-binaries", "copy-dylibs", "tls-r
 
 [dev-dependencies]
 pollster.workspace = true
+tempfile.workspace = true

@@ -438,6 +438,7 @@ dependencies = [
  "rayon",
  "ring",
  "serde",
+ "tempfile",
  "ureq",
  "zip",
 ]

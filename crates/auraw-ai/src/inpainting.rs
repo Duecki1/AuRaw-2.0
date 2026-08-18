@@ -3,19 +3,18 @@ use crate::execution_provider::try_lock_interactive_ai_model;
 use crate::execution_provider::{
     create_session_with_fallback, lock_interactive_ai_model, FallbackSession, SessionOptions,
 };
+use crate::model_artifact::{ensure_artifact, ArtifactSize, DownloadOptions, ModelArtifact};
 use anyhow::{Context, Result};
 use ort::value::Tensor;
 use rayon::prelude::*;
-use ring::digest::{Context as Sha256Context, SHA256};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, OnceLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use crate::pipeline::{
@@ -35,10 +34,20 @@ pub const LAMA_MODEL_URL: &str =
 pub const LAMA_MODEL_BYTES: u64 = 208_044_816;
 pub const LAMA_MODEL_SHA256_HEX: &str =
     "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6";
-const LAMA_MODEL_SHA256: [u8; 32] = [
-    0x1f, 0xae, 0xf5, 0x30, 0x1d, 0x78, 0xdb, 0x7d, 0xda, 0x50, 0x2f, 0xe5, 0x99, 0x66, 0x95, 0x7e,
-    0xc4, 0xb7, 0x9d, 0xd6, 0x4e, 0x16, 0xf0, 0x3e, 0xd9, 0x69, 0x13, 0xc7, 0xa4, 0xeb, 0x68, 0xd6,
-];
+const LAMA_ARTIFACT: ModelArtifact = ModelArtifact {
+    name: "LaMa model",
+    url: Some(LAMA_MODEL_URL),
+    sha256: LAMA_MODEL_SHA256_HEX,
+    size: ArtifactSize::Exact(LAMA_MODEL_BYTES),
+    progress_total: LAMA_MODEL_BYTES,
+};
+const LAMA_DOWNLOAD: DownloadOptions = DownloadOptions {
+    connect_timeout: Duration::from_secs(30),
+    response_timeout: Duration::from_secs(30),
+    body_timeout: Duration::from_secs(15 * 60),
+    attempts: 1,
+    resume: false,
+};
 pub use auraw_gpu::LAMA_EDGE;
 const MAX_INPAINT_PIXELS: u64 = 20_000_000;
 const REC2020_LUMA: [f32; 3] = [0.262_700_2, 0.677_998_1, 0.059_301_7];
@@ -274,17 +283,15 @@ fn ensure_lama_model(
     {
         return Ok(());
     }
-    if verify_lama_model(path).is_ok() {
-        remember_lama_model_identity(path);
-        return Ok(());
-    }
-    if path.exists() {
-        log::warn!("discarding invalid LaMa cache {}", path.display());
-        fs::remove_file(path)
-            .with_context(|| format!("remove invalid LaMa model {}", path.display()))?;
-    }
-    download_lama_model(path, events, cancellation)?;
-    verify_lama_model(path).context("verify published LaMa model")?;
+    ensure_artifact(
+        path,
+        LAMA_ARTIFACT,
+        LAMA_DOWNLOAD,
+        |downloaded, total| {
+            let _ = events.send(InpaintEvent::DownloadProgress { downloaded, total });
+        },
+        || ensure_inpaint_not_cancelled(cancellation),
+    )?;
     remember_lama_model_identity(path);
     Ok(())
 }
@@ -315,121 +322,6 @@ fn remember_lama_model_identity(path: &Path) {
     if let Ok(mut cached) = LAMA_VERIFIED_MODEL.get_or_init(|| Mutex::new(None)).lock() {
         *cached = Some(identity);
     }
-}
-
-fn verify_lama_model(path: &Path) -> Result<()> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("read LaMa model metadata {}", path.display()))?;
-    anyhow::ensure!(metadata.is_file(), "LaMa cache is not a regular file");
-    anyhow::ensure!(
-        metadata.len() == LAMA_MODEL_BYTES,
-        "LaMa model size mismatch: found {}, expected {LAMA_MODEL_BYTES}",
-        metadata.len()
-    );
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut hasher = Sha256Context::new(&SHA256);
-    let mut buffer = [0u8; 256 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest: [u8; 32] = hasher
-        .finish()
-        .as_ref()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("SHA-256 implementation returned the wrong length"))?;
-    anyhow::ensure!(
-        digest == LAMA_MODEL_SHA256,
-        "LaMa model SHA-256 mismatch (expected {LAMA_MODEL_SHA256_HEX})"
-    );
-    Ok(())
-}
-
-fn download_lama_model(
-    path: &Path,
-    events: &mpsc::Sender<InpaintEvent>,
-    cancellation: &AtomicBool,
-) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create model cache {}", parent.display()))?;
-    }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
-    let result = (|| -> Result<()> {
-        let config = ureq::Agent::config_builder()
-            .https_only(true)
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(15 * 60)))
-            .build();
-        let agent: ureq::Agent = config.into();
-        let mut response = agent
-            .get(LAMA_MODEL_URL)
-            .call()
-            .context("download LaMa ONNX model")?;
-        if let Some(length) = response.body().content_length() {
-            anyhow::ensure!(
-                length == LAMA_MODEL_BYTES,
-                "LaMa server declared {length} bytes, expected {LAMA_MODEL_BYTES}"
-            );
-        }
-        let mut reader = response.body_mut().as_reader();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        let mut downloaded = 0u64;
-        let mut hasher = Sha256Context::new(&SHA256);
-        let mut buffer = [0u8; 256 * 1024];
-        loop {
-            ensure_inpaint_not_cancelled(cancellation)?;
-            let read = reader.read(&mut buffer).context("read LaMa download")?;
-            if read == 0 {
-                break;
-            }
-            downloaded = downloaded
-                .checked_add(read as u64)
-                .context("LaMa download byte count overflow")?;
-            anyhow::ensure!(
-                downloaded <= LAMA_MODEL_BYTES,
-                "LaMa download exceeded its pinned {LAMA_MODEL_BYTES}-byte size"
-            );
-            hasher.update(&buffer[..read]);
-            file.write_all(&buffer[..read])
-                .context("write LaMa ONNX model")?;
-            let _ = events.send(InpaintEvent::DownloadProgress {
-                downloaded,
-                total: LAMA_MODEL_BYTES,
-            });
-        }
-        file.sync_all().context("flush LaMa ONNX model")?;
-        anyhow::ensure!(
-            downloaded == LAMA_MODEL_BYTES,
-            "LaMa model size mismatch: received {downloaded}, expected {LAMA_MODEL_BYTES}"
-        );
-        let digest: [u8; 32] = hasher
-            .finish()
-            .as_ref()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("SHA-256 implementation returned the wrong length"))?;
-        anyhow::ensure!(digest == LAMA_MODEL_SHA256, "LaMa model SHA-256 mismatch");
-        ensure_inpaint_not_cancelled(cancellation)?;
-        fs::rename(&temporary, path)
-            .with_context(|| format!("publish LaMa model to {}", path.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
 }
 
 fn infer_lama(

@@ -722,11 +722,7 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub(super) fn lama_model_path(&self) -> PathBuf {
-        let root = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-            .unwrap_or_else(std::env::temp_dir);
-        root.join("auraw/models/lama_fp32.onnx")
+        auraw_ai::desktop_model_cache_root().join("lama_fp32.onnx")
     }
 
     #[cfg(target_os = "android")]
