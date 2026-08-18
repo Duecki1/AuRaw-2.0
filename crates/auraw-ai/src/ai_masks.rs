@@ -4,22 +4,23 @@ use crate::execution_provider::{
     create_session_with_fallback, lock_interactive_ai_model, CpuFallbackProfile, FallbackSession,
     SessionOptions,
 };
+use crate::model_artifact::{
+    ensure_artifact, verify_artifact, ArtifactSize, DownloadOptions, ModelArtifact,
+};
 use crate::pipeline::{MaskImage};
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use ort::value::Tensor;
 use rayon::prelude::*;
-use ring::digest::{Context as Sha256Context, SHA256};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs::{self, File},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, MutexGuard, OnceLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 fn ensure_ai_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
@@ -29,6 +30,8 @@ fn ensure_ai_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
     );
     Ok(())
 }
+
+pub use crate::model_artifact::sha256_file_hex;
 
 pub const BIREFNET_LOW_MODEL_BYTES: u64 = 224_005_088;
 pub const BIREFNET_LOW_MODEL_URL: &str = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx";
@@ -66,6 +69,18 @@ pub struct BiRefNetModelSpec {
     pub input_width: u32,
     pub input_height: u32,
     pub explanation: &'static str,
+}
+
+impl BiRefNetModelSpec {
+    fn artifact(self) -> ModelArtifact {
+        ModelArtifact {
+            name: self.checkpoint,
+            url: Some(self.url),
+            sha256: self.sha256_hex,
+            size: ArtifactSize::Exact(self.bytes),
+            progress_total: self.bytes,
+        }
+    }
 }
 
 impl BiRefNetQuality {
@@ -121,6 +136,29 @@ pub const VITMATTE_MODEL_BYTES: u64 = 103_885_865;
 pub const VITMATTE_MODEL_URL: &str = "https://huggingface.co/Xenova/vitmatte-small-composition-1k/resolve/5e04250c42d7a03dc125b13adb415a47584ec60b/onnx/model.onnx";
 pub const VITMATTE_MODEL_SHA256_HEX: &str =
     "bf28d2e0be2c073286e88d60ad649d7123da2749a2d99133fd1098d5887e0225";
+
+const VITMATTE_ARTIFACT: ModelArtifact = ModelArtifact {
+    name: "ViTMatte model",
+    url: Some(VITMATTE_MODEL_URL),
+    sha256: VITMATTE_MODEL_SHA256_HEX,
+    size: ArtifactSize::Exact(VITMATTE_MODEL_BYTES),
+    progress_total: VITMATTE_MODEL_BYTES,
+};
+const VITMATTE_DOWNLOAD: DownloadOptions = DownloadOptions {
+    connect_timeout: Duration::from_secs(45),
+    response_timeout: Duration::from_secs(60),
+    body_timeout: Duration::from_secs(30 * 60),
+    attempts: 5,
+    resume: true,
+};
+
+const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
+    connect_timeout: Duration::from_secs(30),
+    response_timeout: Duration::from_secs(30),
+    body_timeout: Duration::from_secs(10 * 60),
+    attempts: 1,
+    resume: false,
+};
 // probabilities are normally sparse; keeping them sparse avoids evaluating all
 // 150 classes for every query and pixel while preserving semantic argmaxes.
 const VITMATTE_MAX_EDGE_ANDROID: u32 = 1024;
@@ -354,225 +392,17 @@ fn restore_birefnet_output(
         .collect())
 }
 
-fn ensure_vitmatte_model<F>(path: &Path, cancellation: &AtomicBool, mut progress: F) -> Result<()>
+fn ensure_vitmatte_model<F>(path: &Path, cancellation: &AtomicBool, progress: F) -> Result<()>
 where
     F: FnMut(u64, u64),
 {
-    match verify_vitmatte_model(path) {
-        Ok(()) => return Ok(()),
-        Err(error) if path.exists() => {
-            log::warn!(
-                "discarding invalid ViTMatte cache {}: {error:#}",
-                path.display()
-            );
-            fs::remove_file(path)
-                .with_context(|| format!("remove invalid ViTMatte model {}", path.display()))?;
-        }
-        Err(_) => {}
-    }
-    download_vitmatte_model(path, &mut progress, cancellation)?;
-    verify_vitmatte_model(path).context("verify published ViTMatte ONNX model")
-}
-
-fn verify_vitmatte_model(path: &Path) -> Result<()> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("read ViTMatte model metadata {}", path.display()))?;
-    anyhow::ensure!(metadata.is_file(), "ViTMatte cache is not a regular file");
-    anyhow::ensure!(
-        metadata.len() == VITMATTE_MODEL_BYTES,
-        "ViTMatte model size mismatch: found {}, expected {VITMATTE_MODEL_BYTES}",
-        metadata.len()
-    );
-    let actual = sha256_file_hex(path)?;
-    anyhow::ensure!(
-        actual == VITMATTE_MODEL_SHA256_HEX,
-        "ViTMatte model SHA-256 mismatch (expected {VITMATTE_MODEL_SHA256_HEX})"
-    );
-    Ok(())
-}
-
-fn download_vitmatte_model<F>(
-    path: &Path,
-    progress: &mut F,
-    cancellation: &AtomicBool,
-) -> Result<()>
-where
-    F: FnMut(u64, u64),
-{
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create model cache {}", parent.display()))?;
-    }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
-    const MAX_ATTEMPTS: usize = 5;
-
-    let result = (|| -> Result<()> {
-        let config = ureq::Agent::config_builder()
-            .https_only(true)
-            .timeout_connect(Some(Duration::from_secs(45)))
-            .timeout_recv_response(Some(Duration::from_secs(60)))
-            .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
-            .build();
-        let agent: ureq::Agent = config.into();
-        let mut last_error: Option<anyhow::Error> = None;
-
-        for attempt in 0..MAX_ATTEMPTS {
-            ensure_ai_not_cancelled(cancellation)?;
-            let mut downloaded = fs::metadata(&temporary)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            if downloaded > VITMATTE_MODEL_BYTES {
-                fs::remove_file(&temporary).context("remove oversized partial ViTMatte model")?;
-                downloaded = 0;
-            }
-            if downloaded == VITMATTE_MODEL_BYTES
-                && sha256_file_hex(&temporary).ok().as_deref() == Some(VITMATTE_MODEL_SHA256_HEX)
-            {
-                ensure_ai_not_cancelled(cancellation)?;
-                fs::rename(&temporary, path).with_context(|| {
-                    format!("publish resumed ViTMatte model to {}", path.display())
-                })?;
-                return Ok(());
-            }
-            if downloaded > 0 {
-                progress(downloaded, VITMATTE_MODEL_BYTES);
-            }
-
-            let response_result = if downloaded > 0 {
-                let range = format!("bytes={downloaded}-");
-                agent
-                    .get(VITMATTE_MODEL_URL)
-                    .header("Range", range.as_str())
-                    .call()
-            } else {
-                agent.get(VITMATTE_MODEL_URL).call()
-            };
-            let mut response = match response_result {
-                Ok(response) => response,
-                Err(error) => {
-                    last_error = Some(anyhow::Error::new(error).context(format!(
-                        "download ViTMatte ONNX model (attempt {}/{MAX_ATTEMPTS})",
-                        attempt + 1
-                    )));
-                    if attempt + 1 < MAX_ATTEMPTS {
-                        std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-                        continue;
-                    }
-                    break;
-                }
-            };
-
-            let resuming = downloaded > 0 && response.status().as_u16() == 206;
-            if downloaded > 0 && !resuming {
-                downloaded = 0;
-            }
-            if let Some(length) = response.body().content_length() {
-                let declared_total = if resuming {
-                    downloaded
-                        .checked_add(length)
-                        .context("ViTMatte response length overflow")?
-                } else {
-                    length
-                };
-                anyhow::ensure!(
-                    declared_total == VITMATTE_MODEL_BYTES,
-                    "ViTMatte server declared {declared_total} total bytes, expected {VITMATTE_MODEL_BYTES}"
-                );
-            }
-
-            let mut options = OpenOptions::new();
-            options.write(true).create(true);
-            if resuming {
-                options.append(true);
-            } else {
-                options.truncate(true);
-            }
-            let mut file = options
-                .open(&temporary)
-                .with_context(|| format!("open partial ViTMatte model {}", temporary.display()))?;
-            let mut reader = response.body_mut().as_reader();
-            let mut buffer = [0u8; 256 * 1024];
-            let mut transfer_error: Option<anyhow::Error> = None;
-
-            loop {
-                ensure_ai_not_cancelled(cancellation)?;
-                let read = match reader.read(&mut buffer) {
-                    Ok(read) => read,
-                    Err(error) => {
-                        let _ = file.sync_data();
-                        transfer_error = Some(anyhow::Error::new(error).context(format!(
-                            "read ViTMatte download (attempt {}/{MAX_ATTEMPTS})",
-                            attempt + 1
-                        )));
-                        break;
-                    }
-                };
-                if read == 0 {
-                    break;
-                }
-                downloaded = downloaded
-                    .checked_add(read as u64)
-                    .context("ViTMatte download byte count overflow")?;
-                anyhow::ensure!(
-                    downloaded <= VITMATTE_MODEL_BYTES,
-                    "ViTMatte download exceeded its pinned {VITMATTE_MODEL_BYTES}-byte size"
-                );
-                file.write_all(&buffer[..read])
-                    .context("write ViTMatte ONNX model")?;
-                progress(downloaded, VITMATTE_MODEL_BYTES);
-            }
-
-            if let Some(error) = transfer_error {
-                last_error = Some(error);
-                if attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-                    continue;
-                }
-                break;
-            }
-
-            file.sync_all().context("flush ViTMatte ONNX model")?;
-            if downloaded < VITMATTE_MODEL_BYTES {
-                last_error = Some(anyhow::anyhow!(
-                    "ViTMatte download ended early at {downloaded} / {VITMATTE_MODEL_BYTES} bytes"
-                ));
-                if attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-                    continue;
-                }
-                break;
-            }
-
-            let actual = sha256_file_hex(&temporary).context("hash ViTMatte ONNX model")?;
-            if actual == VITMATTE_MODEL_SHA256_HEX {
-                ensure_ai_not_cancelled(cancellation)?;
-                fs::rename(&temporary, path)
-                    .with_context(|| format!("publish ViTMatte model to {}", path.display()))?;
-                return Ok(());
-            }
-
-            // The full byte count with a wrong digest is not a resumable
-            // prefix. Discard it and retry cleanly; the pinned SHA-256 remains
-            // the final trust boundary.
-            fs::remove_file(&temporary).context("remove corrupt ViTMatte partial")?;
-            last_error = Some(anyhow::anyhow!(
-                "ViTMatte model SHA-256 mismatch (expected {VITMATTE_MODEL_SHA256_HEX})"
-            ));
-            if attempt + 1 < MAX_ATTEMPTS {
-                std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("download ViTMatte ONNX model failed")))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    ensure_artifact(
+        path,
+        VITMATTE_ARTIFACT,
+        VITMATTE_DOWNLOAD,
+        progress,
+        || ensure_ai_not_cancelled(cancellation),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1048,8 +878,8 @@ mod tests {
     #[test]
 -{}.onnx",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
