@@ -2,21 +2,20 @@ use super::*;
 
 impl Sidebar {
     pub(super) fn refresh_mask_thumbnails(ui: &mut Ui, app: &mut AurawApp) {
-        let selected_mask = app.masks.selected_mask;
-        let group_cache_valid = app.mask_thumbnail_revision == app.mask_overlay_revision
-            && app.mask_thumbnail_group_textures.len() == app.masks.masks.len();
+        let selected_mask = app.masks.stack.selected_mask;
+        let group_cache_valid = app.masks.thumbnail_revision == app.masks.overlay_revision
+            && app.masks.thumbnail_group_textures.len() == app.masks.stack.masks.len();
         let component_len = selected_mask
-            .and_then(|index| app.masks.masks.get(index))
+            .and_then(|index| app.masks.stack.masks.get(index))
             .map_or(0, |mask| mask.components.len());
         let component_cache_valid = group_cache_valid
-            && app.mask_thumbnail_component_mask == selected_mask
-            && app.mask_thumbnail_component_textures.len() == component_len;
+            && app.masks.thumbnail_component_mask == selected_mask
+            && app.masks.thumbnail_component_textures.len() == component_len;
         if group_cache_valid && component_cache_valid {
             return;
         }
 
-        let (image_width, image_height) = app
-            .preview_raw
+        let (image_width, image_height) = app.develop.preview_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((1, 1));
@@ -25,9 +24,9 @@ impl Sidebar {
             Self::thumbnail_fit_size(image_width, image_height, edge);
 
         if !group_cache_valid {
-            let images: Vec<_> = (0..app.masks.masks.len())
+            let images: Vec<_> = (0..app.masks.stack.masks.len())
                 .map(|index| {
-                    let gray = app.masks.rasterize_layer(
+                    let gray = app.masks.stack.rasterize_layer(
                         index,
                         thumbnail_width,
                         thumbnail_height,
@@ -39,7 +38,7 @@ impl Sidebar {
                 .collect();
             Self::update_thumbnail_textures(
                 ui,
-                &mut app.mask_thumbnail_group_textures,
+                &mut app.masks.thumbnail_group_textures,
                 images,
                 "mask-group-thumbnail",
             );
@@ -48,7 +47,7 @@ impl Sidebar {
         if !component_cache_valid {
             let images: Vec<_> = selected_mask
                 .and_then(|mask_index| {
-                    app.masks
+                    app.masks.stack
                         .masks
                         .get(mask_index)
                         .map(|mask| (mask_index, mask))
@@ -56,7 +55,7 @@ impl Sidebar {
                 .map(|(mask_index, mask)| {
                     (0..mask.components.len())
                         .map(|component_index| {
-                            let gray = app.masks.rasterize_component_layer(
+                            let gray = app.masks.stack.rasterize_component_layer(
                                 mask_index,
                                 component_index,
                                 thumbnail_width,
@@ -76,14 +75,14 @@ impl Sidebar {
                 .unwrap_or_default();
             Self::update_thumbnail_textures(
                 ui,
-                &mut app.mask_thumbnail_component_textures,
+                &mut app.masks.thumbnail_component_textures,
                 images,
                 "mask-component-thumbnail",
             );
         }
 
-        app.mask_thumbnail_revision = app.mask_overlay_revision;
-        app.mask_thumbnail_component_mask = selected_mask;
+        app.masks.thumbnail_revision = app.masks.overlay_revision;
+        app.masks.thumbnail_component_mask = selected_mask;
     }
 
     fn thumbnail_fit_size(image_width: u32, image_height: u32, edge: u32) -> (u32, u32) {

@@ -1,35 +1,13 @@
 use super::*;
 
 impl AurawApp {
-    pub(crate) fn has_copied_adjustments(&self) -> bool {
-        self.adjustment_clipboard.is_some()
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub(crate) fn copied_adjustments_source_label(&self) -> Option<&str> {
-        self.adjustment_clipboard
-            .as_ref()
-            .map(|clipboard| clipboard.source_label.as_str())
-    }
-
-    pub(super) fn install_adjustment_clipboard(&mut self, edits: SidecarEditState, source_label: String) {
-        #[cfg(target_os = "android")]
-        drop(source_label);
-        self.adjustment_clipboard = Some(LibraryAdjustmentClipboard {
-            edits,
-            settings: self.adjustment_copy_settings,
-            #[cfg(not(target_os = "android"))]
-            source_label,
-        });
-    }
-
     pub(super) fn apply_adjustment_clipboard_to_current(
         &mut self,
         clipboard: &LibraryAdjustmentClipboard,
         mode: AdjustmentPasteMode,
         frame: &eframe::Frame,
     ) -> Result<bool, String> {
-        if self.loaded_raw.is_none() || self.sidecar_target.is_none() {
+        if self.develop.loaded_raw.is_none() || self.persistence.sidecar_target.is_none() {
             return Err("The destination image is not loaded.".to_owned());
         }
 
@@ -43,9 +21,9 @@ impl AurawApp {
             mode,
         );
 
-        let previous_camera_profile = self.selected_camera_profile.clone();
+        let previous_camera_profile = self.develop.selected_camera_profile.clone();
         let pasted_camera_profile = merged.camera_profile.as_ref().and_then(|relative| {
-            self.camera_profile_folder
+            self.preferences.camera_profile_folder
                 .as_ref()
                 .map(|root| root.join(relative))
         });
@@ -59,11 +37,11 @@ impl AurawApp {
         let masks_changed = clipboard.settings.masks || clipboard.settings.ai_masks || replacing;
         let inpainting_changed = clipboard.settings.inpainting || replacing;
         let inpainting_content_changed = inpainting_changed
-            && self.inpaint_strokes.as_slice() != merged.inpainting.as_slice();
+            && self.inpaint.strokes.as_slice() != merged.inpainting.as_slice();
         let lens_changed = (clipboard.settings.lens_correction || replacing)
-            && (self.lens_correction.enabled != merged.lens.enabled
-                || self.lens_correction.selected_maker != merged.lens.maker
-                || self.lens_correction.selected_model != merged.lens.model);
+            && (self.develop.lens_correction.enabled != merged.lens.enabled
+                || self.develop.lens_correction.selected_maker != merged.lens.maker
+                || self.develop.lens_correction.selected_model != merged.lens.model);
 
         if masks_changed || inpainting_changed {
             crate::sidecar::preflight_mask_change(&merged.masks, &merged.inpainting).map_err(
@@ -76,51 +54,51 @@ impl AurawApp {
         }
 
         if adjustments_changed {
-            self.exposure = merged.exposure;
-            self.exposure.sanitize_tone_curves();
+            self.develop.exposure = merged.exposure;
+            self.develop.exposure.sanitize_tone_curves();
         }
         if geometry_changed {
-            self.geometry = merged.geometry.sanitized();
-            self.crop_constraint_reference = None;
+            self.develop.geometry = merged.geometry.sanitized();
+            self.develop_ui.crop_constraint_reference = None;
             self.note_geometry_changed();
         }
         if camera_profile_category_changed {
-            self.selected_camera_profile = pasted_camera_profile.clone();
+            self.develop.selected_camera_profile = pasted_camera_profile.clone();
         }
         if pipeline_adjustments_changed {
             self.note_edit_changed();
-            self.ai_masks_need_update |= merged.ai_masks_need_update;
+            self.ai.masks_need_update |= merged.ai_masks_need_update;
         }
 
         if masks_changed {
-            self.masks = Arc::unwrap_or_clone(merged.masks);
-            self.ai_masks_need_update = merged.ai_masks_need_update;
+            self.masks.stack = Arc::unwrap_or_clone(merged.masks);
+            self.ai.masks_need_update = merged.ai_masks_need_update;
             self.rehydrate_restored_mask_state();
             // Rehydration validates which generated masks exist; retain the
             // explicit cross-image stale marker for pasted content-aware masks.
-            self.ai_masks_need_update |= merged.ai_masks_need_update;
+            self.ai.masks_need_update |= merged.ai_masks_need_update;
             self.mark_all_mask_layers_dirty();
         }
 
         if inpainting_changed {
-            self.inpaint_strokes = Arc::unwrap_or_clone(merged.inpainting);
+            self.inpaint.strokes = Arc::unwrap_or_clone(merged.inpainting);
             self.rebuild_inpaint_layer();
-            self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+            self.inpaint.revision = self.inpaint.revision.wrapping_add(1);
             self.note_inpainting_edit_changed();
             if inpainting_content_changed {
                 self.note_inpainting_changed_for_ai_masks();
             }
-            self.ai_masks_need_update |= merged.ai_masks_need_update;
+            self.ai.masks_need_update |= merged.ai_masks_need_update;
             self.queue_preview_processing(crate::pipeline::ProcessingStage::Tone);
         }
 
         if clipboard.settings.lens_correction || replacing {
-            self.lens_correction.enabled = merged.lens.enabled;
-            self.lens_correction.selected_maker = merged.lens.maker;
-            self.lens_correction.selected_model = merged.lens.model;
+            self.develop.lens_correction.enabled = merged.lens.enabled;
+            self.develop.lens_correction.selected_maker = merged.lens.maker;
+            self.develop.lens_correction.selected_model = merged.lens.model;
             if lens_changed {
                 self.note_lens_correction_changed_for_masks();
-                self.ai_masks_need_update |= merged.ai_masks_need_update;
+                self.ai.masks_need_update |= merged.ai_masks_need_update;
                 self.mark_lens_correction_dirty();
             }
         }
@@ -131,7 +109,7 @@ impl AurawApp {
 
         self.commit_edit_history_now();
         self.queue_explicit_sidecar_save();
-        let needs_ai_refresh = self.ai_masks_need_update();
+        let needs_ai_refresh = self.ai.masks_need_update;
         if camera_profile_category_changed && previous_camera_profile != pasted_camera_profile {
             let edit_override = self.capture_sidecar_edit_state();
             self.reload_current_after_adjustment_paste(
@@ -149,15 +127,14 @@ impl AurawApp {
         profile_selection: Option<PathBuf>,
         edit_override: SidecarEditState,
     ) {
-        let Some(sidecar_target) = self.sidecar_target.clone() else {
+        let Some(sidecar_target) = self.persistence.sidecar_target.clone() else {
             return;
         };
 
         #[cfg(not(target_os = "android"))]
         {
             let crate::sidecar::SidecarTarget::Desktop { raw_path } = sidecar_target;
-            let label = self
-                .current_label
+            let label = self.develop.current_label
                 .clone()
                 .unwrap_or_else(|| raw_path.display().to_string());
             let target = crate::sidecar::SidecarTarget::Desktop {
@@ -173,15 +150,14 @@ impl AurawApp {
                 Some(edit_override),
                 None,
             );
-            self.active_tab = AppTab::Library;
+            self.ui.active_tab = AppTab::Library;
         }
 
         #[cfg(target_os = "android")]
         {
             match sidecar_target {
                 crate::sidecar::SidecarTarget::Desktop { raw_path } => {
-                    let label = self
-                        .current_label
+                    let label = self.develop.current_label
                         .clone()
                         .unwrap_or_else(|| raw_path.display().to_string());
                     let target = crate::sidecar::SidecarTarget::Desktop {
@@ -197,24 +173,24 @@ impl AurawApp {
                         Some(edit_override),
                         None,
                     );
-                    self.active_tab = AppTab::Library;
+                    self.ui.active_tab = AppTab::Library;
                 }
                 crate::sidecar::SidecarTarget::Android {
                     raw_uri,
                     display_name,
                 } => match crate::android::open_library_document(
-                    &self.android_app,
+                    &self.android.android_app,
                     &raw_uri,
                     &display_name,
                 ) {
                     Ok(()) => {
-                        self.pending_android_profile_reload =
+                        self.android.pending_android_profile_reload =
                             Some((profile_selection, edit_override));
-                        self.picker_pending = true;
-                        self.active_tab = AppTab::Library;
+                        self.android.picker_pending = true;
+                        self.ui.active_tab = AppTab::Library;
                     }
                     Err(error) => {
-                        self.notice = Some(format!(
+                        self.ui.notice = Some(format!(
                             "Adjustments were pasted, but the camera profile could not be reloaded: {error}"
                         ));
                     }
@@ -223,12 +199,51 @@ impl AurawApp {
         }
     }
 
-    pub(super) fn desktop_library_edit_state(
+    fn library_asset_is_current(&self, asset: &crate::ui::library::LibraryAsset) -> bool {
+        #[cfg(not(target_os = "android"))]
+        {
+            asset
+                .desktop_path()
+                .is_some_and(|path| self.develop.current_path.as_deref() == Some(path))
+                && self.develop.loaded_raw.is_some()
+        }
+        #[cfg(target_os = "android")]
+        {
+            let Some(uri) = asset.android_uri() else {
+                return false;
+            };
+            matches!(
+                self.persistence.sidecar_target.as_ref(),
+                Some(crate::sidecar::SidecarTarget::Android {
+                    raw_uri: current_uri,
+                    display_name: current_name,
+                }) if current_uri == uri && current_name == &asset.display_name
+            ) && self.develop.loaded_raw.is_some()
+        }
+    }
+
+    fn library_asset_edit_state(
         &mut self,
-        raw_path: &std::path::Path,
+        asset: &crate::ui::library::LibraryAsset,
     ) -> Result<SidecarEditState, String> {
-        let persisted = desktop_library_sidecar_edits(raw_path)?;
-        if self.current_path.as_deref() == Some(raw_path) && self.loaded_raw.is_some() {
+        #[cfg(not(target_os = "android"))]
+        let persisted = {
+            let path = asset
+                .desktop_path()
+                .ok_or_else(|| "Library asset is not available from desktop storage".to_owned())?;
+            desktop_library_sidecar_edits(path)?
+        };
+        #[cfg(target_os = "android")]
+        let persisted = {
+            let uri = asset
+                .android_uri()
+                .ok_or_else(|| "Library asset is not available from Android storage".to_owned())?;
+            crate::sidecar::load_android(&self.android.android_app, uri, &asset.display_name)
+                .map_err(|error| error.to_string())?
+                .map(|loaded| loaded.edits)
+        };
+
+        if self.library_asset_is_current(asset) {
             self.finish_mask_geometry_interaction();
             self.commit_edit_history_now();
             if persisted.is_none() && !self.can_undo_edit() {
@@ -239,80 +254,89 @@ impl AurawApp {
         Ok(persisted.unwrap_or_else(crate::sidecar::default_edit_state))
     }
 
-    pub(crate) fn library_adjustment_edit_count_paths(
+    fn save_library_asset_edit_state(
         &mut self,
-        raw_paths: &[PathBuf],
+        asset: &crate::ui::library::LibraryAsset,
+        edits: SidecarEditState,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "android"))]
+        {
+            let path = asset
+                .desktop_path()
+                .ok_or_else(|| "Library asset is not available from desktop storage".to_owned())?;
+            crate::sidecar::save_desktop(path, edits).map_err(|error| error.to_string())?;
+            crate::sidecar::invalidate_developed_thumbnail_cache(path)?;
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        {
+            let uri = asset
+                .android_uri()
+                .ok_or_else(|| "Library asset is not available from Android storage".to_owned())?;
+            crate::sidecar::save_android(&self.android.android_app, uri, &asset.display_name, edits)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    pub(crate) fn library_adjustment_edit_count(
+        &mut self,
+        assets: &[crate::ui::library::LibraryAsset],
     ) -> (usize, Vec<String>) {
         let mut edited = 0usize;
         let mut failures = Vec::new();
-        for raw_path in raw_paths {
-            match self.desktop_library_edit_state(raw_path) {
+        for asset in assets {
+            match self.library_asset_edit_state(asset) {
                 Ok(state) => {
                     if crate::sidecar::edit_state_has_adjustments(&state) {
                         edited += 1;
                     }
                 }
-                Err(error) => failures.push(format!("{}: {error}", raw_path.display())),
+                Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
             }
         }
         (edited, failures)
     }
 
-    pub(crate) fn copy_library_adjustments_from_path(
+    pub(crate) fn copy_library_adjustments(
         &mut self,
-        raw_path: &std::path::Path,
+        asset: &crate::ui::library::LibraryAsset,
     ) -> Result<(), String> {
-        let edits = self.desktop_library_edit_state(raw_path)?;
-        let label = raw_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| raw_path.display().to_string());
-        self.install_adjustment_clipboard(edits, label);
+        let edits = self.library_asset_edit_state(asset)?;
+        self.library
+            .install_adjustment_clipboard(edits, self.preferences.adjustment_copy_settings);
         Ok(())
     }
 
-    pub(crate) fn paste_library_adjustments_to_paths(
+    pub(crate) fn paste_library_adjustments(
         &mut self,
-        raw_paths: &[PathBuf],
+        assets: &[crate::ui::library::LibraryAsset],
         mode: AdjustmentPasteMode,
         frame: &eframe::Frame,
-    ) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<String>) {
-        let Some(clipboard) = self.adjustment_clipboard.clone() else {
+    ) -> (usize, Vec<crate::ui::library::LibraryAsset>, Vec<String>) {
+        let Some(clipboard) = self.library.adjustment_clipboard.clone() else {
             return (
-                Vec::new(),
+                0,
                 Vec::new(),
                 vec!["Copy adjustments from an image first.".to_owned()],
             );
         };
-        let mut completed = Vec::new();
+        let mut completed = 0usize;
         let mut ai_refresh = Vec::new();
         let mut failures = Vec::new();
-        let current_path = self
-            .loaded_raw
-            .as_ref()
-            .and(self.current_path.as_ref())
-            .cloned();
 
         // Applying a copied camera profile to the loaded image starts an
-        // asynchronous RAW reload. Process every sidecar-only destination
-        // first so that reload cannot interrupt a multi-image paste halfway
-        // through the selection.
-        let ordered_paths = raw_paths
-            .iter()
-            .filter(|raw_path| current_path.as_deref() != Some(raw_path.as_path()))
-            .chain(
-                raw_paths
-                    .iter()
-                    .filter(|raw_path| current_path.as_deref() == Some(raw_path.as_path())),
-            );
+        // asynchronous reopen. Handle sidecar-only assets first so that reload
+        // cannot interrupt a multi-image paste halfway through the selection.
+        let mut ordered_assets = assets.to_vec();
+        ordered_assets.sort_by_key(|asset| self.library_asset_is_current(asset));
 
-        for raw_path in ordered_paths {
-            let result = if current_path.as_deref() == Some(raw_path.as_path()) {
+        for asset in &ordered_assets {
+            let result = if self.library_asset_is_current(asset) {
                 self.apply_adjustment_clipboard_to_current(&clipboard, mode, frame)
             } else {
                 (|| {
-                    let mut destination = desktop_library_sidecar_edits(raw_path)?
-                        .unwrap_or_else(crate::sidecar::default_edit_state);
+                    let mut destination = self.library_asset_edit_state(asset)?;
                     crate::sidecar::apply_copied_adjustments_with_mode(
                         &mut destination,
                         &clipboard.edits,
@@ -320,178 +344,24 @@ impl AurawApp {
                         mode,
                     );
                     let needs_ai_refresh = destination.ai_masks_need_update;
-                    crate::sidecar::save_desktop(raw_path, destination)
-                        .map_err(|error| error.to_string())?;
-                    #[cfg(not(target_os = "android"))]
-                    crate::sidecar::invalidate_developed_thumbnail_cache(raw_path)?;
-                    crate::cloud::sync_sidecar_if_cloud_cached(raw_path, true)?;
+                    self.save_library_asset_edit_state(asset, destination)?;
                     Ok(needs_ai_refresh)
                 })()
             };
 
             match result {
                 Ok(needs_ai_refresh) => {
-                    completed.push(raw_path.clone());
+                    completed += 1;
                     if needs_ai_refresh {
-                        ai_refresh.push(raw_path.clone());
+                        ai_refresh.push(asset.clone());
                     }
                 }
-                Err(error) => failures.push(format!("{}: {error}", raw_path.display())),
+                Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
             }
         }
         (completed, ai_refresh, failures)
     }
 
-    #[cfg(target_os = "android")]
-    pub(super) fn current_android_library_target_matches(&self, raw_uri: &str, display_name: &str) -> bool {
-        matches!(
-            self.sidecar_target.as_ref(),
-            Some(crate::sidecar::SidecarTarget::Android {
-                raw_uri: current_uri,
-                display_name: current_name,
-            }) if current_uri == raw_uri && current_name == display_name
-        ) && self.loaded_raw.is_some()
-    }
-
-    #[cfg(target_os = "android")]
-    pub(super) fn android_library_edit_state(
-        &mut self,
-        raw_uri: &str,
-        display_name: &str,
-    ) -> Result<SidecarEditState, String> {
-        let persisted = crate::sidecar::load_android(&self.android_app, raw_uri, display_name)
-            .map_err(|error| error.to_string())?
-            .map(|loaded| loaded.edits);
-        if self.current_android_library_target_matches(raw_uri, display_name) {
-            self.finish_mask_geometry_interaction();
-            self.commit_edit_history_now();
-            if persisted.is_none() && !self.can_undo_edit() {
-                return Ok(crate::sidecar::default_edit_state());
-            }
-            return Ok(self.capture_sidecar_edit_state());
-        }
-        Ok(persisted.unwrap_or_else(crate::sidecar::default_edit_state))
-    }
-
-    #[cfg(target_os = "android")]
-    pub(crate) fn library_adjustment_edit_count_android(
-        &mut self,
-        targets: &[(String, String)],
-    ) -> (usize, Vec<String>) {
-        let mut edited = 0usize;
-        let mut failures = Vec::new();
-        for (raw_uri, display_name) in targets {
-            match self.android_library_edit_state(raw_uri, display_name) {
-                Ok(state) => {
-                    if crate::sidecar::edit_state_has_adjustments(&state) {
-                        edited += 1;
-                    }
-                }
-                Err(error) => failures.push(format!("{display_name}: {error}")),
-            }
-        }
-        (edited, failures)
-    }
-
-    #[cfg(target_os = "android")]
-    pub(crate) fn copy_library_adjustments_from_android(
-        &mut self,
-        raw_uri: &str,
-        display_name: &str,
-    ) -> Result<(), String> {
-        let edits = self.android_library_edit_state(raw_uri, display_name)?;
-        self.install_adjustment_clipboard(edits, display_name.to_owned());
-        Ok(())
-    }
-
-    #[cfg(target_os = "android")]
-    pub(crate) fn paste_library_adjustments_to_android(
-        &mut self,
-        targets: &[(String, String)],
-        mode: AdjustmentPasteMode,
-        frame: &eframe::Frame,
-    ) -> AndroidAdjustmentPasteResult {
-        let Some(clipboard) = self.adjustment_clipboard.clone() else {
-            return (
-                Vec::new(),
-                Vec::new(),
-                vec!["Copy adjustments from an image first.".to_owned()],
-            );
-        };
-        let mut completed = Vec::new();
-        let mut ai_refresh = Vec::new();
-        let mut failures = Vec::new();
-        let current_target = self.loaded_raw.as_ref().and_then(|_| {
-            let crate::sidecar::SidecarTarget::Android {
-                raw_uri,
-                display_name,
-            } = self.sidecar_target.as_ref()?
-            else {
-                return None;
-            };
-            Some((raw_uri.clone(), display_name.clone()))
-        });
-
-        // As on desktop, leave the loaded image until last because applying a
-        // copied camera profile launches an asynchronous document reopen.
-        let ordered_targets = targets
-            .iter()
-            .filter(|target| current_target.as_ref() != Some(*target))
-            .chain(
-                targets
-                    .iter()
-                    .filter(|target| current_target.as_ref() == Some(*target)),
-            );
-
-        for (raw_uri, display_name) in ordered_targets {
-            let result = if current_target
-                .as_ref()
-                .is_some_and(|(current_uri, current_name)| {
-                    current_uri == raw_uri && current_name == display_name
-                })
-            {
-                self.apply_adjustment_clipboard_to_current(&clipboard, mode, frame)
-            } else {
-                (|| {
-                    let mut destination = crate::sidecar::load_android(
-                        &self.android_app,
-                        raw_uri,
-                        display_name,
-                    )
-                    .map_err(|error| error.to_string())?
-                    .map(|loaded| loaded.edits)
-                    .unwrap_or_else(crate::sidecar::default_edit_state);
-                    crate::sidecar::apply_copied_adjustments_with_mode(
-                        &mut destination,
-                        &clipboard.edits,
-                        clipboard.settings,
-                        mode,
-                    );
-                    let needs_ai_refresh = destination.ai_masks_need_update;
-                    crate::sidecar::save_android(
-                        &self.android_app,
-                        raw_uri,
-                        display_name,
-                        destination,
-                    )
-                    .map_err(|error| error.to_string())?;
-                    Ok(needs_ai_refresh)
-                })()
-            };
-
-            match result {
-                Ok(needs_ai_refresh) => {
-                    let target = (raw_uri.clone(), display_name.clone());
-                    completed.push(target.clone());
-                    if needs_ai_refresh {
-                        ai_refresh.push(target);
-                    }
-                }
-                Err(error) => failures.push(format!("{display_name}: {error}")),
-            }
-        }
-        (completed, ai_refresh, failures)
-    }
 }
 
 pub(super) fn desktop_library_sidecar_edits(
@@ -553,31 +423,29 @@ pub(super) fn complete_library_ai_mask_refresh_item(state: &mut LibraryAiMaskRef
 
 impl AurawApp {
     pub(crate) fn can_start_library_ai_mask_refresh(&self) -> bool {
-        let duplicate = self
-            .background_task_snapshots()
-            .iter()
-            .any(|task| matches!(task.kind, TaskKind::LibraryAiMaskRefresh));
-        let ready = !duplicate && !self.sidecar_save_in_progress();
+        let ready = self.ai.library_mask_refresh.is_none()
+            && !self.foreground_operation_active()
+            && !self.sidecar_save_in_progress();
         #[cfg(not(target_os = "android"))]
         {
             ready
         }
         #[cfg(target_os = "android")]
         {
-            ready && !self.picker_pending
+            ready && !self.android.picker_pending
         }
     }
 
     pub(crate) fn library_ai_mask_refresh_status(
         &self,
     ) -> Option<(usize, usize, usize, Option<String>)> {
-        self.library_ai_mask_refresh.as_ref().map(|state| {
+        self.ai.library_mask_refresh.as_ref().map(|state| {
             let current_mask_progress = state.current.as_ref().map_or(0, |job| {
                 if state.phase == LibraryAiMaskRefreshPhase::Loading {
                     return 0;
                 }
                 if state.phase == LibraryAiMaskRefreshPhase::Updating
-                    && self.ai_masks_need_update()
+                    && self.ai.masks_need_update
                     && !self.ai_mask_update_busy()
                 {
                     // The update could not start (for example a missing model
@@ -614,19 +482,18 @@ impl AurawApp {
     pub(crate) fn start_library_ai_mask_refresh_paths(
         &mut self,
         paths: Vec<PathBuf>,
-        _frame: &eframe::Frame,
+        frame: &eframe::Frame,
     ) {
         if paths.is_empty() {
             return;
         }
         if !self.can_start_library_ai_mask_refresh() {
-            self.notice = Some(
-                "AI-mask refresh is already queued, or edits are still being saved.".to_owned(),
+            self.ui.notice = Some(
+                "Finish the current editing operation or sidecar save before refreshing AI masks."
+                    .to_owned(),
             );
             return;
         }
-        // The sidecar is loaded by the normal asynchronous document loader.
-        // Counting AI targets here would perform file I/O on the UI thread.
         let pending = paths
             .into_iter()
             .map(|source| LibraryAiMaskRefreshJob {
@@ -635,42 +502,37 @@ impl AurawApp {
             })
             .collect::<VecDeque<_>>();
         let total = pending.len();
-        let task_id = self.enqueue_background_action(
-            TaskKind::LibraryAiMaskRefresh,
-            format!(
-                "Refreshing AI masks for {total} {}",
-                if total == 1 { "image" } else { "images" }
-            ),
-            TaskProgress::units(
-                0,
-                total as u64,
-                Some("images".to_owned()),
-                "Waiting for earlier background work…",
-            ),
-            true,
-            BackgroundAction::LibraryAiMaskRefresh { jobs: pending },
-        );
-        self.background_tasks.set_global_visible(task_id, false);
-        self.library_ai_mask_refresh_task_id = Some(task_id);
+        self.ai.library_mask_refresh = Some(LibraryAiMaskRefreshState {
+            pending,
+            current: None,
+            phase: LibraryAiMaskRefreshPhase::Loading,
+            total,
+            completed: 0,
+            mask_total: 0,
+            mask_completed: 0,
+            failures: Vec::new(),
+            cancel_requested: false,
+        });
+        self.start_next_library_ai_mask_refresh(frame);
+        self.egui_ctx.request_repaint();
     }
 
     #[cfg(target_os = "android")]
     pub(crate) fn start_library_ai_mask_refresh_android(
         &mut self,
         targets: Vec<(String, String)>,
-        _frame: &eframe::Frame,
+        frame: &eframe::Frame,
     ) {
         if targets.is_empty() {
             return;
         }
         if !self.can_start_library_ai_mask_refresh() {
-            self.notice = Some(
-                "AI-mask refresh is already queued, or edits are still being saved.".to_owned(),
+            self.ui.notice = Some(
+                "Finish the current editing operation or sidecar save before refreshing AI masks."
+                    .to_owned(),
             );
             return;
         }
-        // The sidecar is loaded by the normal asynchronous document loader.
-        // Counting AI targets here would perform file I/O on the UI thread.
         let pending = targets
             .into_iter()
             .map(|(uri, display_name)| LibraryAiMaskRefreshJob {
@@ -680,30 +542,26 @@ impl AurawApp {
             })
             .collect::<VecDeque<_>>();
         let total = pending.len();
-        let task_id = self.enqueue_background_action(
-            TaskKind::LibraryAiMaskRefresh,
-            format!(
-                "Refreshing AI masks for {total} {}",
-                if total == 1 { "image" } else { "images" }
-            ),
-            TaskProgress::units(
-                0,
-                total as u64,
-                Some("images".to_owned()),
-                "Waiting for earlier background work…",
-            ),
-            true,
-            BackgroundAction::LibraryAiMaskRefresh { jobs: pending },
-        );
-        self.background_tasks.set_global_visible(task_id, false);
-        self.library_ai_mask_refresh_task_id = Some(task_id);
+        self.ai.library_mask_refresh = Some(LibraryAiMaskRefreshState {
+            pending,
+            current: None,
+            phase: LibraryAiMaskRefreshPhase::Loading,
+            total,
+            completed: 0,
+            mask_total: 0,
+            mask_completed: 0,
+            failures: Vec::new(),
+            cancel_requested: false,
+        });
+        self.start_next_library_ai_mask_refresh(frame);
+        self.egui_ctx.request_repaint();
     }
 
     #[cfg(not(target_os = "android"))]
     pub(super) fn start_next_library_ai_mask_refresh(&mut self, frame: &eframe::Frame) {
         loop {
             let next = {
-                let Some(state) = self.library_ai_mask_refresh.as_mut() else {
+                let Some(state) = self.ai.library_mask_refresh.as_mut() else {
                     return;
                 };
                 if state.current.is_some() {
@@ -727,12 +585,12 @@ impl AurawApp {
             };
 
             self.open_path(job.source.clone(), frame);
-            self.active_tab = AppTab::Library;
-            if self.load_receiver.is_some() {
+            self.ui.active_tab = AppTab::Library;
+            if self.develop.load_receiver.is_some() {
                 return;
             }
 
-            if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+            if let Some(state) = self.ai.library_mask_refresh.as_mut() {
                 state
                     .failures
                     .push(format!("{}: could not start RAW load", job.source.display()));
@@ -745,7 +603,7 @@ impl AurawApp {
     pub(super) fn start_next_library_ai_mask_refresh(&mut self, _frame: &eframe::Frame) {
         loop {
             let next = {
-                let Some(state) = self.library_ai_mask_refresh.as_mut() else {
+                let Some(state) = self.ai.library_mask_refresh.as_mut() else {
                     return;
                 };
                 if state.current.is_some() {
@@ -769,19 +627,19 @@ impl AurawApp {
             };
 
             match crate::android::open_library_document(
-                &self.android_app,
+                &self.android.android_app,
                 &job.uri,
                 &job.display_name,
             ) {
                 Ok(()) => {
-                    self.picker_pending = true;
-                    self.notice = None;
-                    self.status = format!("Opening {}…", job.display_name);
-                    self.active_tab = AppTab::Library;
+                    self.android.picker_pending = true;
+                    self.ui.notice = None;
+                    self.ui.status = format!("Opening {}…", job.display_name);
+                    self.ui.active_tab = AppTab::Library;
                     return;
                 }
                 Err(error) => {
-                    if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+                    if let Some(state) = self.ai.library_mask_refresh.as_mut() {
                         state
                             .failures
                             .push(format!("{}: {error}", job.display_name));
@@ -797,19 +655,18 @@ impl AurawApp {
         success: bool,
         frame: &eframe::Frame,
     ) {
-        let Some(state) = self.library_ai_mask_refresh.as_ref() else {
+        let Some(state) = self.ai.library_mask_refresh.as_ref() else {
             return;
         };
         let Some(current) = state.current.as_ref() else {
             return;
         };
 
-        let cancel_requested = self
-            .library_ai_mask_refresh
+        let cancel_requested = self.ai.library_mask_refresh
             .as_ref()
             .is_some_and(|state| state.cancel_requested);
         if cancel_requested {
-            if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+            if let Some(state) = self.ai.library_mask_refresh.as_mut() {
                 state.current = None;
             }
             self.start_next_library_ai_mask_refresh(frame);
@@ -821,7 +678,7 @@ impl AurawApp {
             let label = current.source.display().to_string();
             #[cfg(target_os = "android")]
             let label = current.display_name.clone();
-            if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+            if let Some(state) = self.ai.library_mask_refresh.as_mut() {
                 state.failures.push(format!("{label}: RAW load failed"));
                 complete_library_ai_mask_refresh_item(state);
             }
@@ -829,8 +686,8 @@ impl AurawApp {
             return;
         }
 
-        let mask_targets = ai_mask_refresh_target_count(&self.masks);
-        if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+        let mask_targets = ai_mask_refresh_target_count(&self.masks.stack);
+        if let Some(state) = self.ai.library_mask_refresh.as_mut() {
             let previous_targets = state
                 .current
                 .as_ref()
@@ -843,7 +700,7 @@ impl AurawApp {
             state.phase = LibraryAiMaskRefreshPhase::Updating;
         }
         self.request_update_all_ai_masks(frame);
-        self.active_tab = AppTab::Library;
+        self.ui.active_tab = AppTab::Library;
     }
 
     #[cfg(target_os = "android")]
@@ -852,13 +709,12 @@ impl AurawApp {
         error: String,
         frame: &eframe::Frame,
     ) {
-        let label = self
-            .library_ai_mask_refresh
+        let label = self.ai.library_mask_refresh
             .as_ref()
             .and_then(|state| state.current.as_ref())
             .map(|job| job.display_name.clone())
             .unwrap_or_else(|| "image".to_owned());
-        if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+        if let Some(state) = self.ai.library_mask_refresh.as_mut() {
             if state.cancel_requested {
                 state.current = None;
             } else {
@@ -869,40 +725,52 @@ impl AurawApp {
         self.start_next_library_ai_mask_refresh(frame);
     }
 
+    pub(crate) fn cancel_library_ai_mask_refresh(&mut self) {
+        if let Some(state) = self.ai.library_mask_refresh.as_mut() {
+            state.cancel_requested = true;
+            state.pending.clear();
+        }
+        if matches!(
+            self.foreground_operation_kind(),
+            Some(
+                ForegroundOperationKind::SubjectMask
+                    | ForegroundOperationKind::ObjectMask
+            )
+        ) {
+            self.cancel_foreground_operation();
+        }
+        self.egui_ctx.request_repaint();
+    }
+
     pub(crate) fn poll_library_ai_mask_refresh(&mut self, frame: &eframe::Frame) {
-        self.sync_library_ai_mask_background_progress();
-        let cancel_now = self
-            .library_ai_mask_refresh
+        let cancel_now = self.ai.library_mask_refresh
             .as_ref()
             .is_some_and(|state| state.cancel_requested && state.current.is_none());
         if cancel_now {
             self.finish_library_ai_mask_refresh();
             return;
         }
-        let phase = self
-            .library_ai_mask_refresh
+        let phase = self.ai.library_mask_refresh
             .as_ref()
             .and_then(|state| state.current.as_ref().map(|_| state.phase));
         let Some(phase) = phase else {
             return;
         };
-        let cancel_after_phase = self
-            .library_ai_mask_refresh
+        let cancel_after_phase = self.ai.library_mask_refresh
             .as_ref()
             .is_some_and(|state| state.cancel_requested);
         if cancel_after_phase
             && phase == LibraryAiMaskRefreshPhase::Updating
             && !self.ai_mask_update_busy()
         {
-            if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+            if let Some(state) = self.ai.library_mask_refresh.as_mut() {
                 state.current = None;
             }
             self.start_next_library_ai_mask_refresh(frame);
             return;
         }
 
-        let label = self
-            .library_ai_mask_refresh
+        let label = self.ai.library_mask_refresh
             .as_ref()
             .and_then(|state| state.current.as_ref())
             .map(|job| {
@@ -924,12 +792,11 @@ impl AurawApp {
                     return;
                 }
 
-                if self.ai_masks_need_update() {
-                    let reason = self
-                        .notice
+                if self.ai.masks_need_update {
+                    let reason = self.ui.notice
                         .clone()
                         .unwrap_or_else(|| "AI masks still need an update".to_owned());
-                    if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+                    if let Some(state) = self.ai.library_mask_refresh.as_mut() {
                         state.failures.push(format!("{label}: {reason}"));
                         complete_library_ai_mask_refresh_item(state);
                     }
@@ -943,7 +810,7 @@ impl AurawApp {
                 // still writing, and a following load can observe stale data.
                 self.commit_edit_history_now();
                 self.queue_explicit_sidecar_save();
-                if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+                if let Some(state) = self.ai.library_mask_refresh.as_mut() {
                     state.phase = LibraryAiMaskRefreshPhase::Saving;
                 }
             }
@@ -953,17 +820,16 @@ impl AurawApp {
                 }
 
                 let revision = self.edit_commit_revision();
-                if self.sidecar_failed_revision == Some(revision) {
-                    let reason = self
-                        .notice
+                if self.persistence.sidecar_failed_revision == Some(revision) {
+                    let reason = self.ui.notice
                         .clone()
                         .unwrap_or_else(|| "could not save regenerated AI masks".to_owned());
-                    if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+                    if let Some(state) = self.ai.library_mask_refresh.as_mut() {
                         state.failures.push(format!("{label}: {reason}"));
                     }
                 }
 
-                if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+                if let Some(state) = self.ai.library_mask_refresh.as_mut() {
                     complete_library_ai_mask_refresh_item(state);
                 }
                 self.start_next_library_ai_mask_refresh(frame);
@@ -972,14 +838,12 @@ impl AurawApp {
     }
 
     pub(super) fn finish_library_ai_mask_refresh(&mut self) {
-        let Some(state) = self.library_ai_mask_refresh.take() else {
+        let Some(state) = self.ai.library_mask_refresh.take() else {
             return;
         };
-        let task_id = self.library_ai_mask_refresh_task_id.take();
-        let cancelled = state.cancel_requested
-            || task_id.is_some_and(|id| self.background_task_cancelled(id));
+        let cancelled = state.cancel_requested;
         let succeeded = state.completed.saturating_sub(state.failures.len());
-        self.active_tab = AppTab::Library;
+        self.ui.active_tab = AppTab::Library;
         self.library.refresh(&self.egui_ctx);
         let summary = if cancelled {
             format!(
@@ -999,21 +863,7 @@ impl AurawApp {
             )
         };
         self.library.set_status(summary.clone());
-        self.notice = Some(summary);
-        if let Some(task_id) = task_id {
-            if cancelled || state.failures.is_empty() {
-                self.finish_background_task(task_id);
-            } else {
-                self.fail_background_task(
-                    task_id,
-                    format!(
-                        "{} AI-mask refresh item(s) failed: {}",
-                        state.failures.len(),
-                        state.failures.join(" · ")
-                    ),
-                );
-            }
-        }
+        self.ui.notice = Some(summary);
         self.egui_ctx.request_repaint();
     }
 }

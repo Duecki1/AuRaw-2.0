@@ -28,7 +28,7 @@ use crate::ui::components::adjustment_slider::slider_scroll_locked;
 #[cfg(not(target_os = "android"))]
 use crate::ui::develop::Develop;
 use crate::ui::layout::ScreenLayout;
-use crate::ui::library::{Library, LibraryState};
+use crate::ui::library::{Library, LibraryAdjustmentClipboard, LibraryState};
 #[cfg(target_os = "android")]
 use crate::ui::preview::Preview;
 use crate::ui::settings::Settings;
@@ -36,28 +36,22 @@ use crate::ui::sidebar::Sidebar;
 use crate::ui::top_bar::TopBar;
 use eframe::{egui, wgpu};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 mod ai_denoise;
-mod background_tasks;
-use background_tasks::{
-    BackgroundTaskManager, CancelTaskResult, TaskId, TaskKind, TaskProgress, TaskProgressValue,
-    TaskSnapshot, TaskStatus,
-};
 mod edit_history;
 use edit_history::EditHistory;
 mod worker;
-use worker::{
-    drain_worker_events, show_cancellable_worker_popup, show_download_progress, spawn_ui_worker,
-};
+use worker::drain_worker_events;
+#[cfg(not(target_os = "android"))]
+use worker::spawn_ui_worker;
 
 #[cfg(not(target_os = "android"))]
 pub(crate) enum DesktopPickerEvent {
     RawFile(Option<PathBuf>),
-    CloudRawFiles(Option<Vec<PathBuf>>),
     LibraryFolder(Option<PathBuf>),
     CameraProfileFolder(Option<PathBuf>),
     OnnxRuntime(Result<Option<(PathBuf, String)>, String>),
@@ -501,18 +495,8 @@ struct PreparedLensCorrection {
 }
 
 enum LensCorrectionEvent {
-    Progress {
-        task_id: TaskId,
-        document_id: u64,
-        generation: u64,
-        phase: String,
-    },
-    Finished {
-        task_id: TaskId,
-        document_id: u64,
-        generation: u64,
-        result: Result<PreparedLensCorrection, String>,
-    },
+    Progress(String),
+    Finished(Result<PreparedLensCorrection, String>),
 }
 
 #[derive(Clone)]
@@ -533,21 +517,6 @@ struct SidecarSaveJob {
 
 struct SidecarSaveEvent {
     job: SidecarSaveJob,
-    raw_path: Option<PathBuf>,
-    result: Result<String, String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CloudSidecarConflictResolution {
-    OverwriteServer,
-    OverwriteLocal,
-}
-
-struct CloudSidecarConflictEvent {
-    raw_path: PathBuf,
-    generation: u64,
-    revision: u64,
-    resolution: CloudSidecarConflictResolution,
     result: Result<String, String>,
 }
 
@@ -647,17 +616,15 @@ struct LibraryBatchExportJob {
 
 #[cfg(target_os = "android")]
 #[derive(Clone, Debug)]
-pub(crate) enum AndroidLibraryExportTarget {
-    Local { uri: String, display_name: String },
-    Cloud { path: PathBuf, display_name: String },
+pub(crate) struct AndroidLibraryExportTarget {
+    pub(crate) uri: String,
+    pub(crate) display_name: String,
 }
 
 #[cfg(target_os = "android")]
 impl AndroidLibraryExportTarget {
     fn display_name(&self) -> &str {
-        match self {
-            Self::Local { display_name, .. } | Self::Cloud { display_name, .. } => display_name,
-        }
+        &self.display_name
     }
 }
 
@@ -665,14 +632,6 @@ impl AndroidLibraryExportTarget {
 #[derive(Clone, Debug)]
 struct LibraryBatchExportJob {
     target: AndroidLibraryExportTarget,
-}
-
-#[derive(Clone, Debug)]
-struct LibraryAdjustmentClipboard {
-    edits: SidecarEditState,
-    settings: AdjustmentCopySettings,
-    #[cfg(not(target_os = "android"))]
-    source_label: String,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -728,43 +687,92 @@ struct LibraryBatchExportState {
 enum LibraryBatchExportEvent {
     Started {
         job: LibraryBatchExportJob,
-        completed: usize,
-        total: usize,
     },
     Progress {
-        completed: usize,
-        total: usize,
         completed_tiles: usize,
         total_tiles: usize,
     },
     ItemFinished {
-        completed: usize,
         error: Option<String>,
     },
     Finished {
         cancelled: bool,
+        error: Option<String>,
     },
 }
 
-struct ExportTaskRequest {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportTaskKind {
+    Single,
+    LibraryBatch,
+}
+
+enum ExportTaskReceiver {
+    Tiled(mpsc::Receiver<ExportEvent>),
+    #[cfg(not(target_os = "android"))]
+    LibraryBatch(mpsc::Receiver<LibraryBatchExportEvent>),
+}
+
+#[derive(Clone, Debug)]
+enum ExportDestination {
+    File(PathBuf),
+    #[cfg(target_os = "android")]
+    AndroidDirect {
+        path: PathBuf,
+    },
+    #[cfg(target_os = "android")]
+    AndroidGallery {
+        path: PathBuf,
+        display_name: String,
+        format: ExportFormat,
+    },
+}
+
+impl ExportDestination {
+    fn path(&self) -> &Path {
+        match self {
+            Self::File(path) => path,
+            #[cfg(target_os = "android")]
+            Self::AndroidDirect { path } | Self::AndroidGallery { path, .. } => path,
+        }
+    }
+}
+
+struct ExportTask {
+    kind: ExportTaskKind,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
+    receiver: Option<ExportTaskReceiver>,
+    destination: Option<ExportDestination>,
+    progress: f32,
+    phase: String,
+    completed: usize,
+    total: usize,
+    completed_tiles: usize,
+    total_tiles: usize,
+    minimized: bool,
+    cancelling: bool,
+}
+
+struct PreparedExportSource {
     raw: Arc<LoadedRaw>,
     geometry: GeometryTransform,
     exposure: ExposureParams,
     masks: MaskStack,
     inpaint: Option<InpaintLayer>,
-    path: PathBuf,
-    format: ExportFormat,
-    settings: ExportSettings,
-    metadata: ExportMetadata,
-    display_name: String,
+    source_file_name: Option<String>,
     gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
 
+struct ExportItemRequest {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    source: PreparedExportSource,
+    destination: ExportDestination,
+    format: ExportFormat,
+    settings: ExportSettings,
+}
+
 struct LensCorrectionTaskRequest {
-    document_id: u64,
-    generation: u64,
     original_raw: Arc<LoadedRaw>,
     selection: Option<LensfunLens>,
     #[cfg(target_os = "android")]
@@ -773,26 +781,89 @@ struct LensCorrectionTaskRequest {
     cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
 }
 
-struct SubjectMaskTaskRequest {
-    document_id: u64,
-    generation: u64,
-    quality: BiRefNetQuality,
-    source: MaskRgbImage,
-    model_path: PathBuf,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
+type GeneratedAiMaskTargets = (bool, VecDeque<(usize, usize)>, VecDeque<(usize, usize)>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForegroundOperationKind {
+    SubjectMask,
+    ObjectMask,
+    AiDenoise,
+    Inpaint,
+    LensCorrection,
 }
 
-struct ObjectMaskTaskRequest {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ForegroundProgressValue {
+    Indeterminate,
+    Units { completed: u64, total: u64, unit: Option<String> },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ForegroundProgress {
+    pub(crate) value: ForegroundProgressValue,
+    pub(crate) phase: String,
+    pub(crate) detail: Option<String>,
+}
+
+impl ForegroundProgress {
+    pub(crate) fn indeterminate(phase: impl Into<String>) -> Self {
+        Self {
+            value: ForegroundProgressValue::Indeterminate,
+            phase: phase.into(),
+            detail: None,
+        }
+    }
+
+    pub(crate) fn units(
+        completed: u64,
+        total: u64,
+        unit: impl Into<Option<String>>,
+        phase: impl Into<String>,
+    ) -> Self {
+        Self {
+            value: ForegroundProgressValue::Units { completed, total, unit: unit.into() },
+            phase: phase.into(),
+            detail: None,
+        }
+    }
+
+    pub(crate) fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+}
+
+enum ForegroundOperationReceiver {
+    Subject(mpsc::Receiver<SubjectMaskEvent>),
+    Object(mpsc::Receiver<ObjectMaskEvent>),
+    Inpaint(mpsc::Receiver<InpaintEvent>),
+    AiDenoise(mpsc::Receiver<crate::ai_denoise::AiDenoiseEvent>),
+    LensCorrection(mpsc::Receiver<LensCorrectionEvent>),
+}
+
+enum ForegroundOperationContext {
+    Subject,
+    Object {
+        target: AiMaskTarget,
+        inference_started: bool,
+    },
+    Inpaint {
+        dabs: Vec<BrushDab>,
+        revision: u64,
+        replace_index: Option<usize>,
+    },
+    AiDenoise,
+    LensCorrection,
+}
+
+struct ForegroundOperation {
+    kind: ForegroundOperationKind,
     document_id: u64,
-    generation: u64,
-    target: AiMaskTarget,
-    encoder_path: PathBuf,
-    decoder_path: PathBuf,
-    vitmatte_path: PathBuf,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    request: ObjectMaskRequest,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
+    progress: ForegroundProgress,
+    cancelling: bool,
+    receiver: ForegroundOperationReceiver,
+    context: ForegroundOperationContext,
 }
 
 #[cfg(target_os = "android")]
@@ -810,115 +881,76 @@ struct AiMaskTarget {
     geometry: MaskGeometry,
 }
 
-struct InpaintTaskRequest {
-    document_id: u64,
-    generation: u64,
-    model_path: PathBuf,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    request: InpaintRequest,
-    dabs: Vec<BrushDab>,
-}
-
-enum BackgroundAction {
-    SingleExport(Box<ExportTaskRequest>),
-    LibraryBatchExport {
-        jobs: VecDeque<LibraryBatchExportJob>,
-        settings: ExportSettings,
-        format: ExportFormat,
-    },
-    LensCorrection(LensCorrectionTaskRequest),
-    SubjectMask(SubjectMaskTaskRequest),
-    ObjectMask(Box<ObjectMaskTaskRequest>),
-    Inpainting(InpaintTaskRequest),
-    LibraryAiMaskRefresh {
-        jobs: VecDeque<LibraryAiMaskRefreshJob>,
-    },
-}
-
-pub struct AurawApp {
-    pub current_path: Option<PathBuf>,
+pub(crate) struct DevelopState {
+    pub(crate) current_path: Option<PathBuf>,
     pub(crate) original_raw: Option<Arc<LoadedRaw>>,
-    pub loaded_raw: Option<Arc<LoadedRaw>>,
-    pub preview_raw: Option<Arc<LoadedRaw>>,
-    pub gpu_pipeline: Option<RawGpuPipeline>,
+    pub(crate) loaded_raw: Option<Arc<LoadedRaw>>,
+    pub(crate) preview_raw: Option<Arc<LoadedRaw>>,
+    pub(crate) exposure: ExposureParams,
+    pub(crate) target_exposure: ExposureParams,
+    pub(crate) geometry: GeometryTransform,
+    pub(crate) geometry_revision: u64,
+    pub(crate) lens_correction: LensCorrectionState,
+    pub(crate) lens_correction_dirty: bool,
+    /// Explicit DCP chosen for the currently edited image. None keeps automatic selection.
+    pub(crate) selected_camera_profile: Option<PathBuf>,
+    pub(crate) load_receiver: Option<mpsc::Receiver<LoadEvent>>,
+    pub(crate) loading_label: Option<String>,
+    pub(crate) image_status: String,
+    pub(crate) current_label: Option<String>,
+    pub(crate) raw_cache: VecDeque<CachedRawDecode>,
+    pub(crate) raw_cache_limit: usize,
+}
+
+pub(crate) struct PreviewState {
+    pub(crate) gpu_pipeline: Option<RawGpuPipeline>,
     // Compiled preview programs are tiny compared with an image-sized render
     // graph. Retain them independently so replacing or temporarily releasing
     // a preview never forces Android to compile the full graph again.
-    preview_program_template: Option<RawGpuProgramTemplate>,
+    pub(crate) program_template: Option<RawGpuProgramTemplate>,
     // Native preview texture IDs cannot be freed during `App::ui`: egui may
     // already have emitted meshes that reference them for the current frame.
     // Retire them now and remove them from the renderer at the start of the
     // next frame, before any new paint meshes are built.
-    retired_egui_textures: Vec<egui::TextureId>,
-    gpu_preview_prewarm_receiver: Option<mpsc::Receiver<Result<RawGpuPipeline, String>>>,
-    gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
-    pub(crate) preview_quality: PreviewQuality,
-    pub(crate) image_relative_brush_size: bool,
-    pub(crate) preview_zoom: f32,
-    pub(crate) preview_center: [f32; 2],
-    pub(crate) preview_visible_uv: PreviewUvRect,
-    pub(crate) preview_viewport_pixels: [u32; 2],
-    pub(crate) preview_motion_at: Option<Instant>,
-    pub(crate) preview_touch_navigation_active: bool,
-    pub(crate) preview_revision: u64,
-    pub(crate) preview_detail: Option<PreviewDetail>,
-    pub(crate) preview_navigation: Option<PreviewNavigation>,
-    preview_detail_pending_stage: Option<ProcessingStage>,
-    navigation_pending_stage: Option<ProcessingStage>,
-    preview_detail_urgent: bool,
-    preview_quality_dirty: bool,
-    preview_rebuild_receiver: Option<mpsc::Receiver<PreviewRebuildEvent>>,
-    pub(crate) original_preview_exposure: ExposureParams,
-    pub(crate) original_preview_requested: bool,
-    original_preview_rendered_state: Option<(bool, u64)>,
-    pub(crate) android_original_hold: Option<AndroidOriginalHold>,
-    pub exposure: ExposureParams,
-    pub(crate) library: LibraryState,
+    pub(crate) retired_egui_textures: Vec<egui::TextureId>,
+    pub(crate) gpu_prewarm_receiver: Option<mpsc::Receiver<Result<RawGpuPipeline, String>>>,
+    pub(crate) quality: PreviewQuality,
+    pub(crate) zoom: f32,
+    pub(crate) center: [f32; 2],
+    pub(crate) visible_uv: PreviewUvRect,
+    pub(crate) viewport_pixels: [u32; 2],
+    pub(crate) motion_at: Option<Instant>,
+    pub(crate) touch_navigation_active: bool,
+    pub(crate) revision: u64,
+    pub(crate) detail: Option<PreviewDetail>,
+    pub(crate) navigation: Option<PreviewNavigation>,
+    pub(crate) detail_pending_stage: Option<ProcessingStage>,
+    pub(crate) navigation_pending_stage: Option<ProcessingStage>,
+    pub(crate) detail_urgent: bool,
+    pub(crate) quality_dirty: bool,
+    pub(crate) rebuild_receiver: Option<mpsc::Receiver<PreviewRebuildEvent>>,
+    pub(crate) original_exposure: ExposureParams,
+    pub(crate) original_requested: bool,
+    pub(crate) original_rendered_state: Option<(bool, u64)>,
+    pub(crate) original_hold: Option<AndroidOriginalHold>,
+    pub(crate) pending_stage: Option<ProcessingStage>,
+    #[cfg(target_os = "android")]
+    pub(crate) lens_original_cache: Option<(PreviewQuality, Arc<LoadedRaw>)>,
+    #[cfg(target_os = "android")]
+    pub(crate) lens_corrected_cache:
+        Option<(LensfunLens, PreviewQuality, Arc<LoadedRaw>, Arc<LoadedRaw>)>,
+}
+
+pub(crate) struct DevelopUiState {
     #[cfg(not(target_os = "android"))]
-    pub(crate) develop_reference: DevelopReferenceState,
-    pub(crate) develop_loading_thumbnail: DevelopLoadingThumbnailState,
+    pub(crate) reference: DevelopReferenceState,
+    pub(crate) loading_thumbnail: DevelopLoadingThumbnailState,
     #[cfg(not(target_os = "android"))]
-    pub(crate) develop_filmstrip_open: bool,
+    pub(crate) filmstrip_open: bool,
     #[cfg(not(target_os = "android"))]
-    pub(crate) develop_filmstrip_centered_path: Option<PathBuf>,
+    pub(crate) filmstrip_centered_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
-    pub(crate) develop_sidebar_open: bool,
-    pub(crate) adjustment_copy_settings: AdjustmentCopySettings,
-    adjustment_clipboard: Option<LibraryAdjustmentClipboard>,
-    raw_cache: VecDeque<CachedRawDecode>,
-    raw_cache_limit: usize,
-    performance_settings_path: Option<PathBuf>,
-    thumbnail_cache_size: Option<Result<u64, String>>,
-    thumbnail_cache_size_receiver: Option<mpsc::Receiver<Result<u64, String>>>,
-    #[cfg(not(target_os = "android"))]
-    pub(crate) display_color_management: bool,
-    #[cfg(not(target_os = "android"))]
-    pub(crate) display_profile_override: Option<PathBuf>,
-    #[cfg(not(target_os = "android"))]
-    pub(crate) display_profile_label: String,
-    #[cfg(not(target_os = "android"))]
-    display_profile_source: Option<String>,
-    #[cfg(not(target_os = "android"))]
-    display_profile_fingerprint: Option<u64>,
-    #[cfg(not(target_os = "android"))]
-    display_profile_last_probe: Option<Instant>,
-    #[cfg(not(target_os = "android"))]
-    display_profile_last_screen_point: Option<[i32; 2]>,
-    #[cfg(not(target_os = "android"))]
-    display_output_transform: crate::pipeline::IccOutputTransform,
-    pub(crate) camera_profile_mode: CameraProfileMode,
-    pub(crate) camera_profile_folder: Option<PathBuf>,
-    pub(crate) camera_profile_folder_label: Option<String>,
-    pub(crate) camera_profile_auto_detect: bool,
-    /// Last manually selected DCP, relative to `camera_profile_folder`. This is
-    /// a sticky default only for newly opened RAWs that have no sidecar yet.
-    pub(crate) last_camera_profile: Option<PathBuf>,
-    /// Explicit DCP chosen for the currently edited image. None keeps automatic selection.
-    pub(crate) selected_camera_profile: Option<PathBuf>,
-    pub active_tab: AppTab,
-    pub sidebar_tab: SidebarTab,
-    pub(crate) geometry: GeometryTransform,
+    pub(crate) sidebar_open: bool,
     /// Runtime-only crop before automatic rotation/keystone containment. This
     /// lets the crop expand again when the user reduces the straighten angle.
     pub(crate) crop_constraint_reference: Option<[f32; 4]>,
@@ -928,185 +960,194 @@ pub struct AurawApp {
     pub(crate) white_balance_picker_active: bool,
     /// Native-source UV start/current corners while the neutral-area picker is dragged.
     pub(crate) white_balance_picker_drag: Option<[[f32; 2]; 2]>,
-    pub(crate) geometry_revision: u64,
-    pub adjustment_section: AdjustmentSection,
-    pub mask_section: MaskSection,
-    pub tone_curve_tab: ToneCurveTab,
-    pub color_grade_tab: ColorGradeTab,
-    pub hsl_mixer_color: HslMixerColor,
-    pub export_settings: ExportSettings,
-    pub masks: MaskStack,
-    pub(crate) active_mask_tool: Option<MaskKind>,
+    pub(crate) adjustment_section: AdjustmentSection,
+    pub(crate) mask_section: MaskSection,
+    pub(crate) tone_curve_tab: ToneCurveTab,
+    pub(crate) color_grade_tab: ColorGradeTab,
+    pub(crate) hsl_mixer_color: HslMixerColor,
+}
+
+pub(crate) struct PreferencesState {
+    pub(crate) image_relative_brush_size: bool,
+    pub(crate) adjustment_copy_settings: AdjustmentCopySettings,
+    pub(crate) performance_settings_path: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_color_management: bool,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_override: Option<PathBuf>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_label: String,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_source: Option<String>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_fingerprint: Option<u64>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_last_probe: Option<Instant>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_profile_last_screen_point: Option<[i32; 2]>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) display_output_transform: crate::pipeline::IccOutputTransform,
+    pub(crate) camera_profile_mode: CameraProfileMode,
+    pub(crate) camera_profile_folder: Option<PathBuf>,
+    pub(crate) camera_profile_folder_label: Option<String>,
+    pub(crate) camera_profile_auto_detect: bool,
+    /// Last manually selected DCP, relative to `camera_profile_folder`. This is
+    /// a sticky default only for newly opened RAWs that have no sidecar yet.
+    pub(crate) last_camera_profile: Option<PathBuf>,
+}
+
+pub(crate) struct UiState {
+    pub(crate) active_tab: AppTab,
+    pub(crate) sidebar_tab: SidebarTab,
+    pub(crate) status: String,
+    /// Reveals low-level darktable/RAW controls hidden by the standard view.
+    pub(crate) expert_mode: bool,
+    pub(crate) notice: Option<String>,
+    pub(crate) thumbnail_cache_size: Option<Result<u64, String>>,
+    pub(crate) thumbnail_cache_size_receiver: Option<mpsc::Receiver<Result<u64, String>>>,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) desktop_picker_receiver: Option<mpsc::Receiver<DesktopPickerEvent>>,
+}
+
+pub(crate) struct MaskState {
+    pub(crate) stack: MaskStack,
+    pub(crate) active_tool: Option<MaskKind>,
     pub(crate) brush_mode: BrushMode,
     pub(crate) subject_refinement_active: bool,
-    pub(crate) mask_drag: Option<MaskDragState>,
+    pub(crate) drag: Option<MaskDragState>,
     pub(crate) last_brush_point: Option<[f32; 2]>,
-    mask_touch_gesture_backup: Option<MaskTouchGestureBackup>,
-    mask_interaction_dirty_layer: Option<usize>,
-    mask_interaction_last_upload: Option<Instant>,
-    mask_interaction_has_uncommitted_change: bool,
-    pub(crate) mask_overlay_revision: u64,
-    pub(crate) mask_overlay_texture: Option<egui::TextureHandle>,
-    pub(crate) mask_overlay_texture_key: Option<(usize, Option<usize>, u64, OverlayRasterKey)>,
-    pub(crate) mask_overlay_blink: Option<(std::time::Instant, MaskOverlayBlink)>,
-    pub(crate) mask_thumbnail_revision: u64,
-    pub(crate) mask_thumbnail_group_textures: Vec<egui::TextureHandle>,
-    pub(crate) mask_thumbnail_component_mask: Option<usize>,
-    pub(crate) mask_thumbnail_component_textures: Vec<egui::TextureHandle>,
-    pub(crate) mask_source_cache: Option<MaskRgbImage>,
-    pub(crate) subject_mask_cache: Option<MaskImage>,
+    pub(crate) touch_gesture_backup: Option<MaskTouchGestureBackup>,
+    pub(crate) interaction_dirty_layer: Option<usize>,
+    pub(crate) interaction_last_upload: Option<Instant>,
+    pub(crate) interaction_has_uncommitted_change: bool,
+    pub(crate) overlay_revision: u64,
+    pub(crate) overlay_texture: Option<egui::TextureHandle>,
+    pub(crate) overlay_texture_key: Option<(usize, Option<usize>, u64, OverlayRasterKey)>,
+    pub(crate) overlay_blink: Option<(std::time::Instant, MaskOverlayBlink)>,
+    pub(crate) thumbnail_revision: u64,
+    pub(crate) thumbnail_group_textures: Vec<egui::TextureHandle>,
+    pub(crate) thumbnail_component_mask: Option<usize>,
+    pub(crate) thumbnail_component_textures: Vec<egui::TextureHandle>,
+    pub(crate) source_cache: Option<MaskRgbImage>,
+    pub(crate) subject_cache: Option<MaskImage>,
+    pub(crate) dirty_layers: [bool; MAX_LOCAL_MASKS],
+    pub(crate) detail_dirty_layers: [bool; MAX_LOCAL_MASKS],
+    pub(crate) navigation_dirty_layers: [bool; MAX_LOCAL_MASKS],
+}
+
+pub(crate) struct AiState {
     pub(crate) birefnet_quality: BiRefNetQuality,
     #[cfg(not(target_os = "android"))]
-    pub(crate) ai_gpu_acceleration: bool,
-    pub(crate) ai_masks_need_update: bool,
-    ai_mask_update_active: bool,
-    ai_mask_update_subject_pending: bool,
-    ai_mask_update_object_queue: VecDeque<(usize, usize)>,
-    ai_mask_update_failed: bool,
+    pub(crate) gpu_acceleration: bool,
+    pub(crate) masks_need_update: bool,
+    pub(crate) mask_update_active: bool,
+    pub(crate) mask_update_subject_pending: bool,
+    pub(crate) mask_update_object_queue: VecDeque<(usize, usize)>,
+    pub(crate) mask_update_failed: bool,
     #[cfg(not(target_os = "android"))]
-    pub(crate) onnx_runtime_path: Option<PathBuf>,
+    pub(crate) runtime_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
-    pub(crate) onnx_runtime_sha256: Option<String>,
-    #[cfg(not(target_os = "android"))]
-    desktop_picker_receiver: Option<mpsc::Receiver<DesktopPickerEvent>>,
-    pub status: String,
-    /// Reveals low-level darktable/RAW controls hidden by the standard view.
-    pub expert_mode: bool,
-    pub(crate) lens_correction: LensCorrectionState,
-    edit_history: EditHistory,
-    /// A history restore across a lens-geometry change must put back the masks
-    /// associated with that historical geometry after the normal lens rebuild.
-    history_lens_restore_masks: Option<MaskStack>,
-    sidecar_target: Option<crate::sidecar::SidecarTarget>,
-    sidecar_generation: u64,
-    sidecar_saved_revision: Option<u64>,
-    sidecar_failed_revision: Option<u64>,
-    sidecar_pending: VecDeque<SidecarSaveRequest>,
-    sidecar_in_flight: Option<SidecarSaveJob>,
-    sidecar_receiver: Option<mpsc::Receiver<SidecarSaveEvent>>,
-    sidecar_save_feedback_until: Option<Instant>,
-    sidecar_save_error_dialog: Option<String>,
-    sidecar_conflict_receiver: Option<mpsc::Receiver<CloudSidecarConflictEvent>>,
-    sidecar_conflict_resolution_error: Option<String>,
-    sidecar_autosave_deadline: Option<SidecarAutosaveDeadline>,
-    developed_thumbnail_pending: Option<DevelopedThumbnailJob>,
-    developed_thumbnail_in_flight: Option<DevelopedThumbnailJob>,
-    developed_thumbnail_receiver: Option<mpsc::Receiver<DevelopedThumbnailEvent>>,
+    pub(crate) runtime_sha256: Option<String>,
+    pub(crate) library_mask_refresh: Option<LibraryAiMaskRefreshState>,
+    pub(crate) subject_consent_open: bool,
+    pub(crate) object_consent_open: bool,
+    pub(crate) object_pending_target: Option<(usize, usize)>,
+    pub(crate) object_error_dialog: Option<String>,
+    pub(crate) object_cache: Option<((usize, usize), ObjectInferenceCache)>,
+    pub(crate) denoise_consent_open: bool,
+    pub(crate) denoise_resume_pending: bool,
+}
 
-    egui_ctx: egui::Context,
-    background_tasks: BackgroundTaskManager,
-    background_actions: HashMap<TaskId, BackgroundAction>,
-    export_task_id: Option<TaskId>,
-    library_batch_export_task_id: Option<TaskId>,
-    library_ai_mask_refresh_task_id: Option<TaskId>,
-    subject_task_id: Option<TaskId>,
-    object_task_id: Option<TaskId>,
-    inpaint_task_id: Option<TaskId>,
-    target_exposure: ExposureParams,
-    pending_stage: Option<ProcessingStage>,
-    lens_correction_dirty: bool,
-    lens_correction_generation: u64,
-    lens_correction_receiver: Option<mpsc::Receiver<LensCorrectionEvent>>,
-    lens_correction_task_id: Option<TaskId>,
-    #[cfg(target_os = "android")]
-    lens_original_preview_cache: Option<(PreviewQuality, Arc<LoadedRaw>)>,
-    #[cfg(target_os = "android")]
-    lens_corrected_preview_cache:
-        Option<(LensfunLens, PreviewQuality, Arc<LoadedRaw>, Arc<LoadedRaw>)>,
-    load_receiver: Option<mpsc::Receiver<LoadEvent>>,
-    loading_label: Option<String>,
-    export_receiver: Option<mpsc::Receiver<ExportEvent>>,
-    export_progress: Option<(usize, usize)>,
-    #[cfg(not(target_os = "android"))]
-    library_batch_export_receiver: Option<mpsc::Receiver<LibraryBatchExportEvent>>,
-    #[cfg(not(target_os = "android"))]
-    library_batch_export_tile_progress: Option<(usize, usize)>,
-    library_batch_export: Option<LibraryBatchExportState>,
-    library_ai_mask_refresh: Option<LibraryAiMaskRefreshState>,
-    export_publish_pending: bool,
-    image_status: String,
-    current_label: Option<String>,
-    notice: Option<String>,
-    dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
-    detail_dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
-    navigation_dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
-    subject_consent_open: bool,
-    subject_receiver: Option<mpsc::Receiver<SubjectMaskEvent>>,
-    subject_generation: u64,
-    subject_job_document_id: u64,
-    subject_job_generation: u64,
-    subject_download_progress: Option<(&'static str, u64, u64)>,
-    subject_inferencing: bool,
-    object_consent_open: bool,
-    object_pending_target: Option<(usize, usize)>,
-    object_receiver: Option<mpsc::Receiver<ObjectMaskEvent>>,
-    object_download_progress: Option<(&'static str, u64, u64)>,
-    object_inferencing: bool,
-    object_decoder_only: bool,
-    object_error_dialog: Option<String>,
-    object_generation: u64,
-    object_job_generation: u64,
-    object_job_document_id: u64,
-    object_job_target: Option<AiMaskTarget>,
-    object_cache: Option<((usize, usize), ObjectInferenceCache)>,
-    pub(crate) inpaint_brush_size: f32,
-    pub(crate) inpaint_tool: InpaintStrokeKind,
-    pub(crate) inpaint_source_anchor: Option<[f32; 2]>,
-    pub(crate) inpaint_source_offset: Option<[f32; 2]>,
-    pub(crate) inpaint_source_pick_active: bool,
-    pub(crate) inpaint_stroke: Vec<crate::pipeline::BrushDab>,
-    pub(crate) inpaint_strokes: Vec<InpaintStroke>,
-    pub(crate) last_inpaint_brush_point: Option<[f32; 2]>,
-    pub(crate) inpaint_layer: Option<InpaintLayer>,
-    pub(crate) inpaint_texture: Option<egui::TextureHandle>,
-    pub(crate) inpaint_texture_revision: u64,
-    pub(crate) inpaint_texture_key: Option<u64>,
-    pub(crate) inpaint_stroke_texture: Option<egui::TextureHandle>,
-    pub(crate) inpaint_stroke_texture_key: Option<(usize, OverlayRasterKey)>,
-    pub(crate) inpaint_hovered_stroke: Option<usize>,
-    pub(crate) inpaint_selected_stroke: Option<usize>,
-    pub(crate) inpaint_focus_texture: Option<egui::TextureHandle>,
-    pub(crate) inpaint_focus_texture_key: Option<(usize, u64, OverlayRasterKey, bool)>,
-    inpaint_source_cache: Option<MaskRgbImage>,
-    inpaint_pending_source: Option<PreparedInpaintSource>,
-    inpaint_active_dabs: Option<Vec<crate::pipeline::BrushDab>>,
-    inpaint_replace_index: Option<usize>,
-    inpaint_revision: u64,
-    inpaint_job_document_id: u64,
-    inpaint_job_generation: u64,
-    inpaint_consent_open: bool,
-    inpaint_receiver: Option<mpsc::Receiver<InpaintEvent>>,
-    inpaint_download_progress: Option<(u64, u64)>,
-    inpaint_inferencing: bool,
-    ai_denoise_consent_open: bool,
-    ai_denoise_receiver: Option<mpsc::Receiver<crate::ai_denoise::AiDenoiseEvent>>,
-    ai_denoise_download_progress: Option<(u64, u64)>,
-    ai_denoise_apply_progress: Option<(&'static str, usize, usize)>,
-    ai_denoise_cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
-    ai_denoise_job_document_id: u64,
-    ai_denoise_resume_pending: bool,
-
-    #[cfg(target_os = "android")]
-    android_app: auraw_ffi::AndroidApp,
-    #[cfg(target_os = "android")]
-    pub(crate) picker_pending: bool,
+pub(crate) struct ExportState {
+    pub(crate) gpu_prewarm: Option<Arc<GpuProgramPrewarm>>,
+    pub(crate) settings: ExportSettings,
+    pub(crate) task: Option<ExportTask>,
+    pub(crate) batch: Option<LibraryBatchExportState>,
+    pub(crate) publish_pending: bool,
     /// True while the Android SAF result and RAW decode belong to the batch
     /// exporter rather than to an interactive Library open. The batch exporter
     /// shares Android's document bridge, so completion must be routed by owner
     /// instead of merely checking whether a batch happens to exist.
     #[cfg(target_os = "android")]
-    android_batch_load_pending: bool,
+    pub(crate) android_batch_load_pending: bool,
+}
+
+pub(crate) struct PersistenceState {
+    pub(crate) history: EditHistory,
+    /// A history restore across a lens-geometry change must put back the masks
+    /// associated with that historical geometry after the normal lens rebuild.
+    pub(crate) lens_restore_masks: Option<MaskStack>,
+    pub(crate) sidecar_target: Option<crate::sidecar::SidecarTarget>,
+    pub(crate) sidecar_generation: u64,
+    pub(crate) sidecar_saved_revision: Option<u64>,
+    pub(crate) sidecar_failed_revision: Option<u64>,
+    pub(crate) sidecar_pending: VecDeque<SidecarSaveRequest>,
+    pub(crate) sidecar_in_flight: Option<SidecarSaveJob>,
+    pub(crate) sidecar_receiver: Option<mpsc::Receiver<SidecarSaveEvent>>,
+    pub(crate) sidecar_save_feedback_until: Option<Instant>,
+    pub(crate) sidecar_save_error_dialog: Option<String>,
+    pub(crate) sidecar_autosave_deadline: Option<SidecarAutosaveDeadline>,
+    pub(crate) developed_thumbnail_pending: Option<DevelopedThumbnailJob>,
+    pub(crate) developed_thumbnail_in_flight: Option<DevelopedThumbnailJob>,
+    pub(crate) developed_thumbnail_receiver: Option<mpsc::Receiver<DevelopedThumbnailEvent>>,
+}
+
+pub(crate) struct InpaintState {
+    pub(crate) brush_size: f32,
+    pub(crate) tool: InpaintStrokeKind,
+    pub(crate) source_anchor: Option<[f32; 2]>,
+    pub(crate) source_offset: Option<[f32; 2]>,
+    pub(crate) source_pick_active: bool,
+    pub(crate) stroke: Vec<crate::pipeline::BrushDab>,
+    pub(crate) strokes: Vec<InpaintStroke>,
+    pub(crate) last_brush_point: Option<[f32; 2]>,
+    pub(crate) layer: Option<InpaintLayer>,
+    pub(crate) texture: Option<egui::TextureHandle>,
+    pub(crate) texture_revision: u64,
+    pub(crate) texture_key: Option<u64>,
+    pub(crate) stroke_texture: Option<egui::TextureHandle>,
+    pub(crate) stroke_texture_key: Option<(usize, OverlayRasterKey)>,
+    pub(crate) hovered_stroke: Option<usize>,
+    pub(crate) selected_stroke: Option<usize>,
+    pub(crate) focus_texture: Option<egui::TextureHandle>,
+    pub(crate) focus_texture_key: Option<(usize, u64, OverlayRasterKey, bool)>,
+    pub(crate) source_cache: Option<MaskRgbImage>,
+    pub(crate) pending_source: Option<PreparedInpaintSource>,
+    pub(crate) replace_index: Option<usize>,
+    pub(crate) revision: u64,
+    pub(crate) consent_open: bool,
+}
+
+#[cfg(target_os = "android")]
+pub(crate) struct AndroidState {
+    pub(crate) android_app: auraw_ffi::AndroidApp,
+    pub(crate) picker_pending: bool,
     /// True while an internal Android RAW reopen belongs to Reset All. The
     /// document is reloaded so Develop cannot retain stale in-memory edits,
     /// but the Library remains the active tab.
-    #[cfg(target_os = "android")]
-    pending_android_library_reset_reload: bool,
+    pub(crate) pending_android_library_reset_reload: bool,
     /// Label of the SAF tree currently being mirrored into app-private DCP storage.
     /// This is UI-only transient state and is never persisted as the active folder.
-    #[cfg(target_os = "android")]
     pub(crate) camera_profile_folder_importing_label: Option<String>,
+    pub(crate) pending_android_profile_reload: Option<(Option<PathBuf>, SidecarEditState)>,
+}
+
+pub struct AurawApp {
+    pub(crate) develop: DevelopState,
+    pub(crate) preview: PreviewState,
+    pub(crate) develop_ui: DevelopUiState,
+    pub(crate) library: LibraryState,
+    pub(crate) masks: MaskState,
+    pub(crate) ai: AiState,
+    pub(crate) inpaint: InpaintState,
+    pub(crate) export: ExportState,
+    pub(crate) persistence: PersistenceState,
+    pub(crate) preferences: PreferencesState,
+    pub(crate) ui: UiState,
+    egui_ctx: egui::Context,
+    foreground_operation: Option<ForegroundOperation>,
     #[cfg(target_os = "android")]
-    pending_android_profile_reload: Option<(Option<PathBuf>, SidecarEditState)>,
+    pub(crate) android: AndroidState,
 }
 
 #[cfg(any(not(target_os = "android"), test))]
@@ -1131,57 +1172,54 @@ fn collect_pipeline_update_results(
 
 impl AurawApp {
     pub(crate) fn sync_ai_model_cache_policy(&self) {
-        let develop_visible = self.active_tab == AppTab::Develop;
+        let develop_visible = self.ui.active_tab == AppTab::Develop;
         crate::ai_masks::set_model_cache_enabled(
-            develop_visible && self.sidebar_tab == SidebarTab::Masks,
+            develop_visible && self.ui.sidebar_tab == SidebarTab::Masks,
         );
         crate::inpainting::set_model_cache_enabled(
-            develop_visible && self.sidebar_tab == SidebarTab::Inpainting,
+            develop_visible && self.ui.sidebar_tab == SidebarTab::Inpainting,
         );
     }
 
     pub(crate) fn activate_tab(&mut self, tab: AppTab) {
-        if self.active_tab == tab {
+        if self.ui.active_tab == tab {
             return;
         }
-        if self.active_tab == AppTab::Develop && tab != AppTab::Develop {
+        if self.ui.active_tab == AppTab::Develop && tab != AppTab::Develop {
             self.set_original_preview_requested(false);
-            self.android_original_hold = None;
+            self.preview.original_hold = None;
         }
-        if self.active_tab == AppTab::Library && tab != AppTab::Library {
+        if self.ui.active_tab == AppTab::Library && tab != AppTab::Library {
             // Keep thumbnail decoding from competing with Develop rendering.
             self.library.prepare_for_develop();
             #[cfg(target_os = "android")]
             self.library.set_folder_sidebar_open(false);
         }
         if tab == AppTab::Settings {
-            self.thumbnail_cache_size = None;
-            self.thumbnail_cache_size_receiver = None;
+            self.ui.thumbnail_cache_size = None;
+            self.ui.thumbnail_cache_size_receiver = None;
         }
-        if tab == AppTab::Library && self.library.is_cloud_view() {
-            self.library.refresh(&self.egui_ctx);
-        }
-        self.active_tab = tab;
+        self.ui.active_tab = tab;
         self.sync_ai_model_cache_policy();
         #[cfg(target_os = "android")]
         crate::android::set_back_navigation_active(tab != AppTab::Library);
     }
 
     fn retire_egui_texture(&mut self, texture_id: egui::TextureId) {
-        if !self.retired_egui_textures.contains(&texture_id) {
-            self.retired_egui_textures.push(texture_id);
+        if !self.preview.retired_egui_textures.contains(&texture_id) {
+            self.preview.retired_egui_textures.push(texture_id);
         }
         self.egui_ctx.request_repaint();
     }
 
     fn release_retired_egui_textures(&mut self, frame: &eframe::Frame) {
-        if self.retired_egui_textures.is_empty() {
+        if self.preview.retired_egui_textures.is_empty() {
             return;
         }
         let Some(render_state) = frame.wgpu_render_state() else {
             return;
         };
-        let retired = std::mem::take(&mut self.retired_egui_textures);
+        let retired = std::mem::take(&mut self.preview.retired_egui_textures);
         let mut renderer = render_state.renderer.write();
         for texture_id in retired {
             renderer.free_texture(&texture_id);
@@ -1192,9 +1230,9 @@ impl AurawApp {
         &mut self,
         _renderer: &mut eframe::egui_wgpu::Renderer,
     ) -> Option<RawGpuPipeline> {
-        let pipeline = self.gpu_pipeline.take();
+        let pipeline = self.preview.gpu_pipeline.take();
         if let Some(pipeline) = pipeline.as_ref() {
-            self.preview_program_template = Some(pipeline.program_template());
+            self.preview.program_template = Some(pipeline.program_template());
         }
         if let Some(texture_id) = pipeline
             .as_ref()
@@ -1203,10 +1241,10 @@ impl AurawApp {
             self.retire_egui_texture(texture_id);
         }
         for texture_id in [
-            self.preview_detail
+            self.preview.detail
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
-            self.preview_navigation
+            self.preview.navigation
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
         ]
@@ -1220,7 +1258,7 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub(crate) fn copy_text_to_clipboard(&self, label: &str, text: &str) -> Result<(), String> {
-        crate::android::copy_text_to_clipboard(&self.android_app, label, text)
+        crate::android::copy_text_to_clipboard(&self.android.android_app, label, text)
     }
 }
 
@@ -1230,20 +1268,19 @@ mod inpainting;
 mod processing_export;
 mod library_adjustments;
 mod sidecar_persistence;
-mod background_task_runtime;
+mod foreground;
 mod eframe_impl;
 
-use lifecycle::{install_missing_range_sources, needs_canonical_mask_source};
-use processing_export::{batch_export_overall_fraction, spawn_export_request};
+use lifecycle::needs_canonical_mask_source;
 #[cfg(not(target_os = "android"))]
-use processing_export::{spawn_desktop_library_batch_export, DesktopLibraryBatchExportRequest};
+use lifecycle::install_missing_range_sources;
 use sidecar_persistence::sidecar_interaction_active;
 
 #[cfg(test)]
 mod transactional_pipeline_tests {
     use super::{
-        collect_pipeline_update_results, AiMaskTarget, AurawApp, BackgroundTaskManager,
-        MaskGeometry, MaskKind, MaskStack, PreviewQuality, TaskKind, TaskProgress, TaskStatus,
+        collect_pipeline_update_results, AiMaskTarget, MaskGeometry, MaskKind, MaskStack,
+        MaskState, PreviewQuality,
     };
     use crate::pipeline::GeometryTransform;
 
@@ -1366,35 +1403,13 @@ mod transactional_pipeline_tests {
         stack.add_component(MaskKind::Brush, crate::pipeline::MaskCombineMode::Add);
         assert_eq!(stack.move_submask_component(0, 0, 0, 2), Some((0, 1)));
         assert_eq!(
-            AurawApp::resolve_ai_mask_target_in_stack(&stack, &target),
+            MaskState::resolve_ai_target_in_stack(&stack, &target),
             Ok((0, 1))
         );
 
         stack.masks[0].components[1].kind = MaskKind::Brush;
         stack.masks[0].components[1].geometry = MaskGeometry::for_kind(MaskKind::Brush);
-        let error = AurawApp::resolve_ai_mask_target_in_stack(&stack, &target).unwrap_err();
+        let error = MaskState::resolve_ai_target_in_stack(&stack, &target).unwrap_err();
         assert!(error.contains("changed type"));
-    }
-
-    #[test]
-                document_id: 1,
-                generation: 1,
-            },
-            TaskKind::ObjectMask {
-                document_id: 1,
-                generation: 1,
-            },
-        ];
-        for kind in kinds {
-            let mut tasks = BackgroundTaskManager::default();
-            let id = tasks.start_nonblocking(
-                kind,
-                "Generating mask",
-                TaskProgress::indeterminate("Running inference"),
-                true,
-            );
-            assert!(tasks.fail(id, "inference failed"));
-            assert_eq!(tasks.snapshot(id).unwrap().status, TaskStatus::Failed);
-        }
     }
 }

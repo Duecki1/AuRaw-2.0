@@ -11,10 +11,10 @@ impl Sidebar {
         crate::ui::theme::toolbar_row(ui, |ui| {
             ui.strong("UwU");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let active_tool = app.inpaint_tool;
+                let active_tool = app.inpaint.tool;
                 let clear = crate::ui::icons::phosphor_icon_button_enabled(
                     ui,
-                    app.inpaint_strokes
+                    app.inpaint.strokes
                         .iter()
                         .any(|stroke| stroke.kind == active_tool)
                         && !app.inpaint_busy(),
@@ -30,25 +30,25 @@ impl Sidebar {
         ui.add_space(4.0);
         crate::ui::theme::section_card(ui, "Tool", |ui| {
             ui.add_enabled_ui(!app.inpaint_busy(), |ui| {
-                let previous_tool = app.inpaint_tool;
+                let previous_tool = app.inpaint.tool;
                 ui.horizontal(|ui| {
                     for tool in InpaintStrokeKind::ALL {
-                        ui.selectable_value(&mut app.inpaint_tool, tool, tool.label());
+                        ui.selectable_value(&mut app.inpaint.tool, tool, tool.label());
                     }
                 });
-                if app.inpaint_tool != previous_tool {
-                    app.inpaint_stroke.clear();
-                    app.last_inpaint_brush_point = None;
-                    app.inpaint_stroke_texture = None;
-                    app.inpaint_stroke_texture_key = None;
-                    app.inpaint_selected_stroke = None;
-                    app.inpaint_hovered_stroke = None;
-                    app.inpaint_focus_texture = None;
-                    app.inpaint_focus_texture_key = None;
-                    app.inpaint_source_pick_active = app.inpaint_tool.requires_source()
-                        && app.inpaint_source_anchor.is_none();
+                if app.inpaint.tool != previous_tool {
+                    app.inpaint.stroke.clear();
+                    app.inpaint.last_brush_point = None;
+                    app.inpaint.stroke_texture = None;
+                    app.inpaint.stroke_texture_key = None;
+                    app.inpaint.selected_stroke = None;
+                    app.inpaint.hovered_stroke = None;
+                    app.inpaint.focus_texture = None;
+                    app.inpaint.focus_texture_key = None;
+                    app.inpaint.source_pick_active = app.inpaint.tool.requires_source()
+                        && app.inpaint.source_anchor.is_none();
                 }
-                let help = match app.inpaint_tool {
+                let help = match app.inpaint.tool {
                     InpaintStrokeKind::Remove => {
                         "Paint unwanted content. LaMa generates a local replacement when you release."
                     }
@@ -64,29 +64,29 @@ impl Sidebar {
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 );
-                if app.inpaint_tool.requires_source() {
+                if app.inpaint.tool.requires_source() {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        let label = if app.inpaint_source_pick_active {
+                        let label = if app.inpaint.source_pick_active {
                             "Click image to set source…"
-                        } else if app.inpaint_source_anchor.is_some() {
+                        } else if app.inpaint.source_anchor.is_some() {
                             "Set source again"
                         } else {
                             "Set source"
                         };
                         if ui
-                            .selectable_label(app.inpaint_source_pick_active, label)
+                            .selectable_label(app.inpaint.source_pick_active, label)
                             .on_hover_text("You can also Alt-click the image to set the source.")
                             .clicked()
                         {
-                            app.inpaint_source_pick_active = true;
-                            app.inpaint_source_offset = None;
-                            app.inpaint_stroke.clear();
-                            app.last_inpaint_brush_point = None;
-                            app.inpaint_stroke_texture = None;
-                            app.inpaint_stroke_texture_key = None;
+                            app.inpaint.source_pick_active = true;
+                            app.inpaint.source_offset = None;
+                            app.inpaint.stroke.clear();
+                            app.inpaint.last_brush_point = None;
+                            app.inpaint.stroke_texture = None;
+                            app.inpaint.stroke_texture_key = None;
                         }
-                        if app.inpaint_source_anchor.is_some() {
+                        if app.inpaint.source_anchor.is_some() {
                             ui.label(
                                 egui::RichText::new("Source set")
                                     .small()
@@ -99,7 +99,7 @@ impl Sidebar {
                 adjustment_slider(
                     ui,
                     "Size",
-                    &mut app.inpaint_brush_size,
+                    &mut app.inpaint.brush_size,
                     0.0025..=0.25,
                     3,
                     0.0025,
@@ -109,13 +109,12 @@ impl Sidebar {
         });
 
         ui.add_space(crate::ui::theme::CARD_GAP);
-        let active_tool = app.inpaint_tool;
+        let active_tool = app.inpaint.tool;
         crate::ui::theme::section_card(ui, format!("{} strokes", active_tool.label()), |ui| {
-            app.inpaint_hovered_stroke = None;
+            app.inpaint.hovered_stroke = None;
             let mut regenerate_stroke = None;
             let mut delete_stroke = None;
-            let visible_strokes = app
-                .inpaint_strokes
+            let visible_strokes = app.inpaint.strokes
                 .iter()
                 .enumerate()
                 .filter_map(|(index, stroke)| (stroke.kind == active_tool).then_some(index))
@@ -128,9 +127,9 @@ impl Sidebar {
                 );
             } else {
                 for (tool_index, index) in visible_strokes.iter().copied().enumerate().rev() {
-                    let dab_count = app.inpaint_strokes[index].dabs.len();
+                    let dab_count = app.inpaint.strokes[index].dabs.len();
                     crate::ui::theme::toolbar_row(ui, |ui| {
-                        let selected = app.inpaint_selected_stroke == Some(index);
+                        let selected = app.inpaint.selected_stroke == Some(index);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if crate::ui::icons::phosphor_icon_button_enabled(
                                 ui,
@@ -165,13 +164,13 @@ impl Sidebar {
                                     "Show this stroke on the image. Click to keep it highlighted.",
                                 );
                             if stroke_response.hovered() {
-                                app.inpaint_hovered_stroke = Some(index);
+                                app.inpaint.hovered_stroke = Some(index);
                                 ui.ctx().request_repaint();
                             }
                             if stroke_response.clicked() {
-                                app.inpaint_selected_stroke =
+                                app.inpaint.selected_stroke =
                                     if selected { None } else { Some(index) };
-                                app.inpaint_focus_texture_key = None;
+                                app.inpaint.focus_texture_key = None;
                                 ui.ctx().request_repaint();
                             }
                         });
@@ -184,27 +183,7 @@ impl Sidebar {
                 app.delete_inpaint_stroke(index);
             }
 
-            if let Some((downloaded, total)) = app.inpaint_progress() {
-                ui.add_space(8.0);
-                ui.label("Downloading lama_fp32.onnx…");
-                ui.add(
-                    egui::ProgressBar::new(downloaded as f32 / total.max(1) as f32)
-                        .show_percentage()
-                        .text(format!(
-                            "{:.1} / {:.1} MB",
-                            downloaded as f64 / 1_000_000.0,
-                            total as f64 / 1_000_000.0
-                        )),
-                );
-            } else if app.inpaint_inferencing() {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Erasing…");
-                });
-            }
-
-            if app.gpu_pipeline.is_none() {
+            if app.preview.gpu_pipeline.is_none() {
                 ui.add_space(8.0);
                 ui.colored_label(
                     ui.visuals().warn_fg_color,

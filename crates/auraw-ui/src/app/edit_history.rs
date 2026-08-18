@@ -464,47 +464,47 @@ impl AurawApp {
     /// changes). Persistence can watch
     /// `edit_commit_revision` and therefore never serialize every drag frame.
     pub(crate) fn note_edit_changed(&mut self) {
-        self.edit_history.note_change();
+        self.persistence.history.note_change();
     }
 
     pub(crate) fn note_geometry_changed(&mut self) {
-        self.geometry = self.geometry.sanitized();
-        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        self.develop.geometry = self.develop.geometry.sanitized();
+        self.develop.geometry_revision = self.develop.geometry_revision.wrapping_add(1);
     }
 
     /// Signal an edit that changed semantic mask contents. This separate domain
     /// lets global and lens-only transactions share the existing mask snapshot
     /// without scanning large brush/range-mask data.
     pub(crate) fn note_mask_edit_changed(&mut self) {
-        self.edit_history.note_mask_change();
+        self.persistence.history.note_mask_change();
     }
 
     pub(crate) fn note_inpainting_edit_changed(&mut self) {
-        self.edit_history.note_inpainting_change();
+        self.persistence.history.note_inpainting_change();
     }
 
     pub(crate) fn edit_commit_revision(&self) -> u64 {
-        self.edit_history
+        self.persistence.history
             .committed_revision()
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            ^ self.inpaint_revision
-            ^ self.geometry_revision.rotate_left(17)
+            ^ self.inpaint.revision
+            ^ self.develop.geometry_revision.rotate_left(17)
     }
 
     /// O(1) snapshot for persistence. Call `commit_edit_history_now` first so
     /// the history's canonical mask contents represent the final UI value.
     /// Navigation selection is intentionally not part of persisted edit data.
     pub(crate) fn committed_mask_state_for_persistence(&self) -> Arc<MaskStack> {
-        self.edit_history.committed_masks()
+        self.persistence.history.committed_masks()
     }
 
     pub(crate) fn reset_edit_history(&mut self) {
-        self.history_lens_restore_masks = None;
-        self.edit_history.reset_with_inpainting(
-            &self.exposure,
-            &self.masks,
-            &self.lens_correction,
-            &self.inpaint_strokes,
+        self.persistence.lens_restore_masks = None;
+        self.persistence.history.reset_with_inpainting(
+            &self.develop.exposure,
+            &self.masks.stack,
+            &self.develop.lens_correction,
+            &self.inpaint.strokes,
         );
     }
 
@@ -518,11 +518,11 @@ impl AurawApp {
         // they still enter history as one discrete change without extending
         // the transaction across unrelated edits.
         let interaction_active = ctx.input(|input| input.pointer.any_down());
-        self.edit_history.observe_with_inpainting(
-            &self.exposure,
-            &self.masks,
-            &self.lens_correction,
-            &self.inpaint_strokes,
+        self.persistence.history.observe_with_inpainting(
+            &self.develop.exposure,
+            &self.masks.stack,
+            &self.develop.lens_correction,
+            &self.inpaint.strokes,
             interaction_active,
         );
     }
@@ -532,59 +532,57 @@ impl AurawApp {
     /// the UI state while persistence snapshots the previous baseline.
     pub(crate) fn commit_edit_history_now(&mut self) {
         self.finish_mask_geometry_interaction();
-        self.edit_history.observe_with_inpainting(
-            &self.exposure,
-            &self.masks,
-            &self.lens_correction,
-            &self.inpaint_strokes,
+        self.persistence.history.observe_with_inpainting(
+            &self.develop.exposure,
+            &self.masks.stack,
+            &self.develop.lens_correction,
+            &self.inpaint.strokes,
             false,
         );
     }
 
     pub(crate) fn can_undo_edit(&self) -> bool {
-        self.loaded_raw.is_some()
-            && self
-                .edit_history
-                .can_undo(&self.exposure, &self.masks, &self.lens_correction)
+        self.develop.loaded_raw.is_some()
+            && self.persistence.history
+                .can_undo(&self.develop.exposure, &self.masks.stack, &self.develop.lens_correction)
     }
 
     pub(crate) fn can_redo_edit(&self) -> bool {
-        self.loaded_raw.is_some()
-            && self
-                .edit_history
-                .can_redo(&self.exposure, &self.masks, &self.lens_correction)
+        self.develop.loaded_raw.is_some()
+            && self.persistence.history
+                .can_redo(&self.develop.exposure, &self.masks.stack, &self.develop.lens_correction)
     }
 
     pub(crate) fn undo_edit(&mut self) {
         self.finish_mask_geometry_interaction();
-        let snapshot = self.edit_history.undo_with_inpainting(
-            &self.exposure,
-            &self.masks,
-            &self.lens_correction,
-            &self.inpaint_strokes,
+        let snapshot = self.persistence.history.undo_with_inpainting(
+            &self.develop.exposure,
+            &self.masks.stack,
+            &self.develop.lens_correction,
+            &self.inpaint.strokes,
         );
         if let Some((snapshot, masks_changed, inpainting_changed)) = snapshot {
             self.apply_edit_snapshot(snapshot, masks_changed, inpainting_changed);
-            self.notice = Some("Undid edit.".to_owned());
+            self.ui.notice = Some("Undid edit.".to_owned());
         }
     }
 
     pub(crate) fn redo_edit(&mut self) {
         self.finish_mask_geometry_interaction();
-        let snapshot = self.edit_history.redo_with_inpainting(
-            &self.exposure,
-            &self.masks,
-            &self.lens_correction,
-            &self.inpaint_strokes,
+        let snapshot = self.persistence.history.redo_with_inpainting(
+            &self.develop.exposure,
+            &self.masks.stack,
+            &self.develop.lens_correction,
+            &self.inpaint.strokes,
         );
         if let Some((snapshot, masks_changed, inpainting_changed)) = snapshot {
             self.apply_edit_snapshot(snapshot, masks_changed, inpainting_changed);
-            self.notice = Some("Redid edit.".to_owned());
+            self.ui.notice = Some("Redid edit.".to_owned());
         }
     }
 
     pub(crate) fn handle_edit_history_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.active_tab != AppTab::Develop {
+        if self.ui.active_tab != AppTab::Develop {
             return;
         }
         let redo_shift_z = egui::KeyboardShortcut::new(
@@ -610,29 +608,29 @@ impl AurawApp {
         masks_changed: bool,
         inpainting_changed: bool,
     ) {
-        let lens_changed = !snapshot.lens.matches(&self.lens_correction);
+        let lens_changed = !snapshot.lens.matches(&self.develop.lens_correction);
         let ai_denoise_changed =
-            snapshot.exposure.ai_denoise_enabled != self.exposure.ai_denoise_enabled;
-        self.cancel_document_bound_background_tasks();
+            snapshot.exposure.ai_denoise_enabled != self.develop.exposure.ai_denoise_enabled;
+        self.cancel_document_bound_foreground_operation();
 
-        self.edit_history.set_restoring_snapshot(true);
-        self.exposure = snapshot.exposure;
-        self.exposure.sanitize_tone_curves();
+        self.persistence.history.set_restoring_snapshot(true);
+        self.develop.exposure = snapshot.exposure;
+        self.develop.exposure.sanitize_tone_curves();
         if masks_changed {
-            self.masks = snapshot.materialize_masks();
+            self.masks.stack = snapshot.materialize_masks();
         } else {
-            snapshot.mask_selection.apply_to(&mut self.masks);
+            snapshot.mask_selection.apply_to(&mut self.masks.stack);
         }
         if inpainting_changed {
-            self.inpaint_strokes = snapshot.materialize_inpainting();
+            self.inpaint.strokes = snapshot.materialize_inpainting();
             self.rebuild_inpaint_layer();
-            self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+            self.inpaint.revision = self.inpaint.revision.wrapping_add(1);
             self.note_inpainting_changed_for_ai_masks();
         }
-        snapshot.lens.apply_to(&mut self.lens_correction);
+        snapshot.lens.apply_to(&mut self.develop.lens_correction);
         self.rehydrate_restored_mask_state();
-        if ai_denoise_changed && self.exposure.ai_denoise_enabled {
-            self.ai_denoise_resume_pending = true;
+        if ai_denoise_changed && self.develop.exposure.ai_denoise_enabled {
+            self.ai.denoise_resume_pending = true;
         }
 
         if lens_changed {
@@ -640,7 +638,7 @@ impl AurawApp {
             // masks aside so the rebuild uploads the mask stack that belongs
             // to that exact historical lens state before marking generated
             // mask sources as needing an explicit refresh.
-            self.history_lens_restore_masks = Some(std::mem::take(&mut self.masks));
+            self.persistence.lens_restore_masks = Some(std::mem::take(&mut self.masks.stack));
             self.mark_lens_correction_dirty();
         } else {
             if masks_changed {
@@ -650,43 +648,42 @@ impl AurawApp {
                 self.queue_preview_processing(crate::pipeline::ProcessingStage::Tone);
             }
             self.mark_pipeline_dirty();
-            if ai_denoise_changed && self.exposure.ai_denoise_enabled {
-                self.preview_quality_dirty = true;
-                self.preview_detail = None;
-                self.preview_navigation = None;
+            if ai_denoise_changed && self.develop.exposure.ai_denoise_enabled {
+                self.preview.quality_dirty = true;
+                self.preview.detail = None;
+                self.preview.navigation = None;
             }
         }
-        self.edit_history.set_restoring_snapshot(false);
+        self.persistence.history.set_restoring_snapshot(false);
     }
 
     pub(super) fn rehydrate_restored_mask_state(&mut self) {
-        self.active_mask_tool = self
-            .masks
+        self.masks.active_tool = self.masks.stack
             .selected_component()
             .map(|component| component.kind)
             .filter(|kind| kind.is_available());
-        self.subject_refinement_active &= self.active_mask_tool.is_some_and(|kind| {
+        self.masks.subject_refinement_active &= self.masks.active_tool.is_some_and(|kind| {
             matches!(
                 kind,
                 crate::pipeline::MaskKind::Subject | crate::pipeline::MaskKind::Background
             )
         });
-        self.mask_drag = None;
-        self.last_brush_point = None;
-        self.mask_touch_gesture_backup = None;
-        self.mask_interaction_dirty_layer = None;
-        self.mask_interaction_last_upload = None;
-        self.mask_interaction_has_uncommitted_change = false;
-        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
-        self.mask_overlay_texture = None;
-        self.mask_overlay_texture_key = None;
-        self.mask_overlay_blink = None;
-        self.mask_thumbnail_group_textures.clear();
-        self.mask_thumbnail_component_mask = None;
-        self.mask_thumbnail_component_textures.clear();
-        self.mask_thumbnail_revision = self.mask_overlay_revision;
+        self.masks.drag = None;
+        self.masks.last_brush_point = None;
+        self.masks.touch_gesture_backup = None;
+        self.masks.interaction_dirty_layer = None;
+        self.masks.interaction_last_upload = None;
+        self.masks.interaction_has_uncommitted_change = false;
+        self.masks.overlay_revision = self.masks.overlay_revision.wrapping_add(1);
+        self.masks.overlay_texture = None;
+        self.masks.overlay_texture_key = None;
+        self.masks.overlay_blink = None;
+        self.masks.thumbnail_group_textures.clear();
+        self.masks.thumbnail_component_mask = None;
+        self.masks.thumbnail_component_textures.clear();
+        self.masks.thumbnail_revision = self.masks.overlay_revision;
 
-        let restored_source = self.masks.masks.iter().find_map(|mask| {
+        let restored_source = self.masks.stack.masks.iter().find_map(|mask| {
             mask.components
                 .iter()
                 .find_map(|component| match &component.geometry {
@@ -701,10 +698,10 @@ impl AurawApp {
                     _ => None,
                 })
         });
-        if restored_source.is_some() || !needs_canonical_mask_source(&self.masks) {
-            self.mask_source_cache = restored_source;
+        if restored_source.is_some() || !needs_canonical_mask_source(&self.masks.stack) {
+            self.masks.source_cache = restored_source;
         }
-        self.subject_mask_cache = self.masks.masks.iter().find_map(|mask| {
+        self.masks.subject_cache = self.masks.stack.masks.iter().find_map(|mask| {
             mask.components
                 .iter()
                 .find_map(|component| match &component.geometry {
@@ -714,35 +711,19 @@ impl AurawApp {
                     _ => None,
                 })
         });
-        self.ai_mask_update_active = false;
-        self.ai_mask_update_subject_pending = false;
-        self.ai_mask_update_object_queue.clear();
-        self.ai_mask_update_failed = false;
-        if self.ai_masks_need_update {
-            self.ai_masks_need_update = subject
+        self.ai.mask_update_active = false;
+        self.ai.mask_update_subject_pending = false;
+        self.ai.mask_update_object_queue.clear();
+        self.ai.mask_update_failed = false;
+        if self.ai.masks_need_update {
+            self.ai.masks_need_update = subject
                 || !objects.is_empty()
                 || self.has_range_mask_targets();
         }
-        self.subject_consent_open = false;
-        self.subject_generation = self.subject_generation.wrapping_add(1);
-        if self.subject_receiver.is_none() {
-            self.subject_task_id = None;
-            self.subject_download_progress = None;
-            self.subject_inferencing = false;
-        }
-        self.object_consent_open = false;
-        self.object_pending_target = None;
-        self.object_generation = self.object_generation.wrapping_add(1);
-        if self.object_receiver.is_none() {
-            self.object_task_id = None;
-            self.object_download_progress = None;
-            self.object_inferencing = false;
-            self.object_decoder_only = false;
-            self.object_job_generation = 0;
-            self.object_job_target = None;
-        }
-        self.object_cache = None;
-        }
+        self.ai.subject_consent_open = false;
+        self.ai.object_consent_open = false;
+        self.ai.object_pending_target = None;
+        self.ai.object_cache = None;
     }
 }
 

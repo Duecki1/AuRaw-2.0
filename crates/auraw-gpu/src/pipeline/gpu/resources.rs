@@ -2,6 +2,7 @@ use super::*;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
+use wgpu::util::DeviceExt;
 
 const MAX_UPLOAD_SCRATCH_BYTES: usize = 8 * 1024 * 1024;
 
@@ -514,19 +515,16 @@ pub(super) fn create_demosaic_texture(
     format: wgpu::TextureFormat,
     label: &'static str,
 ) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
+    create_processing_texture(
+        device,
         size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
+        wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[format],
-    })
+        label,
+    )
 }
 
 fn upload_raster_scene_texture(
@@ -745,16 +743,13 @@ pub(super) fn create_tone_guide_texture(
     format: wgpu::TextureFormat,
     label: &'static str,
 ) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
+    create_processing_texture(
+        device,
         size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-        view_formats: &[format],
-    })
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        label,
+    )
 }
 
 pub(super) fn create_float_work_texture(
@@ -763,6 +758,22 @@ pub(super) fn create_float_work_texture(
     format: wgpu::TextureFormat,
     label: &'static str,
 ) -> wgpu::Texture {
+    create_processing_texture(
+        device,
+        size,
+        format,
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        label,
+    )
+}
+
+pub(super) fn create_processing_texture(
+    device: &wgpu::Device,
+    size: wgpu::Extent3d,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+    label: &str,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size,
@@ -770,9 +781,122 @@ pub(super) fn create_float_work_texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+        usage,
         view_formats: &[format],
     })
+}
+
+pub(super) fn create_processing_texture_array(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    layers: u32,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+    label: &str,
+) -> wgpu::Texture {
+    create_processing_texture(
+        device,
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: layers,
+        },
+        format,
+        usage,
+        label,
+    )
+}
+
+pub(super) fn default_texture_view(texture: &wgpu::Texture) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+pub(super) fn create_initialized_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    contents: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents,
+        usage,
+    })
+}
+
+pub(super) fn create_gpu_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    size: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage,
+        mapped_at_creation: false,
+    })
+}
+
+pub(super) fn create_bind_group(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+    entries: &[wgpu::BindGroupEntry<'_>],
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries,
+    })
+}
+
+pub(super) fn create_bind_group_layout(
+    device: &wgpu::Device,
+    label: &str,
+    entries: &[wgpu::BindGroupLayoutEntry],
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries,
+    })
+}
+
+pub(super) fn create_compute_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    cache: Option<&wgpu::PipelineCache>,
+) -> wgpu::ComputePipeline {
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        module,
+        entry_point: Some(entry_point),
+        compilation_options: Default::default(),
+        cache,
+    })
+}
+
+pub(super) fn dispatch_compute(
+    encoder: &mut wgpu::CommandEncoder,
+    label: &str,
+    pipeline: &wgpu::ComputePipeline,
+    bind_groups: &[&wgpu::BindGroup],
+    workgroups: [u32; 3],
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    for (index, bind_group) in bind_groups.iter().enumerate() {
+        pass.set_bind_group(index as u32, *bind_group, &[]);
+    }
+    pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
 }
 
 pub(super) fn buffer_binding(

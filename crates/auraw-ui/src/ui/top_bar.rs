@@ -41,7 +41,7 @@ impl TopBar {
     fn show_android(ui: &mut Ui, app: &mut AurawApp, _frame: &eframe::Frame) {
         theme::prepare_toolbar(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            app.show_global_task_control(ui);
+            app.show_export_task_indicator(ui);
 
             let save_tooltip = if app.sidecar_save_in_progress() {
                 "Saving non-destructive edits…"
@@ -64,14 +64,6 @@ impl TopBar {
             );
             if save_response.clicked() {
                 app.save_edits_now();
-            }
-
-            if let Some(status) = crate::cloud::cached_status(app.current_path.as_deref()) {
-                ui.label(
-                    egui::RichText::new(status)
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
             }
 
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -111,7 +103,7 @@ impl TopBar {
         let brand_width = if compact { 52.0 } else { 68.0 };
         let tab_width = if compact { 72.0 } else { 82.0 };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            app.show_global_task_control(ui);
+            app.show_export_task_indicator(ui);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add_sized(
                     [brand_width, theme::CONTROL_HEIGHT],
@@ -123,13 +115,13 @@ impl TopBar {
                     (AppTab::Develop, "Develop"),
                     (AppTab::Settings, "Settings"),
                 ] {
-                    if theme::tab_button(ui, label, app.active_tab == tab, tab_width).clicked() {
+                    if theme::tab_button(ui, label, app.ui.active_tab == tab, tab_width).clicked() {
                         app.activate_tab(tab);
                     }
                 }
 
                 ui.separator();
-                if app.active_tab == AppTab::Library {
+                if app.ui.active_tab == AppTab::Library {
                     let open = if compact {
                         crate::ui::icons::phosphor_icon_button(
                             ui,
@@ -146,7 +138,7 @@ impl TopBar {
                     }
                 }
 
-                if app.active_tab == AppTab::Develop {
+                if app.ui.active_tab == AppTab::Develop {
                     if Self::history_icon_button(
                         ui,
                         app.can_undo_edit(),
@@ -191,7 +183,7 @@ impl TopBar {
                     if save_response.clicked() {
                         app.save_edits_now();
                     }
-                    let original_visible = app.original_preview_visible();
+                    let original_visible = app.preview.original_visible();
                     let preview_icon = if original_visible {
                         egui_phosphor::regular::EYE
                     } else {
@@ -204,7 +196,7 @@ impl TopBar {
                     };
                     if crate::ui::icons::phosphor_icon_toggle_button_enabled(
                         ui,
-                        app.gpu_pipeline.is_some(),
+                        app.preview.gpu_pipeline.is_some(),
                         preview_icon,
                         original_visible,
                         theme::toolbar_icon_size(),
@@ -213,13 +205,6 @@ impl TopBar {
                     .clicked()
                     {
                         app.toggle_original_preview();
-                    }
-                    if let Some(status) = crate::cloud::cached_status(app.current_path.as_deref()) {
-                        ui.label(
-                            egui::RichText::new(status)
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                        );
                     }
                 }
             });

@@ -6,7 +6,6 @@ built with Rust, egui, and wgpu.
 ## Features
 
 - Folder and Android document-picker libraries with `.auraw` edit sidecars
-- Self-hosted cloud libraries with offline caching and conflict-safe sync
 - Scene-linear RAW processing, DCP profiles, Lensfun corrections, local masks,
   inpainting, AI selections, denoise, color tools, and creative effects
 - PNG, JPEG, and ICC-managed TIFF export

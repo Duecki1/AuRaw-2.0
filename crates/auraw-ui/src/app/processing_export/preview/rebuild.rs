@@ -2,45 +2,43 @@ use super::*;
 
 impl AurawApp {
     pub(crate) fn preview_base_pipeline(&self) -> Option<&RawGpuPipeline> {
-        self.gpu_pipeline.as_ref()
+        self.preview.gpu_pipeline.as_ref()
     }
 
     pub(crate) fn preview_is_preparing(&self) -> bool {
-        self.load_receiver.is_some()
-            || self.ai_denoise_receiver.is_some()
-            || self.preview_rebuild_receiver.is_some()
-            || self.preview_quality_dirty
+        self.develop.load_receiver.is_some()
+            || self.foreground_operation_is(ForegroundOperationKind::AiDenoise)
+            || self.preview.rebuild_receiver.is_some()
+            || self.preview.quality_dirty
     }
 
     pub(crate) fn preview_quality_changed(&mut self) {
         self.persist_performance_settings();
-        if self.loaded_raw.is_some() || self.load_receiver.is_some() {
-            self.preview_quality_dirty = true;
+        if self.develop.loaded_raw.is_some() || self.develop.load_receiver.is_some() {
+            self.preview.quality_dirty = true;
             self.note_preview_motion();
         }
     }
 
     pub(in crate::app) fn requested_preview_edge_for_source(&self, full_raw: &LoadedRaw) -> u32 {
-        let fallback = self
-            .preview_quality
-            .proxy_edge_for_viewport(self.preview_viewport_pixels);
-        if self.preview_zoom > DETAIL_ZOOM_START {
-            return self
-                .preview_raw
+        let fallback = self.preview.quality
+            .proxy_edge_for_viewport(self.preview.viewport_pixels);
+        if self.preview.zoom > DETAIL_ZOOM_START {
+            return self.develop.preview_raw
                 .as_ref()
                 .map(|raw| raw.width.max(raw.height))
                 .unwrap_or(fallback)
                 .min(full_raw.width.max(full_raw.height));
         }
 
-        let span_x = (self.preview_visible_uv.max[0] - self.preview_visible_uv.min[0])
+        let span_x = (self.preview.visible_uv.max[0] - self.preview.visible_uv.min[0])
             .abs()
             .clamp(1.0 / full_raw.width.max(1) as f32, 1.0);
-        let span_y = (self.preview_visible_uv.max[1] - self.preview_visible_uv.min[1])
+        let span_y = (self.preview.visible_uv.max[1] - self.preview.visible_uv.min[1])
             .abs()
             .clamp(1.0 / full_raw.height.max(1) as f32, 1.0);
-        let [viewport_width, viewport_height] = self.preview_viewport_pixels.map(|value| value.max(1));
-        let quarter_turn = self.geometry.quarter_turns % 2 == 1;
+        let [viewport_width, viewport_height] = self.preview.viewport_pixels.map(|value| value.max(1));
+        let quarter_turn = self.develop.geometry.quarter_turns % 2 == 1;
         let (display_for_source_x, display_for_source_y) = if quarter_turn {
             (viewport_height, viewport_width)
         } else {
@@ -52,7 +50,7 @@ impl AurawApp {
             .max(f64::from(display_for_source_y) / source_y);
         let requested = (full_raw.width.max(full_raw.height) as f64
             * source_to_display
-            * f64::from(self.preview_quality.pixel_scale()))
+            * f64::from(self.preview.quality.pixel_scale()))
         .ceil() as u32;
         fallback
             .max(requested.saturating_add(6))
@@ -60,36 +58,36 @@ impl AurawApp {
     }
 
     pub(crate) fn preview_source_region_changed(&mut self) {
-        if self.preview_zoom > DETAIL_ZOOM_START {
+        if self.preview.zoom > DETAIL_ZOOM_START {
             return;
         }
         if let (Some(full_raw), Some(preview_raw)) =
-            (self.loaded_raw.as_ref(), self.preview_raw.as_ref())
+            (self.develop.loaded_raw.as_ref(), self.develop.preview_raw.as_ref())
         {
             let target = self.requested_preview_edge_for_source(full_raw);
             if preview_raw.width.max(preview_raw.height).saturating_add(5) < target {
-                self.preview_quality_dirty = true;
+                self.preview.quality_dirty = true;
             }
         }
     }
 
     pub(crate) fn set_preview_viewport_pixels(&mut self, viewport_pixels: [u32; 2]) -> bool {
-        if self.preview_viewport_pixels == viewport_pixels {
+        if self.preview.viewport_pixels == viewport_pixels {
             return false;
         }
-        self.preview_viewport_pixels = viewport_pixels;
+        self.preview.viewport_pixels = viewport_pixels;
 
-        if self.load_receiver.is_some() {
-            self.preview_quality_dirty = true;
+        if self.develop.load_receiver.is_some() {
+            self.preview.quality_dirty = true;
         }
 
         if let (Some(full_raw), Some(preview_raw)) =
-            (self.loaded_raw.as_ref(), self.preview_raw.as_ref())
+            (self.develop.loaded_raw.as_ref(), self.develop.preview_raw.as_ref())
         {
             let target_edge = self.requested_preview_edge_for_source(full_raw);
             let current_edge = preview_raw.width.max(preview_raw.height);
             if current_edge.saturating_add(5) < target_edge {
-                self.preview_quality_dirty = true;
+                self.preview.quality_dirty = true;
             }
         }
         true
@@ -167,16 +165,15 @@ impl AurawApp {
     }
 
     pub(in crate::app) fn poll_preview_rebuild_worker(&mut self, frame: &eframe::Frame) {
-        let received = self
-            .preview_rebuild_receiver
+        let received = self.preview.rebuild_receiver
             .as_ref()
             .map(std::sync::mpsc::Receiver::try_recv);
         let event = match received {
             Some(Ok(event)) => Some(event),
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                self.preview_rebuild_receiver = None;
-                self.preview_quality_dirty = false;
-                self.notice = Some("Preview rebuild worker stopped unexpectedly.".to_owned());
+                self.preview.rebuild_receiver = None;
+                self.preview.quality_dirty = false;
+                self.ui.notice = Some("Preview rebuild worker stopped unexpectedly.".to_owned());
                 None
             }
             Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => None,
@@ -184,38 +181,36 @@ impl AurawApp {
         let Some(PreviewRebuildEvent::Finished(result)) = event else {
             return;
         };
-        self.preview_rebuild_receiver = None;
+        self.preview.rebuild_receiver = None;
         let prepared = match result {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.preview_quality_dirty = false;
-                self.notice = Some(format!("Could not prepare the preview proxy: {error}"));
+                self.preview.quality_dirty = false;
+                self.ui.notice = Some(format!("Could not prepare the preview proxy: {error}"));
                 return;
             }
         };
-        let source_is_current = self
-            .loaded_raw
+        let source_is_current = self.develop.loaded_raw
             .as_ref()
             .is_some_and(|raw| Arc::ptr_eq(raw, &prepared.source_raw));
         if !source_is_current
-            || prepared.ai_enabled != self.exposure.ai_denoise_enabled
+            || prepared.ai_enabled != self.develop.exposure.ai_denoise_enabled
         {
-            self.preview_quality_dirty |= source_is_current;
+            self.preview.quality_dirty |= source_is_current;
             return;
         }
         let Some(render_state) = frame.wgpu_render_state() else {
-            self.preview_quality_dirty = true;
+            self.preview.quality_dirty = true;
             return;
         };
-        let params = GpuParams::new(&self.exposure, &self.masks, &prepared.preview_raw)
-            .with_vignette_geometry(self.geometry);
-        let program_template = self
-            .gpu_pipeline
+        let params = GpuParams::new(&self.develop.exposure, &self.masks.stack, &prepared.preview_raw)
+            .with_vignette_geometry(self.develop.geometry);
+        let program_template = self.preview.gpu_pipeline
             .as_ref()
             .map(RawGpuPipeline::program_template)
-            .or_else(|| self.preview_program_template.clone());
+            .or_else(|| self.preview.program_template.clone());
         if let Some(template) = program_template.as_ref() {
-            self.preview_program_template = Some(template.clone());
+            self.preview.program_template = Some(template.clone());
         }
 
         // GPU objects are deliberately created here, after the CPU-only worker
@@ -245,7 +240,7 @@ impl AurawApp {
         };
         let pipeline_started = Instant::now();
         let mut pipeline_result = build_pipeline();
-        let needs_in_place_replacement = self.gpu_pipeline.is_some()
+        let needs_in_place_replacement = self.preview.gpu_pipeline.is_some()
             && pipeline_result.as_ref().err().is_some_and(|error| {
                 error
                     .to_string()
@@ -265,8 +260,8 @@ impl AurawApp {
         let mut pipeline = match pipeline_result {
             Ok(pipeline) => pipeline,
             Err(error) => {
-                self.preview_quality_dirty = false;
-                self.notice = Some(format!("Could not rebuild the GPU preview: {error:#}"));
+                self.preview.quality_dirty = false;
+                self.ui.notice = Some(format!("Could not rebuild the GPU preview: {error:#}"));
                 return;
             }
         };
@@ -277,30 +272,30 @@ impl AurawApp {
         #[cfg(not(target_os = "android"))]
         if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline)
         {
-            self.notice = Some(format!("Could not prepare the preview color profile: {error:#}"));
-            self.preview_quality_dirty = false;
+            self.ui.notice = Some(format!("Could not prepare the preview color profile: {error:#}"));
+            self.preview.quality_dirty = false;
             return;
         }
         if let Err(error) = Self::upload_preview_masks(
             &pipeline,
             &render_state.queue,
-            &self.masks,
+            &self.masks.stack,
             &prepared.preview_raw,
         ) {
-            self.notice = Some(error);
-            self.preview_quality_dirty = false;
+            self.ui.notice = Some(error);
+            self.preview.quality_dirty = false;
             return;
         }
         if let Err(error) = pipeline.update_inpaint_layer(
             &render_state.queue,
-            self.inpaint_layer.as_ref(),
+            self.inpaint.layer.as_ref(),
             0,
             0,
             prepared.preview_raw.width,
             prepared.preview_raw.height,
         ) {
-            self.notice = Some(format!("Could not rebuild preview inpainting: {error:#}"));
-            self.preview_quality_dirty = false;
+            self.ui.notice = Some(format!("Could not rebuild preview inpainting: {error:#}"));
+            self.preview.quality_dirty = false;
             return;
         }
         pipeline.recompute(&render_state.queue, &render_state.device, &params);
@@ -312,45 +307,45 @@ impl AurawApp {
         };
         drop(previous);
 
-        self.preview_program_template = Some(pipeline.program_template());
-        self.preview_raw = Some(prepared.preview_raw);
-        self.gpu_pipeline = Some(pipeline);
+        self.preview.program_template = Some(pipeline.program_template());
+        self.develop.preview_raw = Some(prepared.preview_raw);
+        self.preview.gpu_pipeline = Some(pipeline);
         #[cfg(target_os = "android")]
         {
             // Keep the mobile lens toggle cache coherent with the newly
             // selected DPI proxy. Without this, the next lens toggle can
             // restore the lower-resolution proxy that preceded this rebuild.
-            if self.lens_correction.applied {
+            if self.develop.lens_correction.applied {
                 if let (Some(selection), Some(full_raw), Some(preview_raw)) = (
-                    self.lens_correction.selected_lens(),
-                    self.loaded_raw.as_ref(),
-                    self.preview_raw.as_ref(),
+                    self.develop.lens_correction.selected_lens(),
+                    self.develop.loaded_raw.as_ref(),
+                    self.develop.preview_raw.as_ref(),
                 ) {
-                    self.lens_corrected_preview_cache = Some((
+                    self.preview.lens_corrected_cache = Some((
                         selection,
                         prepared.quality,
                         Arc::clone(full_raw),
                         Arc::clone(preview_raw),
                     ));
                 }
-            } else if let Some(preview_raw) = self.preview_raw.as_ref() {
-                self.lens_original_preview_cache =
+            } else if let Some(preview_raw) = self.develop.preview_raw.as_ref() {
+                self.preview.lens_original_cache =
                     Some((prepared.quality, Arc::clone(preview_raw)));
             }
         }
-        self.inpaint_source_cache = None;
-        self.target_exposure = self.exposure;
-        self.pending_stage = None;
-        self.preview_detail_pending_stage = None;
-        self.navigation_pending_stage = None;
-        self.preview_detail_urgent = false;
-        self.dirty_mask_layers.fill(false);
-        self.detail_dirty_mask_layers.fill(false);
-        self.navigation_dirty_mask_layers.fill(false);
-        self.preview_revision = self.preview_revision.wrapping_add(1);
-        self.preview_motion_at = (self.preview_zoom > DETAIL_ZOOM_START).then(Instant::now);
-        if let (Some(full), Some(preview)) = (&self.loaded_raw, &self.preview_raw) {
-            self.image_status = format!(
+        self.inpaint.source_cache = None;
+        self.develop.target_exposure = self.develop.exposure;
+        self.preview.pending_stage = None;
+        self.preview.detail_pending_stage = None;
+        self.preview.navigation_pending_stage = None;
+        self.preview.detail_urgent = false;
+        self.masks.dirty_layers.fill(false);
+        self.masks.detail_dirty_layers.fill(false);
+        self.masks.navigation_dirty_layers.fill(false);
+        self.preview.revision = self.preview.revision.wrapping_add(1);
+        self.preview.motion_at = (self.preview.zoom > DETAIL_ZOOM_START).then(Instant::now);
+        if let (Some(full), Some(preview)) = (&self.develop.loaded_raw, &self.develop.preview_raw) {
+            self.develop.image_status = format!(
                 "{} {} — full {}×{}, preview {}×{} ({})",
                 full.camera_make,
                 full.camera_model,
@@ -361,69 +356,64 @@ impl AurawApp {
                 prepared.quality.label(),
             );
             let latest_edge = self.requested_preview_edge_for_source(full);
-            if prepared.quality != self.preview_quality
+            if prepared.quality != self.preview.quality
                 || preview.width.max(preview.height).saturating_add(5) < latest_edge
             {
-                self.preview_quality_dirty = true;
+                self.preview.quality_dirty = true;
             }
         }
         crate::diagnostics::record(format!(
             "DPI preview rebuild installed: edge {} -> {}x{} ({})",
             prepared.requested_edge,
-            self.preview_raw.as_ref().map_or(0, |raw| raw.width),
-            self.preview_raw.as_ref().map_or(0, |raw| raw.height),
+            self.develop.preview_raw.as_ref().map_or(0, |raw| raw.width),
+            self.develop.preview_raw.as_ref().map_or(0, |raw| raw.height),
             prepared.quality.label(),
         ));
     }
 
     pub(in crate::app) fn apply_pending_preview_quality(&mut self, _frame: &eframe::Frame) {
-        if self.preview_rebuild_receiver.is_some() {
+        if self.preview.rebuild_receiver.is_some() {
             return;
         }
-        if !self.preview_quality_dirty
-            || self.load_receiver.is_some()
+        if !self.preview.quality_dirty
+            || self.develop.load_receiver.is_some()
             || self.lens_correction_busy()
         {
             return;
         }
         #[cfg(target_os = "android")]
-        if self.export_receiver.is_some()
-            || self.export_publish_pending
-            || self.library_batch_export.is_some()
-            || self.ai_denoise_receiver.is_some()
-        {
+        if self.foreground_operation_is(ForegroundOperationKind::AiDenoise) {
             return;
         }
-        let Some(source_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
-            self.preview_quality_dirty = false;
+        let Some(source_raw) = self.develop.loaded_raw.as_ref().map(Arc::clone) else {
+            self.preview.quality_dirty = false;
             return;
         };
         let requested_edge = self.requested_preview_edge_for_source(&source_raw);
-        let quality = self.preview_quality;
-        let ai_enabled = self.exposure.ai_denoise_enabled;
+        let quality = self.preview.quality;
+        let ai_enabled = self.develop.exposure.ai_denoise_enabled;
 
         // Viewport measurements often settle during the same frame in which a
         // RAW is installed. Do not rebuild an already-sharp proxy merely because
         // that measurement set the dirty bit. This also makes fit -> zoom -> fit
         // a no-op for the main surface.
-        let current_is_sufficient = self
-            .preview_raw
+        let current_is_sufficient = self.develop.preview_raw
             .as_ref()
-            .zip(self.gpu_pipeline.as_ref())
+            .zip(self.preview.gpu_pipeline.as_ref())
             .is_some_and(|(raw, pipeline)| {
                 raw.width.max(raw.height).saturating_add(5) >= requested_edge
                     && pipeline.immutable_ai_source_matches(source_raw.cfa_kind, ai_enabled)
             });
         if current_is_sufficient {
-            self.preview_quality_dirty = false;
+            self.preview.quality_dirty = false;
             return;
         }
 
         for texture_id in [
-            self.preview_detail
+            self.preview.detail
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
-            self.preview_navigation
+            self.preview.navigation
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
         ]
@@ -473,12 +463,12 @@ impl AurawApp {
             });
         match spawn {
             Ok(_) => {
-                self.preview_quality_dirty = false;
-                self.preview_rebuild_receiver = Some(receiver);
+                self.preview.quality_dirty = false;
+                self.preview.rebuild_receiver = Some(receiver);
                 self.egui_ctx.request_repaint_after(Duration::from_millis(50));
             }
             Err(error) => {
-                self.notice = Some(format!("Could not start preview rebuild: {error}"));
+                self.ui.notice = Some(format!("Could not start preview rebuild: {error}"));
             }
         }
     }

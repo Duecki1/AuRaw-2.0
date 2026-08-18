@@ -7,33 +7,33 @@ impl eframe::App for AurawApp {
             // safe to discard between frames. Keep the main preview alive so
             // the user can save work or lower preview quality before retrying.
             let retired = [
-                self.preview_detail
+                self.preview.detail
                     .take()
                     .and_then(|preview| preview.pipeline.egui_texture_id),
-                self.preview_navigation
+                self.preview.navigation
                     .take()
                     .and_then(|preview| preview.pipeline.egui_texture_id),
             ];
             for texture_id in retired.into_iter().flatten() {
                 self.retire_egui_texture(texture_id);
             }
-            self.preview_detail_pending_stage = None;
-            self.navigation_pending_stage = None;
-            self.preview_detail_urgent = false;
-            self.preview_zoom = 1.0;
-            self.preview_center = [0.5, 0.5];
-            self.mask_overlay_texture = None;
-            self.mask_overlay_texture_key = None;
-            self.mask_thumbnail_group_textures.clear();
-            self.mask_thumbnail_component_textures.clear();
-            self.mask_thumbnail_component_mask = None;
-            self.inpaint_texture = None;
-            self.inpaint_texture_key = None;
-            self.inpaint_stroke_texture = None;
-            self.inpaint_stroke_texture_key = None;
-            self.inpaint_focus_texture = None;
-            self.inpaint_focus_texture_key = None;
-            self.notice = Some(
+            self.preview.detail_pending_stage = None;
+            self.preview.navigation_pending_stage = None;
+            self.preview.detail_urgent = false;
+            self.preview.zoom = 1.0;
+            self.preview.center = [0.5, 0.5];
+            self.masks.overlay_texture = None;
+            self.masks.overlay_texture_key = None;
+            self.masks.thumbnail_group_textures.clear();
+            self.masks.thumbnail_component_textures.clear();
+            self.masks.thumbnail_component_mask = None;
+            self.inpaint.texture = None;
+            self.inpaint.texture_key = None;
+            self.inpaint.stroke_texture = None;
+            self.inpaint.stroke_texture_key = None;
+            self.inpaint.focus_texture = None;
+            self.inpaint.focus_texture_key = None;
+            self.ui.notice = Some(
                 "GPU memory was exhausted. AuRaw cancelled the operation and released optional preview textures. Close other GPU-heavy apps or lower Preview Quality before retrying."
                     .to_owned(),
             );
@@ -71,11 +71,11 @@ impl eframe::App for AurawApp {
                     // Long-running Android operations are modal. Ignore system
                     // Back until the foreground task completes or is cancelled.
                     ui.ctx().request_repaint();
-                } else if self.active_tab == AppTab::Library
+                } else if self.ui.active_tab == AppTab::Library
                     && self.library.folder_sidebar_open()
                 {
                     self.set_library_folder_sidebar_open(false);
-                } else if self.active_tab == AppTab::Library && self.library.has_selection() {
+                } else if self.ui.active_tab == AppTab::Library && self.library.has_selection() {
                     self.library.clear_selection();
                     crate::android::set_back_navigation_active(false);
                 } else {
@@ -111,7 +111,6 @@ impl eframe::App for AurawApp {
             }
         }
 
-        self.drive_background_tasks(frame);
         self.poll_load_worker(frame);
         self.poll_preview_rebuild_worker(frame);
         #[cfg(not(target_os = "android"))]
@@ -121,20 +120,16 @@ impl eframe::App for AurawApp {
         self.poll_export_worker(frame);
         #[cfg(target_os = "android")]
         self.resume_android_library_batch_export_if_possible(frame);
-        self.poll_subject_worker();
-        self.poll_object_worker();
+        self.poll_foreground_operation(frame);
         self.poll_library_ai_mask_refresh(frame);
-        self.poll_inpaint_worker();
-        self.poll_ai_denoise_worker();
         self.resume_pending_ai_denoise(frame);
-        self.drive_background_tasks(frame);
         #[cfg(target_os = "android")]
-        self.sync_android_task_notification();
+        self.sync_android_export_notification();
         #[cfg(not(target_os = "android"))]
         {
             self.handle_edit_history_shortcuts(ui.ctx());
             self.handle_sidecar_shortcut(ui.ctx());
-            if self.active_tab == AppTab::Develop {
+            if self.ui.active_tab == AppTab::Develop {
                 Develop::handle_image_navigation_shortcuts(ui.ctx(), self, frame);
             }
         }
@@ -159,13 +154,13 @@ impl eframe::App for AurawApp {
             .frame(crate::ui::theme::toolbar_frame(ui))
             .show(ui, |ui| TopBar::show(ui, self, frame));
         #[cfg(target_os = "android")]
-        if self.active_tab == AppTab::Develop {
+        if self.ui.active_tab == AppTab::Develop {
             egui::Panel::top("top_bar")
                 .frame(crate::ui::theme::toolbar_frame(ui))
                 .show(ui, |ui| TopBar::show(ui, self, frame));
         }
 
-        if self.active_tab == AppTab::Develop {
+        if self.ui.active_tab == AppTab::Develop {
             match layout {
                 ScreenLayout::Horizontal => {
                     #[cfg(not(target_os = "android"))]
@@ -175,7 +170,7 @@ impl eframe::App for AurawApp {
                             .exact_size(Sidebar::DESKTOP_TOOL_RAIL_WIDTH)
                             .show(ui, |ui| Sidebar::show_desktop_tool_rail(ui, self));
 
-                        if self.develop_sidebar_open {
+                        if self.develop_ui.sidebar_open {
                             let panel_max = (viewport_size.x * 0.48).clamp(
                                 ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH,
                                 ScreenLayout::MAX_HORIZONTAL_SIDEBAR_WIDTH,
@@ -211,7 +206,7 @@ impl eframe::App for AurawApp {
                     // On desktop it follows the sidebar visibility toggle so the
                     // icon-rail button truly collapses the whole editing sidebar.
                     #[cfg(not(target_os = "android"))]
-                    if self.develop_sidebar_open && self.sidebar_tab == SidebarTab::Masks {
+                    if self.develop_ui.sidebar_open && self.ui.sidebar_tab == SidebarTab::Masks {
                         egui::Panel::right("develop_horizontal_mask_strip")
                             .resizable(false)
                             .exact_size(Sidebar::HORIZONTAL_MASK_STRIP_WIDTH)
@@ -220,7 +215,7 @@ impl eframe::App for AurawApp {
                             });
                     }
                     #[cfg(target_os = "android")]
-                    if self.sidebar_tab == SidebarTab::Masks {
+                    if self.ui.sidebar_tab == SidebarTab::Masks {
                         egui::Panel::right("develop_horizontal_mask_strip")
                             .resizable(false)
                             .exact_size(Sidebar::HORIZONTAL_MASK_STRIP_WIDTH)
@@ -240,7 +235,7 @@ impl eframe::App for AurawApp {
                     // panel after the resizable bottom sidebar places it directly
                     // above that sidebar, leaving the full sidebar height available
                     // for sliders and mask properties.
-                    if self.sidebar_tab == SidebarTab::Masks {
+                    if self.ui.sidebar_tab == SidebarTab::Masks {
                         egui::Panel::bottom("develop_vertical_mask_strip")
                             .resizable(false)
                             .exact_size(Sidebar::VERTICAL_MASK_STRIP_HEIGHT)
@@ -251,7 +246,7 @@ impl eframe::App for AurawApp {
         }
 
         #[cfg(not(target_os = "android"))]
-        if self.active_tab == AppTab::Develop && self.develop_filmstrip_open {
+        if self.ui.active_tab == AppTab::Develop && self.develop_ui.filmstrip_open {
             // Side panels are installed first, so the filmstrip spans only the
             // remaining Develop preview width and ends at the sidebar/tool-rail
             // edge. When hidden it consumes no bottom-panel space; reopening is
@@ -262,7 +257,7 @@ impl eframe::App for AurawApp {
                 .show(ui, |ui| Develop::show_filmstrip(ui, self, frame));
         }
 
-        if self.active_tab == AppTab::Library && self.library.folder_sidebar_open() {
+        if self.ui.active_tab == AppTab::Library && self.library.folder_sidebar_open() {
             #[cfg(not(target_os = "android"))]
             egui::Panel::left("library_folder_sidebar")
                 .resizable(true)
@@ -281,7 +276,7 @@ impl eframe::App for AurawApp {
                 .show(ui, |ui| Library::show_folder_sidebar(ui, self));
         }
 
-        let _central = egui::CentralPanel::default().show(ui, |ui| match self.active_tab {
+        let _central = egui::CentralPanel::default().show(ui, |ui| match self.ui.active_tab {
             AppTab::Library => Library::show(ui, self, frame),
             AppTab::Develop => {
                 #[cfg(not(target_os = "android"))]
@@ -308,47 +303,45 @@ impl eframe::App for AurawApp {
         self.sync_ai_model_cache_policy();
 
         #[cfg(not(target_os = "android"))]
-        if self.active_tab == AppTab::Develop {
-            crate::ui::library::show_desktop_image_action_overlays(ui, self, frame);
+        if self.ui.active_tab == AppTab::Develop {
+            crate::ui::library::show_library_action_overlays(ui, self, frame);
         }
 
         self.apply_pending_lens_correction(frame);
         self.apply_pending_preview_quality(frame);
         self.sync_original_preview(frame);
-        if !self.original_preview_requested {
+        if !self.preview.original_requested {
             self.advance_navigation_preview(frame);
             self.advance_preview_detail(frame);
             self.advance_processing(frame);
         }
         self.refresh_status();
 
-        if self.preview_processing_pending() {
+        if self.preview.processing_pending() {
             ui.ctx().request_repaint();
         }
-        if self.has_background_tasks()
-            || self.export_receiver.is_some()
-            || self.export_publish_pending
-            || self.inpaint_receiver.is_some()
-            || self.ai_denoise_receiver.is_some()
-            || self.preview_rebuild_receiver.is_some()
+        if self.foreground_operation_active()
+            || self.export.task.is_some()
+            || self.export.publish_pending
+            || self.preview.rebuild_receiver.is_some()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
         #[cfg(not(target_os = "android"))]
-        if self.desktop_picker_receiver.is_some() {
+        if self.ui.desktop_picker_receiver.is_some() {
             // Native dialogs are asynchronous. Keep the app event loop visibly
             // alive while the operating-system picker is open.
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
         #[cfg(target_os = "android")]
-        if self.active_tab != AppTab::Library || self.library.folder_sidebar_open() {
+        if self.ui.active_tab != AppTab::Library || self.library.folder_sidebar_open() {
             // JNI back callbacks can arrive while NativeActivity's render loop is
             // idle. Keep a low-frequency wake-up while an in-app Back destination
             // exists so the request is consumed promptly on every device.
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
         #[cfg(target_os = "android")]
-        if self.picker_pending {
+        if self.android.picker_pending {
             // Android's SAF result can be followed by an asynchronous copy (DCP
             // folders in particular may contain thousands of files). A repaint
             // requested from the Java/JNI worker is not guaranteed to wake every
@@ -363,9 +356,9 @@ impl eframe::App for AurawApp {
         self.show_subject_dialogs(ui.ctx());
         self.show_inpainting_dialogs(ui.ctx());
         self.show_ai_denoise_dialogs(ui.ctx(), frame);
-        self.poll_cloud_sidecar_conflict_resolution(frame);
         self.show_sidecar_save_error_dialog(ui.ctx());
-        self.show_background_task_detail_windows(ui.ctx());
+        self.show_foreground_operation_dialog(ui.ctx());
+        self.show_export_task_dialog(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());
         self.observe_edit_history(ui.ctx());
         self.schedule_sidecar_autosave(ui.ctx(), edit_interaction_active);
@@ -376,7 +369,7 @@ impl eframe::App for AurawApp {
         self.poll_developed_thumbnail(frame);
         #[cfg(target_os = "android")]
         crate::android::set_back_navigation_active(
-            self.active_tab != AppTab::Library
+            self.ui.active_tab != AppTab::Library
                 || self.library.has_selection()
                 || self.library.folder_sidebar_open(),
         );
@@ -386,7 +379,7 @@ impl eframe::App for AurawApp {
         crate::ai_masks::set_model_cache_enabled(false);
         crate::inpainting::set_model_cache_enabled(false);
         #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::clear_background_task_notification(&self.android_app) {
+        if let Err(error) = crate::android::clear_background_task_notification(&self.android.android_app) {
             log::warn!("{error}");
         }
         self.persist_performance_settings();

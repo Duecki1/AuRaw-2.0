@@ -12,8 +12,9 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(not(target_os = "android"))]
 use std::ffi::OsString;
+use std::fs;
 #[cfg(not(target_os = "android"))]
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 #[cfg(not(target_os = "android"))]
 use std::io;
 use std::path::{Path, PathBuf};
@@ -21,42 +22,35 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(not(target_os = "android"))]
 use std::sync::OnceLock;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
-#[cfg(not(target_os = "android"))]
-use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 mod actions;
 mod adjustments;
 mod catalog;
 mod clipboard;
-mod cloud;
-mod cloud_view;
 mod dialogs;
 mod export;
 mod local;
 mod platform;
 mod state;
+mod storage;
 mod thumbnails;
-mod trash;
 mod view;
 
 use actions::*;
 use adjustments::*;
 use catalog::*;
 use clipboard::*;
-use cloud::*;
-use cloud_view::*;
 use dialogs::*;
 use export::*;
 use platform::*;
+use storage::*;
 use thumbnails::*;
-use trash::*;
 
 pub use view::Library;
 #[cfg(not(target_os = "android"))]
 pub(crate) use actions::{
-    apply_cloud_image_action, apply_desktop_image_action, cloud_image_context_menu,
-    desktop_image_context_menu, show_desktop_image_action_overlays, LibraryCardAction,
+    apply_library_action, library_image_context_menu, show_library_action_overlays,
 };
 #[cfg(not(target_os = "android"))]
 pub(crate) use thumbnails::{load_desktop_cached_thumbnail, load_desktop_reference_preview};
@@ -76,8 +70,6 @@ const ANDROID_DEVELOP_TEXTURE_CACHE_LIMIT: usize = 10;
 const THUMBNAIL_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const THUMBNAIL_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const THUMBNAIL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
-const CLOUD_DOWNLOAD_PROGRESS_STEP: u64 = 2 * 1024 * 1024;
-const MAX_CLOUD_UPLOAD_FILES: usize = 256;
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_PROXY_EDGE: u32 = 1024;
 pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 8;
@@ -141,7 +133,6 @@ impl LibraryThumbnailSize {
 
     const fn scale(self) -> f32 {
         match self {
-            // Small deliberately preserves AuRaw's previous gallery size.
             Self::Small => 1.0,
             Self::Medium => 1.25,
             Self::Large => 1.5,
@@ -158,26 +149,96 @@ pub(crate) fn maximum_thumbnail_worker_count() -> usize {
     platform::maximum_thumbnail_worker_count()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum LibrarySource {
+/// Stable identity for a Library asset. Identity is intentionally storage-shaped,
+/// while all selection and action logic operates on this common type.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum LibraryAssetId {
     #[cfg(not(target_os = "android"))]
-    File(PathBuf),
+    Desktop(PathBuf),
     #[cfg(target_os = "android")]
-    Android {
-        uri: String,
-        display_name: String,
-        bytes: u64,
-        modified_seconds: u64,
-    },
-    Cloud(crate::cloud::CloudAsset),
+    Android(String),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum LibraryView {
-    #[default]
-    Local,
-    Cloud,
+/// Opaque location understood only by the active platform storage backend.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum LibraryLocator {
+    #[cfg(not(target_os = "android"))]
+    Desktop(PathBuf),
+    #[cfg(target_os = "android")]
+    Android { uri: String },
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LibraryAssetMetadata {
+    pub(crate) bytes: u64,
+    pub(crate) dimensions_hint: Option<[u32; 2]>,
+    /// Unix timestamp seconds when the backend can provide one. Zero means unknown.
+    pub(crate) modified_seconds: u64,
+}
+
+/// One asset model shared by desktop and Android Library code.
+#[derive(Clone, Debug)]
+pub(crate) struct LibraryAsset {
+    pub(crate) id: LibraryAssetId,
+    pub(crate) display_name: String,
+    pub(crate) display_path: String,
+    pub(crate) locator: LibraryLocator,
+    pub(crate) metadata: LibraryAssetMetadata,
+}
+
+impl LibraryAsset {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn from_desktop_path(
+        path: PathBuf,
+        bytes: u64,
+        modified_seconds: u64,
+        dimensions_hint: Option<[u32; 2]>,
+    ) -> Self {
+        let display_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        Self {
+            id: LibraryAssetId::Desktop(path.clone()),
+            display_path: path.display().to_string(),
+            display_name,
+            locator: LibraryLocator::Desktop(path),
+            metadata: LibraryAssetMetadata {
+                bytes,
+                dimensions_hint,
+                modified_seconds,
+            },
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn from_android_document(document: crate::android::LibraryDocument) -> Self {
+        Self {
+            id: LibraryAssetId::Android(document.uri.clone()),
+            display_name: document.display_name,
+            display_path: document.display_path,
+            locator: LibraryLocator::Android { uri: document.uri },
+            metadata: LibraryAssetMetadata {
+                bytes: document.bytes,
+                dimensions_hint: None,
+                modified_seconds: document.modified_seconds,
+            },
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn desktop_path(&self) -> Option<&Path> {
+        match &self.locator {
+            LibraryLocator::Desktop(path) => Some(path.as_path()),
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn android_uri(&self) -> Option<&str> {
+        match &self.locator {
+            LibraryLocator::Android { uri } => Some(uri.as_str()),
+        }
+    }
 }
 
 fn library_import_fab_rect(bounds: egui::Rect) -> egui::Rect {
@@ -188,100 +249,12 @@ fn library_import_icon() -> &'static str {
     egui_phosphor::regular::PLUS
 }
 
-fn cloud_cache_icon(downloaded: bool) -> &'static str {
-    if downloaded {
-        egui_phosphor::regular::DOWNLOAD
-    } else {
-        egui_phosphor::regular::CLOUD
-    }
-}
-
-fn cloud_sync_badge(
-    state: crate::cloud::CloudSyncState,
-    downloaded: bool,
-) -> (&'static str, Color32, &'static str) {
-    match state {
-        crate::cloud::CloudSyncState::Synced => (
-            cloud_cache_icon(downloaded),
-            Color32::WHITE,
-            if downloaded {
-                "Synced · available offline"
-            } else {
-                "Synced · cloud only"
-            },
-        ),
-        crate::cloud::CloudSyncState::Queued => (
-            egui_phosphor::regular::ARROW_CLOCKWISE,
-            Color32::from_rgb(245, 190, 55),
-            "Queued for cloud sync",
-        ),
-        crate::cloud::CloudSyncState::Failed => (
-            egui_phosphor::regular::X,
-            Color32::from_rgb(240, 78, 78),
-            "Cloud sync failed",
-        ),
-        crate::cloud::CloudSyncState::Conflict => (
-            egui_phosphor::regular::INTERSECT,
-            Color32::from_rgb(240, 78, 78),
-            "Cloud edit conflict",
-        ),
-    }
-}
-
-fn cloud_preview_notice(kind: crate::cloud::CloudThumbnailKind) -> Option<&'static str> {
-    match kind {
-        crate::cloud::CloudThumbnailKind::Edited => None,
-        crate::cloud::CloudThumbnailKind::Placeholder => {
-            Some("Temporary unedited RAW preview · full preview is rendering")
-        }
-        crate::cloud::CloudThumbnailKind::Raw => Some("Unedited RAW preview"),
-        crate::cloud::CloudThumbnailKind::Legacy => {
-            Some("Legacy preview · edit rendering is unknown")
-        }
-    }
-}
-
-fn cloud_preview_label(kind: crate::cloud::CloudThumbnailKind) -> Option<&'static str> {
-    match kind {
-        crate::cloud::CloudThumbnailKind::Edited | crate::cloud::CloudThumbnailKind::Legacy => None,
-        crate::cloud::CloudThumbnailKind::Placeholder => Some("PREVIEW RENDERING"),
-        crate::cloud::CloudThumbnailKind::Raw => Some("UNEDITED PREVIEW"),
-    }
-}
-
-fn cloud_preview_icon(kind: crate::cloud::CloudThumbnailKind) -> Option<&'static str> {
-    matches!(kind, crate::cloud::CloudThumbnailKind::Legacy)
-        .then_some(egui_phosphor::regular::CLOCK_COUNTER_CLOCKWISE)
-}
-
-#[derive(Clone, Debug)]
-struct LibraryFileInfo {
-    source: LibrarySource,
-    display_path: String,
-    name: String,
-    bytes: u64,
-    dimensions_hint: Option<[u32; 2]>,
-    cloud_downloaded: bool,
-    cloud_sync_state: crate::cloud::CloudSyncState,
-    #[cfg(not(target_os = "android"))]
-    modified: Option<SystemTime>,
-}
-
 pub(crate) struct LibraryEntry {
-    info: LibraryFileInfo,
+    asset: LibraryAsset,
     texture: Option<egui::TextureHandle>,
-    /// Small CPU-side fallback retained across GPU texture eviction so scrolling
-    /// back to a previously loaded card can repaint immediately without showing
-    /// the loading placeholder or waiting behind newer decode requests.
     resident_thumbnail: Option<RawThumbnail>,
-    /// True only when `texture` was rebuilt from the smaller resident fallback.
-    /// The card stays visible while a full-resolution refresh is queued.
     texture_is_resident: bool,
-    /// Exact decoded preview dimensions, when preview pixels are available.
     thumbnail_size: Option<[u32; 2]>,
-    /// Stable geometry used by the justified gallery. This is filled from RAW
-    /// header metadata before the catalog is shown and never replaced merely
-    /// because a preview texture finishes loading.
     layout_size: Option<[u32; 2]>,
     thumbnail_error: Option<String>,
     thumbnail_failures: u8,
@@ -293,20 +266,9 @@ pub(crate) struct LibraryEntry {
 
 #[cfg(not(target_os = "android"))]
 #[derive(Clone)]
-pub(crate) enum DesktopFilmstripSource {
-    Local(PathBuf),
-    Cloud(crate::cloud::CloudAsset),
-}
-
-#[cfg(not(target_os = "android"))]
-#[derive(Clone)]
 pub(crate) struct DesktopFilmstripItem {
-    pub(crate) source: DesktopFilmstripSource,
-    /// The local RAW path when this item is available on disk. Cloud items
-    /// retain their server identity even before this becomes available.
-    pub(crate) path: Option<PathBuf>,
-    pub(crate) identity: String,
-    pub(crate) name: String,
+    pub(crate) asset: LibraryAsset,
+    pub(crate) path: PathBuf,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) thumbnail_size: Option<[u32; 2]>,
 }
@@ -320,24 +282,24 @@ struct LoadedLibraryThumbnail {
 #[derive(Clone)]
 struct ThumbnailRequest {
     generation: u64,
-    source: LibrarySource,
+    asset_id: LibraryAssetId,
     display_priority: bool,
 }
 
 struct ThumbnailWorkQueue {
     background: VecDeque<ThumbnailRequest>,
-    in_flight: HashMap<LibrarySource, bool>,
-    initial_completed: HashSet<LibrarySource>,
+    in_flight: HashMap<LibraryAssetId, bool>,
+    initial_completed: HashSet<LibraryAssetId>,
 }
 
 impl ThumbnailWorkQueue {
-    fn new(generation: u64, files: &[LibraryFileInfo]) -> Self {
+    fn new(generation: u64, assets: &[LibraryAsset]) -> Self {
         Self {
-            background: files
+            background: assets
                 .iter()
-                .map(|file| ThumbnailRequest {
+                .map(|asset| ThumbnailRequest {
                     generation,
-                    source: file.source.clone(),
+                    asset_id: asset.id.clone(),
                     display_priority: false,
                 })
                 .collect(),
@@ -347,35 +309,28 @@ impl ThumbnailWorkQueue {
     }
 
     fn claim(&mut self, request: &ThumbnailRequest, initial_background: bool) -> bool {
-        if initial_background && self.initial_completed.contains(&request.source) {
+        if initial_background && self.initial_completed.contains(&request.asset_id) {
             return false;
         }
-        if let Some(display_priority) = self.in_flight.get_mut(&request.source) {
+        if let Some(display_priority) = self.in_flight.get_mut(&request.asset_id) {
             *display_priority |= request.display_priority;
             return false;
         }
         self.in_flight
-            .insert(request.source.clone(), request.display_priority);
+            .insert(request.asset_id.clone(), request.display_priority);
         true
     }
 
-    fn finish(&mut self, source: &LibrarySource) -> bool {
-        self.initial_completed.insert(source.clone());
-        self.in_flight.remove(source).unwrap_or(false)
+    fn finish(&mut self, asset_id: &LibraryAssetId) -> bool {
+        self.initial_completed.insert(asset_id.clone());
+        self.in_flight.remove(asset_id).unwrap_or(false)
     }
 }
 
 enum ScanEvent {
-    CloudAvailability {
-        generation: u64,
-        offline_reason: Option<String>,
-        folders: Vec<crate::cloud::CloudFolder>,
-        folder_id: String,
-        asset_folders: HashMap<String, String>,
-    },
     Catalog {
         generation: u64,
-        files: Vec<LibraryFileInfo>,
+        assets: Vec<LibraryAsset>,
         warning_count: usize,
         truncated: bool,
     },
@@ -391,7 +346,7 @@ enum ScanEvent {
     },
     Thumbnail {
         generation: u64,
-        source: LibrarySource,
+        asset_id: LibraryAssetId,
         display_priority: bool,
         result: Result<LoadedLibraryThumbnail, String>,
     },
@@ -401,77 +356,21 @@ enum ScanEvent {
     },
 }
 
-enum CloudOpenEvent {
-    Progress { downloaded: u64, total: u64 },
-    Finished(Result<crate::cloud::CachedCloudAsset, String>),
-}
-
-enum CloudUploadEvent {
-    Progress {
-        position: usize,
-        total: usize,
-        label: String,
-    },
-    Finished {
-        target: crate::cloud::CloudConfig,
-        uploaded: usize,
-        failed: usize,
-        errors: Vec<String>,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CloudClipboardMode {
-    Copy,
-    Cut,
-}
-
-#[derive(Clone, Debug)]
-enum CloudClipboardContent {
-    Folder(crate::cloud::CloudFolder),
-}
-
-#[derive(Clone, Debug)]
-struct CloudClipboard {
-    mode: CloudClipboardMode,
-    content: CloudClipboardContent,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageClipboardMode {
     Copy,
     Cut,
 }
 
-#[cfg(target_os = "android")]
-#[derive(Clone, Debug)]
-struct AndroidImageClipboardItem {
-    uri: String,
-    display_name: String,
-    bytes: u64,
-}
-
-#[derive(Clone, Debug)]
-enum ImageClipboardContent {
-    #[cfg(not(target_os = "android"))]
-    Local(Vec<PathBuf>),
-    #[cfg(target_os = "android")]
-    Local(Vec<AndroidImageClipboardItem>),
-    Cloud(Vec<crate::cloud::CloudAsset>),
-}
-
 #[derive(Clone, Debug)]
 struct ImageClipboard {
     mode: ImageClipboardMode,
-    content: ImageClipboardContent,
+    assets: Vec<LibraryAsset>,
 }
 
 impl ImageClipboard {
     fn count(&self) -> usize {
-        match &self.content {
-            ImageClipboardContent::Local(items) => items.len(),
-            ImageClipboardContent::Cloud(items) => items.len(),
-        }
+        self.assets.len()
     }
 
     fn paste_label(&self) -> String {
@@ -481,128 +380,21 @@ impl ImageClipboard {
 }
 
 #[derive(Clone, Debug)]
-enum ImagePasteDestination {
+enum LibraryTransferDestination {
     #[cfg(not(target_os = "android"))]
     LocalFolder(PathBuf),
     #[cfg(target_os = "android")]
-    LocalLibrary,
-    CloudFolder(String),
+    LocalLibrary { path: String },
 }
 
-struct ImagePasteCompletion {
+struct AssetTransferCompletion {
     result: Result<String, String>,
     clear_clipboard: bool,
     remaining_clipboard: Option<ImageClipboard>,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum CloudPreparedPurpose {
-    Export,
-    CopyAdjustments,
-    PasteAdjustments,
-}
-
-#[derive(Clone, Debug)]
-enum CloudActionRequest {
-    CreateFolder {
-        parent_id: String,
-        name: String,
-    },
-    UpdateFolder {
-        folder: crate::cloud::CloudFolder,
-        parent_id: String,
-        name: String,
-        clear_clipboard: bool,
-    },
-    CopyFolder {
-        folder: crate::cloud::CloudFolder,
-        destination_parent_id: String,
-        clear_clipboard: bool,
-    },
-    DeleteFolder {
-        folder: crate::cloud::CloudFolder,
-    },
-    CopyAssets {
-        assets: Vec<crate::cloud::CloudAsset>,
-        destination_folder_id: String,
-        clear_clipboard: bool,
-    },
-    RenameAsset {
-        asset: crate::cloud::CloudAsset,
-        name: String,
-    },
-    DeleteAssets {
-        assets: Vec<crate::cloud::CloudAsset>,
-    },
-    RestoreTrash {
-        items: Vec<crate::cloud::CloudTrashItem>,
-    },
-    PermanentlyDeleteTrash {
-        items: Vec<crate::cloud::CloudTrashItem>,
-    },
-    EmptyTrash,
-    ResetAssets {
-        assets: Vec<crate::cloud::CloudAsset>,
-    },
-    PrepareAssets {
-        assets: Vec<crate::cloud::CloudAsset>,
-        purpose: CloudPreparedPurpose,
-    },
-}
-
-enum CloudActionCompletion {
-    Mutation {
-        result: Result<String, String>,
-        clear_clipboard: bool,
-    },
-    Prepared {
-        purpose: CloudPreparedPurpose,
-        result: Result<Vec<crate::cloud::CachedCloudAsset>, String>,
-    },
-}
-
-#[derive(Clone, Debug)]
-enum CloudNameDialogKind {
-    CreateFolder { parent_id: String },
-    RenameFolder { folder: crate::cloud::CloudFolder },
-    RenameAsset { asset: crate::cloud::CloudAsset },
-}
-
-#[derive(Clone, Debug)]
-struct CloudNameDialog {
-    kind: CloudNameDialogKind,
-    name: String,
-    error: Option<String>,
-    focus_requested: bool,
-}
-
-#[derive(Clone, Debug)]
-enum CloudTrashDeleteTarget {
-    Selected(Vec<crate::cloud::CloudTrashItem>),
-    Empty,
-}
-
-#[derive(Clone, Debug)]
-enum CloudDeleteTarget {
-    Folder(crate::cloud::CloudFolder),
-    Assets(Vec<crate::cloud::CloudAsset>),
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum CloudLibraryCardAction {
-    Export(Vec<crate::cloud::CloudAsset>),
-    CopyAdjustments(crate::cloud::CloudAsset),
-    PasteAdjustments(Vec<crate::cloud::CloudAsset>),
-    Copy(Vec<crate::cloud::CloudAsset>),
-    Cut(Vec<crate::cloud::CloudAsset>),
-    Duplicate(Vec<crate::cloud::CloudAsset>),
-    Rename(crate::cloud::CloudAsset),
-    ResetAdjustments(Vec<crate::cloud::CloudAsset>),
-    Delete(Vec<crate::cloud::CloudAsset>),
-}
-
 struct ThumbnailWorker {
-    files: Vec<LibraryFileInfo>,
+    assets: Vec<LibraryAsset>,
     warning_count: usize,
     truncated: bool,
     generation: u64,
@@ -617,7 +409,7 @@ struct ThumbnailWorker {
 #[cfg(not(target_os = "android"))]
 #[derive(Clone)]
 struct LibraryExportDialog {
-    paths: Vec<PathBuf>,
+    assets: Vec<LibraryAsset>,
     settings: ExportSettings,
     format: ExportFormat,
 }
@@ -625,46 +417,20 @@ struct LibraryExportDialog {
 #[cfg(target_os = "android")]
 #[derive(Clone)]
 struct LibraryExportDialog {
-    targets: Vec<crate::app::AndroidLibraryExportTarget>,
+    assets: Vec<LibraryAsset>,
     settings: ExportSettings,
     format: ExportFormat,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Clone)]
 struct LibraryAdjustmentPasteDialog {
-    paths: Vec<PathBuf>,
+    assets: Vec<LibraryAsset>,
     edited_count: usize,
 }
 
-#[cfg(target_os = "android")]
-#[derive(Clone)]
-enum AndroidAdjustmentPasteTargets {
-    Local(Vec<(String, String)>),
-    Cloud(Vec<PathBuf>),
-}
-
-#[cfg(target_os = "android")]
-impl AndroidAdjustmentPasteTargets {
-    fn len(&self) -> usize {
-        match self {
-            Self::Local(targets) => targets.len(),
-            Self::Cloud(paths) => paths.len(),
-        }
-    }
-}
-
-#[cfg(target_os = "android")]
-#[derive(Clone)]
-struct LibraryAdjustmentPasteDialog {
-    targets: AndroidAdjustmentPasteTargets,
-    edited_count: usize,
-}
-
-#[cfg(not(target_os = "android"))]
 #[derive(Clone)]
 struct LibraryAiMaskRefreshPrompt {
-    paths: Vec<PathBuf>,
+    assets: Vec<LibraryAsset>,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -701,25 +467,6 @@ struct LibraryFolderClipboard {
 struct LibraryFolderDrag(PathBuf);
 
 #[cfg(not(target_os = "android"))]
-#[derive(Clone, Debug)]
-struct CloudFolderDrag(String);
-
-enum CloudFolderUiAction {
-    Select(String),
-    New(String),
-    Copy(crate::cloud::CloudFolder),
-    Cut(crate::cloud::CloudFolder),
-    Paste(String),
-    Rename(crate::cloud::CloudFolder),
-    Delete(crate::cloud::CloudFolder),
-    Move {
-        folder: crate::cloud::CloudFolder,
-        destination_parent_id: String,
-    },
-    Refresh,
-}
-
-#[cfg(not(target_os = "android"))]
 enum LibraryFolderOperation {
     Create {
         root: PathBuf,
@@ -746,14 +493,8 @@ enum LibraryFolderOperation {
 #[cfg(not(target_os = "android"))]
 enum LibraryFolderOperationResult {
     Created(PathBuf),
-    Copied {
-        source: PathBuf,
-        destination: PathBuf,
-    },
-    Moved {
-        source: PathBuf,
-        destination: PathBuf,
-    },
+    Copied { source: PathBuf, destination: PathBuf },
+    Moved { source: PathBuf, destination: PathBuf },
     Deleted(PathBuf),
 }
 
@@ -792,17 +533,8 @@ struct LibraryFolderNameDialog {
     error: Option<String>,
 }
 
-#[cfg(not(target_os = "android"))]
 struct LibraryRawNameDialog {
-    source: PathBuf,
-    name: String,
-    error: Option<String>,
-    focus_requested: bool,
-}
-
-#[cfg(target_os = "android")]
-struct AndroidLibraryRawNameDialog {
-    source: AndroidImageClipboardItem,
+    asset: LibraryAsset,
     name: String,
     error: Option<String>,
     focus_requested: bool,
@@ -814,6 +546,16 @@ struct AndroidLibraryFolderNameDialog {
     name: String,
     error: Option<String>,
     focus_requested: bool,
+}
+
+#[cfg(target_os = "android")]
+struct PlatformLibraryState {
+    app: auraw_ffi::AndroidApp,
+    root_location: String,
+    folder: String,
+    folders: Vec<crate::android::LibraryFolder>,
+    expanded_folders: HashSet<String>,
+    folder_name_dialog: Option<AndroidLibraryFolderNameDialog>,
 }
 
 #[cfg(target_os = "android")]
@@ -848,42 +590,14 @@ impl LibraryFolderNode {
     }
 }
 
-#[cfg(target_os = "android")]
-#[derive(Clone)]
-struct LibraryAiMaskRefreshPrompt {
-    targets: Vec<(String, String)>,
+#[derive(Clone, Debug)]
+pub(crate) struct LibraryAdjustmentClipboard {
+    pub(crate) edits: crate::sidecar::EditState,
+    pub(crate) settings: crate::sidecar::AdjustmentCopySettings,
 }
 
 pub(crate) struct LibraryState {
     location: Option<String>,
-    local_location: Option<String>,
-    view: LibraryView,
-    cloud_config: crate::cloud::CloudConfig,
-    cloud_cache_root: Option<PathBuf>,
-    cloud_offline_reason: Option<String>,
-    cloud_connection_receiver: Option<mpsc::Receiver<Result<String, String>>>,
-    cloud_connection_status: Option<Result<String, String>>,
-    cloud_open_receiver: Option<mpsc::Receiver<CloudOpenEvent>>,
-    cloud_open_label: Option<String>,
-    cloud_upload_receiver: Option<mpsc::Receiver<CloudUploadEvent>>,
-    cloud_upload_completion: Option<String>,
-    cloud_folders: Vec<crate::cloud::CloudFolder>,
-    cloud_asset_folders: HashMap<String, String>,
-    cloud_folder_id: String,
-    cloud_expanded_folders: HashSet<String>,
-    cloud_action_receiver: Option<mpsc::Receiver<CloudActionCompletion>>,
-    cloud_clipboard: Option<CloudClipboard>,
-    image_clipboard: Option<ImageClipboard>,
-    image_paste_receiver: Option<mpsc::Receiver<ImagePasteCompletion>>,
-    cloud_name_dialog: Option<CloudNameDialog>,
-    cloud_delete_confirmation: Option<CloudDeleteTarget>,
-    cloud_trash_open: bool,
-    cloud_trash_items: Vec<crate::cloud::CloudTrashItem>,
-    cloud_trash_server_time: u64,
-    cloud_trash_retention_days: u32,
-    cloud_trash_receiver: Option<mpsc::Receiver<Result<crate::cloud::CloudTrashCatalog, String>>>,
-    cloud_trash_selection: HashSet<String>,
-    cloud_trash_delete_confirmation: Option<CloudTrashDeleteTarget>,
     #[cfg(not(target_os = "android"))]
     folder: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
@@ -894,17 +608,9 @@ pub(crate) struct LibraryState {
     expanded_folders: HashSet<PathBuf>,
     folder_sidebar_open: bool,
     #[cfg(target_os = "android")]
-    android_app: auraw_ffi::AndroidApp,
-    #[cfg(target_os = "android")]
-    android_root_location: String,
-    #[cfg(target_os = "android")]
-    android_folder: String,
-    #[cfg(target_os = "android")]
-    android_folders: Vec<crate::android::LibraryFolder>,
-    #[cfg(target_os = "android")]
-    android_expanded_folders: HashSet<String>,
+    platform: PlatformLibraryState,
     entries: Vec<LibraryEntry>,
-    entry_indices: HashMap<LibrarySource, usize>,
+    entry_indices: HashMap<LibraryAssetId, usize>,
     event_receiver: Option<mpsc::Receiver<ScanEvent>>,
     request_sender: Option<mpsc::SyncSender<ThumbnailRequest>>,
     generation: Arc<AtomicU64>,
@@ -917,10 +623,11 @@ pub(crate) struct LibraryState {
     thumbnail_workers: usize,
     sort_order: LibrarySortOrder,
     thumbnail_size: LibraryThumbnailSize,
-    selected_sources: HashSet<LibrarySource>,
+    selected_assets: HashSet<LibraryAssetId>,
     selection_mode: bool,
-    #[cfg(not(target_os = "android"))]
-    file_action_receiver: Option<mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
+    image_clipboard: Option<ImageClipboard>,
+    pub(crate) adjustment_clipboard: Option<LibraryAdjustmentClipboard>,
+    asset_transfer_receiver: Option<mpsc::Receiver<AssetTransferCompletion>>,
     #[cfg(not(target_os = "android"))]
     raw_import_receiver: Option<mpsc::Receiver<RawImportResult>>,
     #[cfg(not(target_os = "android"))]
@@ -931,17 +638,11 @@ pub(crate) struct LibraryState {
     folder_name_dialog: Option<LibraryFolderNameDialog>,
     #[cfg(not(target_os = "android"))]
     folder_delete_confirmation: Option<PathBuf>,
-    #[cfg(not(target_os = "android"))]
     raw_name_dialog: Option<LibraryRawNameDialog>,
-    #[cfg(target_os = "android")]
-    android_raw_name_dialog: Option<AndroidLibraryRawNameDialog>,
-    #[cfg(target_os = "android")]
-    android_folder_name_dialog: Option<AndroidLibraryFolderNameDialog>,
     export_dialog: Option<LibraryExportDialog>,
     adjustment_paste_dialog: Option<LibraryAdjustmentPasteDialog>,
     ai_mask_refresh_prompt: Option<LibraryAiMaskRefreshPrompt>,
 }
-
 
 #[cfg(test)]
 mod tests;

@@ -1082,7 +1082,7 @@ fn desktop_save_is_atomic_and_uses_appended_suffix() {
 
 #[test]
 fn reconstructible_range_source_is_not_persisted() {
-    use crate::pipeline::{MaskCombineMode, MaskComponent, MaskRgbImage};
+    use crate::pipeline::{MaskCombineMode, MaskCommon, MaskComponent, MaskRgbImage};
 
     let mut edits = sample_edits();
     let width = 2048;
@@ -1094,11 +1094,9 @@ fn reconstructible_range_source_is_not_persisted() {
     )
     .unwrap();
     Arc::make_mut(&mut edits.masks).masks[0].components[0] = MaskComponent {
-        name: "Luminance Range".to_owned(),
+        common: MaskCommon::new("Luminance Range"),
         kind: MaskKind::LuminanceRange,
         combine: MaskCombineMode::Add,
-        enabled: true,
-        invert: false,
         geometry: MaskGeometry::LuminanceRange {
             source: Some(source),
             low: 0.2,
@@ -1118,15 +1116,13 @@ fn reconstructible_range_source_is_not_persisted() {
 
 #[test]
 fn object_mask_round_trip_preserves_prompts_and_soft_mask() {
-    use crate::pipeline::{MaskCombineMode, MaskComponent, MaskImage, ObjectStroke};
+    use crate::pipeline::{MaskCombineMode, MaskCommon, MaskComponent, MaskImage, ObjectStroke};
 
     let mut edits = sample_edits();
     let object = MaskComponent {
-        name: "Object".to_owned(),
+        common: MaskCommon::new("Object"),
         kind: MaskKind::Object,
         combine: MaskCombineMode::Add,
-        enabled: true,
-        invert: false,
         geometry: MaskGeometry::Object {
             mask: Some(MaskImage::new(2, 2, vec![0, 64, 192, 255]).unwrap()),
             grow: 0.0,
@@ -1156,7 +1152,7 @@ fn object_mask_round_trip_preserves_prompts_and_soft_mask() {
 
 #[test]
 fn repeated_shared_range_sources_stay_small() {
-    use crate::pipeline::{MaskCombineMode, MaskComponent, MaskRgbImage};
+    use crate::pipeline::{MaskCombineMode, MaskCommon, MaskComponent, MaskRgbImage};
 
     let mut edits = sample_edits();
     let width = 2048;
@@ -1168,11 +1164,9 @@ fn repeated_shared_range_sources_stay_small() {
     )
     .unwrap();
     let component = MaskComponent {
-        name: "Range".to_owned(),
+        common: MaskCommon::new("Range"),
         kind: MaskKind::LuminanceRange,
         combine: MaskCombineMode::Add,
-        enabled: true,
-        invert: false,
         geometry: MaskGeometry::LuminanceRange {
             source: Some(source),
             low: 0.2,

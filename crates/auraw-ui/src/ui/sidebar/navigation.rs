@@ -25,7 +25,7 @@ impl Sidebar {
 
         crate::ui::theme::panel_title(
             ui,
-            match app.sidebar_tab {
+            match app.ui.sidebar_tab {
                 SidebarTab::Adjustments => "Edit",
                 SidebarTab::Crop => "Crop & Straighten",
                 SidebarTab::Masks => "Masking",
@@ -38,13 +38,13 @@ impl Sidebar {
     }
 
     fn show_vertical_mobile_shell(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        if !app.expert_mode
+        if !app.ui.expert_mode
             && matches!(
-                app.adjustment_section,
+                app.develop_ui.adjustment_section,
                 AdjustmentSection::AdvancedRendering | AdjustmentSection::Raw
             )
         {
-            app.adjustment_section = AdjustmentSection::Light;
+            app.develop_ui.adjustment_section = AdjustmentSection::Light;
         }
 
         // The order here is intentional. Bottom panels consume their space in
@@ -58,7 +58,7 @@ impl Sidebar {
             .frame(Self::mobile_navigation_frame(ui))
             .show(ui, |ui| Self::show_mobile_primary_tabs(ui, app));
 
-        if matches!(app.sidebar_tab, SidebarTab::Adjustments | SidebarTab::Masks) {
+        if matches!(app.ui.sidebar_tab, SidebarTab::Adjustments | SidebarTab::Masks) {
             egui::Panel::bottom("develop_portrait_context_tabs")
                 .resizable(false)
                 .exact_size(58.0)
@@ -96,7 +96,7 @@ impl Sidebar {
 
         Self::paint_mobile_navigation_separators(ui);
         ui.spacing_mut().item_spacing.x = 0.0;
-        let previous = app.sidebar_tab;
+        let previous = app.ui.sidebar_tab;
         let item_width = (ui.available_width() / 5.0).max(1.0);
         ui.horizontal(|ui| {
             for (tab, icon, label, tooltip) in [
@@ -125,13 +125,13 @@ impl Sidebar {
                     ui,
                     icon,
                     label,
-                    app.sidebar_tab == tab,
+                    app.ui.sidebar_tab == tab,
                     egui::vec2(item_width, 56.0),
                     tooltip,
                 )
                 .clicked()
                 {
-                    app.sidebar_tab = tab;
+                    app.ui.sidebar_tab = tab;
                 }
             }
         });
@@ -147,7 +147,7 @@ impl Sidebar {
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 1.0;
-                ui.horizontal(|ui| match app.sidebar_tab {
+                ui.horizontal(|ui| match app.ui.sidebar_tab {
                     SidebarTab::Adjustments => {
                         for (section, icon, label) in [
                             (AdjustmentSection::Light, regular::SUN, "Light"),
@@ -167,20 +167,20 @@ impl Sidebar {
                                 ui,
                                 icon,
                                 label,
-                                app.adjustment_section == section,
+                                app.develop_ui.adjustment_section == section,
                                 egui::vec2(Self::CONTEXT_TAB_WIDTH, 52.0),
                                 label,
                             )
                             .clicked()
                             {
-                                app.adjustment_section = section;
+                                app.develop_ui.adjustment_section = section;
                                 if section != AdjustmentSection::Color {
-                                    app.white_balance_picker_active = false;
-                                    app.white_balance_picker_drag = None;
+                                    app.develop_ui.white_balance_picker_active = false;
+                                    app.develop_ui.white_balance_picker_drag = None;
                                 }
                             }
                         }
-                        if app.expert_mode {
+                        if app.ui.expert_mode {
                             for (section, icon, label) in [
                                 (
                                     AdjustmentSection::AdvancedRendering,
@@ -193,22 +193,21 @@ impl Sidebar {
                                     ui,
                                     icon,
                                     label,
-                                    app.adjustment_section == section,
+                                    app.develop_ui.adjustment_section == section,
                                     egui::vec2(Self::CONTEXT_TAB_WIDTH, 52.0),
                                     label,
                                 )
                                 .clicked()
                                 {
-                                    app.adjustment_section = section;
-                                    app.white_balance_picker_active = false;
-                                    app.white_balance_picker_drag = None;
+                                    app.develop_ui.adjustment_section = section;
+                                    app.develop_ui.white_balance_picker_active = false;
+                                    app.develop_ui.white_balance_picker_drag = None;
                                 }
                             }
                         }
                     }
                     SidebarTab::Masks => {
-                        let adjustment_mask = app
-                            .masks
+                        let adjustment_mask = app.masks.stack
                             .selected_mask()
                             .is_none_or(|mask| mask.effect.uses_adjustments());
                         for (section, icon, label) in [
@@ -227,13 +226,13 @@ impl Sidebar {
                                 ui,
                                 icon,
                                 label,
-                                app.mask_section == section,
+                                app.develop_ui.mask_section == section,
                                 egui::vec2(Self::CONTEXT_TAB_WIDTH, 52.0),
                                 label,
                             )
                             .clicked()
                             {
-                                app.mask_section = section;
+                                app.develop_ui.mask_section = section;
                             }
                         }
                     }
@@ -316,7 +315,7 @@ impl Sidebar {
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    match app.sidebar_tab {
+                    match app.ui.sidebar_tab {
                         SidebarTab::Adjustments => Self::show_adjustments(ui, app, layout, frame),
                         SidebarTab::Crop => Self::show_crop(ui, app),
                         SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
@@ -334,7 +333,7 @@ impl Sidebar {
 
         ui.set_width(Self::DESKTOP_TOOL_RAIL_WIDTH);
         ui.spacing_mut().item_spacing.y = 4.0;
-        let previous = app.sidebar_tab;
+        let previous = app.ui.sidebar_tab;
         ui.vertical_centered(|ui| {
             ui.add_space(5.0);
             for (tab, icon, tooltip) in [
@@ -351,16 +350,16 @@ impl Sidebar {
                 if icon_toggle_button(
                     ui,
                     icon,
-                    app.sidebar_tab == tab,
+                    app.ui.sidebar_tab == tab,
                     crate::ui::theme::tool_rail_icon_size(),
                     tooltip,
                 )
                 .clicked()
                 {
-                    app.sidebar_tab = tab;
+                    app.ui.sidebar_tab = tab;
                     // Choosing a tool while the properties panel is hidden is a
                     // natural request to reveal that tool's controls again.
-                    app.develop_sidebar_open = true;
+                    app.develop_ui.sidebar_open = true;
                 }
             }
         });
@@ -371,7 +370,7 @@ impl Sidebar {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             ui.add_space(5.0);
 
-            let filmstrip_tooltip = if app.develop_filmstrip_open {
+            let filmstrip_tooltip = if app.develop_ui.filmstrip_open {
                 "Hide filmstrip"
             } else {
                 "Show filmstrip"
@@ -379,16 +378,16 @@ impl Sidebar {
             if icon_toggle_button(
                 ui,
                 UiIcon::Filmstrip,
-                app.develop_filmstrip_open,
+                app.develop_ui.filmstrip_open,
                 crate::ui::theme::tool_rail_icon_size(),
                 filmstrip_tooltip,
             )
             .clicked()
             {
-                app.set_develop_filmstrip_open(!app.develop_filmstrip_open);
+                app.set_develop_filmstrip_open(!app.develop_ui.filmstrip_open);
             }
 
-            let sidebar_tooltip = if app.develop_sidebar_open {
+            let sidebar_tooltip = if app.develop_ui.sidebar_open {
                 "Hide editing sidebar"
             } else {
                 "Show editing sidebar"
@@ -396,13 +395,13 @@ impl Sidebar {
             if icon_toggle_button(
                 ui,
                 UiIcon::Sidebar,
-                app.develop_sidebar_open,
+                app.develop_ui.sidebar_open,
                 crate::ui::theme::tool_rail_icon_size(),
                 sidebar_tooltip,
             )
             .clicked()
             {
-                app.develop_sidebar_open = !app.develop_sidebar_open;
+                app.develop_ui.sidebar_open = !app.develop_ui.sidebar_open;
             }
         });
         Self::finish_sidebar_tab_change(app, previous);
@@ -411,7 +410,7 @@ impl Sidebar {
     #[cfg(target_os = "android")]
 
         ui.spacing_mut().item_spacing.y = 0.0;
-        let previous = app.sidebar_tab;
+        let previous = app.ui.sidebar_tab;
         ui.vertical_centered(|ui| {
             for (tab, icon, label, tooltip) in [
                 (
@@ -439,13 +438,13 @@ impl Sidebar {
                     ui,
                     icon,
                     label,
-                    app.sidebar_tab == tab,
+                    app.ui.sidebar_tab == tab,
                     egui::vec2(56.0, 56.0),
                     tooltip,
                 )
                 .clicked()
                 {
-                    app.sidebar_tab = tab;
+                    app.ui.sidebar_tab = tab;
                 }
             }
         });
@@ -453,16 +452,16 @@ impl Sidebar {
     }
 
     fn finish_sidebar_tab_change(app: &mut AurawApp, previous: SidebarTab) {
-        if previous == SidebarTab::Crop && app.sidebar_tab != SidebarTab::Crop {
-            app.crop_drag = None;
-            app.straighten_tool_active = false;
-            app.straighten_drag = None;
+        if previous == SidebarTab::Crop && app.ui.sidebar_tab != SidebarTab::Crop {
+            app.develop_ui.crop_drag = None;
+            app.develop_ui.straighten_tool_active = false;
+            app.develop_ui.straighten_drag = None;
         }
-        if app.sidebar_tab != SidebarTab::Adjustments {
-            app.white_balance_picker_active = false;
-            app.white_balance_picker_drag = None;
+        if app.ui.sidebar_tab != SidebarTab::Adjustments {
+            app.develop_ui.white_balance_picker_active = false;
+            app.develop_ui.white_balance_picker_drag = None;
         }
-        if app.sidebar_tab != previous {
+        if app.ui.sidebar_tab != previous {
             app.sync_ai_model_cache_policy();
         }
     }
@@ -478,7 +477,7 @@ impl Sidebar {
         // it from consuming the scroll area's remaining vertical height.
         crate::ui::theme::toolbar_row(ui, |ui| {
             if layout == ScreenLayout::Vertical {
-                ui.strong(match app.adjustment_section {
+                ui.strong(match app.develop_ui.adjustment_section {
                     AdjustmentSection::Light => "Light",
                     AdjustmentSection::ToneCurve => "Tone Curve",
                     AdjustmentSection::Color => "Color",
@@ -513,90 +512,90 @@ impl Sidebar {
         let mut changed = false;
         let mut lens_changed = false;
         let mut ai_denoise_request = None;
-        let white_balance_raw = app.loaded_raw.clone();
+        let white_balance_raw = app.develop.loaded_raw.clone();
         if layout == ScreenLayout::Vertical {
-            match app.adjustment_section {
+            match app.develop_ui.adjustment_section {
                 AdjustmentSection::Light => {
-                    changed |= Self::show_basic(ui, &mut app.exposure, false);
+                    changed |= Self::show_basic(ui, &mut app.develop.exposure, false);
                 }
                 AdjustmentSection::ToneCurve => {
                     changed |= Self::show_tone_curve(
                         ui,
-                        &mut app.exposure,
-                        &mut app.tone_curve_tab,
+                        &mut app.develop.exposure,
+                        &mut app.develop_ui.tone_curve_tab,
                         false,
                     );
                 }
                 AdjustmentSection::Color => {
                     changed |= Self::show_color(
                         ui,
-                        &mut app.exposure,
+                        &mut app.develop.exposure,
                         white_balance_raw.as_deref(),
-                        &mut app.white_balance_picker_active,
+                        &mut app.develop_ui.white_balance_picker_active,
                         false,
                     );
                 }
                 AdjustmentSection::ColorGrading => {
                     changed |= Self::show_color_grading(
                         ui,
-                        &mut app.exposure.color_grading,
-                        &mut app.color_grade_tab,
+                        &mut app.develop.exposure.color_grading,
+                        &mut app.develop_ui.color_grade_tab,
                         false,
                     );
                 }
                 AdjustmentSection::Detail => {
-                    let (detail_changed, request) = Self::show_detail(ui, &mut app.exposure, false);
+                    let (detail_changed, request) = Self::show_detail(ui, &mut app.develop.exposure, false);
                     changed |= detail_changed;
                     ai_denoise_request = request;
                 }
                 AdjustmentSection::Effects => {
-                    changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, false);
+                    changed |= Self::show_presence(ui, &mut app.develop.exposure, app.ui.expert_mode, false);
                 }
                 AdjustmentSection::ColorMixer => {
                     changed |=
-                        Self::show_hsl(ui, &mut app.exposure, &mut app.hsl_mixer_color, false);
+                        Self::show_hsl(ui, &mut app.develop.exposure, &mut app.develop_ui.hsl_mixer_color, false);
                 }
                 AdjustmentSection::Optics => {
                     lens_changed |= Self::show_optics(ui, app, false);
                 }
-                AdjustmentSection::AdvancedRendering if app.expert_mode => {
-                    changed |= Self::show_rendering(ui, &mut app.exposure, false);
+                AdjustmentSection::AdvancedRendering if app.ui.expert_mode => {
+                    changed |= Self::show_rendering(ui, &mut app.develop.exposure, false);
                 }
-                AdjustmentSection::Raw if app.expert_mode => {
-                    changed |= Self::show_raw(ui, &mut app.exposure, false);
+                AdjustmentSection::Raw if app.ui.expert_mode => {
+                    changed |= Self::show_raw(ui, &mut app.develop.exposure, false);
                 }
                 _ => {}
             }
         } else {
-            changed |= Self::show_basic(ui, &mut app.exposure, true);
-            changed |= Self::show_tone_curve(ui, &mut app.exposure, &mut app.tone_curve_tab, true);
+            changed |= Self::show_basic(ui, &mut app.develop.exposure, true);
+            changed |= Self::show_tone_curve(ui, &mut app.develop.exposure, &mut app.develop_ui.tone_curve_tab, true);
             changed |= Self::show_color(
                 ui,
-                &mut app.exposure,
+                &mut app.develop.exposure,
                 white_balance_raw.as_deref(),
-                &mut app.white_balance_picker_active,
+                &mut app.develop_ui.white_balance_picker_active,
                 true,
             );
             changed |= Self::show_color_grading(
                 ui,
-                &mut app.exposure.color_grading,
-                &mut app.color_grade_tab,
+                &mut app.develop.exposure.color_grading,
+                &mut app.develop_ui.color_grade_tab,
                 true,
             );
-            let (detail_changed, request) = Self::show_detail(ui, &mut app.exposure, true);
+            let (detail_changed, request) = Self::show_detail(ui, &mut app.develop.exposure, true);
             changed |= detail_changed;
             ai_denoise_request = request;
-            changed |= Self::show_presence(ui, &mut app.exposure, app.expert_mode, true);
-            changed |= Self::show_hsl(ui, &mut app.exposure, &mut app.hsl_mixer_color, true);
+            changed |= Self::show_presence(ui, &mut app.develop.exposure, app.ui.expert_mode, true);
+            changed |= Self::show_hsl(ui, &mut app.develop.exposure, &mut app.develop_ui.hsl_mixer_color, true);
             lens_changed |= Self::show_optics(ui, app, true);
-            if app.expert_mode {
-                changed |= Self::show_rendering(ui, &mut app.exposure, true);
-                changed |= Self::show_raw(ui, &mut app.exposure, true);
+            if app.ui.expert_mode {
+                changed |= Self::show_rendering(ui, &mut app.develop.exposure, true);
+                changed |= Self::show_raw(ui, &mut app.develop.exposure, true);
             }
         }
 
         if changed {
-            app.exposure.sanitize_tone_curves();
+            app.develop.exposure.sanitize_tone_curves();
             app.mark_pipeline_dirty();
         }
         if lens_changed {
@@ -608,10 +607,10 @@ impl Sidebar {
     }
 
     fn show_camera_profile_selector(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        if app.camera_profile_mode == crate::pipeline::CameraProfileMode::MatrixOnly {
+        if app.preferences.camera_profile_mode == crate::pipeline::CameraProfileMode::MatrixOnly {
             return;
         }
-        let Some(raw) = app.loaded_raw.as_ref() else {
+        let Some(raw) = app.develop.loaded_raw.as_ref() else {
             return;
         };
         let candidates = raw.available_camera_profiles.clone();
@@ -630,11 +629,11 @@ impl Sidebar {
             .or_else(|| raw.camera_profile.name.clone())
             .unwrap_or_else(|| "Embedded Matrix".to_owned());
 
-        let previous = app.selected_camera_profile.clone();
+        let previous = app.develop.selected_camera_profile.clone();
         let mut selection = previous.clone();
         let embedded_matrix_selected = previous
             .as_ref()
-            .zip(app.camera_profile_folder.as_ref())
+            .zip(app.preferences.camera_profile_folder.as_ref())
             .is_some_and(|(selected, root)| selected == root);
         let selected_text = embedded_matrix_selected
             .then_some("Embedded Matrix".to_owned())
@@ -658,7 +657,7 @@ impl Sidebar {
                 |ui| {
                     ui.selectable_value(&mut selection, None, "Automatic (recommended)")
                         .on_hover_text("Use the RAW's embedded camera matrix by default.");
-                    if let Some(root) = app.camera_profile_folder.as_ref() {
+                    if let Some(root) = app.preferences.camera_profile_folder.as_ref() {
                         ui.selectable_value(&mut selection, Some(root.clone()), "Embedded Matrix")
                             .on_hover_text(
                                 "Use the RAW's embedded camera matrix without a DCP profile.",

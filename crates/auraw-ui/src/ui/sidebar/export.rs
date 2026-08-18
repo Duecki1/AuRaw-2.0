@@ -214,13 +214,11 @@ impl Sidebar {
         // Using the full RAW dimensions here made the sidebar disagree with the
         // exporter (and could label a crop as a resize). Keep UI validation and
         // displayed dimensions on the same geometry contract as export.rs.
-        let source_dimensions = app
-            .loaded_raw
+        let source_dimensions = app.develop.loaded_raw
             .as_ref()
-            .map(|raw| app.geometry.crop_pixel_dimensions(raw.width, raw.height));
+            .map(|raw| app.develop.geometry.crop_pixel_dimensions(raw.width, raw.height));
         #[cfg(not(target_os = "android"))]
-        let export_picker_directory = app
-            .current_path
+        let export_picker_directory = app.develop.current_path
             .as_deref()
             .and_then(|path| path.parent())
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -238,7 +236,7 @@ impl Sidebar {
                 ui.set_max_width(column_width);
                 export_settings_controls(
                     ui,
-                    &mut app.export_settings,
+                    &mut app.export.settings,
                     source_dimensions,
                     true,
                     export_picker_directory.as_deref(),
@@ -271,18 +269,18 @@ impl Sidebar {
 
                 ui.add_space(10.0);
                 let dimensions_valid = source_dimensions.is_some_and(|(width, height)| {
-                    app.export_settings
+                    app.export.settings
                         .checked_output_dimensions(width, height)
                         .is_ok()
                 });
                 let export_enabled = app.can_export() && dimensions_valid;
-                let profile_ready = app.export_settings.color_profile
+                let profile_ready = app.export.settings.color_profile
                     != ExportColorProfile::CustomIcc
-                    || app.export_settings.custom_icc_path.is_some()
-                    || app.export_settings.bit_depth.is_float();
+                    || app.export.settings.custom_icc_path.is_some()
+                    || app.export.settings.bit_depth.is_float();
                 let png_enabled = export_enabled
                     && profile_ready
-                    && app.export_settings.bit_depth != ExportBitDepth::Float32Linear;
+                    && app.export.settings.bit_depth != ExportBitDepth::Float32Linear;
                 let action_width = ui.available_width();
                 let png_response = ui
                     .add_enabled_ui(png_enabled, |ui| {
@@ -310,7 +308,7 @@ impl Sidebar {
                 ui.add_space(4.0);
                 let jpeg_enabled = export_enabled
                     && profile_ready
-                    && app.export_settings.bit_depth != ExportBitDepth::Float32Linear;
+                    && app.export.settings.bit_depth != ExportBitDepth::Float32Linear;
                 let jpeg_response = ui
                     .add_enabled_ui(jpeg_enabled, |ui| {
                         ui.add_sized(
@@ -322,7 +320,15 @@ impl Sidebar {
                 if jpeg_response.clicked() {
                     app.export_jpeg(frame);
                 }
-                if !app.can_export() && app.export_progress_state().is_none() {
+                if app.export_task_active() {
+                    ui.label(
+                        egui::RichText::new(
+                            "An export is already running. Minimize its progress window to keep editing.",
+                        )
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                } else if !app.can_export() && app.export_progress_state().is_none() {
                     ui.label(
                         egui::RichText::new(
                             "Export becomes available after a RAW image has finished loading.",

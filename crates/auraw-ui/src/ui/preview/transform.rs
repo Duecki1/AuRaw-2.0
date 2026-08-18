@@ -1239,8 +1239,8 @@ pub(super) fn constrain_crop_corner_aspect(
     pointer: [f32; 2],
     handle: CropHandle,
 ) -> Option<[f32; 4]> {
-    let raw = app.loaded_raw.as_ref()?;
-    let ratio = app.geometry.aspect_ratio.value(raw.width, raw.height)?;
+    let raw = app.develop.loaded_raw.as_ref()?;
+    let ratio = app.develop.geometry.aspect_ratio.value(raw.width, raw.height)?;
     let normalized_ratio = ratio / (raw.width.max(1) as f32 / raw.height.max(1) as f32);
     if !normalized_ratio.is_finite() || normalized_ratio <= f32::EPSILON {
         return None;
@@ -1293,10 +1293,10 @@ pub(super) fn constrain_crop_corner_aspect(
 }
 
 pub(super) fn constrain_crop_aspect(app: &AurawApp, mut crop: [f32; 4], handle: CropHandle) -> [f32; 4] {
-    let Some(raw) = app.loaded_raw.as_ref() else {
+    let Some(raw) = app.develop.loaded_raw.as_ref() else {
         return crop;
     };
-    let Some(ratio) = app.geometry.aspect_ratio.value(raw.width, raw.height) else {
+    let Some(ratio) = app.develop.geometry.aspect_ratio.value(raw.width, raw.height) else {
         return crop;
     };
     let normalized_ratio = ratio / (raw.width.max(1) as f32 / raw.height.max(1) as f32);

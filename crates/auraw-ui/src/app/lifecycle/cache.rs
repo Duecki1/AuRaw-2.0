@@ -2,33 +2,33 @@ use super::*;
 
 impl AurawApp {
     pub(in crate::app) fn cached_raw_decode(&mut self, key: &str) -> Option<Arc<LoadedRaw>> {
-        let index = self.raw_cache.iter().position(|entry| entry.key == key)?;
-        let entry = self.raw_cache.remove(index)?;
+        let index = self.develop.raw_cache.iter().position(|entry| entry.key == key)?;
+        let entry = self.develop.raw_cache.remove(index)?;
         let raw = Arc::clone(&entry.raw);
-        self.raw_cache.push_back(entry);
+        self.develop.raw_cache.push_back(entry);
         Some(raw)
     }
 
     pub(in crate::app) fn cache_raw_decode(&mut self, key: String, raw: Arc<LoadedRaw>) {
-        if self.raw_cache_limit == 0 {
-            self.raw_cache.clear();
+        if self.develop.raw_cache_limit == 0 {
+            self.develop.raw_cache.clear();
             return;
         }
-        if let Some(index) = self.raw_cache.iter().position(|entry| entry.key == key) {
-            self.raw_cache.remove(index);
+        if let Some(index) = self.develop.raw_cache.iter().position(|entry| entry.key == key) {
+            self.develop.raw_cache.remove(index);
         }
-        self.raw_cache.push_back(CachedRawDecode { key, raw });
+        self.develop.raw_cache.push_back(CachedRawDecode { key, raw });
         self.trim_raw_cache();
     }
 
     pub(in crate::app) fn trim_raw_cache(&mut self) {
-        while self.raw_cache.len() > self.raw_cache_limit {
-            self.raw_cache.pop_front();
+        while self.develop.raw_cache.len() > self.develop.raw_cache_limit {
+            self.develop.raw_cache.pop_front();
         }
     }
 
     pub(in crate::app) fn new_image_exposure(&self) -> ExposureParams {
-        let previous = self.exposure;
+        let previous = self.develop.exposure;
         let mut exposure = ExposureParams::scene_referred_default();
 
         // Every newly opened RAW starts with inpaint opposed. Threshold and
@@ -45,18 +45,18 @@ impl AurawApp {
     pub(in crate::app) fn prepare_develop_loading_thumbnail(&mut self, path: &std::path::Path) {
         const LOADING_THUMBNAIL_EDGE: u32 = 512;
 
-        self.develop_loading_thumbnail.clear();
-        self.develop_loading_thumbnail.path = Some(path.to_owned());
+        self.develop_ui.loading_thumbnail.clear();
+        self.develop_ui.loading_thumbnail.path = Some(path.to_owned());
 
         if let Some((texture, size)) = self
             .library
             .desktop_loading_thumbnail_for_path(path, &self.egui_ctx)
         {
-            self.develop_loading_thumbnail.texture = Some(texture);
-            self.develop_loading_thumbnail.texture_size = Some(size);
+            self.develop_ui.loading_thumbnail.texture = Some(texture);
+            self.develop_ui.loading_thumbnail.texture_size = Some(size);
         }
 
-        if self.develop_loading_thumbnail.texture.is_some() {
+        if self.develop_ui.loading_thumbnail.texture.is_some() {
             return;
         }
 
@@ -73,14 +73,14 @@ impl AurawApp {
                 let _ = sender.send((worker_path, result));
                 repaint.request_repaint();
             }) {
-            Ok(_) => self.develop_loading_thumbnail.receiver = Some(receiver),
+            Ok(_) => self.develop_ui.loading_thumbnail.receiver = Some(receiver),
             Err(error) => log::warn!("could not start loading-thumbnail worker: {error}"),
         }
     }
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn refresh_develop_loading_thumbnail(&mut self, context: &egui::Context) {
-        let Some(path) = self.develop_loading_thumbnail.path.clone() else {
+        let Some(path) = self.develop_ui.loading_thumbnail.path.clone() else {
             return;
         };
 
@@ -88,18 +88,17 @@ impl AurawApp {
         // picks up a request that was already in flight when the RAW was opened.
         // A cache miss never queues another sensor decode beside the real load.
         self.library.poll(context);
-        if self.develop_loading_thumbnail.texture.is_none() {
+        if self.develop_ui.loading_thumbnail.texture.is_none() {
             if let Some((texture, size)) = self
                 .library
                 .desktop_loading_thumbnail_for_path(&path, context)
             {
-                self.develop_loading_thumbnail.texture = Some(texture);
-                self.develop_loading_thumbnail.texture_size = Some(size);
+                self.develop_ui.loading_thumbnail.texture = Some(texture);
+                self.develop_ui.loading_thumbnail.texture_size = Some(size);
             }
         }
 
-        let event = self
-            .develop_loading_thumbnail
+        let event = self.develop_ui.loading_thumbnail
             .receiver
             .as_ref()
             .and_then(|receiver| match receiver.try_recv() {
@@ -110,12 +109,12 @@ impl AurawApp {
         let Some(event) = event else {
             return;
         };
-        self.develop_loading_thumbnail.receiver = None;
+        self.develop_ui.loading_thumbnail.receiver = None;
 
         let Ok((loaded_path, result)) = event else {
             return;
         };
-        if loaded_path != path || self.develop_loading_thumbnail.texture.is_some() {
+        if loaded_path != path || self.develop_ui.loading_thumbnail.texture.is_some() {
             return;
         }
         match result {
@@ -124,12 +123,12 @@ impl AurawApp {
                     [thumbnail.width as usize, thumbnail.height as usize],
                     &thumbnail.rgba,
                 );
-                self.develop_loading_thumbnail.texture = Some(context.load_texture(
+                self.develop_ui.loading_thumbnail.texture = Some(context.load_texture(
                     format!("develop-loading-thumbnail-{}", loaded_path.display()),
                     image,
                     egui::TextureOptions::LINEAR,
                 ));
-                self.develop_loading_thumbnail.texture_size =
+                self.develop_ui.loading_thumbnail.texture_size =
                     Some([thumbnail.width, thumbnail.height]);
             }
             Ok(None) => {}
@@ -142,30 +141,30 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub(in crate::app) fn prepare_android_develop_loading_thumbnail(&mut self, uri: &str) {
-        self.develop_loading_thumbnail.clear();
-        self.develop_loading_thumbnail.source_uri = Some(uri.to_owned());
+        self.develop_ui.loading_thumbnail.clear();
+        self.develop_ui.loading_thumbnail.source_uri = Some(uri.to_owned());
         if let Some((texture, size)) = self
             .library
             .android_loading_thumbnail_for_uri(uri, &self.egui_ctx)
         {
-            self.develop_loading_thumbnail.texture = Some(texture);
-            self.develop_loading_thumbnail.texture_size = Some(size);
+            self.develop_ui.loading_thumbnail.texture = Some(texture);
+            self.develop_ui.loading_thumbnail.texture_size = Some(size);
         }
     }
 
     #[cfg(target_os = "android")]
     pub(crate) fn refresh_develop_loading_thumbnail(&mut self, context: &egui::Context) {
-        let Some(uri) = self.develop_loading_thumbnail.source_uri.clone() else {
+        let Some(uri) = self.develop_ui.loading_thumbnail.source_uri.clone() else {
             return;
         };
         self.library.poll(context);
-        if self.develop_loading_thumbnail.texture.is_none() {
+        if self.develop_ui.loading_thumbnail.texture.is_none() {
             if let Some((texture, size)) = self
                 .library
                 .android_loading_thumbnail_for_uri(&uri, context)
             {
-                self.develop_loading_thumbnail.texture = Some(texture);
-                self.develop_loading_thumbnail.texture_size = Some(size);
+                self.develop_ui.loading_thumbnail.texture = Some(texture);
+                self.develop_ui.loading_thumbnail.texture_size = Some(size);
             }
         }
     }

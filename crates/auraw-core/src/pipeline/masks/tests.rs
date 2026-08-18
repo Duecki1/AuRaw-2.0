@@ -1,6 +1,100 @@
 use super::*;
 
 #[test]
+fn common_mask_properties_mutate_through_shared_model_api() {
+    let mut stack = MaskStack::default();
+    stack.add_mask(MaskKind::Brush);
+    let mask = &mut stack.masks[0];
+    assert!(mask.common.rename("Primary"));
+    assert!(mask.common.set_enabled(false));
+    mask.common.toggle_invert();
+    assert!(mask.set_opacity(0.42));
+    assert_eq!(mask.name, "Primary");
+    assert!(!mask.enabled);
+    assert!(mask.invert);
+    assert_eq!(mask.opacity, 0.42);
+
+    for kind in [
+        MaskKind::Brush,
+        MaskKind::Radial,
+        MaskKind::Linear,
+        MaskKind::Subject,
+            _ => unreachable!("tested mask kind must expose feather"),
+        };
+        assert_eq!(feather, 0.37);
+    }
+}
+
+#[test]
+fn duplicate_delete_and_selection_use_shared_stack_rules() {
+    let mut stack = MaskStack::default();
+    stack.add_mask(MaskKind::Radial);
+    stack.masks[0].common.rename("Source");
+    stack.masks[0].adjustments.exposure = 1.25;
+    assert!(stack.duplicate_mask(0, true));
+    assert_eq!(stack.selected_mask, Some(1));
+    assert_eq!(stack.selected_component, Some(0));
+    assert_eq!(stack.masks[1].name, "Source Copy");
+    assert!(stack.masks[1].invert);
+    assert_eq!(stack.masks[1].adjustments, LocalAdjustments::default());
+    assert_eq!(stack.masks[1].components, stack.masks[0].components);
+
+    stack.select_mask(0);
+    stack.add_component(MaskKind::Linear, MaskCombineMode::Subtract);
+    assert!(stack.duplicate_component(0, 1, true));
+    assert_eq!(stack.selected_component, Some(2));
+    assert_eq!(stack.masks[0].components[2].name, "Linear Gradient Copy");
+    assert!(stack.masks[0].components[2].invert);
+    assert_eq!(
+        stack.masks[0].components[2].geometry,
+        stack.masks[0].components[1].geometry
+    );
+
+    assert!(stack.delete_component(0, 2));
+    assert_eq!(stack.selected_mask, Some(0));
+    assert_eq!(stack.selected_component, Some(1));
+    assert!(stack.delete_mask(0));
+    assert_eq!(stack.selected_mask, Some(0));
+    assert_eq!(stack.selected_component, Some(0));
+    assert_eq!(stack.masks.len(), 1);
+}
+
+#[test]
+fn shared_common_state_keeps_legacy_flat_serialization() {
+    let mut stack = MaskStack::default();
+    stack.add_mask(MaskKind::Radial);
+    stack.masks[0].common.rename("Flat group");
+    let component = &mut stack.masks[0].components[0];
+    component.common.rename("Flat component");
+    component.set_feather(0.23);
+
+    let value = serde_json::to_value(&stack).unwrap();
+    let mask = value["masks"][0].as_object().unwrap();
+    assert_eq!(mask["name"].as_str(), Some("Flat group"));
+    assert!(mask.get("common").is_none());
+    let component = mask["components"][0].as_object().unwrap();
+    assert_eq!(component["name"].as_str(), Some("Flat component"));
+    assert!(component.get("common").is_none());
+    assert!(component["geometry"]["Radial"].get("feather").is_some());
+
+    let restored: MaskStack = serde_json::from_value(value).unwrap();
+    assert_eq!(restored, stack);
+}
+
+#[test]
+fn shared_enabled_and_opacity_actions_preserve_raster_semantics() {
+    let mut stack = MaskStack::default();
+    stack.add_mask(MaskKind::Fullscreen);
+    assert_eq!(stack.rasterize_layer(0, 2, 2, 2, 2), vec![255; 4]);
+
+    assert!(stack.masks[0].set_opacity(0.5));
+    assert_eq!(stack.rasterize_layer(0, 2, 2, 2, 2), vec![128; 4]);
+
+    assert!(stack.masks[0].components[0].common.set_enabled(false));
+    assert_eq!(stack.rasterize_layer(0, 2, 2, 2, 2), vec![0; 4]);
+}
+
+#[test]
 fn new_brush_is_selected_and_paint_ready() {
     let mut stack = MaskStack::default();
     assert_eq!(stack.add_mask(MaskKind::Brush), Some((0, 0)));
@@ -103,13 +197,15 @@ fn mask_effect_picker_catalog_is_grouped_and_alphabetized() {
 fn legacy_local_mask_defaults_to_adjustment_effect() {
     let mask = LocalMask::new(MaskKind::Brush, 1);
     let mut serialized = serde_json::to_value(mask).expect("serialize local mask");
-    serialized
+    let object = serialized
         .as_object_mut()
-        .expect("local mask is a JSON object")
-        .remove("effect");
+        .expect("local mask is a JSON object");
+    object.remove("effect");
+    object.remove("invert");
     let decoded: LocalMask =
         serde_json::from_value(serialized).expect("deserialize legacy local mask");
     assert_eq!(decoded.effect, MaskEffect::Adjustment);
+    assert!(!decoded.invert);
     assert_eq!(decoded.effect_settings, MaskEffectSettings::default());
 }
 

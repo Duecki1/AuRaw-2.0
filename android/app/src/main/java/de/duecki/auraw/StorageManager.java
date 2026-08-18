@@ -30,8 +30,6 @@ import java.util.Set;
 final class StorageManager {
     private static final String LOG_TAG = "AuRaw";
     private static final long MAX_RAW_IMPORT_BYTES = 2_000_000_000L;
-    private static final long MAX_CLOUD_RAW_UPLOAD_BYTES = 16L * 1024L * 1024L * 1024L;
-    private static final int MAX_CLOUD_UPLOAD_FILES = 256;
     private static final long MAX_SIDECAR_BYTES = 32L * 1024L * 1024L;
     private static final int MAX_RAW_LIBRARY_FILES = 20_000;
     private static final int MAX_RAW_LIBRARY_FOLDERS = 10_000;
@@ -54,9 +52,6 @@ final class StorageManager {
 
         void onImportBatchFinished(int importedCount, int failedCount, String errors);
 
-        void onCloudFileSelected(String uri, String displayName, long bytes);
-
-        void onCloudSelectionFinished(int failedCount, String errors);
     }
 
     private final AuRawActivity activity;
@@ -97,72 +92,6 @@ final class StorageManager {
                 () -> importDocuments(uris),
                 uris.size() == 1 ? "AuRaw document import" : "AuRaw document batch import")
                 .start();
-    }
-
-    void handleCloudRawDocumentResult(int resultCode, Intent data) {
-        if (resultCode != AuRawActivity.RESULT_OK || data == null) {
-            callbacks.onCloudSelectionFinished(0, "");
-            return;
-        }
-        ArrayList<Uri> uris = selectedDocumentUris(data);
-        if (uris.isEmpty()) {
-            callbacks.onCloudSelectionFinished(0, "");
-            return;
-        }
-        new Thread(
-                () -> selectCloudUploadDocuments(uris),
-                "AuRaw cloud upload selection")
-                .start();
-    }
-
-    private void selectCloudUploadDocuments(ArrayList<Uri> uris) {
-        int selected = 0;
-        int omitted = Math.max(0, uris.size() - MAX_CLOUD_UPLOAD_FILES);
-        int failed = omitted;
-        int unreportedFailures = 0;
-        ArrayList<String> errors = new ArrayList<>();
-        if (omitted > 0) {
-            errors.add("Only the first " + MAX_CLOUD_UPLOAD_FILES
-                    + " selected RAW files can be uploaded at once");
-        }
-        int count = Math.min(uris.size(), MAX_CLOUD_UPLOAD_FILES);
-        for (int index = 0; index < count; index++) {
-            Uri uri = uris.get(index);
-            String displayName = queryDisplayName(uri);
-            try {
-                if (!AndroidStorageContract.isRawName(displayName)) {
-                    throw new IllegalArgumentException(
-                            "Choose a supported RAW file (for example DNG, CR3, NEF, ARW, RAF, or RW2)");
-                }
-                Long declaredSize = queryDocumentSize(uri);
-                if (declaredSize != null && declaredSize == 0L) {
-                    throw new IllegalStateException("The selected RAW is empty");
-                }
-                if (declaredSize != null && declaredSize > MAX_CLOUD_RAW_UPLOAD_BYTES) {
-                    throw new IllegalStateException(
-                            "The selected RAW exceeds AuRaw Cloud's 16 GiB upload limit");
-                }
-                if (selected == 0) {
-                    rememberPickerUri(RAW_PICKER_URI_KEY, uri);
-                }
-                callbacks.onCloudFileSelected(
-                        uri.toString(),
-                        displayName,
-                        declaredSize == null ? -1L : declaredSize);
-                selected++;
-            } catch (Exception error) {
-                failed++;
-                if (errors.size() < 5) {
-                    errors.add(displayName + ": " + error);
-                } else {
-                    unreportedFailures++;
-                }
-            }
-        }
-        if (unreportedFailures > 0) {
-            errors.add(unreportedFailures + " additional selection(s) failed");
-        }
-        callbacks.onCloudSelectionFinished(failed, String.join("\n", errors));
     }
 
     private Uri rememberedPickerUri(String key) {
@@ -392,6 +321,12 @@ final class StorageManager {
         thumbnailCache.copyDeveloped(sourceUri, destinationUri);
     }
 
+    /** Preserves the edited thumbnail cache when a library bundle is copied or moved. */
+    void copyRawLibraryDevelopedThumbnail(String sourceUri, String destinationUri)
+            throws Exception {
+        copyDevelopedThumbnailCache(sourceUri, destinationUri);
+    }
+
     private void clearDevelopedThumbnailCache(String uriText) {
         thumbnailCache.clearDeveloped(uriText);
     }
@@ -404,19 +339,14 @@ final class StorageManager {
         return thumbnailCache.sizeBytes();
     }
 
-    /**
-     * Slow compatibility fallback for providers/LibRaw builds that cannot seek
-     * through /proc/self/fd. The first successful decode is cached as JPEG, so
-     * this full RAW copy is not repeated when the library is reopened.
-     */
-    String materializeRawLibraryThumbnail(String uriText, String displayName)
-            throws Exception {
+    /** Materializes one library RAW into app-private storage for Rust-side processing/copying. */
+    String materializeRawLibraryDocument(String uriText, String displayName) throws Exception {
         Uri uri = Uri.parse(uriText);
         verifyRawLibraryIdentity(uri, displayName);
         String safeName = AndroidStorageContract.safeRawName(displayName);
         int dot = safeName.lastIndexOf('.');
         String suffix = dot >= 0 ? safeName.substring(dot) : ".raw";
-        File cached = File.createTempFile("auraw-thumbnail-", suffix, activity.getCacheDir());
+        File cached = File.createTempFile("auraw-library-", suffix, activity.getCacheDir());
         boolean completed = false;
         try {
             try (InputStream input = openLibraryInput(uri);
@@ -434,6 +364,11 @@ final class StorageManager {
                 cached.deleteOnExit();
             }
         }
+    }
+
+    /** Compatibility fallback for thumbnail decoding uses the same storage materialization. */
+    String materializeRawLibraryThumbnail(String uriText, String displayName) throws Exception {
+        return materializeRawLibraryDocument(uriText, displayName);
     }
 
     /** Called when a library thumbnail is selected in Rust. */
@@ -471,45 +406,11 @@ final class StorageManager {
         }
     }
 
-    /** Duplicates a library RAW and its current sidecar into AuRaw's library. */
-    String duplicateRawLibraryDocument(String rawUriText, String displayName) throws Exception {
-        Uri rawUri = Uri.parse(rawUriText);
-        verifyRawLibraryIdentity(rawUri, displayName);
-        StoredRaw duplicate = null;
-        String cachedSidecar = "";
-        try {
-            duplicate = storeRawInLibrary(rawUri, displayName);
-            cachedSidecar = materializeRawSidecar(rawUriText, displayName);
-            if (cachedSidecar != null && !cachedSidecar.isEmpty()) {
-                publishRawSidecar(cachedSidecar, duplicate.uri.toString(), duplicate.displayName);
-            }
-            copyDevelopedThumbnailCache(rawUriText, duplicate.uri.toString());
-            return duplicate.displayName;
-        } catch (Exception error) {
-            if (duplicate != null) {
-                clearDevelopedThumbnailCache(duplicate.uri.toString());
-                try {
-                    deleteStoredRaw(duplicate.uri);
-                } catch (Exception ignored) {
-                    // Preserve the original failure; best-effort cleanup only.
-                }
-            }
-            throw error;
-        } finally {
-            if (cachedSidecar != null && !cachedSidecar.isEmpty()) {
-                File staged = new File(cachedSidecar);
-                if (!staged.delete() && staged.exists()) {
-                    staged.deleteOnExit();
-                }
-            }
-        }
-    }
-
-    /** Imports a RAW prepared in AuRaw's private cloud cache and its sidecar. */
-    String importCachedRawLibraryDocument(String rawPath, String displayName) throws Exception {
+    /** Imports an app-local RAW bundle (RAW plus optional .auraw sidecar) into the library. */
+    String importLocalRawLibraryDocument(String rawPath, String displayName) throws Exception {
         File sourceRaw = new File(rawPath);
         if (!sourceRaw.isFile() || !AndroidStorageContract.isRawName(displayName)) {
-            throw new IllegalArgumentException("The cached cloud RAW is missing or unsupported");
+            throw new IllegalArgumentException("The local RAW is missing or unsupported");
         }
         StoredRaw imported = null;
         try {
@@ -534,7 +435,7 @@ final class StorageManager {
         }
     }
 
-    /** Rolls back a cloud-cache import that completed before its server-side move failed. */
+    /** Rolls back an imported copy when a move cannot commit. */
     void deleteImportedRawLibraryDocument(String rawUri, String displayName) throws Exception {
         deleteRawLibraryDocument(rawUri, displayName);
     }

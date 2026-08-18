@@ -1,35 +1,53 @@
 use super::*;
 
+impl InpaintState {
+    pub(crate) fn live_retouch_preview(&self) -> Option<&MaskRgbImage> {
+        self.source_cache.as_ref()
+    }
+
+    fn reset_for_document(&mut self) {
+        self.stroke.clear();
+        self.strokes.clear();
+        self.last_brush_point = None;
+        self.source_anchor = None;
+        self.source_offset = None;
+        self.source_pick_active = self.tool.requires_source();
+        self.layer = None;
+        self.texture = None;
+        self.texture_key = None;
+        self.stroke_texture = None;
+        self.stroke_texture_key = None;
+        self.hovered_stroke = None;
+        self.selected_stroke = None;
+        self.focus_texture = None;
+        self.focus_texture_key = None;
+        self.source_cache = None;
+        self.pending_source = None;
+        self.replace_index = None;
+        self.revision = self.revision.wrapping_add(1);
+        self.consent_open = false;
+        self.texture_revision = self.texture_revision.wrapping_add(1);
+    }
+}
+
 impl AurawApp {
     pub(crate) fn inpaint_busy(&self) -> bool {
-        self.inpaint_task_id.is_some()
-            || self.inpaint_receiver.is_some()
-            || self.inpaint_consent_open
-    }
-
-    pub(crate) fn inpaint_progress(&self) -> Option<(u64, u64)> {
-        self.inpaint_download_progress
-    }
-
-    pub(crate) fn inpaint_inferencing(&self) -> bool {
-        self.inpaint_inferencing
+        self.foreground_operation_active() || self.inpaint.consent_open
     }
 
     pub(crate) fn prepare_live_retouch_preview(&mut self, frame: &eframe::Frame) {
-        self.inpaint_source_cache = None;
-        if !self.inpaint_tool.requires_source() {
+        self.inpaint.source_cache = None;
+        if !self.inpaint.tool.requires_source() {
             return;
         }
         let result = (|| -> Result<MaskRgbImage, String> {
             let render_state = frame
                 .wgpu_render_state()
                 .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-            let raw = self
-                .preview_raw
+            let raw = self.develop.preview_raw
                 .as_ref()
                 .ok_or_else(|| "Open an image before using Heal or Clone.".to_owned())?;
-            let pipeline = self
-                .gpu_pipeline
+            let pipeline = self.preview.gpu_pipeline
                 .as_ref()
                 .ok_or_else(|| "Open an image before using Heal or Clone.".to_owned())?;
 
@@ -42,7 +60,7 @@ impl AurawApp {
             pipeline
                 .update_inpaint_layer(
                     &render_state.queue,
-                    self.inpaint_layer.as_ref(),
+                    self.inpaint.layer.as_ref(),
                     0,
                     0,
                     raw.width,
@@ -51,8 +69,8 @@ impl AurawApp {
                 .map_err(|error| {
                     format!("Could not update the live retouch source: {error:#}")
                 })?;
-            let params = GpuParams::new(&self.target_exposure, &self.masks, raw)
-                .with_vignette_geometry(self.geometry);
+            let params = GpuParams::new(&self.develop.target_exposure, &self.masks.stack, raw)
+                .with_vignette_geometry(self.develop.geometry);
             pipeline.recompute(&render_state.queue, &render_state.device, &params);
             let rgba = pipeline
                 .read_output_region_blocking(
@@ -68,133 +86,101 @@ impl AurawApp {
                 .ok_or_else(|| "The live retouch preview has invalid dimensions.".to_owned())
         })();
         match result {
-            Ok(source) => self.inpaint_source_cache = Some(source),
-            Err(error) => self.notice = Some(error),
+            Ok(source) => self.inpaint.source_cache = Some(source),
+            Err(error) => self.ui.notice = Some(error),
         }
-    }
-
-    pub(crate) fn live_retouch_preview(&self) -> Option<&MaskRgbImage> {
-        self.inpaint_source_cache.as_ref()
     }
 
     pub(crate) fn clear_inpainting_tool(&mut self, kind: InpaintStrokeKind) {
-        if self.inpaint_receiver.is_some() {
+        if self.foreground_operation_is(ForegroundOperationKind::Inpaint) {
             return;
         }
-        self.inpaint_stroke.clear();
-        let previous_len = self.inpaint_strokes.len();
-        self.inpaint_strokes.retain(|stroke| stroke.kind != kind);
-        if self.inpaint_strokes.len() == previous_len {
+        self.inpaint.stroke.clear();
+        let previous_len = self.inpaint.strokes.len();
+        self.inpaint.strokes.retain(|stroke| stroke.kind != kind);
+        if self.inpaint.strokes.len() == previous_len {
             return;
         }
-        self.inpaint_replace_index = None;
+        self.inpaint.replace_index = None;
         self.note_inpainting_edit_changed();
-        self.last_inpaint_brush_point = None;
+        self.inpaint.last_brush_point = None;
         self.rebuild_inpaint_layer();
-        self.inpaint_stroke_texture = None;
-        self.inpaint_stroke_texture_key = None;
-        self.inpaint_hovered_stroke = None;
-        self.inpaint_selected_stroke = None;
-        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+        self.inpaint.stroke_texture = None;
+        self.inpaint.stroke_texture_key = None;
+        self.inpaint.hovered_stroke = None;
+        self.inpaint.selected_stroke = None;
+        self.inpaint.revision = self.inpaint.revision.wrapping_add(1);
         self.note_inpainting_changed_for_ai_masks();
         self.queue_preview_processing(ProcessingStage::Tone);
-        self.notice = Some(format!("All {} strokes cleared.", kind.label()));
+        self.ui.notice = Some(format!("All {} strokes cleared.", kind.label()));
         self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn reset_inpainting_state(&mut self) {
-        // A native inference call may only notice cancellation between phases. Keep its
-        // receiver connected until the terminal event arrives, while invalidating its
-        // document generation so the result can never be installed into the new image.
-        if let Some(task_id) = self.inpaint_task_id {
-            self.cancel_background_task(task_id);
+        // Native inference may only notice cancellation between phases. Keep the
+        // shared receiver connected until the terminal event arrives; the document
+        // snapshot prevents a late result from being installed into the new image.
+        if self.foreground_operation_is(ForegroundOperationKind::Inpaint) {
+            self.cancel_foreground_operation();
         }
-        let worker_still_running = self.inpaint_receiver.is_some();
-        self.inpaint_stroke.clear();
-        self.inpaint_strokes.clear();
-        self.last_inpaint_brush_point = None;
-        self.inpaint_source_anchor = None;
-        self.inpaint_source_offset = None;
-        self.inpaint_source_pick_active = self.inpaint_tool.requires_source();
-        self.inpaint_layer = None;
-        self.inpaint_texture = None;
-        self.inpaint_texture_key = None;
-        self.inpaint_stroke_texture = None;
-        self.inpaint_stroke_texture_key = None;
-        self.inpaint_hovered_stroke = None;
-        self.inpaint_selected_stroke = None;
-        self.inpaint_focus_texture = None;
-        self.inpaint_focus_texture_key = None;
-        self.inpaint_source_cache = None;
-        self.inpaint_pending_source = None;
-        self.inpaint_replace_index = None;
-        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
-        self.inpaint_consent_open = false;
-        if !worker_still_running {
-            self.inpaint_task_id = None;
-            self.inpaint_receiver = None;
-            self.inpaint_active_dabs = None;
-            self.inpaint_download_progress = None;
-            self.inpaint_inferencing = false;
-        }
-        self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
+        self.inpaint.reset_for_document();
     }
 
     pub(crate) fn request_inpaint(&mut self, frame: &eframe::Frame) {
-        if self.inpaint_stroke.is_empty() || self.inpaint_busy() {
+        if self.inpaint.stroke.is_empty() || self.inpaint_busy() {
             return;
         }
-        self.inpaint_selected_stroke = None;
-        self.inpaint_focus_texture = None;
-        self.inpaint_focus_texture_key = None;
-        if self.inpaint_tool.requires_source() {
-            self.request_source_retouch(frame, self.inpaint_tool, None);
+        self.inpaint.selected_stroke = None;
+        self.inpaint.focus_texture = None;
+        self.inpaint.focus_texture_key = None;
+        if self.inpaint.tool.requires_source() {
+            self.request_source_retouch(frame, self.inpaint.tool, None);
             return;
         }
         #[cfg(not(target_os = "android"))]
         if !self.validate_onnx_runtime_for_ai() {
-            self.inpaint_stroke.clear();
-            self.last_inpaint_brush_point = None;
+            self.inpaint.stroke.clear();
+            self.inpaint.last_brush_point = None;
             return;
         }
 
-        self.inpaint_replace_index = None;
+        self.inpaint.replace_index = None;
 
         // Capture only the full-resolution RAW region needed by this stroke.
         // This avoids the old preview-proxy source while keeping brush release
         // fast: shader programs are reused and only a small local crop is
         // allocated/read back.
-        let source = match self.capture_inpaint_source(frame, &self.inpaint_stroke, None) {
+        let source = match self.capture_inpaint_source(frame, &self.inpaint.stroke, None) {
             Ok(source) => source,
             Err(error) => {
-                self.inpaint_source_cache = None;
-                self.notice = Some(error);
-                self.inpaint_stroke.clear();
-                self.last_inpaint_brush_point = None;
+                self.inpaint.source_cache = None;
+                self.ui.notice = Some(error);
+                self.inpaint.stroke.clear();
+                self.inpaint.last_brush_point = None;
                 return;
             }
         };
-        self.inpaint_pending_source = Some(source);
+        self.inpaint.pending_source = Some(source);
         let model_path = self.lama_model_path();
         if model_path.exists() {
             self.start_inpaint_worker(model_path);
         } else {
-            self.inpaint_consent_open = true;
+            self.inpaint.consent_open = true;
             self.egui_ctx.request_repaint();
         }
     }
 
     pub(crate) fn regenerate_inpaint_stroke(&mut self, frame: &eframe::Frame, index: usize) {
-        if self.inpaint_busy() || index >= self.inpaint_strokes.len() {
+        if self.inpaint_busy() || index >= self.inpaint.strokes.len() {
             return;
         }
-        self.inpaint_selected_stroke = None;
-        self.inpaint_focus_texture = None;
-        self.inpaint_focus_texture_key = None;
-        let existing = self.inpaint_strokes[index].clone();
+        self.inpaint.selected_stroke = None;
+        self.inpaint.focus_texture = None;
+        self.inpaint.focus_texture_key = None;
+        let existing = self.inpaint.strokes[index].clone();
         if existing.kind.requires_source() {
-            self.inpaint_stroke = existing.dabs;
-            self.last_inpaint_brush_point = None;
+            self.inpaint.stroke = existing.dabs;
+            self.inpaint.last_brush_point = None;
             self.request_source_retouch(frame, existing.kind, Some(index));
             return;
         }
@@ -207,20 +193,20 @@ impl AurawApp {
         let source = match self.capture_inpaint_source(frame, &dabs, Some(index)) {
             Ok(source) => source,
             Err(error) => {
-                self.notice = Some(error);
+                self.ui.notice = Some(error);
                 return;
             }
         };
 
-        self.inpaint_stroke = dabs;
-        self.last_inpaint_brush_point = None;
-        self.inpaint_pending_source = Some(source);
-        self.inpaint_replace_index = Some(index);
+        self.inpaint.stroke = dabs;
+        self.inpaint.last_brush_point = None;
+        self.inpaint.pending_source = Some(source);
+        self.inpaint.replace_index = Some(index);
         let model_path = self.lama_model_path();
         if model_path.exists() {
             self.start_inpaint_worker(model_path);
         } else {
-            self.inpaint_consent_open = true;
+            self.inpaint.consent_open = true;
             self.egui_ctx.request_repaint();
         }
     }
@@ -231,8 +217,7 @@ impl AurawApp {
         dabs: &[BrushDab],
         excluded_stroke: Option<usize>,
     ) -> Result<PreparedInpaintSource, String> {
-        let full_raw = self
-            .loaded_raw
+        let full_raw = self.develop.loaded_raw
             .as_ref()
             .ok_or_else(|| "Open an image before using Inpainting.".to_owned())?;
         let patch = inpaint_patch_rect(dabs, full_raw.width, full_raw.height)
@@ -259,12 +244,10 @@ impl AurawApp {
         let render_state = frame
             .wgpu_render_state()
             .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-        let full_raw = self
-            .loaded_raw
+        let full_raw = self.develop.loaded_raw
             .as_ref()
             .ok_or_else(|| "Open an image before using Inpainting.".to_owned())?;
-        let template = self
-            .gpu_pipeline
+        let template = self.preview.gpu_pipeline
             .as_ref()
             .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
         if patch.size == 0
@@ -299,7 +282,7 @@ impl AurawApp {
             capture_height,
         );
         let empty_masks = MaskStack::default();
-        let mut neutral_exposure = self.exposure;
+        let mut neutral_exposure = self.develop.exposure;
         neutral_exposure.temperature = 0.0;
         neutral_exposure.tint = 0.0;
         let params = GpuParams::new_for_tile(
@@ -343,8 +326,7 @@ impl AurawApp {
         }
         let replacement_base = excluded_stroke.map(|excluded| {
             compose_inpaint_strokes(
-                &self
-                    .inpaint_strokes
+                &self.inpaint.strokes
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| *index != excluded)
@@ -355,7 +337,7 @@ impl AurawApp {
         let source_layer = replacement_base
             .as_ref()
             .and_then(|layer| layer.as_ref())
-            .or(self.inpaint_layer.as_ref().filter(|_| excluded_stroke.is_none()));
+            .or(self.inpaint.layer.as_ref().filter(|_| excluded_stroke.is_none()));
         let rgb_rec2020 = if let Some(layer) = source_layer {
             flatten_inpaint_source_model_region(
                 scene,
@@ -378,34 +360,33 @@ impl AurawApp {
         kind: InpaintStrokeKind,
         replace_index: Option<usize>,
     ) {
-        let dabs = std::mem::take(&mut self.inpaint_stroke);
-        self.last_inpaint_brush_point = None;
-        self.inpaint_stroke_texture = None;
-        self.inpaint_stroke_texture_key = None;
+        let dabs = std::mem::take(&mut self.inpaint.stroke);
+        self.inpaint.last_brush_point = None;
+        self.inpaint.stroke_texture = None;
+        self.inpaint.stroke_texture_key = None;
         let result = (|| -> Result<InpaintStroke, String> {
             if !kind.requires_source() || dabs.is_empty() {
                 return Err("The retouch stroke is empty.".to_owned());
             }
-            let full_raw = self
-                .loaded_raw
+            let full_raw = self.develop.loaded_raw
                 .as_ref()
                 .ok_or_else(|| "Open an image before using Heal or Clone.".to_owned())?;
             let source_offset = if let Some(index) = replace_index {
-                self.inpaint_strokes
+                self.inpaint.strokes
                     .get(index)
                     .and_then(|stroke| stroke.source_offset)
                     .ok_or_else(|| "The retouch stroke has no saved source point.".to_owned())?
             } else {
-                let source = self.inpaint_source_anchor.ok_or_else(|| {
+                let source = self.inpaint.source_anchor.ok_or_else(|| {
                     "Set a source point before painting with Heal or Clone.".to_owned()
                 })?;
-                self.inpaint_source_offset.unwrap_or([
+                self.inpaint.source_offset.unwrap_or([
                     source[0] - dabs[0].center[0],
                     source[1] - dabs[0].center[1],
                 ])
             };
             if replace_index.is_none() {
-                self.inpaint_source_offset = Some(source_offset);
+                self.inpaint.source_offset = Some(source_offset);
             }
             let full_min = full_raw.width.min(full_raw.height).max(1) as f32;
             let source_is_valid = dabs.iter().all(|dab| {
@@ -468,164 +449,151 @@ impl AurawApp {
         let stroke = match result {
             Ok(stroke) => stroke,
             Err(error) => {
-                self.notice = Some(error);
-                if self.inpaint_source_anchor.is_none() {
-                    self.inpaint_source_pick_active = true;
+                self.ui.notice = Some(error);
+                if self.inpaint.source_anchor.is_none() {
+                    self.inpaint.source_pick_active = true;
                 }
                 self.egui_ctx.request_repaint();
                 return;
             }
         };
         let preflight = if let Some(index) = replace_index {
-            if index >= self.inpaint_strokes.len() {
+            if index >= self.inpaint.strokes.len() {
                 Err(crate::sidecar::SidecarError::Invalid(
                     "retouch replacement target no longer exists".to_owned(),
                 ))
             } else {
-                let previous = std::mem::replace(&mut self.inpaint_strokes[index], stroke);
+                let previous = std::mem::replace(&mut self.inpaint.strokes[index], stroke);
                 let result =
-                    crate::sidecar::preflight_mask_change(&self.masks, &self.inpaint_strokes);
+                    crate::sidecar::preflight_mask_change(&self.masks.stack, &self.inpaint.strokes);
                 if result.is_err() {
-                    self.inpaint_strokes[index] = previous;
+                    self.inpaint.strokes[index] = previous;
                 }
                 result
             }
         } else {
-            crate::sidecar::preflight_inpaint_addition(&self.masks, &self.inpaint_strokes, &stroke)
-                .map(|_| self.inpaint_strokes.push(stroke))
+            crate::sidecar::preflight_inpaint_addition(&self.masks.stack, &self.inpaint.strokes, &stroke)
+                .map(|_| self.inpaint.strokes.push(stroke))
         };
         match preflight {
             Ok(()) => {
                 self.note_inpainting_edit_changed();
                 self.rebuild_inpaint_layer();
-                self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+                self.inpaint.revision = self.inpaint.revision.wrapping_add(1);
                 self.note_inpainting_changed_for_ai_masks();
                 self.queue_preview_processing(ProcessingStage::Tone);
-                self.notice = Some(if replace_index.is_some() {
+                self.ui.notice = Some(if replace_index.is_some() {
                     format!("{} stroke regenerated.", kind.label())
                 } else {
                     format!("{} stroke applied.", kind.label())
                 });
             }
             Err(error) => {
-                self.notice = Some(format!(
+                self.ui.notice = Some(format!(
                     "{} result was not applied because the edit cannot fit in the platform sidecar: {error}. Delete an existing mask or retouch result and try again.",
                     kind.label()
                 ));
             }
         }
-        self.inpaint_source_cache = None;
+        self.inpaint.source_cache = None;
         self.egui_ctx.request_repaint();
     }
 
     pub(super) fn start_inpaint_worker(&mut self, model_path: PathBuf) {
-        if self.inpaint_task_id.is_some() || self.inpaint_receiver.is_some() {
+        if self.foreground_operation_active() {
+            self.ui.notice = Some("Finish or cancel the current editing operation first.".to_owned());
             return;
         }
-        let Some(source) = self.inpaint_pending_source.take() else {
-            self.inpaint_replace_index = None;
-            self.notice = Some("The image could not be prepared for inpainting.".to_owned());
+        let Some(source) = self.inpaint.pending_source.take() else {
+            self.inpaint.replace_index = None;
+            self.ui.notice = Some("The image could not be prepared for inpainting.".to_owned());
             return;
         };
-        if self.inpaint_stroke.is_empty() {
-            self.inpaint_replace_index = None;
+        if self.inpaint.stroke.is_empty() {
+            self.inpaint.replace_index = None;
             return;
         }
-        let dabs = std::mem::take(&mut self.inpaint_stroke);
-        self.last_inpaint_brush_point = None;
-        self.inpaint_stroke_texture = None;
-        self.inpaint_stroke_texture_key = None;
+        let dabs = std::mem::take(&mut self.inpaint.stroke);
+        let replace_index = self.inpaint.replace_index.take();
+        self.inpaint.last_brush_point = None;
+        self.inpaint.stroke_texture = None;
+        self.inpaint.stroke_texture_key = None;
         #[cfg(not(target_os = "android"))]
-        let runtime_path = self.onnx_runtime_path.clone();
+        let runtime_path = self.ai.runtime_path.clone();
         #[cfg(not(target_os = "android"))]
-        let runtime_sha256 = self.onnx_runtime_sha256.clone();
+        let runtime_sha256 = self.ai.runtime_sha256.clone();
         #[cfg(target_os = "android")]
         let runtime_path = None;
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
-        let generation = self.inpaint_revision;
-        let request = InpaintTaskRequest {
-            document_id: self.sidecar_generation,
-            generation,
+
+        let needs_download = !model_path.exists();
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let receiver = spawn_inpaint(
             model_path,
             runtime_path,
             runtime_sha256,
-            request: InpaintRequest {
+            InpaintRequest {
                 source,
                 dabs: dabs.clone(),
             },
-            dabs,
-        };
-        let needs_download = !request.model_path.exists();
-        if needs_download {
-            let task_id = self.enqueue_background_action(
-                TaskKind::Inpainting {
-                    document_id: request.document_id,
-                    generation,
-                },
-                "Downloading inpainting model",
-                TaskProgress::indeterminate("Waiting for earlier background work…"),
-                true,
-                BackgroundAction::Inpainting(request),
-            );
-            self.inpaint_task_id = Some(task_id);
+            Arc::clone(&cancellation),
+        );
+        let progress = ForegroundProgress::indeterminate(if needs_download {
+            "Preparing inpainting model…"
         } else {
-            let task_id = self.background_tasks.start_nonblocking(
-                TaskKind::Inpainting {
-                    document_id: request.document_id,
-                    generation,
-                },
-                "Erasing selection",
-                TaskProgress::indeterminate("Running local LaMa inpainting…"),
-                true,
-            );
-            self.start_inpaint_task(task_id, request);
-        }
+            "Running local LaMa inpainting…"
+        });
+        self.begin_foreground_operation(ForegroundOperation {
+            kind: ForegroundOperationKind::Inpaint,
+            document_id: self.persistence.sidecar_generation,
+            cancellation,
+            progress,
+            cancelling: false,
+            receiver: ForegroundOperationReceiver::Inpaint(receiver),
+            context: ForegroundOperationContext::Inpaint {
+                dabs,
+                revision: self.inpaint.revision,
+                replace_index,
+            },
+        });
         self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn poll_inpaint_worker(&mut self) {
-        let Some(task_id) = self.inpaint_task_id else {
+        if !self.foreground_operation_is(ForegroundOperationKind::Inpaint) {
+            return;
+        }
+        let Some(mut operation) = self.foreground_operation.take() else {
             return;
         };
-        let (events, disconnected) = drain_worker_events(
-            self.inpaint_receiver.as_ref(),
-            |event| matches!(event, InpaintEvent::Finished(_)),
-        );
+        let ForegroundOperationReceiver::Inpaint(receiver) = &operation.receiver else {
+            self.foreground_operation = Some(operation);
+            return;
+        };
+        let (events, disconnected) = drain_worker_events(Some(receiver), |event| {
+            matches!(event, InpaintEvent::Finished(_))
+        });
 
         let mut finished = None;
         for event in events {
             match event {
                 InpaintEvent::DownloadProgress { downloaded, total } => {
-                    self.inpaint_download_progress = Some((downloaded, total));
-                    self.inpaint_inferencing = false;
-                    self.background_tasks.set_global_visible(task_id, true);
-                    self.background_tasks
-                        .rename(task_id, "Downloading inpainting model");
-                    self.update_background_progress(
-                        Some(task_id),
-                        TaskProgress::units(
-                            downloaded,
-                            total,
-                            Some("bytes".to_owned()),
-                            "Downloading inpainting model",
-                        )
-                        .with_detail(format!(
-                            "{:.1} / {:.1} MB",
-                            downloaded as f64 / 1_000_000.0,
-                            total as f64 / 1_000_000.0
-                        )),
-                    );
+                    operation.progress = ForegroundProgress::units(
+                        downloaded,
+                        total,
+                        Some("bytes".to_owned()),
+                        "Downloading inpainting model",
+                    )
+                    .with_detail(format!(
+                        "{:.1} / {:.1} MB",
+                        downloaded as f64 / 1_000_000.0,
+                        total as f64 / 1_000_000.0
+                    ));
                 }
                 InpaintEvent::Inferencing => {
-                    self.inpaint_download_progress = None;
-                    self.inpaint_inferencing = true;
-                    self.background_tasks.set_global_visible(task_id, false);
-                    self.background_tasks.release_current(task_id);
-                    self.update_background_progress(
-                        Some(task_id),
-                        TaskProgress::indeterminate("Running local LaMa inpainting…"),
-                    );
+                    operation.progress =
+                        ForegroundProgress::indeterminate("Running local LaMa inpainting…");
                 }
                 InpaintEvent::Finished(result) => finished = Some(result),
             }
@@ -634,54 +602,51 @@ impl AurawApp {
             finished = Some(Err("The inpainting worker stopped unexpectedly.".to_owned()));
         }
         let Some(result) = finished else {
+            self.foreground_operation = Some(operation);
             return;
         };
 
-        let cancelled = self.background_task_cancelled(task_id);
-        let stale = self.inpaint_job_document_id != self.sidecar_generation
-            || self.inpaint_job_generation != self.inpaint_revision;
-        let failed_during_inference = self.inpaint_inferencing;
-        self.inpaint_receiver = None;
-        self.inpaint_task_id = None;
-        self.inpaint_download_progress = None;
-        self.inpaint_inferencing = false;
-
+        let (dabs, revision, replace_index) = match &operation.context {
+            ForegroundOperationContext::Inpaint {
+                dabs,
+                revision,
+                replace_index,
+            } => (dabs.clone(), *revision, *replace_index),
+            _ => (Vec::new(), 0, None),
+        };
+        let cancelled = operation.is_cancelled();
+        let stale = operation.document_id != self.persistence.sidecar_generation || revision != self.inpaint.revision;
         if cancelled || stale {
-            self.inpaint_active_dabs = None;
-            self.inpaint_replace_index = None;
-            self.finish_background_task(task_id);
             self.egui_ctx.request_repaint();
             return;
         }
 
         match result {
             Ok(result) => {
-                let dabs = self.inpaint_active_dabs.take().unwrap_or_default();
                 if let Some(stroke) = InpaintStroke::from_result(dabs, result) {
-                    let replace_index = self.inpaint_replace_index.take();
                     let mut pending_stroke = Some(stroke);
                     let preflight = if let Some(index) = replace_index {
-                        if index >= self.inpaint_strokes.len() {
+                        if index >= self.inpaint.strokes.len() {
                             Err(crate::sidecar::SidecarError::Invalid(
                                 "inpainting replacement target no longer exists".to_owned(),
                             ))
                         } else {
                             let replacement = pending_stroke.take().expect("inpaint result exists");
                             let previous =
-                                std::mem::replace(&mut self.inpaint_strokes[index], replacement);
+                                std::mem::replace(&mut self.inpaint.strokes[index], replacement);
                             let result = crate::sidecar::preflight_mask_change(
-                                &self.masks,
-                                &self.inpaint_strokes,
+                                &self.masks.stack,
+                                &self.inpaint.strokes,
                             );
                             if result.is_err() {
-                                self.inpaint_strokes[index] = previous;
+                                self.inpaint.strokes[index] = previous;
                             }
                             result
                         }
                     } else {
                         crate::sidecar::preflight_inpaint_addition(
-                            &self.masks,
-                            &self.inpaint_strokes,
+                            &self.masks.stack,
+                            &self.inpaint.strokes,
                             pending_stroke.as_ref().expect("inpaint result exists"),
                         )
                     };
@@ -689,53 +654,33 @@ impl AurawApp {
                     match preflight {
                         Ok(()) => {
                             if let Some(stroke) = pending_stroke.take() {
-                                self.inpaint_strokes.push(stroke);
+                                self.inpaint.strokes.push(stroke);
                             }
                             self.note_inpainting_edit_changed();
                             self.rebuild_inpaint_layer();
-                            self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+                            self.inpaint.revision = self.inpaint.revision.wrapping_add(1);
                             self.note_inpainting_changed_for_ai_masks();
                             self.queue_preview_processing(ProcessingStage::Tone);
-                            self.notice = Some(if replace_index.is_some() {
+                            self.ui.notice = Some(if replace_index.is_some() {
                                 "Inpainting stroke regenerated.".to_owned()
                             } else {
                                 "Erase complete.".to_owned()
                             });
-                            self.finish_background_task(task_id);
                         }
                         Err(error) => {
-                            let message = format!(
+                            self.ui.notice = Some(format!(
                                 "Erase result was not applied because the edit cannot fit in the platform sidecar: {error}. Delete an existing mask or erase result and try again."
-                            );
-                            self.notice = Some(message.clone());
-                            if failed_during_inference {
-                                self.finish_background_task(task_id);
-                            } else {
-                                self.fail_background_task(task_id, message);
-                            }
+                            ));
                         }
                     }
                 } else {
-                    self.inpaint_replace_index = None;
-                    let message = "Inpainting returned an empty result.".to_owned();
-                    self.notice = Some(message.clone());
-                    if failed_during_inference {
-                        self.finish_background_task(task_id);
-                    } else {
-                        self.fail_background_task(task_id, message);
-                    }
+                    self.ui.notice = Some("Inpainting returned an empty result.".to_owned());
                 }
             }
             Err(error) => {
                 log::error!("Inpainting failed: {error}");
-                self.inpaint_active_dabs = None;
-                self.inpaint_replace_index = None;
-                let message = format!("Inpainting failed: {error}");
-                self.notice = Some(message.clone());
-                if failed_during_inference {
-                    self.finish_background_task(task_id);
-                } else {
-                    self.fail_background_task(task_id, message);
+                if !error.contains("cancelled") {
+                    self.ui.notice = Some(format!("Inpainting failed: {error}"));
                 }
             }
         }
@@ -743,37 +688,36 @@ impl AurawApp {
     }
 
     pub(crate) fn delete_inpaint_stroke(&mut self, index: usize) {
-        if self.inpaint_busy() || index >= self.inpaint_strokes.len() {
+        if self.inpaint_busy() || index >= self.inpaint.strokes.len() {
             return;
         }
-        self.inpaint_strokes.remove(index);
-        self.inpaint_hovered_stroke = None;
-        self.inpaint_selected_stroke = None;
-        self.inpaint_focus_texture = None;
-        self.inpaint_focus_texture_key = None;
+        self.inpaint.strokes.remove(index);
+        self.inpaint.hovered_stroke = None;
+        self.inpaint.selected_stroke = None;
+        self.inpaint.focus_texture = None;
+        self.inpaint.focus_texture_key = None;
         self.note_inpainting_edit_changed();
         self.rebuild_inpaint_layer();
-        self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
+        self.inpaint.revision = self.inpaint.revision.wrapping_add(1);
         self.note_inpainting_changed_for_ai_masks();
         self.queue_preview_processing(ProcessingStage::Tone);
-        self.notice = Some("Inpainting stroke deleted.".to_owned());
+        self.ui.notice = Some("Inpainting stroke deleted.".to_owned());
         self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn rebuild_inpaint_layer(&mut self) {
-        if self
-            .inpaint_selected_stroke
-            .is_some_and(|index| index >= self.inpaint_strokes.len())
+        if self.inpaint.selected_stroke
+            .is_some_and(|index| index >= self.inpaint.strokes.len())
         {
-            self.inpaint_selected_stroke = None;
+            self.inpaint.selected_stroke = None;
         }
-        self.inpaint_hovered_stroke = None;
-        self.inpaint_focus_texture = None;
-        self.inpaint_focus_texture_key = None;
-        self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);
-        self.inpaint_texture = None;
-        self.inpaint_texture_key = None;
-        self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
+        self.inpaint.hovered_stroke = None;
+        self.inpaint.focus_texture = None;
+        self.inpaint.focus_texture_key = None;
+        self.inpaint.layer = compose_inpaint_strokes(&self.inpaint.strokes);
+        self.inpaint.texture = None;
+        self.inpaint.texture_key = None;
+        self.inpaint.texture_revision = self.inpaint.texture_revision.wrapping_add(1);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -787,14 +731,14 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub(super) fn lama_model_path(&self) -> PathBuf {
-        self.android_app
+        self.android.android_app
             .internal_data_path()
             .unwrap_or_else(std::env::temp_dir)
             .join("models/lama_fp32.onnx")
     }
 
     pub(crate) fn show_inpainting_dialogs(&mut self, ctx: &egui::Context) {
-        if self.inpaint_consent_open {
+        if self.inpaint.consent_open {
             crate::ui::responsive_popup(egui::Window::new("Download inpainting model?"), ctx, 520.0)
                 .collapsible(false)
                 .resizable(false)
@@ -820,7 +764,7 @@ impl AurawApp {
                         );
                     });
                     #[cfg(not(target_os = "android"))]
-                    if self.onnx_runtime_path.is_none() {
+                    if self.ai.runtime_path.is_none() {
                         ui.colored_label(
                             egui::Color32::YELLOW,
                             "Select a trusted local ONNX Runtime library in Settings before continuing.",
@@ -829,40 +773,18 @@ impl AurawApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Consent, download and continue").clicked() {
-                            self.inpaint_consent_open = false;
+                            self.inpaint.consent_open = false;
                             self.start_inpaint_worker(self.lama_model_path());
                         }
                         if ui.button("Cancel").clicked() {
-                            self.inpaint_consent_open = false;
-                            self.inpaint_pending_source = None;
-                            self.inpaint_active_dabs = None;
-                            self.inpaint_replace_index = None;
-                            self.inpaint_stroke.clear();
-                            self.last_inpaint_brush_point = None;
+                            self.inpaint.consent_open = false;
+                            self.inpaint.pending_source = None;
+                            self.inpaint.replace_index = None;
+                            self.inpaint.stroke.clear();
+                            self.inpaint.last_brush_point = None;
                         }
                     });
                 });
-        }
-        if self.inpaint_receiver.is_some()
-            && self
-                .inpaint_task_id
-                .is_some_and(|id| self.background_task_details_open(id))
-        {
-            let action = show_cancellable_worker_popup(ctx, "Erasing selection", 420.0, |ui| {
-                if let Some((downloaded, total)) = self.inpaint_download_progress {
-                    show_download_progress(ui, "Downloading lama_fp32.onnx…", downloaded, total);
-                } else if self.inpaint_inferencing {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Running local LaMa inpainting…");
-                    });
-                } else {
-                    ui.spinner();
-                }
-            });
-            let task_id = self.inpaint_task_id;
-            self.apply_worker_dialog_action(task_id, action);
-            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 }

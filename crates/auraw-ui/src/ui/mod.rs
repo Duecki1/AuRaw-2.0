@@ -10,6 +10,29 @@ pub mod sidebar;
 pub mod theme;
 pub mod top_bar;
 
+#[cfg(not(target_os = "android"))]
+pub(crate) fn choose_export_file_path(
+    format: crate::pipeline::ExportFormat,
+    default_name: &str,
+    initial_directory: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter(format!("{} image", format.label()), format.extensions())
+        .set_file_name(default_name);
+    if let Some(directory) = initial_directory.filter(|path| !path.as_os_str().is_empty()) {
+        dialog = dialog.set_directory(directory);
+    }
+    let mut path = dialog.save_file()?;
+    let valid_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| format.matches_extension(extension));
+    if !valid_extension {
+        path.set_extension(format.extension());
+    }
+    Some(path)
+}
+
 /// Keep desktop dialogs compact while constraining them to the usable viewport.
 /// Compact portrait screens additionally enable vertical scrolling so long
 /// model-download text remains reachable without extending below system bars.

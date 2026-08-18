@@ -2,9 +2,9 @@ use super::{
     bounded_tile_spec, build_exif_payload, build_lanczos_contributions, built_in_srgb_icc,
     encode_jpeg_rgb, encode_srgb_row, encode_srgb_row_with_format, export_to_destination,
     publish_completed_export, resolved_export_tile_spec, stitch_linear_tile_into_band,
-    tiff_strip_layout, tile_mask_source_region, validate_export_dimensions, ExportMetadata,
-    ExportResizeMode, ExportRowFormat, ExportSettings, GeometryResampler, JpegEncodeRequest,
-    LinearLightResizer,
+    tiff_strip_layout, tile_mask_source_region, validate_export_dimensions, ExportFormat,
+    ExportMetadata, ExportResizeMode, ExportRowFormat, ExportSettings, GeometryResampler,
+    JpegEncodeRequest, LinearLightResizer,
     EXPORT_TILE_HALO, MAX_EXPORT_EDGE, TIFF_TARGET_STRIP_BYTES,
 };
 use crate::pipeline::{
@@ -12,6 +12,17 @@ use crate::pipeline::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[test]
+fn export_format_extensions_preserve_existing_names_and_aliases() {
+    assert_eq!(ExportFormat::Png.extension(), "png");
+    assert_eq!(ExportFormat::Jpeg.extension(), "jpg");
+    assert_eq!(ExportFormat::Tiff.extension(), "tif");
+    assert!(ExportFormat::Png.matches_extension("PNG"));
+    assert!(ExportFormat::Jpeg.matches_extension("jpeg"));
+    assert!(ExportFormat::Tiff.matches_extension("TIFF"));
+    assert!(!ExportFormat::Png.matches_extension("jpg"));
+}
 
 #[test]
 fn resize_modes_preserve_aspect_ratio() {
