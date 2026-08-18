@@ -7,8 +7,7 @@ impl AurawApp {
         component_index: usize,
     ) -> bool {
         let target = (mask_index, component_index);
-        let cleared = self
-            .masks
+        let cleared = self.masks.stack
             .masks
             .get_mut(mask_index)
             .and_then(|mask| mask.components.get_mut(component_index))
@@ -34,29 +33,27 @@ impl AurawApp {
         if self.foreground_operation_is(ForegroundOperationKind::ObjectMask) {
             self.cancel_foreground_operation();
         }
-        if self.object_pending_target == Some(target) {
-            self.object_pending_target = None;
+        if self.ai.object_pending_target == Some(target) {
+            self.ai.object_pending_target = None;
         }
-        if self
-            .object_cache
+        if self.ai.object_cache
             .as_ref()
             .is_some_and(|(cached_target, _)| *cached_target == target)
         {
-            self.object_cache = None;
+            self.ai.object_cache = None;
         }
-        self.mask_overlay_blink = None;
-        self.brush_mode = BrushMode::Paint;
+        self.masks.overlay_blink = None;
+        self.masks.brush_mode = BrushMode::Paint;
         true
     }
 
     pub(crate) fn request_object_mask(&mut self, mask_index: usize, component_index: usize) {
-        self.object_error_dialog = None;
+        self.ai.object_error_dialog = None;
         #[cfg(not(target_os = "android"))]
         if !self.validate_onnx_runtime_for_ai() {
             return;
         }
-        let Some(component) = self
-            .masks
+        let Some(component) = self.masks.stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -70,10 +67,10 @@ impl AurawApp {
             .iter()
             .any(|stroke| stroke.positive && !stroke.points.is_empty())
         {
-            self.notice = Some("Paint inside an object before generating its mask.".to_owned());
+            self.ui.notice = Some("Paint inside an object before generating its mask.".to_owned());
             return;
         }
-        if self.mask_source_cache.is_none() {
+        if self.masks.source_cache.is_none() {
             self.report_ai_mask_error(
                 "The original image source is not ready for object selection. Re-open the Object mask or create it again."
                     .to_owned(),
@@ -82,10 +79,10 @@ impl AurawApp {
         }
         if self.foreground_operation_active() {
             if self.foreground_operation_is(ForegroundOperationKind::ObjectMask) {
-                self.object_pending_target = Some((mask_index, component_index));
+                self.ai.object_pending_target = Some((mask_index, component_index));
                 self.cancel_foreground_operation();
             } else {
-                self.notice = Some("Finish or cancel the current editing operation first.".to_owned());
+                self.ui.notice = Some("Finish or cancel the current editing operation first.".to_owned());
             }
             return;
         }
@@ -94,8 +91,8 @@ impl AurawApp {
         if encoder.is_file() && decoder.is_file() && self.vitmatte_model_path().is_file() {
             self.start_object_worker(mask_index, component_index, encoder, decoder);
         } else {
-            self.object_pending_target = Some((mask_index, component_index));
-            self.object_consent_open = true;
+            self.ai.object_pending_target = Some((mask_index, component_index));
+            self.ai.object_consent_open = true;
         }
     }
 
@@ -108,20 +105,19 @@ impl AurawApp {
     ) {
         if self.foreground_operation_active() {
             if self.foreground_operation_is(ForegroundOperationKind::ObjectMask) {
-                self.object_pending_target = Some((mask_index, component_index));
+                self.ai.object_pending_target = Some((mask_index, component_index));
                 self.cancel_foreground_operation();
             }
             return;
         }
 
-        let Some(source) = self.mask_source_cache.clone() else {
-            self.notice =
+        let Some(source) = self.masks.source_cache.clone() else {
+            self.ui.notice =
                 Some("The original image source is unavailable for object selection.".to_owned());
             return;
         };
         let (strokes, brush_size, edge_refine) = {
-            let Some(component) = self
-                .masks
+            let Some(component) = self.masks.stack
                 .masks
                 .get(mask_index)
                 .and_then(|mask| mask.components.get(component_index))
@@ -151,8 +147,7 @@ impl AurawApp {
                 *edge_refine,
             )
         };
-        let cache = self
-            .object_cache
+        let cache = self.ai.object_cache
             .as_ref()
             .filter(|(target, _)| *target == (mask_index, component_index))
             .map(|(_, cache)| cache.clone());
@@ -165,15 +160,15 @@ impl AurawApp {
             edge_refine,
             cache,
         };
-        let Some(target) = self.capture_ai_mask_target(mask_index, component_index) else {
-            self.notice = Some("The selected object mask is no longer available.".to_owned());
+        let Some(target) = self.masks.capture_ai_target(mask_index, component_index) else {
+            self.ui.notice = Some("The selected object mask is no longer available.".to_owned());
             return;
         };
-        self.object_pending_target = None;
+        self.ai.object_pending_target = None;
         #[cfg(not(target_os = "android"))]
-        let runtime_path = self.onnx_runtime_path.clone();
+        let runtime_path = self.ai.runtime_path.clone();
         #[cfg(not(target_os = "android"))]
-        let runtime_sha256 = self.onnx_runtime_sha256.clone();
+        let runtime_sha256 = self.ai.runtime_sha256.clone();
         #[cfg(target_os = "android")]
         let runtime_path = None;
         #[cfg(target_os = "android")]
@@ -200,7 +195,7 @@ impl AurawApp {
         });
         self.begin_foreground_operation(ForegroundOperation {
             kind: ForegroundOperationKind::ObjectMask,
-            document_id: self.sidecar_generation,
+            document_id: self.persistence.sidecar_generation,
             cancellation,
             progress,
             cancelling: false,
@@ -279,10 +274,10 @@ impl AurawApp {
             } => (Some(target.clone()), *inference_started),
             _ => (None, false),
         };
-        let updating_all = self.ai_mask_update_active && target.is_some();
-        let library_refresh = self.library_ai_mask_refresh.is_some();
+        let updating_all = self.ai.mask_update_active && target.is_some();
+        let library_refresh = self.ai.library_mask_refresh.is_some();
         let cancelled = operation.is_cancelled();
-        let stale = operation.document_id != self.sidecar_generation;
+        let stale = operation.document_id != self.persistence.sidecar_generation;
 
         let mut succeeded = false;
         let mut error_message = None;
@@ -295,7 +290,7 @@ impl AurawApp {
                         mask: pixels,
                         cache,
                     } = result;
-                    let location = self.resolve_ai_mask_target(&target);
+                    let location = self.masks.resolve_ai_target(&target);
                     let mask = MaskImage::new(width, height, pixels);
                     match (location, mask) {
                         (_, None) => {
@@ -306,8 +301,7 @@ impl AurawApp {
                         }
                         (Err(error), Some(_)) => error_message = Some(error),
                         (Ok((mask_index, component_index)), Some(mask)) => {
-                            let applied = self
-                                .masks
+                            let applied = self.masks.stack
                                 .masks
                                 .get_mut(mask_index)
                                 .and_then(|local| local.components.get_mut(component_index))
@@ -324,7 +318,7 @@ impl AurawApp {
                                     }
                                 });
                             if applied {
-                                self.object_cache = Some(((mask_index, component_index), cache));
+                                self.ai.object_cache = Some(((mask_index, component_index), cache));
                                 self.mark_mask_geometry_dirty(mask_index);
                                 self.blink_selected_component();
                                 succeeded = true;
@@ -347,21 +341,21 @@ impl AurawApp {
         if library_refresh {
             if cancelled {
                 self.cancel_ai_mask_update();
-            } else if let Some((mask_index, component_index)) = self.object_pending_target.take() {
+            } else if let Some((mask_index, component_index)) = self.ai.object_pending_target.take() {
                 let (encoder, decoder) = self.sam21_model_paths();
                 self.start_object_worker(mask_index, component_index, encoder, decoder);
             } else if updating_all {
-                self.ai_mask_update_failed |= !succeeded;
+                self.ai.mask_update_failed |= !succeeded;
                 if !succeeded {
-                    self.ai_mask_update_object_queue.clear();
+                    self.ai.mask_update_object_queue.clear();
                 }
                 if let Some(message) = error_message.clone() {
-                    self.notice = Some(message);
+                    self.ui.notice = Some(message);
                 }
                 self.continue_ai_mask_update();
             }
         } else if cancelled || stale {
-            if let Some((mask_index, component_index)) = self.object_pending_target.take() {
+            if let Some((mask_index, component_index)) = self.ai.object_pending_target.take() {
                 let (encoder, decoder) = self.sam21_model_paths();
                 self.start_object_worker(mask_index, component_index, encoder, decoder);
             }
@@ -373,9 +367,9 @@ impl AurawApp {
                     "Object selection did not produce a mask.".to_owned()
                 }
             });
-            self.notice = Some(message.clone());
+            self.ui.notice = Some(message.clone());
             if failed_during_inference {
-                self.object_error_dialog = Some(message);
+                self.ai.object_error_dialog = Some(message);
             }
         }
         self.egui_ctx.request_repaint();

@@ -11,29 +11,27 @@ impl Preview {
         source_height: u32,
         response: &egui::Response,
     ) {
-        let lens_geometry = app
-            .loaded_raw
+        let lens_geometry = app.develop.loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.clone());
-        let Some(mask_index) = app.masks.selected_mask else {
+        let Some(mask_index) = app.masks.stack.selected_mask else {
             app.finish_mask_geometry_interaction();
-            app.active_mask_tool = None;
+            app.masks.active_tool = None;
             return;
         };
-        let Some(component_index) = app.masks.selected_component else {
+        let Some(component_index) = app.masks.stack.selected_component else {
             app.finish_mask_geometry_interaction();
-            app.active_mask_tool = None;
+            app.masks.active_tool = None;
             return;
         };
-        let Some(kind) = app
-            .masks
+        let Some(kind) = app.masks.stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
             .map(|component| component.kind)
         else {
             app.finish_mask_geometry_interaction();
-            app.active_mask_tool = None;
+            app.masks.active_tool = None;
             return;
         };
         if !kind.is_available() {
@@ -41,16 +39,15 @@ impl Preview {
         }
         if kind == MaskKind::Fullscreen {
             app.finish_mask_geometry_interaction();
-            app.active_mask_tool = None;
+            app.masks.active_tool = None;
             return;
         }
-        let subject_refining = app.subject_refinement_active
+        let subject_refining = app.masks.subject_refinement_active
             && matches!(kind, MaskKind::Subject | MaskKind::Background);
-        app.active_mask_tool = Some(kind);
+        app.masks.active_tool = Some(kind);
         let geometry_can_leave_image = matches!(kind, MaskKind::Radial | MaskKind::Linear)
-            && (app.mask_drag.is_some()
-                || app
-                    .masks
+            && (app.masks.drag.is_some()
+                || app.masks.stack
                     .masks
                     .get(mask_index)
                     .and_then(|mask| mask.components.get(component_index))
@@ -76,7 +73,7 @@ impl Preview {
                 // Leaving the preview while still dragging must not connect the
                 // last valid dab to a later re-entry point through hidden space.
                 if subject_refining || matches!(kind, MaskKind::Brush | MaskKind::Object) {
-                    app.last_brush_point = None;
+                    app.masks.last_brush_point = None;
                 }
                 return;
             }
@@ -88,8 +85,7 @@ impl Preview {
             let object_stroke_finished = primary_released
                 && !subject_refining
                 && kind == MaskKind::Object
-                && app
-                    .masks
+                && app.masks.stack
                     .masks
                     .get(mask_index)
                     .and_then(|mask| mask.components.get(component_index))
@@ -101,8 +97,8 @@ impl Preview {
                         )
                     });
             app.finish_mask_geometry_interaction();
-            app.last_brush_point = None;
-            app.mask_drag = None;
+            app.masks.last_brush_point = None;
+            app.masks.drag = None;
             app.commit_mask_touch_gesture();
             if object_stroke_finished {
                 app.request_object_mask(mask_index, component_index);
@@ -117,7 +113,7 @@ impl Preview {
         }
         let source_uv = final_geometry_screen_to_native_source(
             image_rect,
-            app.geometry,
+            app.develop.geometry,
             lens_geometry.as_deref(),
             source_width,
             source_height,
@@ -132,21 +128,21 @@ impl Preview {
             // pasteboard. Otherwise a stroke that leaves and re-enters the image
             // gets interpolated through an area the user could not actually draw.
             if subject_refining || matches!(kind, MaskKind::Brush | MaskKind::Object) {
-                app.last_brush_point = None;
+                app.masks.last_brush_point = None;
             }
             return;
         };
 
         if subject_refining {
-            let refinement = &mut app.masks.subject_refinement;
-            let opacity = app.brush_mode.dab_opacity(true, refinement.flow);
-            let first_dab = app.last_brush_point.is_none();
-            let previous = app.last_brush_point.unwrap_or(uv);
+            let refinement = &mut app.masks.stack.subject_refinement;
+            let opacity = app.masks.brush_mode.dab_opacity(true, refinement.flow);
+            let first_dab = app.masks.last_brush_point.is_none();
+            let previous = app.masks.last_brush_point.unwrap_or(uv);
             let dx = uv[0] - previous[0];
             let dy = uv[1] - previous[1];
             let previous_screen = final_geometry_native_source_to_screen(
                 image_rect,
-                app.geometry,
+                app.develop.geometry,
                 lens_geometry.as_deref(),
                 source_width,
                 source_height,
@@ -155,12 +151,12 @@ impl Preview {
             let distance_px = pointer.distance(previous_screen);
             let dab_size = zoom_scaled_brush_size(
                 refinement.size,
-                app.preview_zoom,
-                app.image_relative_brush_size,
+                app.preview.zoom,
+                app.preferences.image_relative_brush_size,
             );
             let radius_px = geometry_brush_radius_screen(
                 image_rect,
-                app.geometry,
+                app.develop.geometry,
                 lens_geometry.as_deref(),
                 source_width,
                 source_height,
@@ -197,14 +193,13 @@ impl Preview {
                 }
             }
             if changed {
-                app.last_brush_point = Some(uv);
+                app.masks.last_brush_point = Some(uv);
                 app.note_subject_refinement_interaction();
                 ui.ctx().request_repaint();
             }
             return;
         }
-        let color_was_sampled = app
-            .masks
+        let color_was_sampled = app.masks.stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -215,14 +210,14 @@ impl Preview {
                 )
             });
 
-        if app.mask_drag.is_none() && kind != MaskKind::Brush && kind != MaskKind::Object {
-            let geometry = &app.masks.masks[mask_index].components[component_index].geometry;
-            app.mask_drag = begin_mask_drag(
+        if app.masks.drag.is_none() && kind != MaskKind::Brush && kind != MaskKind::Object {
+            let geometry = &app.masks.stack.masks[mask_index].components[component_index].geometry;
+            app.masks.drag = begin_mask_drag(
                 geometry,
                 uv,
                 pointer,
                 image_rect,
-                app.geometry,
+                app.develop.geometry,
                 lens_geometry.as_deref(),
                 source_width,
                 source_height,
@@ -231,12 +226,11 @@ impl Preview {
 
         let mut changed = false;
 
-        if kind == MaskKind::Object && app.last_brush_point.is_none() {
+        if kind == MaskKind::Object && app.masks.last_brush_point.is_none() {
             changed |= app.restart_refined_object_mask_for_stroke(mask_index, component_index);
         }
 
-        if let Some(component) = app
-            .masks
+        if let Some(component) = app.masks.stack
             .masks
             .get_mut(mask_index)
             .and_then(|mask| mask.components.get_mut(component_index))
@@ -254,16 +248,16 @@ impl Preview {
                     },
                     MaskKind::Brush,
                 ) => {
-                    let opacity = app.brush_mode.dab_opacity(*opacity_enabled, *brush_opacity);
-                    let first_dab = app.last_brush_point.is_none();
-                    let previous = app.last_brush_point.unwrap_or(uv);
+                    let opacity = app.masks.brush_mode.dab_opacity(*opacity_enabled, *brush_opacity);
+                    let first_dab = app.masks.last_brush_point.is_none();
+                    let previous = app.masks.last_brush_point.unwrap_or(uv);
                     let dx = uv[0] - previous[0];
                     let dy = uv[1] - previous[1];
                     // Measure spacing in the transformed preview so brush density
                     // remains stable after crop, rotate, flip, and perspective.
                     let previous_screen = final_geometry_native_source_to_screen(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -272,12 +266,12 @@ impl Preview {
                     let distance_px = pointer.distance(previous_screen);
                     let dab_size = zoom_scaled_brush_size(
                         *size,
-                        app.preview_zoom,
-                        app.image_relative_brush_size,
+                        app.preview.zoom,
+                        app.preferences.image_relative_brush_size,
                     );
                     let radius_px = geometry_brush_radius_screen(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -321,7 +315,7 @@ impl Preview {
                         // Keep the last emitted point, not merely the last
                         // pointer sample, so sub-spacing motion accumulates
                         // instead of disappearing between frames.
-                        app.last_brush_point = Some(uv);
+                        app.masks.last_brush_point = Some(uv);
                     }
                 }
                 (
@@ -333,7 +327,7 @@ impl Preview {
                         ..
                     },
                     MaskKind::Radial,
-                ) => match app.mask_drag {
+                ) => match app.masks.drag {
                     Some(MaskDragState::Create(origin)) => {
                         let mut rx = (uv[0] - origin[0]).abs();
                         let mut ry = (uv[1] - origin[1]).abs();
@@ -393,7 +387,7 @@ impl Preview {
                         ..
                     },
                     MaskKind::Linear,
-                ) => match app.mask_drag {
+                ) => match app.masks.drag {
                     Some(MaskDragState::Create(origin)) => {
                         *start = origin;
                         *end = uv;
@@ -465,13 +459,13 @@ impl Preview {
                     // Object strokes always start a new positive selection. A
                     // refined mask was cleared above on the first pointer-down.
                     let positive = true;
-                    let first_point = app.last_brush_point.is_none();
-                    let previous = app.last_brush_point.unwrap_or(uv);
+                    let first_point = app.masks.last_brush_point.is_none();
+                    let previous = app.masks.last_brush_point.unwrap_or(uv);
                     let dx = uv[0] - previous[0];
                     let dy = uv[1] - previous[1];
                     let previous_screen = final_geometry_native_source_to_screen(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -480,12 +474,12 @@ impl Preview {
                     let distance_px = pointer.distance(previous_screen);
                     let stroke_brush_size = zoom_scaled_brush_size(
                         *brush_size,
-                        app.preview_zoom,
-                        app.image_relative_brush_size,
+                        app.preview.zoom,
+                        app.preferences.image_relative_brush_size,
                     );
                     let radius_px = geometry_brush_radius_screen(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -516,7 +510,7 @@ impl Preview {
                         }
                     }
                     if changed {
-                        app.last_brush_point = Some(uv);
+                        app.masks.last_brush_point = Some(uv);
                     }
                 }
                 (
@@ -561,17 +555,16 @@ impl Preview {
         source_width: u32,
         source_height: u32,
     ) {
-        let lens_geometry = app
-            .loaded_raw
+        let lens_geometry = app.develop.loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.clone());
-        let Some(mask_index) = app.masks.selected_mask else {
+        let Some(mask_index) = app.masks.stack.selected_mask else {
             return;
         };
-        let Some(mask) = app.masks.masks.get(mask_index) else {
+        let Some(mask) = app.masks.stack.masks.get(mask_index) else {
             return;
         };
-        let selected_component = app.masks.selected_component;
+        let selected_component = app.masks.stack.selected_component;
         // Keep coverage visible when the selected type has no active rendered
         // result. Effect settings are independent from retained Adjustment
         // values, so switching types remains fully reversible.
@@ -606,7 +599,7 @@ impl Preview {
         // the overlay returns to hidden so it cannot obscure the edit.
         let steady_target: Option<Option<usize>> = neutral.then_some(None);
         let mut coverage_target = steady_target;
-        if let Some((started, blink)) = app.mask_overlay_blink {
+        if let Some((started, blink)) = app.masks.overlay_blink {
             let elapsed = started.elapsed().as_secs_f32();
             coverage_target = match blink {
                 MaskOverlayBlink::GroupTwice if elapsed < 0.18 => Some(None),
@@ -620,11 +613,11 @@ impl Preview {
                 MaskOverlayBlink::ComponentThenGroup if elapsed < 0.57 => Some(None),
                 MaskOverlayBlink::ComponentThenGroup if elapsed < 0.70 => None,
                 _ => {
-                    app.mask_overlay_blink = None;
+                    app.masks.overlay_blink = None;
                     steady_target
                 }
             };
-            if app.mask_overlay_blink.is_some() {
+            if app.masks.overlay_blink.is_some() {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(25));
             }
@@ -636,7 +629,7 @@ impl Preview {
                 .is_some_and(|position| preview_rect.contains(position));
         if pointer_editing {
             let editing_live_mask = selected_component.is_some_and(|index| {
-                app.masks.masks[mask_index]
+                app.masks.stack.masks[mask_index]
                     .components
                     .get(index)
                     .is_some_and(|component| {
@@ -644,7 +637,7 @@ impl Preview {
                         // drawing even when the group already has adjustments: the
                         // painted prompt is exactly what the AI model will see.
                         component.kind == MaskKind::Object
-                            || (app.subject_refinement_active
+                            || (app.masks.subject_refinement_active
                                 && matches!(
                                     component.kind,
                                     MaskKind::Subject | MaskKind::Background
@@ -678,7 +671,7 @@ impl Preview {
         }
 
         if let Some(component) = selected_component.and_then(|index| {
-            app.masks
+            app.masks.stack
                 .masks
                 .get(mask_index)
                 .and_then(|mask| mask.components.get(index))
@@ -698,7 +691,7 @@ impl Preview {
                 } => {
                     let outer = radial_outline_geometry_screen_points(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -711,7 +704,7 @@ impl Preview {
                     let inner_scale = 1.0 - feather.clamp(0.0, 1.0) * 0.98;
                     let inner = radial_outline_geometry_screen_points(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -726,7 +719,7 @@ impl Preview {
                     ));
                     let center_screen = final_geometry_native_source_to_screen(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -735,7 +728,7 @@ impl Preview {
                     painter.circle_filled(center_screen, 5.0, color);
                     for handle in radial_handles_geometry_screen(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -747,7 +740,7 @@ impl Preview {
                     }
                     let major_handle = radial_handles_geometry_screen(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -757,7 +750,7 @@ impl Preview {
                     )[0];
                     let rotation_handle = radial_rotation_handle_geometry(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -785,7 +778,7 @@ impl Preview {
                     // the overlay derived from the exact rasterizer geometry.
                     let axis = linear_axis_geometry_screen_points(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -796,7 +789,7 @@ impl Preview {
                     painter.add(Shape::line(axis, Stroke::new(2.0, color)));
                     let a = final_geometry_native_source_to_screen(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -804,7 +797,7 @@ impl Preview {
                     );
                     let b = final_geometry_native_source_to_screen(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -814,7 +807,7 @@ impl Preview {
                     painter.circle_filled(b, 5.0, color);
                     let (middle, rotation_handle) = linear_rotation_handle_geometry(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -831,7 +824,7 @@ impl Preview {
                     for t in [0.5 - 0.5 * width_factor, 0.5 + 0.5 * width_factor] {
                         let boundary = linear_isot_geometry_screen_points(
                             image_rect,
-                            app.geometry,
+                            app.develop.geometry,
                             lens_geometry.as_deref(),
                             source_width,
                             source_height,
@@ -850,13 +843,13 @@ impl Preview {
             }
         }
 
-        let refining_subject = app.subject_refinement_active
-            && app.masks.selected_component().is_some_and(|component| {
+        let refining_subject = app.masks.subject_refinement_active
+            && app.masks.stack.selected_component().is_some_and(|component| {
                 matches!(component.kind, MaskKind::Subject | MaskKind::Background)
                     && component.enabled
             });
         if refining_subject
-            || app.masks.selected_component().is_some_and(|component| {
+            || app.masks.stack.selected_component().is_some_and(|component| {
                 matches!(component.kind, MaskKind::Brush | MaskKind::Object) && component.enabled
             })
         {
@@ -866,14 +859,14 @@ impl Preview {
                 .or_else(|| ui.ctx().pointer_interact_pos())
                 .filter(|position| preview_rect.contains(*position))
             {
-                let cursor_color = match app.brush_mode {
+                let cursor_color = match app.masks.brush_mode {
                     BrushMode::Paint => Color32::WHITE,
                     BrushMode::Erase => subtract,
                 };
                 if refining_subject {
                     let source_uv = final_geometry_screen_to_native_source(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_width,
                         source_height,
@@ -881,13 +874,13 @@ impl Preview {
                     );
                     if let Some(uv) = editable_source_uv(source_uv) {
                         let brush_size = zoom_scaled_brush_size(
-                            app.masks.subject_refinement.size,
-                            app.preview_zoom,
-                            app.image_relative_brush_size,
+                            app.masks.stack.subject_refinement.size,
+                            app.preview.zoom,
+                            app.preferences.image_relative_brush_size,
                         );
                         let outline = brush_outline_geometry_screen_points(
                             image_rect,
-                            app.geometry,
+                            app.develop.geometry,
                             lens_geometry.as_deref(),
                             source_width,
                             source_height,
@@ -898,11 +891,11 @@ impl Preview {
                         let cursor_painter = ui.painter_at(preview_rect.intersect(image_rect));
                         cursor_painter.add(Shape::line(outline, Stroke::new(1.5, cursor_color)));
                         let inner_size = brush_size
-                            * (1.0 - app.masks.subject_refinement.feather.clamp(0.0, 1.0));
+                            * (1.0 - app.masks.stack.subject_refinement.feather.clamp(0.0, 1.0));
                         if inner_size > brush_size * 0.04 {
                             let inner = brush_outline_geometry_screen_points(
                                 image_rect,
-                                app.geometry,
+                                app.develop.geometry,
                                 lens_geometry.as_deref(),
                                 source_width,
                                 source_height,
@@ -916,12 +909,12 @@ impl Preview {
                             ));
                         }
                     }
-                } else if let Some(component) = app.masks.selected_component() {
+                } else if let Some(component) = app.masks.stack.selected_component() {
                     match &component.geometry {
                         MaskGeometry::Brush { size, .. } => {
                             let source_uv = final_geometry_screen_to_native_source(
                                 image_rect,
-                                app.geometry,
+                                app.develop.geometry,
                                 lens_geometry.as_deref(),
                                 source_width,
                                 source_height,
@@ -930,15 +923,15 @@ impl Preview {
                             if let Some(uv) = editable_source_uv(source_uv) {
                                 let outline = brush_outline_geometry_screen_points(
                                     image_rect,
-                                    app.geometry,
+                                    app.develop.geometry,
                                     lens_geometry.as_deref(),
                                     source_width,
                                     source_height,
                                     uv,
                                     zoom_scaled_brush_size(
                                         *size,
-                                        app.preview_zoom,
-                                        app.image_relative_brush_size,
+                                        app.preview.zoom,
+                                        app.preferences.image_relative_brush_size,
                                     ),
                                     64,
                                 );
@@ -948,7 +941,7 @@ impl Preview {
                         MaskGeometry::Object { brush_size, .. } => {
                             let source_uv = final_geometry_screen_to_native_source(
                                 image_rect,
-                                app.geometry,
+                                app.develop.geometry,
                                 lens_geometry.as_deref(),
                                 source_width,
                                 source_height,
@@ -957,15 +950,15 @@ impl Preview {
                             if let Some(uv) = editable_source_uv(source_uv) {
                                 let outline = brush_outline_geometry_screen_points(
                                     image_rect,
-                                    app.geometry,
+                                    app.develop.geometry,
                                     lens_geometry.as_deref(),
                                     source_width,
                                     source_height,
                                     uv,
                                     zoom_scaled_brush_size(
                                         *brush_size,
-                                        app.preview_zoom,
-                                        app.image_relative_brush_size,
+                                        app.preview.zoom,
+                                        app.preferences.image_relative_brush_size,
                                     ),
                                     64,
                                 );
@@ -989,17 +982,17 @@ impl Preview {
         source_width: u32,
         source_height: u32,
     ) {
-        if app.gpu_pipeline.is_none() {
+        if app.preview.gpu_pipeline.is_none() {
             return;
         }
-        let margin = app.masks.raster_margin_pixels_for_layer(
+        let margin = app.masks.stack.raster_margin_pixels_for_layer(
             mask_index,
             component_index,
             source_width,
             source_height,
         );
         let region = overlay_raster_region(
-            app.preview_visible_uv,
+            app.preview.visible_uv,
             source_width,
             source_height,
             preview_rect,
@@ -1009,12 +1002,12 @@ impl Preview {
         let key = (
             mask_index,
             component_index,
-            app.mask_overlay_revision,
+            app.masks.overlay_revision,
             region,
         );
 
-        if app.mask_overlay_texture_key != Some(key) {
-            let cropped_masks = app.masks.cropped_for_region(
+        if app.masks.overlay_texture_key != Some(key) {
+            let cropped_masks = app.masks.stack.cropped_for_region(
                 region.source_x,
                 region.source_y,
                 region.source_width,
@@ -1049,26 +1042,26 @@ impl Preview {
                 ],
                 &rgba,
             );
-            if let Some(texture) = app.mask_overlay_texture.as_mut() {
+            if let Some(texture) = app.masks.overlay_texture.as_mut() {
                 texture.set(image, egui::TextureOptions::LINEAR);
             } else {
-                app.mask_overlay_texture = Some(ui.ctx().load_texture(
+                app.masks.overlay_texture = Some(ui.ctx().load_texture(
                     "selected-mask-coverage",
                     image,
                     egui::TextureOptions::LINEAR,
                 ));
             }
-            app.mask_overlay_texture_key = Some(key);
+            app.masks.overlay_texture_key = Some(key);
         }
 
-        if let Some(texture) = &app.mask_overlay_texture {
+        if let Some(texture) = &app.masks.overlay_texture {
             let _ = preview_rect;
             paint_final_geometry_overlay_texture(
                 ui,
                 texture.id(),
                 image_rect,
-                app.geometry,
-                app.loaded_raw
+                app.develop.geometry,
+                app.develop.loaded_raw
                     .as_ref()
                     .and_then(|raw| raw.lens_geometry.as_deref()),
                 source_width,
@@ -1080,42 +1073,40 @@ impl Preview {
     }
 
     pub(in crate::ui::preview) fn paint_tool_hint(ui: &Ui, app: &AurawApp, preview_rect: Rect) {
-        let Some(kind) = app.active_mask_tool else {
+        let Some(kind) = app.masks.active_tool else {
             return;
         };
         let text = match kind {
-            MaskKind::Subject | MaskKind::Background if app.subject_refinement_active => {
-                match app.brush_mode {
+            MaskKind::Subject | MaskKind::Background if app.masks.subject_refinement_active => {
+                match app.masks.brush_mode {
                     BrushMode::Paint => "Refine: paint subject",
                     BrushMode::Erase => "Refine: subtract subject / paint background",
                 }
             }
             MaskKind::Brush => return,
             MaskKind::Object
-                if app.masks.selected_component().is_some_and(|component| {
+                if app.masks.stack.selected_component().is_some_and(|component| {
                     matches!(&component.geometry, MaskGeometry::Object { mask: None, .. })
                 }) =>
             {
                 "Paint through the middle of the object part"
             }
             MaskKind::Radial
-                if !app
-                    .masks
+                if !app.masks.stack
                     .selected_component()
                     .is_some_and(|component| component.geometry.is_initialized()) =>
             {
                 "Drag from the center to create a radial gradient"
             }
             MaskKind::Linear
-                if !app
-                    .masks
+                if !app.masks.stack
                     .selected_component()
                     .is_some_and(|component| component.geometry.is_initialized()) =>
             {
                 "Drag across the image to create a linear gradient"
             }
             MaskKind::ColorRange
-                if !app.masks.selected_component().is_some_and(|component| {
+                if !app.masks.stack.selected_component().is_some_and(|component| {
                     matches!(
                         &component.geometry,
                         MaskGeometry::ColorRange { sampled: true, .. }

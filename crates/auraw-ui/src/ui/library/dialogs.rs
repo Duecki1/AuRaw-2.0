@@ -340,13 +340,12 @@ pub(super) fn show_library_folder_dialogs(ui: &mut Ui, app: &mut AurawApp) {
     }
     if confirm_delete {
         if let (Some(root), Some(target)) = (app.library.root_folder.clone(), delete_target) {
-            if let Some(current) = app
-                .current_path
+            if let Some(current) = app.develop.current_path
                 .clone()
                 .filter(|current| current.starts_with(&target))
             {
                 app.detach_current_file_for_library_action(&current);
-                app.current_path = None;
+                app.develop.current_path = None;
             }
             app.library
                 .start_folder_operation(LibraryFolderOperation::Delete { root, target }, ui.ctx());
@@ -425,12 +424,12 @@ pub(super) fn show_library_raw_name_dialog(
 
     #[cfg(not(target_os = "android"))]
     let current_path = asset.desktop_path().and_then(|path| {
-        (app.current_path.as_deref() == Some(path)).then(|| path.to_path_buf())
+        (app.develop.current_path.as_deref() == Some(path)).then(|| path.to_path_buf())
     });
     #[cfg(not(target_os = "android"))]
     if let Some(path) = current_path.as_deref() {
         app.detach_current_file_for_library_action(path);
-        app.current_path = None;
+        app.develop.current_path = None;
     }
 
     match rename_asset(app, &asset, &name) {

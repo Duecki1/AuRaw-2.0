@@ -47,6 +47,7 @@ impl LibraryState {
             selected_assets: HashSet::new(),
             selection_mode: false,
             image_clipboard: None,
+            adjustment_clipboard: None,
             asset_transfer_receiver: None,
             raw_import_receiver: None,
             folder_operation_receiver: None,
@@ -117,6 +118,7 @@ impl LibraryState {
             selected_assets: HashSet::new(),
             selection_mode: false,
             image_clipboard: None,
+            adjustment_clipboard: None,
             asset_transfer_receiver: None,
             raw_name_dialog: None,
             export_dialog: None,
@@ -129,6 +131,18 @@ impl LibraryState {
 
     pub(crate) fn set_status(&mut self, status: impl Into<String>) {
         self.status = status.into();
+    }
+
+    pub(crate) fn has_copied_adjustments(&self) -> bool {
+        self.adjustment_clipboard.is_some()
+    }
+
+    pub(crate) fn install_adjustment_clipboard(
+        &mut self,
+        edits: crate::sidecar::EditState,
+        settings: crate::sidecar::AdjustmentCopySettings,
+    ) {
+        self.adjustment_clipboard = Some(LibraryAdjustmentClipboard { edits, settings });
     }
 
     pub(crate) fn has_selection(&self) -> bool {

@@ -3,11 +3,11 @@ use super::*;
 impl AurawApp {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn set_birefnet_quality(&mut self, quality: BiRefNetQuality) {
-        if self.birefnet_quality == quality {
+        if self.ai.birefnet_quality == quality {
             return;
         }
-        self.birefnet_quality = quality;
-        self.subject_mask_cache = None;
+        self.ai.birefnet_quality = quality;
+        self.masks.subject_cache = None;
         self.persist_performance_settings();
     }
 
@@ -16,12 +16,12 @@ impl AurawApp {
     }
 
     pub(crate) fn request_subject_mask(&mut self, frame: &eframe::Frame) {
-        self.object_error_dialog = None;
+        self.ai.object_error_dialog = None;
         if self.foreground_operation_active() {
-            self.notice = Some("Finish or cancel the current editing operation first.".to_owned());
+            self.ui.notice = Some("Finish or cancel the current editing operation first.".to_owned());
             return;
         }
-        if let Some(mask) = self.subject_mask_cache.clone() {
+        if let Some(mask) = self.masks.subject_cache.clone() {
             self.apply_subject_mask(mask);
             return;
         }
@@ -37,7 +37,7 @@ impl AurawApp {
         if path.is_file() {
             self.start_subject_worker(path);
         } else {
-            self.subject_consent_open = true;
+            self.ai.subject_consent_open = true;
         }
     }
 
@@ -45,14 +45,14 @@ impl AurawApp {
         if self.foreground_operation_active() {
             return;
         }
-        let Some(source) = self.mask_source_cache.clone() else {
-            self.notice = Some("The preview could not be prepared for subject selection.".to_owned());
+        let Some(source) = self.masks.source_cache.clone() else {
+            self.ui.notice = Some("The preview could not be prepared for subject selection.".to_owned());
             return;
         };
         #[cfg(not(target_os = "android"))]
-        let runtime_path = self.onnx_runtime_path.clone();
+        let runtime_path = self.ai.runtime_path.clone();
         #[cfg(not(target_os = "android"))]
-        let runtime_sha256 = self.onnx_runtime_sha256.clone();
+        let runtime_sha256 = self.ai.runtime_sha256.clone();
         #[cfg(target_os = "android")]
         let runtime_path = None;
         #[cfg(target_os = "android")]
@@ -62,7 +62,7 @@ impl AurawApp {
         let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let receiver = spawn_subject_mask(
             SubjectMaskWorkerRequest {
-                quality: self.birefnet_quality,
+                quality: self.ai.birefnet_quality,
                 model_path,
                 runtime_path,
                 runtime_sha256,
@@ -75,18 +75,18 @@ impl AurawApp {
         let progress = ForegroundProgress::indeterminate(if model_present {
             format!(
                 "Running {} quality locally with {}…",
-                self.birefnet_quality.label(),
-                self.birefnet_quality.model().checkpoint
+                self.ai.birefnet_quality.label(),
+                self.ai.birefnet_quality.model().checkpoint
             )
         } else {
             format!(
                 "Preparing {} download…",
-                self.birefnet_quality.model().download_label
+                self.ai.birefnet_quality.model().download_label
             )
         });
         self.begin_foreground_operation(ForegroundOperation {
             kind: ForegroundOperationKind::SubjectMask,
-            document_id: self.sidecar_generation,
+            document_id: self.persistence.sidecar_generation,
             cancellation,
             progress,
             cancelling: false,
@@ -96,8 +96,8 @@ impl AurawApp {
     }
 
     pub(in crate::app) fn apply_subject_mask(&mut self, mask: MaskImage) {
-        self.subject_mask_cache = Some(mask.clone());
-        for local_mask in &mut self.masks.masks {
+        self.masks.subject_cache = Some(mask.clone());
+        for local_mask in &mut self.masks.stack.masks {
             for component in &mut local_mask.components {
                 if matches!(component.kind, MaskKind::Subject | MaskKind::Background) {
                     if let crate::pipeline::MaskGeometry::Ai { mask: target, .. } =
@@ -150,8 +150,8 @@ impl AurawApp {
                 SubjectMaskEvent::Inferencing => {
                     operation.progress = ForegroundProgress::indeterminate(format!(
                         "Running {} quality locally with {}…",
-                        self.birefnet_quality.label(),
-                        self.birefnet_quality.model().checkpoint
+                        self.ai.birefnet_quality.label(),
+                        self.ai.birefnet_quality.model().checkpoint
                     ));
                 }
                 SubjectMaskEvent::Finished(result) => finished = Some(result),
@@ -165,10 +165,10 @@ impl AurawApp {
             return;
         };
 
-        let updating_all = self.ai_mask_update_active && self.ai_mask_update_subject_pending;
-        let library_refresh = self.library_ai_mask_refresh.is_some();
+        let updating_all = self.ai.mask_update_active && self.ai.mask_update_subject_pending;
+        let library_refresh = self.ai.library_mask_refresh.is_some();
         let cancelled = operation.is_cancelled();
-        let stale = operation.document_id != self.sidecar_generation;
+        let stale = operation.document_id != self.persistence.sidecar_generation;
 
         let mut succeeded = false;
         let mut error_message = None;
@@ -190,10 +190,10 @@ impl AurawApp {
             if cancelled {
                 self.cancel_ai_mask_update();
             } else if updating_all {
-                self.ai_mask_update_subject_pending = false;
-                self.ai_mask_update_failed |= !succeeded;
+                self.ai.mask_update_subject_pending = false;
+                self.ai.mask_update_failed |= !succeeded;
                 if let Some(message) = error_message.clone() {
-                    self.notice = Some(message);
+                    self.ui.notice = Some(message);
                 }
                 self.continue_ai_mask_update();
             }
@@ -205,7 +205,7 @@ impl AurawApp {
                     "Subject selection did not produce a mask.".to_owned()
                 }
             });
-            self.notice = Some(message);
+            self.ui.notice = Some(message);
         }
         self.egui_ctx.request_repaint();
     }

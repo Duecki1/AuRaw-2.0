@@ -2,7 +2,7 @@ use super::*;
 
 impl AurawApp {
     pub(in crate::app) fn show_subject_dialogs(&mut self, ctx: &egui::Context) {
-        if self.subject_consent_open {
+        if self.ai.subject_consent_open {
             crate::ui::responsive_popup(
                 egui::Window::new("Download subject-selection model?"),
                 ctx,
@@ -12,10 +12,10 @@ impl AurawApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    let model = self.birefnet_quality.model();
+                    let model = self.ai.birefnet_quality.model();
                     ui.label(format!(
                         "{} quality uses {} with its native {} x {} input tensor.",
-                        self.birefnet_quality.label(),
+                        self.ai.birefnet_quality.label(),
                         model.checkpoint,
                         model.input_height,
                         model.input_width
@@ -41,7 +41,7 @@ impl AurawApp {
                         );
                     });
                     #[cfg(not(target_os = "android"))]
-                    if self.onnx_runtime_path.is_none() {
+                    if self.ai.runtime_path.is_none() {
                         ui.colored_label(
                             egui::Color32::YELLOW,
                             "Select a trusted local ONNX Runtime library in Settings before continuing. AuRaw never downloads native runtime code.",
@@ -52,12 +52,12 @@ impl AurawApp {
                         if ui.button("Consent, download and continue").clicked()
                             && self.ai_runtime_ready()
                         {
-                            self.subject_consent_open = false;
+                            self.ai.subject_consent_open = false;
                             self.start_subject_worker(self.birefnet_model_path());
                         }
                         if ui.button("Cancel").clicked() {
-                            self.subject_consent_open = false;
-                            if self.ai_mask_update_active {
+                            self.ai.subject_consent_open = false;
+                            if self.ai.mask_update_active {
                                 self.cancel_ai_mask_update();
                             }
                         }
@@ -65,7 +65,7 @@ impl AurawApp {
                 });
         }
 
-        if self.landscape_consent_open {
+        if self.ai.landscape_consent_open {
             crate::ui::responsive_popup(
                 egui::Window::new("Download landscape-selection model?"),
                 ctx,
@@ -109,7 +109,7 @@ impl AurawApp {
                     );
                 });
                 #[cfg(not(target_os = "android"))]
-                if self.onnx_runtime_path.is_none() {
+                if self.ai.runtime_path.is_none() {
                     ui.colored_label(
                         egui::Color32::YELLOW,
                         "Select a trusted local ONNX Runtime library in Settings before continuing.",
@@ -120,9 +120,9 @@ impl AurawApp {
                     if ui.button("Consent, download and continue").clicked()
                         && self.ai_runtime_ready()
                     {
-                        self.landscape_consent_open = false;
+                        self.ai.landscape_consent_open = false;
                         if let Some((mask_index, component_index)) =
-                            self.landscape_pending_target.take()
+                            self.ai.landscape_pending_target.take()
                         {
                             self.start_landscape_worker(
                                 mask_index,
@@ -133,9 +133,9 @@ impl AurawApp {
                         }
                     }
                     if ui.button("Cancel").clicked() {
-                        self.landscape_consent_open = false;
-                        self.landscape_pending_target = None;
-                        if self.ai_mask_update_active {
+                        self.ai.landscape_consent_open = false;
+                        self.ai.landscape_pending_target = None;
+                        if self.ai.mask_update_active {
                             self.cancel_ai_mask_update();
                         }
                     }
@@ -143,7 +143,7 @@ impl AurawApp {
             });
         }
 
-        if self.object_consent_open {
+        if self.ai.object_consent_open {
             crate::ui::responsive_popup(
                 egui::Window::new("Download object-selection model?"),
                 ctx,
@@ -174,7 +174,7 @@ impl AurawApp {
                         );
                     });
                     #[cfg(not(target_os = "android"))]
-                    if self.onnx_runtime_path.is_none() {
+                    if self.ai.runtime_path.is_none() {
                         ui.colored_label(
                             egui::Color32::YELLOW,
                             "Select a trusted local ONNX Runtime library in Settings before continuing.",
@@ -185,16 +185,16 @@ impl AurawApp {
                         if ui.button("Consent, download and continue").clicked()
                             && self.ai_runtime_ready()
                         {
-                            self.object_consent_open = false;
-                            if let Some((mask_index, component_index)) = self.object_pending_target.take() {
+                            self.ai.object_consent_open = false;
+                            if let Some((mask_index, component_index)) = self.ai.object_pending_target.take() {
                                 let (encoder, decoder) = self.sam21_model_paths();
                                 self.start_object_worker(mask_index, component_index, encoder, decoder);
                             }
                         }
                         if ui.button("Cancel").clicked() {
-                            self.object_consent_open = false;
-                            self.object_pending_target = None;
-                            if self.ai_mask_update_active {
+                            self.ai.object_consent_open = false;
+                            self.ai.object_pending_target = None;
+                            if self.ai.mask_update_active {
                                 self.cancel_ai_mask_update();
                             }
                         }
@@ -202,7 +202,7 @@ impl AurawApp {
                 });
         }
 
-        if let Some(message) = self.object_error_dialog.clone() {
+        if let Some(message) = self.ai.object_error_dialog.clone() {
             let mut close = false;
             crate::ui::responsive_popup(egui::Window::new("AI mask failed"), ctx, 420.0)
                 .collapsible(false)
@@ -216,7 +216,7 @@ impl AurawApp {
                     }
                 });
             if close {
-                self.object_error_dialog = None;
+                self.ai.object_error_dialog = None;
             }
         }
     }

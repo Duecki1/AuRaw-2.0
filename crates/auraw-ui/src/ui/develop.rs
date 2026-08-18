@@ -46,7 +46,7 @@ impl Develop {
             return;
         };
 
-        let Some(current_path) = app.current_path.as_deref() else {
+        let Some(current_path) = app.develop.current_path.as_deref() else {
             return;
         };
         let Some(current_index) = app.library.filmstrip_index_for_path(current_path) else {
@@ -86,7 +86,7 @@ impl Develop {
     }
 
     pub(crate) fn show_preview(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        if app.develop_reference.path.is_none() {
+        if app.develop_ui.reference.path.is_none() {
             Preview::show(ui, app, frame);
             return;
         }
@@ -109,15 +109,14 @@ impl Develop {
         }
         let min_ratio = (SPLIT_MIN_PANE_WIDTH / usable_width).min(0.45);
         let max_ratio = 1.0 - min_ratio;
-        app.develop_reference.split_ratio = app
-            .develop_reference
+        app.develop_ui.reference.split_ratio = app.develop_ui.reference
             .split_ratio
             .clamp(min_ratio, max_ratio);
 
         // Treat the center gutter as a real drag handle. Using the pointer's
         // absolute x position avoids accumulating `drag_delta()` across frames,
         // and the ratio is retained when the reference image changes.
-        let divider_left = split_rect.left() + usable_width * app.develop_reference.split_ratio;
+        let divider_left = split_rect.left() + usable_width * app.develop_ui.reference.split_ratio;
         let initial_divider_rect = egui::Rect::from_min_max(
             egui::pos2(divider_left, split_rect.top()),
             egui::pos2(divider_left + SPLIT_GAP, split_rect.bottom()),
@@ -141,14 +140,14 @@ impl Develop {
         if divider_response.dragged() {
             if let Some(pointer) = ui.ctx().input(|input| input.pointer.interact_pos()) {
                 let ratio = (pointer.x - split_rect.left() - SPLIT_GAP * 0.5) / usable_width;
-                app.develop_reference.split_ratio = ratio.clamp(min_ratio, max_ratio);
+                app.develop_ui.reference.split_ratio = ratio.clamp(min_ratio, max_ratio);
             }
         }
         if divider_response.double_clicked() {
-            app.develop_reference.split_ratio = 0.5;
+            app.develop_ui.reference.split_ratio = 0.5;
         }
 
-        let pane_width = usable_width * app.develop_reference.split_ratio;
+        let pane_width = usable_width * app.develop_ui.reference.split_ratio;
         let left_rect = egui::Rect::from_min_max(
             split_rect.min,
             egui::pos2(split_rect.left() + pane_width, split_rect.bottom()),
@@ -191,10 +190,10 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
         return;
     }
 
-    let active_path = app.current_path.clone();
-    let reference_path = app.develop_reference.path.clone();
+    let active_path = app.develop.current_path.clone();
+    let reference_path = app.develop_ui.reference.path.clone();
     let center_request = active_path.as_ref().and_then(|path| {
-        if app.develop_filmstrip_centered_path.as_ref() == Some(path) {
+        if app.develop_ui.filmstrip_centered_path.as_ref() == Some(path) {
             None
         } else {
             app.library
@@ -299,7 +298,7 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
                     ui.separator();
                     if reference {
                         if ui.button("Clear Reference Image").clicked() {
-                            app.develop_reference.clear();
+                            app.develop_ui.reference.clear();
                             ui.close();
                         }
                     } else if ui.button("Set as Reference Image").clicked() {
@@ -311,7 +310,7 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
         });
 
     if let Some(path) = centered_path {
-        app.develop_filmstrip_centered_path = Some(path);
+        app.develop_ui.filmstrip_centered_path = Some(path);
     }
 
     app.library.evict_old_textures(&protected_indices);
@@ -326,26 +325,26 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
 
 fn set_reference_image(app: &mut AurawApp, item: &DesktopFilmstripItem, context: &egui::Context) {
     let path = item.path.clone();
-    app.develop_reference.path = Some(path);
-    app.develop_reference.label = Some(item.asset.display_name.clone());
+    app.develop_ui.reference.path = Some(path);
+    app.develop_ui.reference.label = Some(item.asset.display_name.clone());
     // Install the existing catalog texture immediately so Reference mode opens
     // without a blank frame. A dedicated high-quality preview replaces it as
     // soon as the background request completes.
-    app.develop_reference.texture = item.texture.clone();
-    app.develop_reference.texture_size = item.thumbnail_size;
-    app.develop_reference.high_quality = false;
-    app.develop_reference.error = None;
-    app.develop_reference.loading_path = None;
-    app.develop_reference.preview_receiver = None;
+    app.develop_ui.reference.texture = item.texture.clone();
+    app.develop_ui.reference.texture_size = item.thumbnail_size;
+    app.develop_ui.reference.high_quality = false;
+    app.develop_ui.reference.error = None;
+    app.develop_ui.reference.loading_path = None;
+    app.develop_ui.reference.preview_receiver = None;
     start_reference_preview_load(app, context);
 }
 
 fn start_reference_preview_load(app: &mut AurawApp, context: &egui::Context) {
-    let Some(path) = app.develop_reference.path.clone() else {
+    let Some(path) = app.develop_ui.reference.path.clone() else {
         return;
     };
-    if app.develop_reference.high_quality
-        || app.develop_reference.loading_path.as_ref() == Some(&path)
+    if app.develop_ui.reference.high_quality
+        || app.develop_ui.reference.loading_path.as_ref() == Some(&path)
     {
         return;
     }
@@ -373,23 +372,22 @@ fn start_reference_preview_load(app: &mut AurawApp, context: &egui::Context) {
 
     match spawn_result {
         Ok(_) => {
-            app.develop_reference.loading_path = Some(path);
-            app.develop_reference.preview_receiver = Some(receiver);
+            app.develop_ui.reference.loading_path = Some(path);
+            app.develop_ui.reference.preview_receiver = Some(receiver);
         }
         Err(error) => {
-            app.develop_reference.error =
+            app.develop_ui.reference.error =
                 Some(format!("could not start reference preview worker: {error}"));
         }
     }
 }
 
 fn sync_reference_texture(app: &mut AurawApp, context: &egui::Context) {
-    let Some(path) = app.develop_reference.path.clone() else {
+    let Some(path) = app.develop_ui.reference.path.clone() else {
         return;
     };
 
-    let event = app
-        .develop_reference
+    let event = app.develop_ui.reference
         .preview_receiver
         .as_ref()
         .and_then(|receiver| match receiver.try_recv() {
@@ -401,48 +399,48 @@ fn sync_reference_texture(app: &mut AurawApp, context: &egui::Context) {
         });
 
     if let Some(event) = event {
-        app.develop_reference.preview_receiver = None;
-        app.develop_reference.loading_path = None;
+        app.develop_ui.reference.preview_receiver = None;
+        app.develop_ui.reference.loading_path = None;
         match event {
             Ok((loaded_path, Ok(thumbnail))) if loaded_path == path => {
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [thumbnail.width as usize, thumbnail.height as usize],
                     &thumbnail.rgba,
                 );
-                app.develop_reference.texture = Some(context.load_texture(
+                app.develop_ui.reference.texture = Some(context.load_texture(
                     format!("develop-reference-high-quality-{}", loaded_path.display()),
                     image,
                     egui::TextureOptions::LINEAR,
                 ));
-                app.develop_reference.texture_size = Some([thumbnail.width, thumbnail.height]);
-                app.develop_reference.high_quality = true;
-                app.develop_reference.error = None;
+                app.develop_ui.reference.texture_size = Some([thumbnail.width, thumbnail.height]);
+                app.develop_ui.reference.high_quality = true;
+                app.develop_ui.reference.error = None;
             }
             Ok((loaded_path, Err(error))) if loaded_path == path => {
-                app.develop_reference.error = Some(error);
+                app.develop_ui.reference.error = Some(error);
             }
             Ok(_) => {}
-            Err(error) => app.develop_reference.error = Some(error),
+            Err(error) => app.develop_ui.reference.error = Some(error),
         }
     }
 
     // Keep the existing 512 px catalog texture as an immediate placeholder.
     // If it was evicted before Reference mode opened, ask the normal thumbnail
     // worker to repopulate it while the high-quality request is running.
-    if app.develop_reference.texture.is_none() {
+    if app.develop_ui.reference.texture.is_none() {
         if let Some(index) = app.library.filmstrip_index_for_path(&path) {
             app.library.touch_and_request_thumbnail(index, context);
             if let Some(item) = app.library.filmstrip_item(index) {
-                app.develop_reference.label = Some(item.asset.display_name);
-                app.develop_reference.texture = item.texture;
-                app.develop_reference.texture_size = item.thumbnail_size;
+                app.develop_ui.reference.label = Some(item.asset.display_name);
+                app.develop_ui.reference.texture = item.texture;
+                app.develop_ui.reference.texture_size = item.thumbnail_size;
             }
         }
     }
 
-    if !app.develop_reference.high_quality
-        && app.develop_reference.preview_receiver.is_none()
-        && app.develop_reference.error.is_none()
+    if !app.develop_ui.reference.high_quality
+        && app.develop_ui.reference.preview_receiver.is_none()
+        && app.develop_ui.reference.error.is_none()
     {
         start_reference_preview_load(app, context);
     }
@@ -461,9 +459,8 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 0.0, Color32::from_rgb(15, 16, 18));
 
-            if let Some(texture) = app.develop_reference.texture.as_ref() {
-                let texture_size = app
-                    .develop_reference
+            if let Some(texture) = app.develop_ui.reference.texture.as_ref() {
+                let texture_size = app.develop_ui.reference
                     .texture_size
                     .map(|[width, height]| egui::vec2(width as f32, height as f32))
                     .unwrap_or_else(|| texture.size_vec2());
@@ -487,9 +484,9 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
                     .request_repaint_after(std::time::Duration::from_millis(80));
             }
 
-            if !app.develop_reference.high_quality
-                && app.develop_reference.loading_path.is_some()
-                && app.develop_reference.texture.is_some()
+            if !app.develop_ui.reference.high_quality
+                && app.develop_ui.reference.loading_path.is_some()
+                && app.develop_ui.reference.texture.is_some()
             {
                 painter.text(
                     rect.right_bottom() - egui::vec2(12.0, 12.0),
@@ -500,7 +497,7 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
                 );
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(80));
-            } else if let Some(error) = app.develop_reference.error.as_deref() {
+            } else if let Some(error) = app.develop_ui.reference.error.as_deref() {
                 painter.text(
                     rect.right_bottom() - egui::vec2(12.0, 12.0),
                     Align2::RIGHT_BOTTOM,
@@ -534,10 +531,10 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
                     .corner_radius(5.0),
             );
             if close.clicked() {
-                app.develop_reference.clear();
+                app.develop_ui.reference.clear();
             }
 
-            if let Some(label) = app.develop_reference.label.as_deref() {
+            if let Some(label) = app.develop_ui.reference.label.as_deref() {
                 let text_rect = egui::Rect::from_min_max(
                     egui::pos2(rect.left() + 10.0, rect.bottom() - 34.0),
                     egui::pos2(rect.right() - 10.0, rect.bottom() - 8.0),

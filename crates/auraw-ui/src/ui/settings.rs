@@ -75,7 +75,7 @@ impl Settings {
 
         Self::group(ui, content_width, |ui| {
             ui.heading("Interface");
-            ui.checkbox(&mut app.expert_mode, "Expert mode")
+            ui.checkbox(&mut app.ui.expert_mode, "Expert mode")
                 .on_hover_text(
                     "Show detailed creative-effect tuning, darktable-style rendering internals, and RAW reconstruction controls. Disabled by default.",
                 );
@@ -87,21 +87,21 @@ impl Settings {
             );
 
             ui.separator();
-            let previous_quality = app.preview_quality;
+            let previous_quality = app.preview.quality;
             crate::ui::theme::form_combo(
                 ui,
                 "Preview quality",
                 "settings-preview-quality",
-                app.preview_quality.label(),
+                app.preview.quality.label(),
                 160.0,
                 |ui| {
-                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Low, "Low");
-                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Medium, "Medium");
-                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::High, "High");
-                    ui.selectable_value(&mut app.preview_quality, PreviewQuality::Max, "Max");
+                    ui.selectable_value(&mut app.preview.quality, PreviewQuality::Low, "Low");
+                    ui.selectable_value(&mut app.preview.quality, PreviewQuality::Medium, "Medium");
+                    ui.selectable_value(&mut app.preview.quality, PreviewQuality::High, "High");
+                    ui.selectable_value(&mut app.preview.quality, PreviewQuality::Max, "Max");
                 },
             );
-            if app.preview_quality != previous_quality {
+            if app.preview.quality != previous_quality {
                 app.preview_quality_changed();
             }
             ui.add(
@@ -114,7 +114,7 @@ impl Settings {
             ui.separator();
             if ui
                 .checkbox(
-                    &mut app.image_relative_brush_size,
+                    &mut app.preferences.image_relative_brush_size,
                     "Keep brush size fixed to the image",
                 )
                 .on_hover_text(
@@ -125,7 +125,7 @@ impl Settings {
                 app.persist_performance_settings();
             }
             ui.add(
-                egui::Label::new(if app.image_relative_brush_size {
+                egui::Label::new(if app.preferences.image_relative_brush_size {
                     "Brushes keep the same image footprint at every zoom level."
                 } else {
                     "Brushes keep the same on-screen footprint at every zoom level."
@@ -135,7 +135,7 @@ impl Settings {
 
             ui.separator();
             ui.strong("Library performance");
-            let mut raw_cache_files = app.raw_cache_limit();
+            let mut raw_cache_files = app.develop.raw_cache_limit;
             if adjustment_slider(
                 ui,
                 "Decoded RAW cache",
@@ -211,7 +211,7 @@ impl Settings {
                 );
                 ui.add_space(4.0);
 
-                let mut enabled = app.display_color_management;
+                let mut enabled = app.preferences.display_color_management;
                 if ui
                     .checkbox(&mut enabled, "Use monitor color profile")
                     .on_hover_text(
@@ -225,18 +225,18 @@ impl Settings {
                 ui.separator();
                 ui.strong("Active display profile");
                 ui.add(
-                    egui::Label::new(egui::RichText::new(&app.display_profile_label).strong())
+                    egui::Label::new(egui::RichText::new(&app.preferences.display_profile_label).strong())
                         .wrap(),
                 );
-                if let Some(source) = app.display_profile_source() {
+                if let Some(source) = app.preferences.display_profile_source.as_deref() {
                     ui.add(egui::Label::new(egui::RichText::new(source).monospace()).wrap());
-                } else if app.display_color_management {
+                } else if app.preferences.display_color_management {
                     ui.small("No OS monitor profile was found; sRGB is used as the safe fallback.");
                 }
 
                 ui.separator();
                 ui.strong("Manual override");
-                if let Some(path) = app.display_profile_override.as_deref() {
+                if let Some(path) = app.preferences.display_profile_override.as_deref() {
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(path.display().to_string()).monospace(),
@@ -256,7 +256,7 @@ impl Settings {
                     }
                     if ui
                         .add_enabled(
-                            app.display_profile_override.is_some(),
+                            app.preferences.display_profile_override.is_some(),
                             egui::Button::new("Use automatic"),
                         )
                         .clicked()
@@ -281,7 +281,7 @@ impl Settings {
             );
             ui.add_space(4.0);
 
-            let mut settings = app.adjustment_copy_settings;
+            let mut settings = app.preferences.adjustment_copy_settings;
             let mut changed = false;
             changed |= ui
                 .checkbox(&mut settings.adjustments, "Adjustments")
@@ -327,7 +327,7 @@ impl Settings {
                 );
             ui.add_space(4.0);
 
-            let previous_mode = app.camera_profile_mode;
+            let previous_mode = app.preferences.camera_profile_mode;
             let mut mode = previous_mode;
             crate::ui::theme::form_combo(
                 ui,
@@ -353,7 +353,7 @@ impl Settings {
                 app.set_camera_profile_mode(mode);
             }
 
-            let description = match app.camera_profile_mode {
+            let description = match app.preferences.camera_profile_mode {
                     CameraProfileMode::Automatic => {
                         "Automatic uses the RAW's embedded camera matrix by default. A DCP chosen for an individual image remains explicit."
                     }
@@ -369,17 +369,17 @@ impl Settings {
             ui.separator();
             ui.strong("Camera profile folder");
             #[cfg(target_os = "android")]
-            if let Some(label) = &app.camera_profile_folder_importing_label {
+            if let Some(label) = &app.android.camera_profile_folder_importing_label {
                 ui.add(
                     egui::Label::new(egui::RichText::new(format!("Importing {label}…")).strong())
                         .wrap(),
                 );
                 ui.small("Copying .dcp files into AuRaw's persistent private storage. Large Adobe CameraProfiles trees can take a moment.");
-            } else if let Some(path) = &app.camera_profile_folder {
+            } else if let Some(path) = &app.preferences.camera_profile_folder {
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(
-                            app.camera_profile_folder_label
+                            app.preferences.camera_profile_folder_label
                                 .as_deref()
                                 .unwrap_or("CameraProfiles"),
                         )
@@ -393,10 +393,10 @@ impl Settings {
                 ui.small("No external DCP folder selected.");
             }
             #[cfg(not(target_os = "android"))]
-            if let Some(path) = &app.camera_profile_folder {
+            if let Some(path) = &app.preferences.camera_profile_folder {
                 #[cfg(not(target_os = "android"))]
                 {
-                    if let Some(label) = &app.camera_profile_folder_label {
+                    if let Some(label) = &app.preferences.camera_profile_folder_label {
                         ui.small(label);
                     }
                     ui.add(
@@ -411,7 +411,7 @@ impl Settings {
             }
             crate::ui::theme::action_row(ui, |ui| {
                 #[cfg(target_os = "android")]
-                let choose_label = if app.camera_profile_folder_importing_label.is_some() {
+                let choose_label = if app.android.camera_profile_folder_importing_label.is_some() {
                     "Importing…"
                 } else {
                     "Choose folder…"
@@ -420,7 +420,7 @@ impl Settings {
                 let choose_label = "Choose folder…";
 
                 #[cfg(target_os = "android")]
-                let choose_enabled = !app.picker_pending;
+                let choose_enabled = !app.android.picker_pending;
                 #[cfg(not(target_os = "android"))]
                 let choose_enabled = true;
 
@@ -435,9 +435,9 @@ impl Settings {
                     app.auto_detect_camera_profile_folder();
                 }
                 let can_clear =
-                    app.camera_profile_folder.is_some() || app.camera_profile_auto_detect;
+                    app.preferences.camera_profile_folder.is_some() || app.preferences.camera_profile_auto_detect;
                 #[cfg(target_os = "android")]
-                let can_clear = can_clear && !app.picker_pending;
+                let can_clear = can_clear && !app.android.picker_pending;
                 if ui
                     .add_enabled(can_clear, egui::Button::new("Clear"))
                     .clicked()
@@ -472,7 +472,7 @@ impl Settings {
             ui.add_space(8.0);
             Self::group(ui, content_width, |ui| {
                 ui.heading("AI models");
-                let mut acceleration = app.ai_gpu_acceleration;
+                let mut acceleration = app.ai.gpu_acceleration;
                 if ui
                     .checkbox(
                         &mut acceleration,
@@ -494,7 +494,7 @@ impl Settings {
 
                 ui.separator();
                 ui.strong("Subject masks");
-                let previous_quality = app.birefnet_quality;
+                let previous_quality = app.ai.birefnet_quality;
                 let mut quality = previous_quality;
                 ui.add_enabled_ui(app.birefnet_quality_change_enabled(), |ui| {
                     crate::ui::theme::form_combo(
@@ -527,7 +527,7 @@ impl Settings {
                 };
                 ui.add(egui::Label::new(runtime_help).wrap());
                 ui.add_space(4.0);
-                if let Some(path) = &app.onnx_runtime_path {
+                if let Some(path) = &app.ai.runtime_path {
                     ui.label("Selected runtime:");
                     ui.add(
                         egui::Label::new(
@@ -535,7 +535,7 @@ impl Settings {
                         )
                         .wrap(),
                     );
-                    if let Some(sha256) = &app.onnx_runtime_sha256 {
+                    if let Some(sha256) = &app.ai.runtime_sha256 {
                         ui.small("Pinned SHA-256:");
                         ui.add(egui::Label::new(egui::RichText::new(sha256).monospace()).wrap());
                     }
@@ -551,7 +551,7 @@ impl Settings {
                     }
                     if ui
                         .add_enabled(
-                            app.onnx_runtime_path.is_some(),
+                            app.ai.runtime_path.is_some(),
                             eframe::egui::Button::new("Clear"),
                         )
                         .clicked()
@@ -616,7 +616,7 @@ impl Settings {
             );
         });
 
-        if !app.expert_mode {
+        if !app.ui.expert_mode {
             return;
         }
 
@@ -637,7 +637,7 @@ impl Settings {
                 ui,
                 "Method",
                 "settings-highlight-reconstruction-method",
-                match app.exposure.highlight_method {
+                match app.develop.exposure.highlight_method {
                     HighlightReconstructionMethod::Off => "Off",
                     HighlightReconstructionMethod::Lch => "LCh (fast)",
                     HighlightReconstructionMethod::InpaintOpposed => "Inpaint opposed",
@@ -646,21 +646,21 @@ impl Settings {
                 |ui| {
                     changed |= ui
                         .selectable_value(
-                            &mut app.exposure.highlight_method,
+                            &mut app.develop.exposure.highlight_method,
                             HighlightReconstructionMethod::Off,
                             "Off",
                         )
                         .changed();
                     changed |= ui
                         .selectable_value(
-                            &mut app.exposure.highlight_method,
+                            &mut app.develop.exposure.highlight_method,
                             HighlightReconstructionMethod::Lch,
                             "LCh (fast)",
                         )
                         .changed();
                     changed |= ui
                         .selectable_value(
-                            &mut app.exposure.highlight_method,
+                            &mut app.develop.exposure.highlight_method,
                             HighlightReconstructionMethod::InpaintOpposed,
                             "Inpaint opposed",
                         )
@@ -668,22 +668,22 @@ impl Settings {
                 },
             );
 
-            let enabled = app.exposure.highlight_method != HighlightReconstructionMethod::Off;
+            let enabled = app.develop.exposure.highlight_method != HighlightReconstructionMethod::Off;
             ui.add_enabled_ui(enabled, |ui| {
                 changed |= adjustment_slider(
                     ui,
                     "Clip threshold",
-                    &mut app.exposure.highlight_clip,
+                    &mut app.develop.exposure.highlight_clip,
                     0.5..=2.0,
                     2,
                     0.01,
                     Some("Sensor-relative level at which a channel is treated as clipped."),
                 );
-                if app.exposure.highlight_method == HighlightReconstructionMethod::Lch {
+                if app.develop.exposure.highlight_method == HighlightReconstructionMethod::Lch {
                     changed |= adjustment_slider(
                         ui,
                         "Reconstruction strength",
-                        &mut app.exposure.highlight_reconstruction,
+                        &mut app.develop.exposure.highlight_reconstruction,
                         0.0..=1.0,
                         2,
                         0.01,

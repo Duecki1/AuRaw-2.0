@@ -84,7 +84,7 @@ impl AurawApp {
     }
 
     pub(crate) fn show_foreground_operation_dialog(&mut self, ctx: &egui::Context) {
-        if self.library_ai_mask_refresh.is_some() {
+        if self.ai.library_mask_refresh.is_some() {
             return;
         }
         let Some(operation) = self.foreground_operation.as_ref() else {
@@ -159,7 +159,7 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub(crate) fn android_foreground_task_active(&self) -> bool {
-        self.foreground_operation_active() || self.library_ai_mask_refresh.is_some()
+        self.foreground_operation_active() || self.ai.library_mask_refresh.is_some()
     }
 }
 

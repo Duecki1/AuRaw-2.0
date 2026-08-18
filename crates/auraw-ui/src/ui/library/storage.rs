@@ -96,13 +96,13 @@ pub(super) fn delete_library_asset(
         let path = asset
             .desktop_path()
             .ok_or_else(|| "Library asset is not available from desktop storage".to_owned())?;
-        let was_current = app.current_path.as_deref() == Some(path);
+        let was_current = app.develop.current_path.as_deref() == Some(path);
         if was_current {
             app.detach_current_file_for_library_action(path);
         }
         remove_local_raw_bundle(path)?;
         if was_current {
-            app.current_path = None;
+            app.develop.current_path = None;
         }
         Ok(())
     }

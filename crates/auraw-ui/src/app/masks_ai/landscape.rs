@@ -7,13 +7,12 @@ impl AurawApp {
         mask_index: usize,
         component_index: usize,
     ) {
-        self.object_error_dialog = None;
+        self.ai.object_error_dialog = None;
         if self.foreground_operation_active() {
-            self.notice = Some("Finish or cancel the current editing operation first.".to_owned());
+            self.ui.notice = Some("Finish or cancel the current editing operation first.".to_owned());
             return;
         }
-        let valid = self
-            .masks
+        let valid = self.masks.stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -24,7 +23,7 @@ impl AurawApp {
                 )
             });
         if !valid {
-            self.notice = Some("The selected landscape mask is no longer available.".to_owned());
+            self.ui.notice = Some("The selected landscape mask is no longer available.".to_owned());
             return;
         }
         #[cfg(not(target_os = "android"))]
@@ -41,8 +40,8 @@ impl AurawApp {
         {
             self.start_landscape_worker(mask_index, component_index, path, false);
         } else {
-            self.landscape_pending_target = Some((mask_index, component_index));
-            self.landscape_consent_open = true;
+            self.ai.landscape_pending_target = Some((mask_index, component_index));
+            self.ai.landscape_consent_open = true;
             self.egui_ctx.request_repaint();
         }
     }
@@ -57,8 +56,8 @@ impl AurawApp {
         if self.foreground_operation_active() {
             return;
         }
-        let Some(source) = self.mask_source_cache.clone() else {
-            self.notice =
+        let Some(source) = self.masks.source_cache.clone() else {
+            self.ui.notice =
                 Some("The preview could not be prepared for landscape selection.".to_owned());
             return;
         };
@@ -66,13 +65,12 @@ impl AurawApp {
         let needs_download = !crate::ai_masks::landscape_model_is_verified(&model_path)
             || !crate::ai_masks::vitmatte_model_is_verified(&vitmatte_path);
         if needs_download && !allow_download {
-            self.landscape_pending_target = Some((mask_index, component_index));
-            self.landscape_consent_open = true;
+            self.ai.landscape_pending_target = Some((mask_index, component_index));
+            self.ai.landscape_consent_open = true;
             self.egui_ctx.request_repaint();
             return;
         }
-        let Some(category) = self
-            .masks
+        let Some(category) = self.masks.stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -81,17 +79,17 @@ impl AurawApp {
                 _ => None,
             })
         else {
-            self.notice = Some("The selected landscape mask is no longer available.".to_owned());
+            self.ui.notice = Some("The selected landscape mask is no longer available.".to_owned());
             return;
         };
-        let Some(target) = self.capture_ai_mask_target(mask_index, component_index) else {
-            self.notice = Some("The selected landscape mask is no longer available.".to_owned());
+        let Some(target) = self.masks.capture_ai_target(mask_index, component_index) else {
+            self.ui.notice = Some("The selected landscape mask is no longer available.".to_owned());
             return;
         };
         #[cfg(not(target_os = "android"))]
-        let runtime_path = self.onnx_runtime_path.clone();
+        let runtime_path = self.ai.runtime_path.clone();
         #[cfg(not(target_os = "android"))]
-        let runtime_sha256 = self.onnx_runtime_sha256.clone();
+        let runtime_sha256 = self.ai.runtime_sha256.clone();
         #[cfg(target_os = "android")]
         let runtime_path = None;
         #[cfg(target_os = "android")]
@@ -119,7 +117,7 @@ impl AurawApp {
         });
         self.begin_foreground_operation(ForegroundOperation {
             kind: ForegroundOperationKind::LandscapeMask,
-            document_id: self.sidecar_generation,
+            document_id: self.persistence.sidecar_generation,
             cancellation,
             progress,
             cancelling: false,
@@ -186,17 +184,17 @@ impl AurawApp {
             }
             _ => (None, None),
         };
-        let updating_all = self.ai_mask_update_active && target.is_some();
-        let library_refresh = self.library_ai_mask_refresh.is_some();
+        let updating_all = self.ai.mask_update_active && target.is_some();
+        let library_refresh = self.ai.library_mask_refresh.is_some();
         let cancelled = operation.is_cancelled();
-        let stale = operation.document_id != self.sidecar_generation;
+        let stale = operation.document_id != self.persistence.sidecar_generation;
 
         let mut succeeded = false;
         let mut error_message = None;
         if !cancelled && !stale {
             match (target, job_category, result) {
                 (Some(target), Some(expected_category), Ok(result)) => {
-                    let location = self.resolve_ai_mask_target(&target);
+                    let location = self.masks.resolve_ai_target(&target);
                     let mask_image = MaskImage::new(result.width, result.height, result.mask);
                     match (location, mask_image) {
                         (_, None) => {
@@ -207,8 +205,7 @@ impl AurawApp {
                         }
                         (Err(error), Some(_)) => error_message = Some(error),
                         (Ok((mask_index, component_index)), Some(mask_image)) => {
-                            let applied = self
-                                .masks
+                            let applied = self.masks.stack
                                 .masks
                                 .get_mut(mask_index)
                                 .and_then(|mask| mask.components.get_mut(component_index))
@@ -247,9 +244,9 @@ impl AurawApp {
             if cancelled {
                 self.cancel_ai_mask_update();
             } else if updating_all {
-                self.ai_mask_update_failed |= !succeeded;
+                self.ai.mask_update_failed |= !succeeded;
                 if let Some(message) = error_message.clone() {
-                    self.notice = Some(message);
+                    self.ui.notice = Some(message);
                 }
                 self.continue_ai_mask_update();
             }
@@ -261,7 +258,7 @@ impl AurawApp {
                     "Landscape selection did not produce a mask.".to_owned()
                 }
             });
-            self.notice = Some(message);
+            self.ui.notice = Some(message);
         }
         self.egui_ctx.request_repaint();
     }

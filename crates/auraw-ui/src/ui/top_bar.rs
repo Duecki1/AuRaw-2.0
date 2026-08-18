@@ -115,13 +115,13 @@ impl TopBar {
                     (AppTab::Develop, "Develop"),
                     (AppTab::Settings, "Settings"),
                 ] {
-                    if theme::tab_button(ui, label, app.active_tab == tab, tab_width).clicked() {
+                    if theme::tab_button(ui, label, app.ui.active_tab == tab, tab_width).clicked() {
                         app.activate_tab(tab);
                     }
                 }
 
                 ui.separator();
-                if app.active_tab == AppTab::Library {
+                if app.ui.active_tab == AppTab::Library {
                     let open = if compact {
                         crate::ui::icons::phosphor_icon_button(
                             ui,
@@ -138,7 +138,7 @@ impl TopBar {
                     }
                 }
 
-                if app.active_tab == AppTab::Develop {
+                if app.ui.active_tab == AppTab::Develop {
                     if Self::history_icon_button(
                         ui,
                         app.can_undo_edit(),
@@ -183,7 +183,7 @@ impl TopBar {
                     if save_response.clicked() {
                         app.save_edits_now();
                     }
-                    let original_visible = app.original_preview_visible();
+                    let original_visible = app.preview.original_visible();
                     let preview_icon = if original_visible {
                         egui_phosphor::regular::EYE
                     } else {
@@ -196,7 +196,7 @@ impl TopBar {
                     };
                     if crate::ui::icons::phosphor_icon_toggle_button_enabled(
                         ui,
-                        app.gpu_pipeline.is_some(),
+                        app.preview.gpu_pipeline.is_some(),
                         preview_icon,
                         original_visible,
                         theme::toolbar_icon_size(),

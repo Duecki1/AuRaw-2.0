@@ -12,7 +12,7 @@ impl AurawApp {
         }
         #[cfg(target_os = "android")]
         {
-            self.android_app
+            self.android.android_app
                 .internal_data_path()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("models")
@@ -29,7 +29,7 @@ impl AurawApp {
 
     pub(in crate::app) fn birefnet_model_path(&self) -> PathBuf {
         self.ai_model_root()
-            .join(self.birefnet_quality.model().cache_filename)
+            .join(self.ai.birefnet_quality.model().cache_filename)
     }
 
     pub(in crate::app) fn vitmatte_model_path(&self) -> PathBuf {
@@ -106,20 +106,19 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn choose_onnx_runtime(&mut self) {
-        if self.desktop_picker_receiver.is_some() {
+        if self.ui.desktop_picker_receiver.is_some() {
             return;
         }
         let mut dialog = rfd::AsyncFileDialog::new()
             .set_title("Select the ONNX Runtime shared library");
-        if let Some(parent) = self
-            .onnx_runtime_path
+        if let Some(parent) = self.ai.runtime_path
             .as_deref()
             .and_then(|path| path.parent())
             .filter(|parent| !parent.as_os_str().is_empty())
         {
             dialog = dialog.set_directory(parent);
         }
-        self.desktop_picker_receiver = Some(spawn_ui_worker(&self.egui_ctx, move || {
+        self.ui.desktop_picker_receiver = Some(spawn_ui_worker(&self.egui_ctx, move || {
             let result = pollster::block_on(dialog.pick_file())
                 .map(|handle| handle.path().to_path_buf())
                 .map(Self::validate_and_persist_onnx_runtime)
@@ -167,13 +166,13 @@ impl AurawApp {
     pub(crate) fn clear_onnx_runtime(&mut self) {
         match Self::persist_onnx_runtime_selection(None) {
             Ok(()) => {
-                self.onnx_runtime_path = None;
-                self.onnx_runtime_sha256 = None;
-                self.notice = Some(
+                self.ai.runtime_path = None;
+                self.ai.runtime_sha256 = None;
+                self.ui.notice = Some(
                     "ONNX Runtime selection cleared. Restart AuRaw to apply the change.".to_owned(),
                 );
             }
-            Err(error) => self.notice = Some(error),
+            Err(error) => self.ui.notice = Some(error),
         }
     }
 }
