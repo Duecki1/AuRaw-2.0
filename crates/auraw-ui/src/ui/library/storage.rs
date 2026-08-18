@@ -28,6 +28,9 @@ pub(super) fn reset_asset_adjustments(
     asset: &LibraryAsset,
 ) -> Result<bool, String> {
     #[cfg(not(target_os = "android"))]
+    let _ = app;
+
+    #[cfg(not(target_os = "android"))]
     {
         let path = asset
             .desktop_path()
@@ -49,6 +52,9 @@ pub(super) fn rename_asset(
     asset: &LibraryAsset,
     requested_name: &str,
 ) -> Result<LibraryAsset, String> {
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
+
     #[cfg(not(target_os = "android"))]
     {
         let path = asset

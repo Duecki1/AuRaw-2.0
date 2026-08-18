@@ -372,8 +372,10 @@ pub(super) fn validate_library_item_name(name: &str, raw: bool) -> Result<(), St
 pub(super) fn show_library_raw_name_dialog(
     ui: &mut Ui,
     app: &mut AurawApp,
-    _frame: &eframe::Frame,
+    frame: &eframe::Frame,
 ) {
+    #[cfg(target_os = "android")]
+    let _ = frame;
     let mut close = false;
     let mut rename = None;
     if let Some(dialog) = app.library.raw_name_dialog.as_mut() {
@@ -457,7 +459,7 @@ pub(super) fn show_library_raw_name_dialog(
                         crate::sidecar::SidecarTarget::Desktop {
                             raw_path: destination,
                         },
-                        _frame,
+                        frame,
                         None,
                     );
                 }
