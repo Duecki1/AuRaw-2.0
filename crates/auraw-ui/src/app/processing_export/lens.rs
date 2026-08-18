@@ -5,7 +5,7 @@ impl AurawApp {
         self.note_edit_changed();
         if self.original_raw.is_some() {
             self.lens_correction_dirty = true;
-            self.lens_correction_generation = self.lens_correction_generation.wrapping_add(1);
+            self.cancel_foreground_operation_if(ForegroundOperationKind::LensCorrection);
             self.notice = None;
             self.egui_ctx.request_repaint();
         }
@@ -17,16 +17,17 @@ impl AurawApp {
 
     pub(in crate::app) fn queue_pending_lens_correction(&mut self, frame: &eframe::Frame) {
         self.poll_lens_correction_worker(frame);
-        if !self.lens_correction_dirty {
+        if !self.lens_correction_dirty || self.foreground_operation_active() {
             return;
         }
-        self.lens_correction_dirty = false;
 
         let Some(original_raw) = self.original_raw.as_ref().map(Arc::clone) else {
+            self.lens_correction_dirty = false;
             return;
         };
         let selection = if self.lens_correction.enabled {
             let Some(selection) = self.lens_correction.selected_lens() else {
+                self.lens_correction_dirty = false;
                 self.lens_correction.enabled = false;
                 self.lens_correction.applied = false;
                 self.lens_correction.catalog.status =
@@ -63,69 +64,55 @@ impl AurawApp {
         #[cfg(not(target_os = "android"))]
         let cached_raws = None;
 
-        let generation = self.lens_correction_generation;
-        let document_id = self.sidecar_generation;
-        let name = selection
-            .as_ref()
-            .map(|lens| format!("Applying {}", lens.label()))
-            .unwrap_or_else(|| "Disabling lens correction".to_owned());
         let preview_proxy_edge = self.preview_quality.proxy_edge_for_fitted_source(
             self.preview_viewport_pixels,
             original_raw.width,
             original_raw.height,
             self.geometry,
         );
-        self.enqueue_lens_background_action(
-            LensCorrectionTaskRequest {
-                document_id,
-                generation,
-                original_raw,
-                selection,
-                #[cfg(target_os = "android")]
-                preview_quality: self.preview_quality,
-                preview_proxy_edge,
-                cached_raws,
-            },
-            name,
-        );
+        self.lens_correction_dirty = false;
+        self.start_lens_correction_task(LensCorrectionTaskRequest {
+            original_raw,
+            selection,
+            #[cfg(target_os = "android")]
+            preview_quality: self.preview_quality,
+            preview_proxy_edge,
+            cached_raws,
+        });
     }
 
-    pub(in crate::app) fn start_lens_correction_task(&mut self, id: TaskId, request: LensCorrectionTaskRequest) {
-        let Some(cancellation) = self.background_tasks.cancellation_token(id) else {
-            self.fail_background_task(id, "Lens correction lost its cancellation state.");
+    pub(in crate::app) fn start_lens_correction_task(&mut self, request: LensCorrectionTaskRequest) {
+        if self.foreground_operation_active() {
+            self.lens_correction_dirty = true;
             return;
-        };
-        self.lens_correction_task_id = Some(id);
+        }
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancellation = Arc::clone(&cancellation);
         let status_label = request
             .selection
             .as_ref()
             .map(LensfunLens::label)
             .unwrap_or_else(|| "original RAW geometry".to_owned());
         self.lens_correction.catalog.status = if request.selection.is_some() {
-            format!("Applying {status_label} in the background…")
+            format!("Applying {status_label}…")
         } else {
-            "Disabling lens correction in the background…".to_owned()
+            "Disabling lens correction…".to_owned()
         };
-        self.background_tasks.update_progress(
-            id,
-            TaskProgress::indeterminate(if request.selection.is_some() {
-                "Applying profile…"
-            } else {
-                "Restoring original RAW geometry…"
-            }),
-        );
+        let progress = ForegroundProgress::indeterminate(if request.selection.is_some() {
+            "Applying lens profile…"
+        } else {
+            "Restoring original RAW geometry…"
+        });
 
         let repaint = self.egui_ctx.clone();
         let (sender, receiver) = mpsc::channel();
-        let document_id = request.document_id;
-        let generation = request.generation;
         let spawn_result = std::thread::Builder::new()
             .name("auraw-lens-correction".to_owned())
             .spawn(move || {
                 use std::sync::atomic::Ordering;
                 let result = (|| -> Result<PreparedLensCorrection, String> {
-                    if cancellation.load(Ordering::Acquire) {
-                        return Err("background task cancelled".to_owned());
+                    if worker_cancellation.load(Ordering::Acquire) {
+                        return Err("foreground operation cancelled".to_owned());
                     }
                     let applied_label = request.selection.as_ref().map(LensfunLens::label);
                     let (full_raw, preview_raw) = if let Some(cached_raws) = request.cached_raws {
@@ -146,15 +133,12 @@ impl AurawApp {
                         } else {
                             original_raw
                         };
-                        if cancellation.load(Ordering::Acquire) {
-                            return Err("background task cancelled".to_owned());
+                        if worker_cancellation.load(Ordering::Acquire) {
+                            return Err("foreground operation cancelled".to_owned());
                         }
-                        let _ = sender.send(LensCorrectionEvent::Progress {
-                            task_id: id,
-                            document_id,
-                            generation,
-                            phase: "Building preview proxy…".to_owned(),
-                        });
+                        let _ = sender.send(LensCorrectionEvent::Progress(
+                            "Building preview proxy…".to_owned(),
+                        ));
                         repaint.request_repaint();
                         let preview_spec = ProxySpec {
                             max_edge: request.preview_proxy_edge,
@@ -167,8 +151,8 @@ impl AurawApp {
                             };
                         (full_raw, preview_raw)
                     };
-                    if cancellation.load(Ordering::Acquire) {
-                        return Err("background task cancelled".to_owned());
+                    if worker_cancellation.load(Ordering::Acquire) {
+                        return Err("foreground operation cancelled".to_owned());
                     }
                     Ok(PreparedLensCorrection {
                         full_raw,
@@ -180,125 +164,95 @@ impl AurawApp {
                         preview_quality: request.preview_quality,
                     })
                 })();
-                let _ = sender.send(LensCorrectionEvent::Finished {
-                    task_id: id,
-                    document_id,
-                    generation,
-                    result,
-                });
+                let _ = sender.send(LensCorrectionEvent::Finished(result));
                 repaint.request_repaint();
             });
         match spawn_result {
             Ok(_) => {
-                self.lens_correction_receiver = Some(receiver);
+                self.begin_foreground_operation(ForegroundOperation {
+                    kind: ForegroundOperationKind::LensCorrection,
+                    document_id: self.sidecar_generation,
+                    cancellation,
+                    progress,
+                    cancelling: false,
+                    receiver: ForegroundOperationReceiver::LensCorrection(receiver),
+                    context: ForegroundOperationContext::LensCorrection,
+                });
                 self.egui_ctx.request_repaint_after(Duration::from_millis(50));
             }
             Err(error) => {
-                self.lens_correction_task_id = None;
-                self.fail_background_task(id, format!("Could not start lens correction: {error}"));
+                self.lens_correction.enabled = self.lens_correction.applied;
+                self.lens_correction.catalog.status =
+                    format!("Could not start lens correction: {error}");
+                self.notice = Some(self.lens_correction.catalog.status.clone());
             }
         }
     }
 
     pub(crate) fn lens_correction_busy(&self) -> bool {
-        self.lens_correction_receiver.is_some()
-            || self.background_task_snapshots().iter().any(|task| {
-                matches!(task.kind, TaskKind::LensCorrection { .. })
-                    && task.status != TaskStatus::Failed
-            })
+        self.lens_correction_dirty
+            || self.foreground_operation_is(ForegroundOperationKind::LensCorrection)
     }
 
     pub(in crate::app) fn poll_lens_correction_worker(&mut self, frame: &eframe::Frame) {
-        let (events, disconnected) = drain_worker_events(
-            self.lens_correction_receiver.as_ref(),
-            |event| matches!(event, LensCorrectionEvent::Finished { .. }),
-        );
+        if !self.foreground_operation_is(ForegroundOperationKind::LensCorrection) {
+            return;
+        }
+        let Some(mut operation) = self.foreground_operation.take() else {
+            return;
+        };
+        let ForegroundOperationReceiver::LensCorrection(receiver) = &operation.receiver else {
+            self.foreground_operation = Some(operation);
+            return;
+        };
+        let (events, disconnected) = drain_worker_events(Some(receiver), |event| {
+            matches!(event, LensCorrectionEvent::Finished(_))
+        });
 
         let mut finished = None;
         for event in events {
             match event {
-                LensCorrectionEvent::Progress {
-                    task_id,
-                    document_id,
-                    generation,
-                    phase,
-                } => {
-                    if document_id == self.sidecar_generation
-                        && generation == self.lens_correction_generation
-                        && !self.background_task_cancelled(task_id)
-                    {
-                        self.update_background_progress(
-                            Some(task_id),
-                            TaskProgress::indeterminate(phase),
-                        );
-                    }
+                LensCorrectionEvent::Progress(phase) => {
+                    operation.progress = ForegroundProgress::indeterminate(phase);
                 }
-                LensCorrectionEvent::Finished {
-                    task_id,
-                    document_id,
-                    generation,
-                    result,
-                } => finished = Some((task_id, document_id, generation, result)),
+                LensCorrectionEvent::Finished(result) => finished = Some(result),
             }
         }
-
         if finished.is_none() && disconnected {
-            self.lens_correction_receiver = None;
-            if let Some(id) = self.lens_correction_task_id.take() {
-                self.fail_background_task(id, "Lens-correction worker stopped unexpectedly.");
-            }
-            self.lens_correction.enabled = self.lens_correction.applied;
-            self.lens_correction.catalog.status =
-                "Lens-correction worker stopped unexpectedly.".to_owned();
-            self.notice = Some(self.lens_correction.catalog.status.clone());
-            return;
+            finished = Some(Err("Lens-correction worker stopped unexpectedly.".to_owned()));
         }
-        let Some((task_id, document_id, generation, result)) = finished else {
+        let Some(result) = finished else {
+            self.foreground_operation = Some(operation);
             return;
         };
-        self.lens_correction_receiver = None;
-        if self.lens_correction_task_id == Some(task_id) {
-            self.lens_correction_task_id = None;
-        }
 
-        let stale = document_id != self.sidecar_generation
-            || generation != self.lens_correction_generation
-            || self.background_task_cancelled(task_id);
+        let stale = !operation.accepts_result(self.sidecar_generation);
         if stale {
-            self.finish_background_task(task_id);
             return;
         }
-
         let prepared = match result {
             Ok(prepared) => prepared,
             Err(error) => {
-                if self.background_task_cancelled(task_id) {
-                    self.finish_background_task(task_id);
-                } else {
+                if !error.contains("cancelled") {
                     self.lens_correction.enabled = self.lens_correction.applied;
                     self.lens_correction.catalog.status = error.clone();
                     self.notice =
                         Some("Lens correction failed; restored the previous preview.".to_owned());
-                    self.fail_background_task(task_id, error);
                 }
                 return;
             }
         };
-        self.update_background_progress(
-            Some(task_id),
-            TaskProgress::indeterminate("Preparing GPU preview…"),
-        );
+        operation.progress = ForegroundProgress::indeterminate("Preparing GPU preview…");
 
         let Some(render_state) = frame.wgpu_render_state() else {
             self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
-            self.fail_background_task(task_id, self.notice.clone().unwrap_or_default());
             return;
         };
 
         #[cfg(target_os = "android")]
         {
             let Some(pipeline) = self.gpu_pipeline.as_ref() else {
-                self.fail_background_task(task_id, "The preview pipeline is unavailable.");
+                self.notice = Some("The preview pipeline is unavailable.".to_owned());
                 return;
             };
             if let Err(error) =
@@ -307,7 +261,6 @@ impl AurawApp {
                 self.notice = Some(format!(
                     "Could not update the lens-corrected preview pixels: {error:#}"
                 ));
-                self.fail_background_task(task_id, self.notice.clone().unwrap_or_default());
                 return;
             }
             let params = GpuParams::new(&self.exposure, &self.masks, &prepared.preview_raw)
@@ -342,17 +295,13 @@ impl AurawApp {
             ) {
                 Ok(pipeline) => pipeline,
                 Err(error) => {
-                    let message =
-                        format!("Could not rebuild the corrected GPU preview: {error:#}");
-                    self.notice = Some(message.clone());
-                    self.fail_background_task(task_id, message);
+                    self.notice =
+                        Some(format!("Could not rebuild the corrected GPU preview: {error:#}"));
                     return;
                 }
             };
             if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
-                let message = format!("Could not prepare the preview color profile: {error:#}");
-                self.notice = Some(message.clone());
-                self.fail_background_task(task_id, message);
+                self.notice = Some(format!("Could not prepare the preview color profile: {error:#}"));
                 return;
             }
             if let Err(error) = Self::upload_preview_masks(
@@ -361,8 +310,7 @@ impl AurawApp {
                 &preview_masks,
                 &prepared.preview_raw,
             ) {
-                self.notice = Some(error.clone());
-                self.fail_background_task(task_id, error);
+                self.notice = Some(error);
                 return;
             }
             if let Err(error) = pipeline.update_inpaint_layer(
@@ -373,19 +321,14 @@ impl AurawApp {
                 prepared.preview_raw.width,
                 prepared.preview_raw.height,
             ) {
-                let message =
-                    format!("Could not rebuild lens-corrected preview inpainting: {error:#}");
-                self.notice = Some(message.clone());
-                self.fail_background_task(task_id, message);
+                self.notice = Some(format!(
+                    "Could not rebuild lens-corrected preview inpainting: {error:#}"
+                ));
                 return;
             }
             pipeline.recompute(&render_state.queue, &render_state.device, &params);
 
-            if document_id != self.sidecar_generation
-                || generation != self.lens_correction_generation
-                || self.background_task_cancelled(task_id)
-            {
-                self.finish_background_task(task_id);
+            if !operation.accepts_result(self.sidecar_generation) {
                 return;
             }
             let mut renderer = render_state.renderer.write();
@@ -395,11 +338,8 @@ impl AurawApp {
             self.gpu_pipeline = Some(pipeline);
         }
 
-        if document_id != self.sidecar_generation
-            || generation != self.lens_correction_generation
-            || self.background_task_cancelled(task_id)
+        if !operation.accepts_result(self.sidecar_generation)
         {
-            self.finish_background_task(task_id);
             return;
         }
 
@@ -431,9 +371,7 @@ impl AurawApp {
             |label| format!("Applied {label}"),
         );
         self.notice = None;
-        self.finish_background_task(task_id);
         self.resume_persisted_ai_denoise(frame);
         self.egui_ctx.request_repaint();
     }
-
 }

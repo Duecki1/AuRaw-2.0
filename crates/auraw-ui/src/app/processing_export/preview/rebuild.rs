@@ -7,7 +7,7 @@ impl AurawApp {
 
     pub(crate) fn preview_is_preparing(&self) -> bool {
         self.load_receiver.is_some()
-            || self.ai_denoise_receiver.is_some()
+            || self.foreground_operation_is(ForegroundOperationKind::AiDenoise)
             || self.preview_rebuild_receiver.is_some()
             || self.preview_quality_dirty
     }
@@ -387,11 +387,7 @@ impl AurawApp {
             return;
         }
         #[cfg(target_os = "android")]
-        if self.export_receiver.is_some()
-            || self.export_publish_pending
-            || self.library_batch_export.is_some()
-            || self.ai_denoise_receiver.is_some()
-        {
+        if self.foreground_operation_is(ForegroundOperationKind::AiDenoise) {
             return;
         }
         let Some(source_raw) = self.loaded_raw.as_ref().map(Arc::clone) else {

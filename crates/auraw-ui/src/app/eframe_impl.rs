@@ -111,7 +111,6 @@ impl eframe::App for AurawApp {
             }
         }
 
-        self.drive_background_tasks(frame);
         self.poll_load_worker(frame);
         self.poll_preview_rebuild_worker(frame);
         #[cfg(not(target_os = "android"))]
@@ -121,16 +120,11 @@ impl eframe::App for AurawApp {
         self.poll_export_worker(frame);
         #[cfg(target_os = "android")]
         self.resume_android_library_batch_export_if_possible(frame);
-        self.poll_subject_worker();
-        self.poll_object_worker();
-        self.poll_landscape_worker();
+        self.poll_foreground_operation(frame);
         self.poll_library_ai_mask_refresh(frame);
-        self.poll_inpaint_worker();
-        self.poll_ai_denoise_worker();
         self.resume_pending_ai_denoise(frame);
-        self.drive_background_tasks(frame);
         #[cfg(target_os = "android")]
-        self.sync_android_task_notification();
+        self.sync_android_export_notification();
         #[cfg(not(target_os = "android"))]
         {
             self.handle_edit_history_shortcuts(ui.ctx());
@@ -329,11 +323,9 @@ impl eframe::App for AurawApp {
         if self.preview_processing_pending() {
             ui.ctx().request_repaint();
         }
-        if self.has_background_tasks()
-            || self.export_receiver.is_some()
+        if self.foreground_operation_active()
+            || self.export_task.is_some()
             || self.export_publish_pending
-            || self.inpaint_receiver.is_some()
-            || self.ai_denoise_receiver.is_some()
             || self.preview_rebuild_receiver.is_some()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
@@ -368,7 +360,8 @@ impl eframe::App for AurawApp {
         self.show_inpainting_dialogs(ui.ctx());
         self.show_ai_denoise_dialogs(ui.ctx(), frame);
         self.show_sidecar_save_error_dialog(ui.ctx());
-        self.show_background_task_detail_windows(ui.ctx());
+        self.show_foreground_operation_dialog(ui.ctx());
+        self.show_export_task_dialog(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());
         self.observe_edit_history(ui.ctx());
         self.schedule_sidecar_autosave(ui.ctx(), edit_interaction_active);

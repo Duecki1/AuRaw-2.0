@@ -375,13 +375,6 @@ fn prepare_desktop_library_export_request(
         .file_name()
         .and_then(|name| name.to_str())
         .map(str::to_owned);
-    let display_name = job
-        .source
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("image")
-        .to_owned();
     Ok(ExportTaskRequest {
         device: device.clone(),
         queue: queue.clone(),
@@ -394,78 +387,45 @@ fn prepare_desktop_library_export_request(
         path: job.destination.clone(),
         format,
         settings: settings.clone(),
-        display_name,
         gpu_export_prewarm: None,
     })
 }
 
 impl AurawApp {
     pub(crate) fn export_progress_state(&self) -> Option<(usize, usize)> {
-        self.export_progress
+        self.export_task.as_ref().and_then(|task| {
+            (task.total_tiles > 0).then_some((task.completed_tiles, task.total_tiles))
+        })
     }
 
     pub(crate) fn library_batch_export_progress(&self) -> Option<(usize, usize)> {
-        self.library_batch_export
-            .as_ref()
-            .map(|batch| (batch.completed, batch.total))
-    }
-
-    pub(crate) fn library_batch_export_tile_progress(&self) -> Option<(usize, usize)> {
-        #[cfg(not(target_os = "android"))]
-        {
-            self.library_batch_export_tile_progress
-        }
-        #[cfg(target_os = "android")]
-        {
-            self.export_progress
-        }
-    }
-
-    pub(crate) fn library_batch_export_overall_fraction(&self) -> Option<f32> {
-        self.library_batch_export.as_ref().map(|batch| {
-            batch_export_overall_fraction(
-                batch.completed,
-                batch.total,
-                batch.current.is_some(),
-                self.library_batch_export_tile_progress(),
-            )
+        self.export_task.as_ref().and_then(|task| {
+            (task.kind == ExportTaskKind::LibraryBatch).then_some((task.completed, task.total))
         })
     }
 
-    pub(crate) fn library_batch_export_status(
-        &self,
-    ) -> Option<(usize, usize, usize, Option<String>, bool)> {
-        self.library_batch_export.as_ref().map(|batch| {
-            let current = batch.current.as_ref().map(|job| {
-                #[cfg(not(target_os = "android"))]
-                {
-                    job.source
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("image")
-                        .to_owned()
-                }
-                #[cfg(target_os = "android")]
-                {
-                    job.target.display_name().to_owned()
-                }
-            });
-            (
-                batch.completed,
-                batch.total,
-                batch.failures.len(),
-                current,
-                batch.cancel_requested,
-            )
-        })
+    fn update_library_batch_export_progress(&mut self) {
+        let Some(batch) = self.library_batch_export.as_ref() else {
+            return;
+        };
+        let Some(task) = self.export_task.as_mut() else {
+            return;
+        };
+        if task.kind != ExportTaskKind::LibraryBatch {
+            return;
+        }
+        task.completed = batch.completed.min(batch.total);
+        task.total = batch.total;
+        task.progress = batch_export_overall_fraction(
+            task.completed,
+            task.total,
+            batch.current.is_some(),
+            (task.total_tiles > 0).then_some((task.completed_tiles, task.total_tiles)),
+        );
     }
 
     pub(in crate::app) fn request_library_batch_export_cancellation(&mut self) -> bool {
-        if let Some(task_id) = self.library_batch_export_task_id {
-            if !self.background_task_cancelled(task_id) {
-                let _ = self.background_tasks.request_cancel(task_id);
-            }
-        }
+        self.cancel_export_task();
         if let Some(batch) = self.library_batch_export.as_mut() {
             batch.cancel_requested = true;
             batch.pending.clear();
@@ -478,7 +438,6 @@ impl AurawApp {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn cancel_library_batch_export(&mut self) {
         self.request_library_batch_export_cancellation();
-        self.sync_library_batch_background_progress();
     }
 
     #[cfg(target_os = "android")]
@@ -495,7 +454,10 @@ impl AurawApp {
         settings: ExportSettings,
         format: ExportFormat,
     ) {
-        if targets.is_empty() {
+        if targets.is_empty() || self.export_task.is_some() {
+            if self.export_task.is_some() {
+                self.notice = Some("An export is already running.".to_owned());
+            }
             return;
         }
         let pending = targets
@@ -503,25 +465,33 @@ impl AurawApp {
             .map(|target| LibraryBatchExportJob { target })
             .collect::<VecDeque<_>>();
         let total = pending.len();
-        self.enqueue_background_action(
-            TaskKind::LibraryBatchExport,
-            format!(
-                "Exporting {total} {}",
-                if total == 1 { "image" } else { "images" }
-            ),
-            TaskProgress::units(
-                0,
-                total as u64,
-                Some("images".to_owned()),
-                "Queued for batch export…",
-            ),
-            false,
-            BackgroundAction::LibraryBatchExport {
-                jobs: pending,
-                settings,
-                format,
-            },
-        );
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.export_settings = settings.clone();
+        self.library_batch_export = Some(LibraryBatchExportState {
+            pending,
+            current: None,
+            total,
+            completed: 0,
+            failures: Vec::new(),
+            cancel_requested: false,
+            format,
+            settings,
+        });
+        self.export_task = Some(ExportTask {
+            kind: ExportTaskKind::LibraryBatch,
+            cancellation,
+            receiver: None,
+            progress: 0.0,
+            phase: "Preparing batch export…".to_owned(),
+            completed: 0,
+            total,
+            completed_tiles: 0,
+            total_tiles: 0,
+            minimized: false,
+            cancelling: false,
+        });
+        self.notice = None;
+        self.egui_ctx.request_repaint();
     }
 
     #[cfg(target_os = "android")]
@@ -531,11 +501,10 @@ impl AurawApp {
         // batch item. The current export may finish; remaining items resume when
         // the user returns to Library.
         if self.active_tab == AppTab::Develop {
-            if let Some(task_id) = self.library_batch_export_task_id {
-                self.update_background_progress(
-                    Some(task_id),
-                    TaskProgress::indeterminate("Paused while Develop is in use"),
-                );
+            if let Some(task) = self.export_task.as_mut() {
+                if task.kind == ExportTaskKind::LibraryBatch {
+                    task.phase = "Paused while Develop is in use".to_owned();
+                }
             }
             return;
         }
@@ -562,6 +531,11 @@ impl AurawApp {
                 return;
             };
 
+            if let Some(task) = self.export_task.as_mut() {
+                task.phase = format!("Opening {}…", job.target.display_name());
+                task.completed_tiles = 0;
+                task.total_tiles = 0;
+            }
             let display_name = job.target.display_name().to_owned();
             match crate::android::open_library_document(
                 &self.android_app,
@@ -583,13 +557,18 @@ impl AurawApp {
                         batch.completed += 1;
                         batch.current = None;
                     }
+                    self.update_library_batch_export_progress();
                 }
             }
         }
     }
 
     #[cfg(target_os = "android")]
-    pub(in crate::app) fn on_library_batch_load_finished(&mut self, success: bool, frame: &eframe::Frame) {
+    pub(in crate::app) fn on_library_batch_load_finished(
+        &mut self,
+        success: bool,
+        frame: &eframe::Frame,
+    ) {
         let Some(batch) = self.library_batch_export.as_ref() else {
             return;
         };
@@ -613,13 +592,14 @@ impl AurawApp {
                 }
                 batch.current = None;
             }
+            self.update_library_batch_export_progress();
             return;
         }
 
         let format = batch.format;
         let settings = batch.settings.clone();
         let display_name = current.target.display_name().to_owned();
-        self.export_settings = settings.clone();
+        self.export_settings = settings;
         let Some(data_dir) = self.android_app.internal_data_path() else {
             self.complete_android_library_batch_export_item(Err(format!(
                 "{display_name}: Android did not provide an app data directory"
@@ -663,36 +643,16 @@ impl AurawApp {
         let direct_path = crate::android::is_direct_export_path(&destination)
             .then(|| destination.clone());
         let mut start_error = None;
-        let started = if let Some(task_id) = self.library_batch_export_task_id {
-            if let Some(request) =
-                self.capture_export_task_request(destination, frame, format)
-            {
-                // The batch task already owns the global FIFO slot. Starting a
-                // nested SingleExport task here would queue it behind its own
-                // parent and show a second "waiting" dialog indefinitely. The
-                // shared task starter also releases Android preview GPU resources
-                // before allocating the full-quality tiled export pipeline.
-                match self.start_export_task(task_id, request, frame) {
-                    Ok(()) => {
-                        let started = self.export_task_id == Some(task_id)
-                            && self.export_receiver.is_some();
-                        if started {
-                            self.sync_library_batch_background_progress();
-                        }
-                        started
-                    }
-                    Err(error) => {
-                        self.notice = Some(format!("Export failed: {error}"));
-                        start_error = Some(error);
-                        false
-                    }
+        let started = self
+            .capture_export_task_request(destination, frame, format)
+            .and_then(|request| match self.start_export_task(request, ExportTaskKind::LibraryBatch) {
+                Ok(()) => Some(()),
+                Err(error) => {
+                    start_error = Some(error);
+                    None
                 }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+            })
+            .is_some();
         self.active_tab = AppTab::Library;
         if !started {
             if let Some(path) = direct_path {
@@ -706,7 +666,10 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    pub(in crate::app) fn complete_android_library_batch_export_item(&mut self, result: Result<(), String>) {
+    pub(in crate::app) fn complete_android_library_batch_export_item(
+        &mut self,
+        result: Result<(), String>,
+    ) {
         if let Some(batch) = self.library_batch_export.as_mut() {
             let name = batch
                 .current
@@ -727,6 +690,15 @@ impl AurawApp {
             }
             batch.current = None;
         }
+        if let Some(task) = self.export_task.as_mut() {
+            if task.kind == ExportTaskKind::LibraryBatch {
+                task.receiver = None;
+                task.completed_tiles = 0;
+                task.total_tiles = 0;
+                task.phase = "Preparing next image…".to_owned();
+            }
+        }
+        self.update_library_batch_export_progress();
         let finished_or_cancelled = self.library_batch_export.as_ref().is_some_and(|batch| {
             batch.cancel_requested || batch.pending.is_empty()
         });
@@ -736,11 +708,19 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    pub(in crate::app) fn resume_android_library_batch_export_if_possible(&mut self, frame: &eframe::Frame) {
+    pub(in crate::app) fn resume_android_library_batch_export_if_possible(
+        &mut self,
+        frame: &eframe::Frame,
+    ) {
+        let export_worker_active = self.export_task.as_ref().is_some_and(|task| {
+            task.kind == ExportTaskKind::LibraryBatch
+                && matches!(task.receiver.as_ref(), Some(ExportTaskReceiver::Tiled(_)))
+        });
         if self.active_tab == AppTab::Develop
             || self.picker_pending
             || self.load_receiver.is_some()
-            || self.export_receiver.is_some()
+            || export_worker_active
+            || self.export_publish_pending
         {
             return;
         }
@@ -756,11 +736,6 @@ impl AurawApp {
         let Some(batch) = self.library_batch_export.take() else {
             return;
         };
-        #[cfg(not(target_os = "android"))]
-        {
-            self.library_batch_export_tile_progress = None;
-        }
-
         let succeeded = batch.completed.saturating_sub(batch.failures.len());
         let mut message = if batch.cancel_requested {
             format!(
@@ -794,14 +769,8 @@ impl AurawApp {
             ));
         }
         self.notice = Some(message);
-        self.export_task_id = None;
-        if let Some(id) = self.library_batch_export_task_id.take() {
-            if batch.cancel_requested || batch.failures.is_empty() {
-                self.finish_background_task(id);
-            } else {
-                self.fail_background_task(id, batch.failures.join(" · "));
-            }
-        }
+        super::export::clear_export_task(&mut self.export_task);
+        self.egui_ctx.request_repaint();
     }
 
     #[cfg(not(target_os = "android"))]
@@ -810,39 +779,69 @@ impl AurawApp {
         jobs: Vec<(PathBuf, PathBuf)>,
         settings: ExportSettings,
         format: ExportFormat,
-        _frame: &eframe::Frame,
+        frame: &eframe::Frame,
     ) {
-        if jobs.is_empty() {
+        if jobs.is_empty() || self.export_task.is_some() {
+            if self.export_task.is_some() {
+                self.notice = Some("An export is already running.".to_owned());
+            }
             return;
         }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            self.notice = Some("Export requires the wgpu renderer.".to_owned());
+            return;
+        };
         let pending = jobs
             .into_iter()
             .map(|(source, destination)| LibraryBatchExportJob { source, destination })
             .collect::<VecDeque<_>>();
         let total = pending.len();
-        self.enqueue_background_action(
-            TaskKind::LibraryBatchExport,
-            format!(
-                "Exporting {total} {}",
-                if total == 1 { "image" } else { "images" }
-            ),
-            TaskProgress::units(
-                0,
-                total as u64,
-                Some("images".to_owned()),
-                "Waiting for earlier background work…",
-            ),
-            true,
-            BackgroundAction::LibraryBatchExport {
-                jobs: pending,
-                settings,
-                format,
-            },
-        );
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let receiver = spawn_desktop_library_batch_export(DesktopLibraryBatchExportRequest {
+            device: render_state.device.clone(),
+            queue: render_state.queue.clone(),
+            jobs: pending,
+            format,
+            settings,
+            camera_profile_mode: self.camera_profile_mode,
+            camera_profile_folder: self.camera_profile_folder.clone(),
+            last_camera_profile: self.last_camera_profile.clone(),
+            default_exposure: self.new_image_exposure(),
+            decode_gate: self.library.decode_gate(),
+            cancellation: Arc::clone(&cancellation),
+            repaint: self.egui_ctx.clone(),
+        });
+        self.library_batch_export = Some(LibraryBatchExportState {
+            pending: VecDeque::new(),
+            current: None,
+            total,
+            completed: 0,
+            failures: Vec::new(),
+            cancel_requested: false,
+        });
+        self.export_task = Some(ExportTask {
+            kind: ExportTaskKind::LibraryBatch,
+            cancellation,
+            receiver: Some(ExportTaskReceiver::LibraryBatch(receiver)),
+            progress: 0.0,
+            phase: "Preparing batch export…".to_owned(),
+            completed: 0,
+            total,
+            completed_tiles: 0,
+            total_tiles: 0,
+            minimized: false,
+            cancelling: false,
+        });
+        self.notice = None;
+        self.egui_ctx.request_repaint();
     }
 
     #[cfg(not(target_os = "android"))]
-    pub(in crate::app) fn on_library_batch_load_finished(&mut self, _success: bool, _frame: &eframe::Frame) {
+    pub(in crate::app) fn on_library_batch_load_finished(
+        &mut self,
+        _success: bool,
+        _frame: &eframe::Frame,
+    ) {
         // Desktop batch export owns a separate decode/export worker and never
         // consumes the document opened in Develop.
     }
@@ -866,41 +865,48 @@ impl AurawApp {
             match result {
                 crate::android::ExportPublishResult::Published(location) => {
                     self.notice = Some(format!("Exported to {location}"));
-                    if let Some(id) = self.export_task_id.take() {
-                        self.finish_background_task(id);
-                    }
                 }
                 crate::android::ExportPublishResult::Failed(error) => {
                     self.notice = Some(format!("Export failed: {error}"));
-                    if let Some(id) = self.export_task_id.take() {
-                        self.fail_background_task(id, error.clone());
-                    }
                     log::error!("Android export publish failed: {error}");
                 }
             }
+            super::export::clear_export_task(&mut self.export_task);
         }
     }
 
     #[cfg(not(target_os = "android"))]
     pub(in crate::app) fn poll_library_batch_export_worker(&mut self) {
-        let (events, disconnected) =
-            drain_worker_events(self.library_batch_export_receiver.as_ref(), |_| false);
+        let (events, disconnected) = {
+            let receiver = self.export_task.as_ref().and_then(|task| {
+                if task.kind != ExportTaskKind::LibraryBatch {
+                    return None;
+                }
+                match task.receiver.as_ref() {
+                    Some(ExportTaskReceiver::LibraryBatch(receiver)) => Some(receiver),
+                    _ => None,
+                }
+            });
+            drain_worker_events(receiver, |_| false)
+        };
 
         let mut finished = false;
         for event in events {
             match event {
-                LibraryBatchExportEvent::Started {
-                    job,
-                    completed,
-                    total,
-                } => {
+                LibraryBatchExportEvent::Started { job, completed, total } => {
                     if let Some(batch) = self.library_batch_export.as_mut() {
                         batch.current = Some(job);
                         batch.completed = completed;
                         batch.total = total;
                     }
-                    self.library_batch_export_tile_progress = Some((0, 0));
-                    self.sync_library_batch_background_progress();
+                    if let Some(task) = self.export_task.as_mut() {
+                        task.completed = completed;
+                        task.total = total;
+                        task.completed_tiles = 0;
+                        task.total_tiles = 0;
+                        task.phase = "Rendering image…".to_owned();
+                    }
+                    self.update_library_batch_export_progress();
                 }
                 LibraryBatchExportEvent::Progress {
                     completed,
@@ -912,8 +918,12 @@ impl AurawApp {
                         batch.completed = completed;
                         batch.total = total;
                     }
-                    self.library_batch_export_tile_progress = Some((completed_tiles, total_tiles));
-                    self.sync_library_batch_background_progress();
+                    if let Some(task) = self.export_task.as_mut() {
+                        task.completed_tiles = completed_tiles;
+                        task.total_tiles = total_tiles;
+                        task.phase = "Rendering image…".to_owned();
+                    }
+                    self.update_library_batch_export_progress();
                 }
                 LibraryBatchExportEvent::ItemFinished { completed, error } => {
                     if let Some(batch) = self.library_batch_export.as_mut() {
@@ -923,8 +933,12 @@ impl AurawApp {
                             batch.failures.push(error);
                         }
                     }
-                    self.library_batch_export_tile_progress = None;
-                    self.sync_library_batch_background_progress();
+                    if let Some(task) = self.export_task.as_mut() {
+                        task.completed_tiles = 0;
+                        task.total_tiles = 0;
+                        task.phase = "Preparing next image…".to_owned();
+                    }
+                    self.update_library_batch_export_progress();
                 }
                 LibraryBatchExportEvent::Finished { cancelled } => {
                     if let Some(batch) = self.library_batch_export.as_mut() {
@@ -937,14 +951,17 @@ impl AurawApp {
 
         if disconnected && !finished {
             if let Some(batch) = self.library_batch_export.as_mut() {
-                batch.failures.push("Batch export worker stopped unexpectedly.".to_owned());
+                batch
+                    .failures
+                    .push("Batch export worker stopped unexpectedly.".to_owned());
             }
             finished = true;
         }
 
         if finished {
-            self.library_batch_export_receiver = None;
-            self.library_batch_export_tile_progress = None;
+            if let Some(task) = self.export_task.as_mut() {
+                task.receiver = None;
+            }
             self.finish_library_batch_export();
         }
     }

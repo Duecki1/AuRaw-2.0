@@ -184,26 +184,6 @@ impl Sidebar {
                 app.delete_inpaint_stroke(index);
             }
 
-            if let Some((downloaded, total)) = app.inpaint_progress() {
-                ui.add_space(8.0);
-                ui.label("Downloading lama_fp32.onnx…");
-                ui.add(
-                    egui::ProgressBar::new(downloaded as f32 / total.max(1) as f32)
-                        .show_percentage()
-                        .text(format!(
-                            "{:.1} / {:.1} MB",
-                            downloaded as f64 / 1_000_000.0,
-                            total as f64 / 1_000_000.0
-                        )),
-                );
-            } else if app.inpaint_inferencing() {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Erasing…");
-                });
-            }
-
             if app.gpu_pipeline.is_none() {
                 ui.add_space(8.0);
                 ui.colored_label(

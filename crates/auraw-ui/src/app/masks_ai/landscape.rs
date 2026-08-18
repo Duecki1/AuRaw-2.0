@@ -8,9 +8,8 @@ impl AurawApp {
         component_index: usize,
     ) {
         self.object_error_dialog = None;
-        self.recover_terminal_ai_mask_task_owners();
-        if self.landscape_task_id.is_some() || self.landscape_receiver.is_some() {
-            self.notice = Some("Wait for the current landscape mask to finish.".to_owned());
+        if self.foreground_operation_active() {
+            self.notice = Some("Finish or cancel the current editing operation first.".to_owned());
             return;
         }
         let valid = self
@@ -55,7 +54,7 @@ impl AurawApp {
         model_path: PathBuf,
         allow_download: bool,
     ) {
-        if self.landscape_task_id.is_some() || self.landscape_receiver.is_some() {
+        if self.foreground_operation_active() {
             return;
         }
         let Some(source) = self.mask_source_cache.clone() else {
@@ -85,6 +84,10 @@ impl AurawApp {
             self.notice = Some("The selected landscape mask is no longer available.".to_owned());
             return;
         };
+        let Some(target) = self.capture_ai_mask_target(mask_index, component_index) else {
+            self.notice = Some("The selected landscape mask is no longer available.".to_owned());
+            return;
+        };
         #[cfg(not(target_os = "android"))]
         let runtime_path = self.onnx_runtime_path.clone();
         #[cfg(not(target_os = "android"))]
@@ -94,64 +97,52 @@ impl AurawApp {
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
 
-        self.landscape_generation = self.landscape_generation.wrapping_add(1);
-        let generation = self.landscape_generation;
-        let Some(target) = self.capture_ai_mask_target(mask_index, component_index) else {
-            self.notice = Some("The selected landscape mask is no longer available.".to_owned());
-            return;
-        };
-        let request = LandscapeMaskTaskRequest {
-            document_id: self.sidecar_generation,
-            generation,
-            target,
-            source,
-            model_path,
-            vitmatte_path,
-            allow_download,
-            runtime_path,
-            runtime_sha256,
-            category,
-        };
-
-        if let Some(task_id) = self.library_ai_mask_refresh_task_id.filter(|task_id| {
-            self.background_tasks.current_id() == Some(*task_id) && self.ai_mask_update_active
-        }) {
-            self.start_landscape_mask_task(task_id, request);
-        } else if needs_download {
-            let task_id = self.enqueue_background_action(
-                TaskKind::LandscapeMask {
-                    document_id: request.document_id,
-                    generation,
-                },
-                "Downloading landscape-mask model",
-                TaskProgress::indeterminate("Waiting for earlier background work…"),
-                true,
-                BackgroundAction::LandscapeMask(request),
-            );
-            self.landscape_task_id = Some(task_id);
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let receiver = spawn_landscape_mask(
+            LandscapeMaskWorkerRequest {
+                model_path,
+                vitmatte_path,
+                allow_download,
+                runtime_path,
+                runtime_sha256,
+                width: source.width,
+                height: source.height,
+                rgba: source.rgba.to_vec(),
+                category,
+            },
+            Arc::clone(&cancellation),
+        );
+        let progress = ForegroundProgress::indeterminate(if needs_download {
+            "Preparing landscape-mask models…"
         } else {
-            let task_id = self.background_tasks.start_nonblocking(
-                TaskKind::LandscapeMask {
-                    document_id: request.document_id,
-                    generation,
-                },
-                "Generating landscape mask",
-                TaskProgress::indeterminate("Running local landscape-mask inference…"),
-                true,
-            );
-            self.start_landscape_mask_task(task_id, request);
-        }
+            "Running local landscape-mask inference…"
+        });
+        self.begin_foreground_operation(ForegroundOperation {
+            kind: ForegroundOperationKind::LandscapeMask,
+            document_id: self.sidecar_generation,
+            cancellation,
+            progress,
+            cancelling: false,
+            receiver: ForegroundOperationReceiver::Landscape(receiver),
+            context: ForegroundOperationContext::Landscape { target, category },
+        });
         self.egui_ctx.request_repaint();
     }
 
     pub(in crate::app) fn poll_landscape_worker(&mut self) {
-        let Some(task_id) = self.landscape_task_id else {
+        if !self.foreground_operation_is(ForegroundOperationKind::LandscapeMask) {
+            return;
+        }
+        let Some(mut operation) = self.foreground_operation.take() else {
             return;
         };
-        let (events, disconnected) = drain_worker_events(
-            self.landscape_receiver.as_ref(),
-            |event| matches!(event, LandscapeMaskEvent::Finished(_)),
-        );
+        let ForegroundOperationReceiver::Landscape(receiver) = &operation.receiver else {
+            self.foreground_operation = Some(operation);
+            return;
+        };
+        let (events, disconnected) = drain_worker_events(Some(receiver), |event| {
+            matches!(event, LandscapeMaskEvent::Finished(_))
+        });
         let mut finished = None;
         for event in events {
             match event {
@@ -160,40 +151,21 @@ impl AurawApp {
                     downloaded,
                     total,
                 } => {
-                    self.landscape_download_progress = Some((downloaded, total));
-                    self.landscape_inferencing = false;
-                    self.background_tasks.set_global_visible(task_id, true);
-                    self.background_tasks
-                        .rename(task_id, format!("Downloading {label}"));
-                    self.update_background_progress(
-                        Some(task_id),
-                        TaskProgress::units(
-                            downloaded,
-                            total,
-                            Some("bytes".to_owned()),
-                            format!("Downloading {label}"),
-                        )
-                        .with_detail(format!(
-                            "{:.1} / {:.1} MB",
-                            downloaded as f64 / 1_000_000.0,
-                            total as f64 / 1_000_000.0
-                        )),
-                    );
+                    operation.progress = ForegroundProgress::units(
+                        downloaded,
+                        total,
+                        Some("bytes".to_owned()),
+                        format!("Downloading {label}"),
+                    )
+                    .with_detail(format!(
+                        "{:.1} / {:.1} MB",
+                        downloaded as f64 / 1_000_000.0,
+                        total as f64 / 1_000_000.0
+                    ));
                 }
                 LandscapeMaskEvent::Inferencing => {
-                    self.landscape_download_progress = None;
-                    self.landscape_inferencing = true;
-                    self.background_tasks.set_global_visible(task_id, false);
-                    if matches!(
-                        self.background_tasks.snapshot(task_id).map(|task| task.kind),
-                        Some(TaskKind::LandscapeMask { .. })
-                    ) {
-                        self.background_tasks.release_current(task_id);
-                    }
-                    self.update_background_progress(
-                        Some(task_id),
-                        TaskProgress::indeterminate("Running local landscape-mask inference…"),
-                    );
+                    operation.progress =
+                        ForegroundProgress::indeterminate("Running local landscape-mask inference…");
                 }
                 LandscapeMaskEvent::Finished(result) => finished = Some(result),
             }
@@ -204,22 +176,20 @@ impl AurawApp {
             ));
         }
         let Some(result) = finished else {
+            self.foreground_operation = Some(operation);
             return;
         };
 
-        let target = self.landscape_job_target.clone();
-        let job_category = self.landscape_job_category;
+        let (target, job_category) = match &operation.context {
+            ForegroundOperationContext::Landscape { target, category } => {
+                (Some(target.clone()), Some(*category))
+            }
+            _ => (None, None),
+        };
         let updating_all = self.ai_mask_update_active && target.is_some();
-        let library_task = self.library_ai_mask_refresh_task_id == Some(task_id);
-        let cancelled = self.background_task_cancelled(task_id);
-        let stale = self.landscape_job_document_id != self.sidecar_generation
-            || self.landscape_job_generation != self.landscape_generation;
-        self.landscape_receiver = None;
-        self.landscape_task_id = None;
-        self.landscape_download_progress = None;
-        self.landscape_inferencing = false;
-        self.landscape_job_target = None;
-        self.landscape_job_category = None;
+        let library_refresh = self.library_ai_mask_refresh.is_some();
+        let cancelled = operation.is_cancelled();
+        let stale = operation.document_id != self.sidecar_generation;
 
         let mut succeeded = false;
         let mut error_message = None;
@@ -273,7 +243,7 @@ impl AurawApp {
             }
         }
 
-        if library_task {
+        if library_refresh {
             if cancelled {
                 self.cancel_ai_mask_update();
             } else if updating_all {
@@ -283,19 +253,15 @@ impl AurawApp {
                 }
                 self.continue_ai_mask_update();
             }
-        } else if cancelled || succeeded {
-            self.finish_background_task(task_id);
-        } else {
-            let message = error_message
-                .unwrap_or_else(|| {
-                    if stale {
-                        "Landscape selection became stale before inference completed.".to_owned()
-                    } else {
-                        "Landscape selection did not produce a mask.".to_owned()
-                    }
-                });
-            self.notice = Some(message.clone());
-            self.fail_background_task(task_id, message);
+        } else if !cancelled && !succeeded {
+            let message = error_message.unwrap_or_else(|| {
+                if stale {
+                    "Landscape selection became stale before inference completed.".to_owned()
+                } else {
+                    "Landscape selection did not produce a mask.".to_owned()
+                }
+            });
+            self.notice = Some(message);
         }
         self.egui_ctx.request_repaint();
     }

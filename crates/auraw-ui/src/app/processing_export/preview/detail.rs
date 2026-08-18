@@ -27,7 +27,7 @@ impl AurawApp {
             || self.lens_correction_dirty
             || self.lens_correction_busy()
             || self.load_receiver.is_some()
-            || self.ai_denoise_receiver.is_some()
+            || self.foreground_operation_is(ForegroundOperationKind::AiDenoise)
         {
             return;
         }

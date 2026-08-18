@@ -37,21 +37,16 @@ use crate::ui::sidebar::Sidebar;
 use crate::ui::top_bar::TopBar;
 use eframe::{egui, wgpu};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 mod ai_denoise;
-mod background_tasks;
-use background_tasks::{
-    BackgroundTaskManager, CancelTaskResult, TaskId, TaskKind, TaskProgress, TaskProgressValue,
-    TaskSnapshot, TaskStatus,
-};
 mod edit_history;
 use edit_history::EditHistory;
 mod worker;
-use worker::{drain_worker_events, show_cancellable_worker_popup, show_download_progress};
+use worker::drain_worker_events;
 #[cfg(not(target_os = "android"))]
 use worker::spawn_ui_worker;
 
@@ -501,18 +496,8 @@ struct PreparedLensCorrection {
 }
 
 enum LensCorrectionEvent {
-    Progress {
-        task_id: TaskId,
-        document_id: u64,
-        generation: u64,
-        phase: String,
-    },
-    Finished {
-        task_id: TaskId,
-        document_id: u64,
-        generation: u64,
-        result: Result<PreparedLensCorrection, String>,
-    },
+    Progress(String),
+    Finished(Result<PreparedLensCorrection, String>),
 }
 
 #[derive(Clone)]
@@ -728,6 +713,33 @@ enum LibraryBatchExportEvent {
     },
 }
 
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportTaskKind {
+    Single,
+    LibraryBatch,
+}
+
+enum ExportTaskReceiver {
+    Tiled(mpsc::Receiver<ExportEvent>),
+    #[cfg(not(target_os = "android"))]
+    LibraryBatch(mpsc::Receiver<LibraryBatchExportEvent>),
+}
+
+struct ExportTask {
+    kind: ExportTaskKind,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
+    receiver: Option<ExportTaskReceiver>,
+    progress: f32,
+    phase: String,
+    completed: usize,
+    total: usize,
+    completed_tiles: usize,
+    total_tiles: usize,
+    minimized: bool,
+    cancelling: bool,
+}
+
 struct ExportTaskRequest {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -740,13 +752,10 @@ struct ExportTaskRequest {
     format: ExportFormat,
     settings: ExportSettings,
     metadata: ExportMetadata,
-    display_name: String,
     gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
 
 struct LensCorrectionTaskRequest {
-    document_id: u64,
-    generation: u64,
     original_raw: Arc<LoadedRaw>,
     selection: Option<LensfunLens>,
     #[cfg(target_os = "android")]
@@ -755,42 +764,97 @@ struct LensCorrectionTaskRequest {
     cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
 }
 
-struct SubjectMaskTaskRequest {
-    document_id: u64,
-    generation: u64,
-    quality: BiRefNetQuality,
-    source: MaskRgbImage,
-    model_path: PathBuf,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-}
-
-struct ObjectMaskTaskRequest {
-    document_id: u64,
-    generation: u64,
-    target: AiMaskTarget,
-    encoder_path: PathBuf,
-    decoder_path: PathBuf,
-    vitmatte_path: PathBuf,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    request: ObjectMaskRequest,
-}
-
-struct LandscapeMaskTaskRequest {
-    document_id: u64,
-    generation: u64,
-    target: AiMaskTarget,
-    source: MaskRgbImage,
-    model_path: PathBuf,
-    vitmatte_path: PathBuf,
-    allow_download: bool,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    category: LandscapeCategory,
-}
-
 type GeneratedAiMaskTargets = (bool, VecDeque<(usize, usize)>, VecDeque<(usize, usize)>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForegroundOperationKind {
+    SubjectMask,
+    ObjectMask,
+    LandscapeMask,
+    AiDenoise,
+    Inpaint,
+    LensCorrection,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ForegroundProgressValue {
+    Indeterminate,
+    Units { completed: u64, total: u64, unit: Option<String> },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ForegroundProgress {
+    pub(crate) value: ForegroundProgressValue,
+    pub(crate) phase: String,
+    pub(crate) detail: Option<String>,
+}
+
+impl ForegroundProgress {
+    pub(crate) fn indeterminate(phase: impl Into<String>) -> Self {
+        Self {
+            value: ForegroundProgressValue::Indeterminate,
+            phase: phase.into(),
+            detail: None,
+        }
+    }
+
+    pub(crate) fn units(
+        completed: u64,
+        total: u64,
+        unit: impl Into<Option<String>>,
+        phase: impl Into<String>,
+    ) -> Self {
+        Self {
+            value: ForegroundProgressValue::Units { completed, total, unit: unit.into() },
+            phase: phase.into(),
+            detail: None,
+        }
+    }
+
+    pub(crate) fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+}
+
+enum ForegroundOperationReceiver {
+    Subject(mpsc::Receiver<SubjectMaskEvent>),
+    Object(mpsc::Receiver<ObjectMaskEvent>),
+    Landscape(mpsc::Receiver<LandscapeMaskEvent>),
+    Inpaint(mpsc::Receiver<InpaintEvent>),
+    AiDenoise(mpsc::Receiver<crate::ai_denoise::AiDenoiseEvent>),
+    LensCorrection(mpsc::Receiver<LensCorrectionEvent>),
+}
+
+enum ForegroundOperationContext {
+    Subject,
+    Object {
+        target: AiMaskTarget,
+        inference_started: bool,
+    },
+    Landscape {
+        target: AiMaskTarget,
+        category: LandscapeCategory,
+    },
+    Inpaint {
+        dabs: Vec<BrushDab>,
+        revision: u64,
+        replace_index: Option<usize>,
+    },
+    AiDenoise,
+    LensCorrection,
+}
+
+struct ForegroundOperation {
+    kind: ForegroundOperationKind,
+    document_id: u64,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
+    progress: ForegroundProgress,
+    cancelling: bool,
+    receiver: ForegroundOperationReceiver,
+    context: ForegroundOperationContext,
+}
 
 #[cfg(target_os = "android")]
 type AndroidAdjustmentPasteResult = (Vec<(String, String)>, Vec<(String, String)>, Vec<String>);
@@ -805,33 +869,6 @@ struct AiMaskTarget {
     component_index: usize,
     kind: MaskKind,
     geometry: MaskGeometry,
-}
-
-struct InpaintTaskRequest {
-    document_id: u64,
-    generation: u64,
-    model_path: PathBuf,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    request: InpaintRequest,
-    dabs: Vec<BrushDab>,
-}
-
-enum BackgroundAction {
-    SingleExport(Box<ExportTaskRequest>),
-    LibraryBatchExport {
-        jobs: VecDeque<LibraryBatchExportJob>,
-        settings: ExportSettings,
-        format: ExportFormat,
-    },
-    LensCorrection(LensCorrectionTaskRequest),
-    SubjectMask(SubjectMaskTaskRequest),
-    ObjectMask(Box<ObjectMaskTaskRequest>),
-    LandscapeMask(LandscapeMaskTaskRequest),
-    Inpainting(InpaintTaskRequest),
-    LibraryAiMaskRefresh {
-        jobs: VecDeque<LibraryAiMaskRefreshJob>,
-    },
 }
 
 pub struct AurawApp {
@@ -991,21 +1028,11 @@ pub struct AurawApp {
     developed_thumbnail_receiver: Option<mpsc::Receiver<DevelopedThumbnailEvent>>,
 
     egui_ctx: egui::Context,
-    background_tasks: BackgroundTaskManager,
-    background_actions: HashMap<TaskId, BackgroundAction>,
-    export_task_id: Option<TaskId>,
-    library_batch_export_task_id: Option<TaskId>,
-    library_ai_mask_refresh_task_id: Option<TaskId>,
-    subject_task_id: Option<TaskId>,
-    object_task_id: Option<TaskId>,
-    landscape_task_id: Option<TaskId>,
-    inpaint_task_id: Option<TaskId>,
+    foreground_operation: Option<ForegroundOperation>,
+    export_task: Option<ExportTask>,
     target_exposure: ExposureParams,
     pending_stage: Option<ProcessingStage>,
     lens_correction_dirty: bool,
-    lens_correction_generation: u64,
-    lens_correction_receiver: Option<mpsc::Receiver<LensCorrectionEvent>>,
-    lens_correction_task_id: Option<TaskId>,
     #[cfg(target_os = "android")]
     lens_original_preview_cache: Option<(PreviewQuality, Arc<LoadedRaw>)>,
     #[cfg(target_os = "android")]
@@ -1013,12 +1040,6 @@ pub struct AurawApp {
         Option<(LensfunLens, PreviewQuality, Arc<LoadedRaw>, Arc<LoadedRaw>)>,
     load_receiver: Option<mpsc::Receiver<LoadEvent>>,
     loading_label: Option<String>,
-    export_receiver: Option<mpsc::Receiver<ExportEvent>>,
-    export_progress: Option<(usize, usize)>,
-    #[cfg(not(target_os = "android"))]
-    library_batch_export_receiver: Option<mpsc::Receiver<LibraryBatchExportEvent>>,
-    #[cfg(not(target_os = "android"))]
-    library_batch_export_tile_progress: Option<(usize, usize)>,
     library_batch_export: Option<LibraryBatchExportState>,
     library_ai_mask_refresh: Option<LibraryAiMaskRefreshState>,
     export_publish_pending: bool,
@@ -1029,34 +1050,12 @@ pub struct AurawApp {
     detail_dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
     navigation_dirty_mask_layers: [bool; MAX_LOCAL_MASKS],
     subject_consent_open: bool,
-    subject_receiver: Option<mpsc::Receiver<SubjectMaskEvent>>,
-    subject_generation: u64,
-    subject_job_document_id: u64,
-    subject_job_generation: u64,
-    subject_download_progress: Option<(&'static str, u64, u64)>,
-    subject_inferencing: bool,
     object_consent_open: bool,
     object_pending_target: Option<(usize, usize)>,
-    object_receiver: Option<mpsc::Receiver<ObjectMaskEvent>>,
-    object_download_progress: Option<(&'static str, u64, u64)>,
-    object_inferencing: bool,
-    object_decoder_only: bool,
     object_error_dialog: Option<String>,
-    object_generation: u64,
-    object_job_generation: u64,
-    object_job_document_id: u64,
-    object_job_target: Option<AiMaskTarget>,
     object_cache: Option<((usize, usize), ObjectInferenceCache)>,
     landscape_consent_open: bool,
     landscape_pending_target: Option<(usize, usize)>,
-    landscape_receiver: Option<mpsc::Receiver<LandscapeMaskEvent>>,
-    landscape_download_progress: Option<(u64, u64)>,
-    landscape_inferencing: bool,
-    landscape_generation: u64,
-    landscape_job_generation: u64,
-    landscape_job_document_id: u64,
-    landscape_job_target: Option<AiMaskTarget>,
-    landscape_job_category: Option<LandscapeCategory>,
 
     pub(crate) inpaint_brush_size: f32,
     pub(crate) inpaint_tool: InpaintStrokeKind,
@@ -1078,21 +1077,10 @@ pub struct AurawApp {
     pub(crate) inpaint_focus_texture_key: Option<(usize, u64, OverlayRasterKey, bool)>,
     inpaint_source_cache: Option<MaskRgbImage>,
     inpaint_pending_source: Option<PreparedInpaintSource>,
-    inpaint_active_dabs: Option<Vec<crate::pipeline::BrushDab>>,
     inpaint_replace_index: Option<usize>,
     inpaint_revision: u64,
-    inpaint_job_document_id: u64,
-    inpaint_job_generation: u64,
     inpaint_consent_open: bool,
-    inpaint_receiver: Option<mpsc::Receiver<InpaintEvent>>,
-    inpaint_download_progress: Option<(u64, u64)>,
-    inpaint_inferencing: bool,
     ai_denoise_consent_open: bool,
-    ai_denoise_receiver: Option<mpsc::Receiver<crate::ai_denoise::AiDenoiseEvent>>,
-    ai_denoise_download_progress: Option<(u64, u64)>,
-    ai_denoise_apply_progress: Option<(&'static str, usize, usize)>,
-    ai_denoise_cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
-    ai_denoise_job_document_id: u64,
     ai_denoise_resume_pending: bool,
 
     #[cfg(target_os = "android")]
@@ -1236,22 +1224,19 @@ mod inpainting;
 mod processing_export;
 mod library_adjustments;
 mod sidecar_persistence;
-mod background_task_runtime;
+mod foreground;
 mod eframe_impl;
 
 use lifecycle::needs_canonical_mask_source;
 #[cfg(not(target_os = "android"))]
 use lifecycle::install_missing_range_sources;
-use processing_export::{batch_export_overall_fraction, spawn_export_request};
-#[cfg(not(target_os = "android"))]
-use processing_export::{spawn_desktop_library_batch_export, DesktopLibraryBatchExportRequest};
 use sidecar_persistence::sidecar_interaction_active;
 
 #[cfg(test)]
 mod transactional_pipeline_tests {
     use super::{
-        collect_pipeline_update_results, AiMaskTarget, AurawApp, BackgroundTaskManager,
-        MaskGeometry, MaskKind, MaskStack, PreviewQuality, TaskKind, TaskProgress, TaskStatus,
+        collect_pipeline_update_results, AiMaskTarget, AurawApp, MaskGeometry, MaskKind,
+        MaskStack, PreviewQuality,
     };
     use crate::pipeline::GeometryTransform;
 
@@ -1384,32 +1369,4 @@ mod transactional_pipeline_tests {
         assert!(error.contains("changed type"));
     }
 
-    #[test]
-    fn subject_landscape_and_object_errors_remain_failed_tasks() {
-        let kinds = [
-            TaskKind::SubjectMask {
-                document_id: 1,
-                generation: 1,
-            },
-            TaskKind::LandscapeMask {
-                document_id: 1,
-                generation: 1,
-            },
-            TaskKind::ObjectMask {
-                document_id: 1,
-                generation: 1,
-            },
-        ];
-        for kind in kinds {
-            let mut tasks = BackgroundTaskManager::default();
-            let id = tasks.start_nonblocking(
-                kind,
-                "Generating mask",
-                TaskProgress::indeterminate("Running inference"),
-                true,
-            );
-            assert!(tasks.fail(id, "inference failed"));
-            assert_eq!(tasks.snapshot(id).unwrap().status, TaskStatus::Failed);
-        }
-    }
 }

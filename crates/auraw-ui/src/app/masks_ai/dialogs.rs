@@ -2,7 +2,6 @@ use super::*;
 
 impl AurawApp {
     pub(in crate::app) fn show_subject_dialogs(&mut self, ctx: &egui::Context) {
-        let library_batch_refreshing = self.library_ai_mask_refresh.is_some();
         if self.subject_consent_open {
             crate::ui::responsive_popup(
                 egui::Window::new("Download subject-selection model?"),
@@ -64,34 +63,6 @@ impl AurawApp {
                         }
                     });
                 });
-        }
-        // The Library batch progress is the operation-level dialog. Do not
-        // cover it with a second worker-level window while refreshing pasted
-        // masks; the batch dialog stays visible for the entire operation.
-        if self.subject_receiver.is_some() && !library_batch_refreshing
-            && self
-                .subject_task_id
-                .is_some_and(|id| self.background_task_details_open(id))
-        {
-            let action = show_cancellable_worker_popup(ctx, "Preparing subject mask", 420.0, |ui| {
-                if let Some((label, downloaded, total)) = self.subject_download_progress {
-                    show_download_progress(ui, format!("Downloading {label}…"), downloaded, total);
-                } else if self.subject_inferencing {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(format!(
-                            "Running {} quality locally with {}…",
-                            self.birefnet_quality.label(),
-                            self.birefnet_quality.model().checkpoint
-                        ));
-                    });
-                } else {
-                    ui.spinner();
-                }
-            });
-            let task_id = self.subject_task_id;
-            self.apply_worker_dialog_action(task_id, action);
-            ctx.request_repaint_after(Duration::from_millis(50));
         }
 
         if self.landscape_consent_open {
@@ -171,33 +142,6 @@ impl AurawApp {
                 });
             });
         }
-        if self.landscape_receiver.is_some()
-            && !library_batch_refreshing
-            && self
-                .landscape_task_id
-                .is_some_and(|id| self.background_task_details_open(id))
-        {
-            let action = show_cancellable_worker_popup(ctx, "Preparing landscape mask", 420.0, |ui| {
-                if let Some((downloaded, total)) = self.landscape_download_progress {
-                    show_download_progress(
-                        ui,
-                        "Downloading MaskFormer landscape model…",
-                        downloaded,
-                        total,
-                    );
-                } else if self.landscape_inferencing {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Running local semantic landscape selection…");
-                    });
-                } else {
-                    ui.spinner();
-                }
-            });
-            let task_id = self.landscape_task_id;
-            self.apply_worker_dialog_action(task_id, action);
-            ctx.request_repaint_after(Duration::from_millis(50));
-        }
 
         if self.object_consent_open {
             crate::ui::responsive_popup(
@@ -256,31 +200,6 @@ impl AurawApp {
                         }
                     });
                 });
-        }
-        if self.object_receiver.is_some() && !library_batch_refreshing
-            && self
-                .object_task_id
-                .is_some_and(|id| self.background_task_details_open(id))
-        {
-            let action = show_cancellable_worker_popup(ctx, "Preparing object mask", 420.0, |ui| {
-                if let Some((label, downloaded, total)) = self.object_download_progress {
-                    show_download_progress(ui, format!("Downloading {label}…"), downloaded, total);
-                } else if self.object_inferencing {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(if self.object_decoder_only {
-                            "Updating the object mask…"
-                        } else {
-                            "Encoding the selected image region and generating the object mask…"
-                        });
-                    });
-                } else {
-                    ui.spinner();
-                }
-            });
-            let task_id = self.object_task_id;
-            self.apply_worker_dialog_action(task_id, action);
-            ctx.request_repaint_after(Duration::from_millis(50));
         }
 
         if let Some(message) = self.object_error_dialog.clone() {
