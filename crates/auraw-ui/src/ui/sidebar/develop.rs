@@ -478,6 +478,9 @@ impl Sidebar {
                     changed = true;
                 }
                 let base_tint = raw.as_shot_white_balance().map_or(tint, |value| value.1);
+                let tint_neutral_fraction = ((1.0 - MIN_WHITE_BALANCE_TINT)
+                    / (MAX_WHITE_BALANCE_TINT - MIN_WHITE_BALANCE_TINT))
+                    .clamp(0.0, 1.0);
                 let tint_changed = ui
                     .push_id(base_tint.to_bits(), |ui| {
                         gradient_adjustment_slider(
@@ -487,8 +490,10 @@ impl Sidebar {
                             MIN_WHITE_BALANCE_TINT..=MAX_WHITE_BALANCE_TINT,
                             3,
                             0.005,
-                            Some("darktable-compatible absolute camera tint; the as-shot value is the reset value."),
-                            SliderGradient::Tint,
+                            Some("darktable-compatible absolute camera tint: values below 1 are magenta, values above 1 are green; the as-shot value is the reset value."),
+                            SliderGradient::CameraTint {
+                                neutral_fraction: tint_neutral_fraction,
+                            },
                         )
                     })
                     .inner;
