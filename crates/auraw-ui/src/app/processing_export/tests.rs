@@ -2,7 +2,7 @@ use super::{
     batch::batch_export_overall_fraction,
     export::{clear_export_task, export_source_stem},
 };
-use super::super::{ExportTask, ExportTaskKind, ExportTaskReceiver};
+use super::super::{ExportDestination, ExportTask, ExportTaskKind, ExportTaskReceiver};
 use crate::pipeline::ExportEvent;
 use std::path::Path;
 use std::sync::{
@@ -49,6 +49,7 @@ fn test_export_task() -> ExportTask {
         kind: ExportTaskKind::Single,
         cancellation: Arc::new(AtomicBool::new(false)),
         receiver: Some(ExportTaskReceiver::Tiled(receiver)),
+        destination: Some(ExportDestination::File("photo.png".into())),
         progress: 0.42,
         phase: "Rendering tile 4/10".to_owned(),
         completed: 0,
@@ -57,6 +58,34 @@ fn test_export_task() -> ExportTask {
         total_tiles: 10,
         minimized: false,
         cancelling: false,
+    }
+}
+
+#[test]
+fn export_destination_keeps_the_render_path_explicit() {
+    let destination = ExportDestination::File("nested/photo.tif".into());
+    assert_eq!(destination.path(), Path::new("nested/photo.tif"));
+}
+
+#[cfg(target_os = "android")]
+#[test]
+fn android_gallery_destination_keeps_publish_name_and_format() {
+    let destination = ExportDestination::AndroidGallery {
+        path: "cache/photo-123.jpg".into(),
+        display_name: "photo-auraw.jpg".to_owned(),
+        format: crate::pipeline::ExportFormat::Jpeg,
+    };
+    assert_eq!(destination.path(), Path::new("cache/photo-123.jpg"));
+    match destination {
+        ExportDestination::AndroidGallery {
+            display_name,
+            format,
+            ..
+        } => {
+            assert_eq!(display_name, "photo-auraw.jpg");
+            assert_eq!(format, crate::pipeline::ExportFormat::Jpeg);
+        }
+        _ => unreachable!(),
     }
 }
 

@@ -4,6 +4,45 @@ use super::batch::batch_export_overall_fraction;
 use super::preview::DETAIL_ZOOM_START;
 
 impl ExportTask {
+    pub(super) fn new(
+        kind: ExportTaskKind,
+        cancellation: Arc<std::sync::atomic::AtomicBool>,
+        receiver: Option<ExportTaskReceiver>,
+        destination: Option<ExportDestination>,
+        total: usize,
+    ) -> Self {
+        Self {
+            kind,
+            cancellation,
+            receiver,
+            destination,
+            progress: 0.0,
+            phase: if kind == ExportTaskKind::LibraryBatch {
+                "Preparing batch export…".to_owned()
+            } else {
+                "Preparing tiled export…".to_owned()
+            },
+            completed: 0,
+            total,
+            completed_tiles: 0,
+            total_tiles: 0,
+            minimized: false,
+            cancelling: false,
+        }
+    }
+
+    fn start_item(
+        &mut self,
+        receiver: mpsc::Receiver<ExportEvent>,
+        destination: ExportDestination,
+    ) {
+        self.receiver = Some(ExportTaskReceiver::Tiled(receiver));
+        self.destination = Some(destination);
+        self.completed_tiles = 0;
+        self.total_tiles = 0;
+        self.phase = "Preparing tiled export…".to_owned();
+    }
+
     pub(super) fn minimize(&mut self) {
         self.minimized = true;
     }
@@ -42,24 +81,29 @@ pub(in crate::app) fn export_source_stem(current_path: Option<&std::path::Path>,
         .to_owned()
 }
 
-pub(in crate::app) fn spawn_export_request(
-    request: ExportTaskRequest,
+pub(in crate::app) fn spawn_export_item(
+    request: ExportItemRequest,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
 ) -> mpsc::Receiver<ExportEvent> {
-    let ExportTaskRequest {
+    let ExportItemRequest {
         device,
         queue,
+        source,
+        destination,
+        format,
+        settings,
+    } = request;
+    let PreparedExportSource {
         raw,
         geometry,
         exposure,
         masks,
         inpaint,
-        path,
-        format,
-        settings,
-        metadata,
+        source_file_name,
         gpu_export_prewarm,
-    } = request;
+    } = source;
+    let metadata = ExportMetadata::from_raw(&raw, source_file_name);
+    let path = destination.path().to_path_buf();
     spawn_tiled_export(
         format,
         TiledExportJob {
@@ -80,6 +124,25 @@ pub(in crate::app) fn spawn_export_request(
     )
 }
 
+#[cfg(not(target_os = "android"))]
+pub(in crate::app) fn run_export_item(
+    request: ExportItemRequest,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<(), String> {
+    let receiver = spawn_export_item(request, cancellation);
+    while let Ok(event) = receiver.recv() {
+        match event {
+            ExportEvent::Progress {
+                completed_tiles,
+                total_tiles,
+            } => progress(completed_tiles, total_tiles),
+            ExportEvent::Finished(result) => return result.map(|_| ()),
+        }
+    }
+    Err("export worker stopped unexpectedly".to_owned())
+}
+
 impl AurawApp {
     pub(crate) fn export_task_active(&self) -> bool {
         self.export.task.is_some()
@@ -94,109 +157,47 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
-    pub(crate) fn export_png(&mut self, frame: &eframe::Frame) {
+    fn export_desktop(&mut self, frame: &eframe::Frame, format: ExportFormat) {
         if !self.can_export() {
             return;
         }
 
         let default_name = format!(
-            "{}-auraw.png",
-            export_source_stem(self.develop.current_path.as_deref(), self.develop.current_label.as_deref())
+            "{}-auraw.{}",
+            export_source_stem(
+                self.develop.current_path.as_deref(),
+                self.develop.current_label.as_deref(),
+            ),
+            format.extension(),
         );
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("PNG image", &["png"])
-            .set_file_name(default_name);
-        if let Some(parent) = self.develop.current_path
+        let initial_directory = self
+            .develop
+            .current_path
             .as_deref()
-            .and_then(|path| path.parent())
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            dialog = dialog.set_directory(parent);
-        }
-        let Some(mut path) = dialog.save_file() else {
+            .and_then(|path| path.parent());
+        let Some(path) = crate::ui::choose_export_file_path(
+            format,
+            &default_name,
+            initial_directory,
+        ) else {
             return;
         };
-        let has_png_extension = matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some(extension) if extension.eq_ignore_ascii_case("png")
-        );
-        if !has_png_extension {
-            path.set_extension("png");
-        }
+        self.start_export(path, frame, format);
+    }
 
-        self.start_export(path, frame, ExportFormat::Png);
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn export_png(&mut self, frame: &eframe::Frame) {
+        self.export_desktop(frame, ExportFormat::Png);
     }
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn export_jpeg(&mut self, frame: &eframe::Frame) {
-        if !self.can_export() {
-            return;
-        }
-
-        let default_name = format!(
-            "{}-auraw.jpg",
-            export_source_stem(self.develop.current_path.as_deref(), self.develop.current_label.as_deref())
-        );
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("JPEG image", &["jpg", "jpeg"])
-            .set_file_name(default_name);
-        if let Some(parent) = self.develop.current_path
-            .as_deref()
-            .and_then(|path| path.parent())
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            dialog = dialog.set_directory(parent);
-        }
-        let Some(mut path) = dialog.save_file() else {
-            return;
-        };
-        let has_jpeg_extension = matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some(extension)
-                if extension.eq_ignore_ascii_case("jpg")
-                    || extension.eq_ignore_ascii_case("jpeg")
-        );
-        if !has_jpeg_extension {
-            path.set_extension("jpg");
-        }
-
-        self.start_export(path, frame, ExportFormat::Jpeg);
+        self.export_desktop(frame, ExportFormat::Jpeg);
     }
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn export_tiff(&mut self, frame: &eframe::Frame) {
-        if !self.can_export() {
-            return;
-        }
-
-        let default_name = format!(
-            "{}-auraw.tif",
-            export_source_stem(self.develop.current_path.as_deref(), self.develop.current_label.as_deref())
-        );
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("TIFF image", &["tif", "tiff"])
-            .set_file_name(default_name);
-        if let Some(parent) = self.develop.current_path
-            .as_deref()
-            .and_then(|path| path.parent())
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            dialog = dialog.set_directory(parent);
-        }
-        let Some(mut path) = dialog.save_file() else {
-            return;
-        };
-        let has_tiff_extension = matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some(extension)
-                if extension.eq_ignore_ascii_case("tif")
-                    || extension.eq_ignore_ascii_case("tiff")
-        );
-        if !has_tiff_extension {
-            path.set_extension("tif");
-        }
-
-        self.start_export(path, frame, ExportFormat::Tiff);
+        self.export_desktop(frame, ExportFormat::Tiff);
     }
 
     #[cfg(target_os = "android")]
@@ -220,49 +221,83 @@ impl AurawApp {
             return;
         }
 
-        let Some(data_dir) = self.android.android_app.internal_data_path() else {
-            self.ui.notice = Some("Android did not provide an app data directory.".to_owned());
-            return;
-        };
-        let export_dir = data_dir.join("cache").join("exports");
-        if let Err(error) = std::fs::create_dir_all(&export_dir) {
-            self.ui.notice = Some(format!("Could not prepare Android export cache: {error}"));
-            return;
-        }
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         let display_name = format!("AuRaw-{timestamp}.{}", format.extension());
+        let destination = match self.prepare_android_export_destination(
+            display_name.clone(),
+            display_name,
+            format,
+        ) {
+            Ok(destination) => destination,
+            Err(error) => {
+                self.ui.notice = Some(error);
+                return;
+            }
+        };
+        let cleanup = destination.clone();
+        if self
+            .start_export_destination(destination, frame, format)
+            .is_none()
+        {
+            self.cancel_android_export_destination(&cleanup);
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(in crate::app) fn prepare_android_export_destination(
+        &self,
+        display_name: String,
+        cache_file_name: String,
+        format: ExportFormat,
+    ) -> Result<ExportDestination, String> {
+        let Some(data_dir) = self.android.android_app.internal_data_path() else {
+            return Err("Android did not provide an app data directory.".to_owned());
+        };
+        let export_dir = data_dir.join("cache").join("exports");
+        std::fs::create_dir_all(&export_dir)
+            .map_err(|error| format!("Could not prepare Android export cache: {error}"))?;
         match crate::android::prepare_direct_export(
             &self.android.android_app,
             &export_dir,
             &display_name,
             format.mime_type(),
         ) {
-            Ok(Some(path)) => {
-                let direct_path = path.clone();
-                if self.start_export(path, frame, format).is_none() {
-                    crate::android::cancel_direct_export(&self.android.android_app, &direct_path);
-                }
-            }
-            Ok(None) => {
-                // Android 8/9 still need the legacy cache + permission flow.
-                self.start_export(export_dir.join(display_name), frame, format);
-            }
+            Ok(Some(path)) => Ok(ExportDestination::AndroidDirect { path }),
+            Ok(None) => Ok(ExportDestination::AndroidGallery {
+                path: export_dir.join(cache_file_name),
+                display_name,
+                format,
+            }),
             Err(error) => {
                 log::warn!("direct Android export unavailable, falling back to cache: {error}");
-                self.start_export(export_dir.join(display_name), frame, format);
+                Ok(ExportDestination::AndroidGallery {
+                    path: export_dir.join(cache_file_name),
+                    display_name,
+                    format,
+                })
             }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(in crate::app) fn cancel_android_export_destination(
+        &self,
+        destination: &ExportDestination,
+    ) {
+        if let ExportDestination::AndroidDirect { path } = destination {
+            crate::android::cancel_direct_export(&self.android.android_app, path);
         }
     }
 
     pub(in crate::app) fn capture_export_task_request(
         &mut self,
-        path: PathBuf,
+        destination: ExportDestination,
         frame: &eframe::Frame,
         format: ExportFormat,
-    ) -> Option<ExportTaskRequest> {
+    ) -> Option<ExportItemRequest> {
         if self.develop.loaded_raw.is_none()
             || self.develop.preview_raw.is_none()
             || self.export.publish_pending
@@ -282,19 +317,21 @@ impl AurawApp {
             .and_then(|name| name.to_str())
             .map(str::to_owned)
             .or_else(|| self.develop.current_label.clone());
-        Some(ExportTaskRequest {
+        Some(ExportItemRequest {
             device: render_state.device.clone(),
             queue: render_state.queue.clone(),
-            metadata: ExportMetadata::from_raw(&raw, source_file_name),
-            raw,
-            geometry: self.develop.geometry,
-            exposure: self.develop.exposure,
-            masks: self.masks.stack.clone(),
-            inpaint: self.inpaint.layer.clone(),
-            path,
+            source: PreparedExportSource {
+                raw,
+                geometry: self.develop.geometry,
+                exposure: self.develop.exposure,
+                masks: self.masks.stack.clone(),
+                inpaint: self.inpaint.layer.clone(),
+                source_file_name,
+                gpu_export_prewarm: self.export.gpu_prewarm.as_ref().map(Arc::clone),
+            },
+            destination,
             format,
             settings: self.export.settings.clone(),
-            gpu_export_prewarm: self.export.gpu_prewarm.as_ref().map(Arc::clone),
         })
     }
 
@@ -304,10 +341,19 @@ impl AurawApp {
         frame: &eframe::Frame,
         format: ExportFormat,
     ) -> Option<()> {
+        self.start_export_destination(ExportDestination::File(path), frame, format)
+    }
+
+    fn start_export_destination(
+        &mut self,
+        destination: ExportDestination,
+        frame: &eframe::Frame,
+        format: ExportFormat,
+    ) -> Option<()> {
         if !self.can_export() {
             return None;
         }
-        let request = self.capture_export_task_request(path, frame, format)?;
+        let request = self.capture_export_task_request(destination, frame, format)?;
         if let Err(error) = self.start_export_task(request, ExportTaskKind::Single) {
             self.ui.notice = Some(format!("Export failed: {error}"));
             return None;
@@ -317,7 +363,7 @@ impl AurawApp {
 
     pub(in crate::app) fn start_export_task(
         &mut self,
-        request: ExportTaskRequest,
+        request: ExportItemRequest,
         kind: ExportTaskKind,
     ) -> Result<(), String> {
         let cancellation = match (kind, self.export.task.as_ref()) {
@@ -336,26 +382,18 @@ impl AurawApp {
                 return Err("the library batch export is no longer active".to_owned());
             }
         };
-        let receiver = spawn_export_request(request, Arc::clone(&cancellation));
+        let destination = request.destination.clone();
+        let receiver = spawn_export_item(request, Arc::clone(&cancellation));
         if kind == ExportTaskKind::Single {
-            self.export.task = Some(ExportTask {
+            self.export.task = Some(ExportTask::new(
                 kind,
                 cancellation,
-                receiver: Some(ExportTaskReceiver::Tiled(receiver)),
-                progress: 0.0,
-                phase: "Preparing tiled export…".to_owned(),
-                completed: 0,
-                total: 1,
-                completed_tiles: 0,
-                total_tiles: 0,
-                minimized: false,
-                cancelling: false,
-            });
+                Some(ExportTaskReceiver::Tiled(receiver)),
+                Some(destination),
+                1,
+            ));
         } else if let Some(task) = self.export.task.as_mut() {
-            task.receiver = Some(ExportTaskReceiver::Tiled(receiver));
-            task.completed_tiles = 0;
-            task.total_tiles = 0;
-            task.phase = "Preparing tiled export…".to_owned();
+            task.start_item(receiver, destination);
         }
         self.ui.notice = None;
         self.egui_ctx.request_repaint();
@@ -574,80 +612,77 @@ impl AurawApp {
 
                             #[cfg(target_os = "android")]
                             {
-                                if crate::android::is_direct_export_path(&path) {
-                                    match crate::android::finalize_direct_export(
-                                        &self.android.android_app,
-                                        &path,
-                                    ) {
-                                        Ok(location) => {
-                                            if is_batch {
-                                                android_batch_result = Some(Ok(()));
-                                            } else {
-                                                self.ui.notice = Some(format!("Exported to {location}"));
-                                                clear_export_task(&mut self.export.task);
+                                let destination = self
+                                    .export
+                                    .task
+                                    .as_ref()
+                                    .and_then(|task| task.destination.clone());
+                                match destination {
+                                    Some(ExportDestination::AndroidDirect { path: direct_path }) => {
+                                        debug_assert_eq!(path, direct_path);
+                                        match crate::android::finalize_direct_export(
+                                            &self.android.android_app,
+                                            &direct_path,
+                                        ) {
+                                            Ok(location) => {
+                                                if is_batch {
+                                                    android_batch_result = Some(Ok(()));
+                                                } else {
+                                                    self.ui.notice = Some(format!("Exported to {location}"));
+                                                    clear_export_task(&mut self.export.task);
+                                                }
                                             }
-                                        }
-                                        Err(error) => {
-                                            if is_batch {
-                                                android_batch_result = Some(Err(error.clone()));
-                                            } else {
-                                                clear_export_task(&mut self.export.task);
+                                            Err(error) => {
+                                                if is_batch {
+                                                    android_batch_result = Some(Err(error.clone()));
+                                                } else {
+                                                    clear_export_task(&mut self.export.task);
+                                                }
+                                                self.ui.notice = Some(format!("Export failed: {error}"));
+                                                log::error!("Android direct export finalize failed: {error}");
                                             }
-                                            self.ui.notice = Some(format!("Export failed: {error}"));
-                                            log::error!("Android direct export finalize failed: {error}");
                                         }
                                     }
-                                } else {
-                                    let format = match path.extension().and_then(|extension| extension.to_str()) {
-                                        Some(extension)
-                                            if extension.eq_ignore_ascii_case("jpg")
-                                                || extension.eq_ignore_ascii_case("jpeg") => ExportFormat::Jpeg,
-                                        Some(extension)
-                                            if extension.eq_ignore_ascii_case("tif")
-                                                || extension.eq_ignore_ascii_case("tiff") => ExportFormat::Tiff,
-                                        _ => ExportFormat::Png,
-                                    };
-                                    let fallback_name = format!("AuRaw-export.{}", format.extension());
-                                    let display_name = self.export.batch
-                                        .as_ref()
-                                        .and_then(|batch| batch.current.as_ref())
-                                        .map(|job| {
-                                            let stem = std::path::Path::new(job.target.display_name())
-                                                .file_stem()
-                                                .and_then(|stem| stem.to_str())
-                                                .filter(|stem| !stem.is_empty())
-                                                .unwrap_or("AuRaw-export");
-                                            format!("{stem}-auraw.{}", format.extension())
-                                        })
-                                        .or_else(|| {
-                                            path.file_name()
-                                                .and_then(|name| name.to_str())
-                                                .map(str::to_owned)
-                                        })
-                                        .unwrap_or(fallback_name);
-                                    match crate::android::publish_image(
-                                        &self.android.android_app,
-                                        &path,
-                                        &display_name,
-                                        format.mime_type(),
-                                    ) {
-                                        Ok(()) => {
-                                            self.export.publish_pending = true;
-                                            self.ui.notice = Some("Saving to Pictures/AuRaw…".to_owned());
-                                            if let Some(task) = self.export.task.as_mut() {
-                                                task.phase = "Publishing to Pictures/AuRaw…".to_owned();
-                                                task.progress = task.progress.max(EXPORT_MAX_INCOMPLETE_FRACTION);
+                                    Some(ExportDestination::AndroidGallery {
+                                        path: cache_path,
+                                        display_name,
+                                        format,
+                                    }) => {
+                                        debug_assert_eq!(path, cache_path);
+                                        match crate::android::publish_image(
+                                            &self.android.android_app,
+                                            &cache_path,
+                                            &display_name,
+                                            format.mime_type(),
+                                        ) {
+                                            Ok(()) => {
+                                                self.export.publish_pending = true;
+                                                self.ui.notice = Some("Saving to Pictures/AuRaw…".to_owned());
+                                                if let Some(task) = self.export.task.as_mut() {
+                                                    task.phase = "Publishing to Pictures/AuRaw…".to_owned();
+                                                    task.progress = task.progress.max(EXPORT_MAX_INCOMPLETE_FRACTION);
+                                                }
+                                            }
+                                            Err(error) => {
+                                                let _ = std::fs::remove_file(&cache_path);
+                                                if is_batch {
+                                                    android_batch_result = Some(Err(error.clone()));
+                                                } else {
+                                                    clear_export_task(&mut self.export.task);
+                                                }
+                                                self.ui.notice = Some(format!("Export failed: {error}"));
                                             }
                                         }
-                                        Err(error) => {
-                                            let _ = std::fs::remove_file(&path);
-                                            if is_batch {
-                                                android_batch_result = Some(Err(error.clone()));
-                                            } else {
-                                                clear_export_task(&mut self.export.task);
-                                            }
-                                            self.ui.notice = Some(format!("Export failed: {error}"));
+                                    }
+                                    Some(ExportDestination::File(_)) | None => {
+                                        let error = "export destination state was lost".to_owned();
+                                        if is_batch {
+                                            android_batch_result = Some(Err(error.clone()));
+                                        } else {
+                                            clear_export_task(&mut self.export.task);
                                         }
+                                        self.ui.notice = Some(format!("Export failed: {error}"));
+                                        log::error!("Android export finalization failed: {error}");
                                     }
                                 }
                             }

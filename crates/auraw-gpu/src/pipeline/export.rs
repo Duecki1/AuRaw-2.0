@@ -43,6 +43,20 @@ impl ExportFormat {
         }
     }
 
+    pub const fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Png => &["png"],
+            Self::Jpeg => &["jpg", "jpeg"],
+            Self::Tiff => &["tif", "tiff"],
+        }
+    }
+
+    pub fn matches_extension(self, extension: &str) -> bool {
+        self.extensions()
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    }
+
     pub const fn mime_type(self) -> &'static str {
         match self {
             Self::Png => "image/png",
@@ -448,183 +462,6 @@ fn run_export_worker(
             ExportFormat::Tiff => export_tiled_tiff(context, request),
         }
     })
-}
-
-/// Compatibility wrapper for callers using the original PNG API.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_tiled_png_export(
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    raw: Arc<LoadedRaw>,
-    geometry: GeometryTransform,
-    exposure: ExposureParams,
-    masks: MaskStack,
-    inpaint: Option<InpaintLayer>,
-    path: PathBuf,
-    tile_spec: TileSpec,
-    settings: ExportSettings,
-    metadata: ExportMetadata,
-    cancellation: Arc<AtomicBool>,
-) -> mpsc::Receiver<ExportEvent> {
-    spawn_tiled_png_export_with_program_prewarm(
-        device, queue, raw, geometry, exposure, masks, inpaint, path, tile_spec, settings, metadata,
-        cancellation, None,
-    )
-}
-
-/// Compatibility wrapper for callers using the original PNG prewarm API.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_tiled_png_export_with_program_prewarm(
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    raw: Arc<LoadedRaw>,
-    geometry: GeometryTransform,
-    exposure: ExposureParams,
-    masks: MaskStack,
-    inpaint: Option<InpaintLayer>,
-    path: PathBuf,
-    tile_spec: TileSpec,
-    settings: ExportSettings,
-    metadata: ExportMetadata,
-    cancellation: Arc<AtomicBool>,
-    program_prewarm: Option<Arc<GpuProgramPrewarm>>,
-) -> mpsc::Receiver<ExportEvent> {
-    spawn_tiled_export(
-        ExportFormat::Png,
-        TiledExportJob {
-            device,
-            queue,
-            raw,
-            geometry,
-            exposure,
-            masks,
-            inpaint,
-            path,
-            tile_spec,
-            settings,
-            metadata,
-            cancellation,
-            program_prewarm,
-        },
-    )
-}
-
-/// Compatibility wrapper for callers using the original JPEG API.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_tiled_jpeg_export(
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    raw: Arc<LoadedRaw>,
-    geometry: GeometryTransform,
-    exposure: ExposureParams,
-    masks: MaskStack,
-    inpaint: Option<InpaintLayer>,
-    path: PathBuf,
-    tile_spec: TileSpec,
-    settings: ExportSettings,
-    metadata: ExportMetadata,
-    cancellation: Arc<AtomicBool>,
-) -> mpsc::Receiver<ExportEvent> {
-    spawn_tiled_jpeg_export_with_program_prewarm(
-        device, queue, raw, geometry, exposure, masks, inpaint, path, tile_spec, settings, metadata,
-        cancellation, None,
-    )
-}
-
-/// Compatibility wrapper for callers using the original JPEG prewarm API.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_tiled_jpeg_export_with_program_prewarm(
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    raw: Arc<LoadedRaw>,
-    geometry: GeometryTransform,
-    exposure: ExposureParams,
-    masks: MaskStack,
-    inpaint: Option<InpaintLayer>,
-    path: PathBuf,
-    tile_spec: TileSpec,
-    settings: ExportSettings,
-    metadata: ExportMetadata,
-    cancellation: Arc<AtomicBool>,
-    program_prewarm: Option<Arc<GpuProgramPrewarm>>,
-) -> mpsc::Receiver<ExportEvent> {
-    spawn_tiled_export(
-        ExportFormat::Jpeg,
-        TiledExportJob {
-            device,
-            queue,
-            raw,
-            geometry,
-            exposure,
-            masks,
-            inpaint,
-            path,
-            tile_spec,
-            settings,
-            metadata,
-            cancellation,
-            program_prewarm,
-        },
-    )
-}
-
-/// Compatibility wrapper for callers using the original TIFF API.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_tiled_tiff_export(
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    raw: Arc<LoadedRaw>,
-    geometry: GeometryTransform,
-    exposure: ExposureParams,
-    masks: MaskStack,
-    inpaint: Option<InpaintLayer>,
-    path: PathBuf,
-    tile_spec: TileSpec,
-    settings: ExportSettings,
-    metadata: ExportMetadata,
-    cancellation: Arc<AtomicBool>,
-) -> mpsc::Receiver<ExportEvent> {
-    spawn_tiled_tiff_export_with_program_prewarm(
-        device, queue, raw, geometry, exposure, masks, inpaint, path, tile_spec, settings, metadata,
-        cancellation, None,
-    )
-}
-
-/// Compatibility wrapper for callers using the original TIFF prewarm API.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_tiled_tiff_export_with_program_prewarm(
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    raw: Arc<LoadedRaw>,
-    geometry: GeometryTransform,
-    exposure: ExposureParams,
-    masks: MaskStack,
-    inpaint: Option<InpaintLayer>,
-    path: PathBuf,
-    tile_spec: TileSpec,
-    settings: ExportSettings,
-    metadata: ExportMetadata,
-    cancellation: Arc<AtomicBool>,
-    program_prewarm: Option<Arc<GpuProgramPrewarm>>,
-) -> mpsc::Receiver<ExportEvent> {
-    spawn_tiled_export(
-        ExportFormat::Tiff,
-        TiledExportJob {
-            device,
-            queue,
-            raw,
-            geometry,
-            exposure,
-            masks,
-            inpaint,
-            path,
-            tile_spec,
-            settings,
-            metadata,
-            cancellation,
-            program_prewarm,
-        },
-    )
 }
 
 fn resolved_export_tile_spec(

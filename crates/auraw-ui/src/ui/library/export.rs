@@ -70,34 +70,11 @@ pub(super) fn library_export_jobs(paths: &[PathBuf], format: ExportFormat) -> Op
             .and_then(|name| name.to_str())
             .map(|name| format!("{name}-auraw.{}", format.extension()))
             .unwrap_or_else(|| format!("auraw-export.{}", format.extension()));
-        let mut dialog = rfd::FileDialog::new().set_file_name(default_name);
-        if let Some(parent) = source
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            dialog = dialog.set_directory(parent);
-        }
-        dialog = match format {
-            ExportFormat::Png => dialog.add_filter("PNG image", &["png"]),
-            ExportFormat::Jpeg => dialog.add_filter("JPEG image", &["jpg", "jpeg"]),
-            ExportFormat::Tiff => dialog.add_filter("TIFF image", &["tif", "tiff"]),
-        };
-        let mut destination = dialog.save_file()?;
-        let valid_extension = destination
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| match format {
-                ExportFormat::Png => extension.eq_ignore_ascii_case("png"),
-                ExportFormat::Jpeg => {
-                    extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
-                }
-                ExportFormat::Tiff => {
-                    extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff")
-                }
-            });
-        if !valid_extension {
-            destination.set_extension(format.extension());
-        }
+        let destination = crate::ui::choose_export_file_path(
+            format,
+            &default_name,
+            source.parent(),
+        )?;
         return Some(vec![(source.clone(), destination)]);
     }
 
