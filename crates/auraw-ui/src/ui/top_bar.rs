@@ -66,14 +66,6 @@ impl TopBar {
                 app.save_edits_now();
             }
 
-            if let Some(status) = crate::cloud::cached_status(app.current_path.as_deref()) {
-                ui.label(
-                    egui::RichText::new(status)
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-            }
-
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 if Self::back_icon_button(ui, theme::toolbar_icon_size()).clicked() {
                     app.activate_tab(AppTab::Library);
@@ -213,13 +205,6 @@ impl TopBar {
                     .clicked()
                     {
                         app.toggle_original_preview();
-                    }
-                    if let Some(status) = crate::cloud::cached_status(app.current_path.as_deref()) {
-                        ui.label(
-                            egui::RichText::new(status)
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                        );
                     }
                 }
             });

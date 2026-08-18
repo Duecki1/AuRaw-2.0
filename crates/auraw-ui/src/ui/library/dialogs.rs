@@ -174,7 +174,7 @@ pub(super) fn show_ai_mask_refresh_progress(
 pub(super) fn show_android_library_folder_dialog(ui: &mut Ui, app: &mut AurawApp) {
     let mut close = false;
     let mut create = None;
-    if let Some(dialog) = app.library.android_folder_name_dialog.as_mut() {
+    if let Some(dialog) = app.library.platform.folder_name_dialog.as_mut() {
         crate::ui::responsive_popup(egui::Window::new("New folder"), ui.ctx(), 380.0)
             .id(egui::Id::new("android-library-folder-name-dialog"))
             .collapsible(false)
@@ -206,18 +206,18 @@ pub(super) fn show_android_library_folder_dialog(ui: &mut Ui, app: &mut AurawApp
             });
     }
     if close {
-        app.library.android_folder_name_dialog = None;
+        app.library.platform.folder_name_dialog = None;
     }
     if let Some((parent, name)) = create {
-        match crate::android::create_library_folder(&app.library.android_app, &parent, &name) {
+        match crate::android::create_library_folder(&app.library.platform.app, &parent, &name) {
             Ok(folder) => {
-                app.library.android_folder_name_dialog = None;
-                app.library.android_expanded_folders.insert(parent);
+                app.library.platform.folder_name_dialog = None;
+                app.library.platform.expanded_folders.insert(parent);
                 app.library.status = format!("Created folder {folder}");
                 app.library.refresh(ui.ctx());
             }
             Err(error) => {
-                if let Some(dialog) = app.library.android_folder_name_dialog.as_mut() {
+                if let Some(dialog) = app.library.platform.folder_name_dialog.as_mut() {
                     dialog.error = Some(error);
                 }
             }
@@ -354,171 +354,31 @@ pub(super) fn show_library_folder_dialogs(ui: &mut Ui, app: &mut AurawApp) {
     }
 }
 
-pub(super) fn show_cloud_dialogs(ui: &mut Ui, app: &mut AurawApp) {
-    let mut close_name_dialog = false;
-    let mut name_operation = None;
-    if let Some(dialog) = app.library.cloud_name_dialog.as_mut() {
-        let title = match dialog.kind {
-            CloudNameDialogKind::CreateFolder { .. } => "New cloud folder",
-            CloudNameDialogKind::RenameFolder { .. } => "Rename cloud folder",
-            CloudNameDialogKind::RenameAsset { .. } => "Rename cloud RAW",
-        };
-        egui::Window::new(title)
-            .id(egui::Id::new("cloud-item-name-dialog"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ui.ctx(), |ui| {
-                ui.label(
-                    if matches!(dialog.kind, CloudNameDialogKind::RenameAsset { .. }) {
-                        "RAW filename"
-                    } else {
-                        "Folder name"
-                    },
-                );
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut dialog.name)
-                        .desired_width(320.0)
-                        .id_source("cloud-item-name-input"),
-                );
-                if !dialog.focus_requested {
-                    response.request_focus();
-                    dialog.focus_requested = true;
-                }
-                show_dialog_error(ui, dialog.error.as_deref());
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        close_name_dialog = true;
-                    }
-                    let enter = response.has_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    let confirm_label = match dialog.kind {
-                        CloudNameDialogKind::CreateFolder { .. } => "Create",
-                        CloudNameDialogKind::RenameFolder { .. }
-                        | CloudNameDialogKind::RenameAsset { .. } => "Rename",
-                    };
-                    if ui.button(confirm_label).clicked() || enter {
-                        let raw = matches!(dialog.kind, CloudNameDialogKind::RenameAsset { .. });
-                        match validate_cloud_item_name(&dialog.name, raw) {
-                            Ok(()) => {
-                                name_operation = Some(match &dialog.kind {
-                                    CloudNameDialogKind::CreateFolder { parent_id } => {
-                                        CloudActionRequest::CreateFolder {
-                                            parent_id: parent_id.clone(),
-                                            name: dialog.name.clone(),
-                                        }
-                                    }
-                                    CloudNameDialogKind::RenameFolder { folder } => {
-                                        CloudActionRequest::UpdateFolder {
-                                            folder: folder.clone(),
-                                            parent_id: folder.parent_id.clone(),
-                                            name: dialog.name.clone(),
-                                            clear_clipboard: false,
-                                        }
-                                    }
-                                    CloudNameDialogKind::RenameAsset { asset } => {
-                                        CloudActionRequest::RenameAsset {
-                                            asset: asset.clone(),
-                                            name: dialog.name.clone(),
-                                        }
-                                    }
-                                });
-                                close_name_dialog = true;
-                            }
-                            Err(error) => {
-                                dialog.error = Some(error);
-                                dialog.focus_requested = false;
-                            }
-                        }
-                    }
-                });
-            });
+pub(super) fn validate_library_item_name(name: &str, raw: bool) -> Result<(), String> {
+    if name.is_empty()
+        || name.trim() != name
+        || name.contains(['/', '\\'])
+        || name.contains('"')
+        || name.chars().any(char::is_control)
+    {
+        return Err("Enter a single safe name without leading or trailing spaces.".to_owned());
     }
-    if close_name_dialog {
-        app.library.cloud_name_dialog = None;
+    if raw && !crate::pipeline::is_supported_raw_path(Path::new(name)) {
+        return Err("Keep a supported RAW filename extension.".to_owned());
     }
-    if let Some(operation) = name_operation {
-        app.library.start_cloud_action(operation, ui.ctx());
-    }
-
-    let delete_target = app.library.cloud_delete_confirmation.clone();
-    let mut close_delete = false;
-    let mut confirm_delete = false;
-    if let Some(target) = delete_target.as_ref() {
-        let (title, message) = match target {
-            CloudDeleteTarget::Folder(folder) => (
-                "Delete cloud folder?",
-                format!("Delete {} and everything inside it?", folder.name),
-            ),
-            CloudDeleteTarget::Assets(assets) => (
-                "Delete cloud RAWs?",
-                format!(
-                    "Delete {} selected cloud RAW{}?",
-                    assets.len(),
-                    if assets.len() == 1 { "" } else { "s" }
-                ),
-            ),
-        };
-        egui::Window::new(title)
-            .id(egui::Id::new("cloud-delete-confirmation"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ui.ctx(), |ui| {
-                ui.label(message);
-                ui.label(
-                    egui::RichText::new(
-                        "This moves the complete server copy to Trash for its retention period.",
-                    )
-                    .strong(),
-                );
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        close_delete = true;
-                    }
-                    if ui.button("Delete").clicked() {
-                        confirm_delete = true;
-                        close_delete = true;
-                    }
-                });
-            });
-    }
-    if close_delete {
-        app.library.cloud_delete_confirmation = None;
-    }
-    if confirm_delete {
-        if let Some(target) = delete_target {
-            let request = match target {
-                CloudDeleteTarget::Folder(folder) => {
-                    detach_current_cloud_asset_if_inside_folder(app, &folder.id);
-                    if cloud_folder_contains(
-                        &app.library.cloud_folders,
-                        &folder.id,
-                        &app.library.cloud_folder_id,
-                    ) {
-                        app.remember_cloud_library_folder(folder.parent_id.clone());
-                    }
-                    CloudActionRequest::DeleteFolder { folder }
-                }
-                CloudDeleteTarget::Assets(assets) => {
-                    detach_current_cloud_asset_if_selected(app, &assets);
-                    CloudActionRequest::DeleteAssets { assets }
-                }
-            };
-            app.library.start_cloud_action(request, ui.ctx());
-        }
-    }
+    Ok(())
 }
 
-#[cfg(not(target_os = "android"))]
-pub(super) fn show_local_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+pub(super) fn show_library_raw_name_dialog(
+    ui: &mut Ui,
+    app: &mut AurawApp,
+    _frame: &eframe::Frame,
+) {
     let mut close = false;
     let mut rename = None;
     if let Some(dialog) = app.library.raw_name_dialog.as_mut() {
-        egui::Window::new("Rename local RAW")
-            .id(egui::Id::new("local-raw-name-dialog"))
+        crate::ui::responsive_popup(egui::Window::new("Rename RAW"), ui.ctx(), 420.0)
+            .id(egui::Id::new("library-raw-name-dialog"))
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -527,7 +387,7 @@ pub(super) fn show_local_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp, frame:
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut dialog.name)
                         .desired_width(320.0)
-                        .id_source("local-raw-name-input"),
+                        .id_source("library-raw-name-input"),
                 );
                 if !dialog.focus_requested {
                     response.request_focus();
@@ -542,10 +402,8 @@ pub(super) fn show_local_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp, frame:
                     let enter = response.has_focus()
                         && ui.input(|input| input.key_pressed(egui::Key::Enter));
                     if ui.button("Rename").clicked() || enter {
-                        match validate_cloud_item_name(&dialog.name, true) {
-                            Ok(()) => {
-                                rename = Some((dialog.source.clone(), dialog.name.clone()));
-                            }
+                        match validate_library_item_name(&dialog.name, true) {
+                            Ok(()) => rename = Some((dialog.asset.clone(), dialog.name.clone())),
                             Err(error) => {
                                 dialog.error = Some(error);
                                 dialog.focus_requested = false;
@@ -558,29 +416,40 @@ pub(super) fn show_local_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp, frame:
     if close {
         app.library.raw_name_dialog = None;
     }
-    if let Some((source, name)) = rename {
-        let was_current = app.detach_current_file_for_library_action(&source);
-        if was_current {
-            app.current_path = None;
-        }
-        match rename_raw_bundle(&source, &name) {
-            Ok(destination) => {
-                if let Some(ImageClipboard {
-                    content: ImageClipboardContent::Local(paths),
-                    ..
-                }) = app.library.image_clipboard.as_mut()
-                {
-                    for path in paths {
-                        if path == &source {
-                            *path = destination.clone();
-                        }
+
+    let Some((asset, name)) = rename else {
+        return;
+    };
+
+    #[cfg(not(target_os = "android"))]
+    let current_path = asset.desktop_path().and_then(|path| {
+        (app.current_path.as_deref() == Some(path)).then(|| path.to_path_buf())
+    });
+    #[cfg(not(target_os = "android"))]
+    if let Some(path) = current_path.as_deref() {
+        app.detach_current_file_for_library_action(path);
+        app.current_path = None;
+    }
+
+    match rename_asset(app, &asset, &name) {
+        Ok(renamed_asset) => {
+            if let Some(clipboard) = app.library.image_clipboard.as_mut() {
+                for clipboard_asset in &mut clipboard.assets {
+                    if clipboard_asset.id == asset.id {
+                        *clipboard_asset = renamed_asset.clone();
                     }
                 }
-                app.library.raw_name_dialog = None;
-                app.library.clear_selection();
-                app.library.refresh(ui.ctx());
-                app.library.status = format!("Renamed local RAW to {}.", destination.display());
-                if was_current {
+            }
+            app.library.raw_name_dialog = None;
+            app.library.clear_selection();
+            #[cfg(target_os = "android")]
+            crate::android::set_back_navigation_active(false);
+            app.library.refresh(ui.ctx());
+            app.library.status = format!("Renamed RAW to {name}.");
+
+            #[cfg(not(target_os = "android"))]
+            if current_path.is_some() {
+                if let Some(destination) = renamed_asset.desktop_path().map(Path::to_path_buf) {
                     app.open_path_labeled(
                         destination.clone(),
                         name,
@@ -588,109 +457,33 @@ pub(super) fn show_local_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp, frame:
                         crate::sidecar::SidecarTarget::Desktop {
                             raw_path: destination,
                         },
-                        frame,
-                        None,
-                    );
-                }
-            }
-            Err(error) => {
-                if let Some(dialog) = app.library.raw_name_dialog.as_mut() {
-                    dialog.error = Some(error);
-                    dialog.focus_requested = false;
-                }
-                if was_current && source.is_file() {
-                    let label = source
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("local RAW")
-                        .to_owned();
-                    app.open_path_labeled(
-                        source.clone(),
-                        label,
-                        false,
-                        crate::sidecar::SidecarTarget::Desktop { raw_path: source },
-                        frame,
+                        _frame,
                         None,
                     );
                 }
             }
         }
-    }
-}
-
-#[cfg(target_os = "android")]
-pub(super) fn show_android_local_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp) {
-    let mut close = false;
-    let mut rename = None;
-    if let Some(dialog) = app.library.android_raw_name_dialog.as_mut() {
-        crate::ui::responsive_popup(egui::Window::new("Rename local RAW"), ui.ctx(), 420.0)
-            .id(egui::Id::new("android-local-raw-name-dialog"))
-            .collapsible(false)
-            .resizable(false)
-            .show(ui.ctx(), |ui| {
-                ui.label("RAW filename");
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut dialog.name)
-                        .desired_width(320.0)
-                        .id_source("android-local-raw-name-input"),
+        Err(error) => {
+            if let Some(dialog) = app.library.raw_name_dialog.as_mut() {
+                dialog.error = Some(error);
+                dialog.focus_requested = false;
+            }
+            #[cfg(not(target_os = "android"))]
+            if let Some(source) = current_path.filter(|path| path.is_file()) {
+                let label = source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("local RAW")
+                    .to_owned();
+                app.open_path_labeled(
+                    source.clone(),
+                    label,
+                    false,
+                    crate::sidecar::SidecarTarget::Desktop { raw_path: source },
+                    frame,
+                    None,
                 );
-                if !dialog.focus_requested {
-                    response.request_focus();
-                    dialog.focus_requested = true;
-                }
-                show_dialog_error(ui, dialog.error.as_deref());
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        close = true;
-                    }
-                    let enter = response.has_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    if ui.button("Rename").clicked() || enter {
-                        match validate_cloud_item_name(&dialog.name, true) {
-                            Ok(()) => {
-                                rename = Some((dialog.source.clone(), dialog.name.clone()));
-                            }
-                            Err(error) => {
-                                dialog.error = Some(error);
-                                dialog.focus_requested = false;
-                            }
-                        }
-                    }
-                });
-            });
-    }
-    if close {
-        app.library.android_raw_name_dialog = None;
-    }
-    if let Some((source, name)) = rename {
-        match app.rename_android_library_item(&source.uri, &source.display_name, &name) {
-            Ok(renamed_uri) => {
-                if let Some(ImageClipboard {
-                    content: ImageClipboardContent::Local(items),
-                    ..
-                }) = app.library.image_clipboard.as_mut()
-                {
-                    for item in items {
-                        if item.uri == source.uri {
-                            item.uri = renamed_uri.clone();
-                            item.display_name = name.clone();
-                        }
-                    }
-                }
-                app.library.android_raw_name_dialog = None;
-                app.library.clear_selection();
-                crate::android::set_back_navigation_active(false);
-                app.library.refresh(ui.ctx());
-                app.library.status = format!("Renamed local RAW to {name}.");
-            }
-            Err(error) => {
-                if let Some(dialog) = app.library.android_raw_name_dialog.as_mut() {
-                    dialog.error = Some(error);
-                    dialog.focus_requested = false;
-                }
             }
         }
     }
 }
-

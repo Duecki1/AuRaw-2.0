@@ -6,16 +6,8 @@ impl AurawApp {
         let performance_settings_path = crate::performance_settings::desktop_path();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         auraw_ai::set_ai_acceleration_enabled(performance.ai_gpu_acceleration);
-        let cloud_config = crate::cloud::CloudConfig {
-            enabled: performance.cloud_enabled,
-            server_url: performance.cloud_server_url.clone(),
-            access_token: performance.cloud_access_token.clone(),
-        };
-        let cloud_cache_root = crate::cloud::cache_root(performance_settings_path.as_deref());
         let last_library_folder = performance.last_library_folder.clone();
         let last_library_selected_folder = performance.last_library_selected_folder.clone();
-        let last_library_view = performance.last_library_view;
-        let last_cloud_library_folder = performance.last_cloud_library_folder.clone();
         let mut camera_profile_folder = performance.camera_profile_folder.clone();
         let mut camera_profile_folder_label = performance.camera_profile_folder_label.clone();
         if performance.camera_profile_auto_detect
@@ -179,8 +171,6 @@ impl AurawApp {
             sidecar_receiver: None,
             sidecar_save_feedback_until: None,
             sidecar_save_error_dialog: None,
-            sidecar_conflict_receiver: None,
-            sidecar_conflict_resolution_error: None,
             sidecar_autosave_deadline: None,
             developed_thumbnail_pending: None,
             developed_thumbnail_in_flight: None,
@@ -281,13 +271,6 @@ impl AurawApp {
             app.library
                 .restore_folder(folder, last_library_selected_folder, ctx);
         }
-        app.library
-            .configure_cloud(cloud_config, cloud_cache_root, ctx);
-        app.library.restore_navigation(
-            last_library_view,
-            last_cloud_library_folder,
-            ctx,
-        );
         app
     }
 
@@ -345,14 +328,6 @@ impl AurawApp {
             }
         }
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
-        let cloud_config = crate::cloud::CloudConfig {
-            enabled: performance.cloud_enabled,
-            server_url: performance.cloud_server_url.clone(),
-            access_token: performance.cloud_access_token.clone(),
-        };
-        let cloud_cache_root = crate::cloud::cache_root(performance_settings_path.as_deref());
-        let last_library_view = performance.last_library_view;
-        let last_cloud_library_folder = performance.last_cloud_library_folder.clone();
         prewarm_dcp_profile_folder(performance.camera_profile_folder.clone());
         let gpu_export_prewarm = Arc::new(crate::pipeline::GpuProgramPrewarm::new());
         let gpu_preview_prewarm_receiver =
@@ -361,7 +336,7 @@ impl AurawApp {
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
         let edit_history = EditHistory::new(&exposure, &masks, &lens_correction);
-        let mut app = Self {
+        let app = Self {
             current_path: None,
             original_raw: None,
             loaded_raw: None,
@@ -489,8 +464,6 @@ impl AurawApp {
             sidecar_receiver: None,
             sidecar_save_feedback_until: None,
             sidecar_save_error_dialog: None,
-            sidecar_conflict_receiver: None,
-            sidecar_conflict_resolution_error: None,
             sidecar_autosave_deadline: None,
             developed_thumbnail_pending: None,
             developed_thumbnail_in_flight: None,
@@ -591,13 +564,6 @@ impl AurawApp {
             camera_profile_folder_importing_label: None,
             pending_android_profile_reload: None,
         };
-        app.library
-            .configure_cloud(cloud_config, cloud_cache_root, &cc.egui_ctx);
-        app.library.restore_navigation(
-            last_library_view,
-            last_cloud_library_folder,
-            &cc.egui_ctx,
-        );
         app
     }
 }

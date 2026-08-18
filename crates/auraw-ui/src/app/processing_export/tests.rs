@@ -2,7 +2,7 @@ use super::{batch::batch_export_overall_fraction, export::export_source_stem};
 use std::path::Path;
 
 #[test]
-fn cloud_label_overrides_the_cached_original_filename_for_exports() {
+fn display_label_overrides_the_materialized_filename_for_exports() {
     assert_eq!(
         export_source_stem(Some(Path::new("/cache/asset/original.dng")), Some("IMG_1234.DNG")),
         "IMG_1234"

@@ -227,7 +227,6 @@ pub(super) fn apply_library_folder_ui_action(
                         mode: LibraryFolderClipboardMode::Copy,
                     });
                     app.library.image_clipboard = None;
-                    app.library.cloud_clipboard = None;
                     app.library.status = format!(
                         "Copied folder {}. Choose Paste Folder in a destination.",
                         path.display()
@@ -244,7 +243,6 @@ pub(super) fn apply_library_folder_ui_action(
                         mode: LibraryFolderClipboardMode::Cut,
                     });
                     app.library.image_clipboard = None;
-                    app.library.cloud_clipboard = None;
                     app.library.status = format!(
                         "Cut folder {}. Choose Paste Folder in a destination.",
                         path.display()
@@ -286,7 +284,7 @@ pub(super) fn apply_library_folder_ui_action(
         LibraryFolderUiAction::PasteImages(destination_parent) => {
             start_image_clipboard_paste(
                 app,
-                ImagePasteDestination::LocalFolder(destination_parent),
+                LibraryTransferDestination::LocalFolder(destination_parent),
                 context,
             );
         }
@@ -342,6 +340,28 @@ pub(super) fn apply_library_folder_ui_action(
         }
         LibraryFolderUiAction::Refresh => app.library.refresh(context),
     }
+}
+
+pub(in crate::ui::library) fn start_local_library_ai_mask_refresh(
+    app: &mut AurawApp,
+    assets: &[LibraryAsset],
+    frame: &eframe::Frame,
+) {
+    app.start_library_ai_mask_refresh_paths(desktop_paths(assets), frame);
+}
+
+pub(in crate::ui::library) fn start_local_library_export(
+    app: &mut AurawApp,
+    assets: &[LibraryAsset],
+    settings: ExportSettings,
+    format: ExportFormat,
+    frame: &eframe::Frame,
+) -> bool {
+    let Some(jobs) = library_export_jobs(&desktop_paths(assets), format) else {
+        return false;
+    };
+    app.start_library_exports(jobs, settings, format, frame);
+    true
 }
 
 pub(in crate::ui::library) fn local_action_in_progress(app: &AurawApp) -> bool {

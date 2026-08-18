@@ -115,7 +115,7 @@ pub(super) fn apply_android_library_folder_ui_action(
             app.set_library_folder_sidebar_open(false);
         }
         AndroidLibraryFolderUiAction::New(parent) => {
-            app.library.android_folder_name_dialog = Some(AndroidLibraryFolderNameDialog {
+            app.library.platform.folder_name_dialog = Some(AndroidLibraryFolderNameDialog {
                 parent,
                 name: String::new(),
                 error: None,
@@ -126,12 +126,37 @@ pub(super) fn apply_android_library_folder_ui_action(
     }
 }
 
+pub(in crate::ui::library) fn start_local_library_ai_mask_refresh(
+    app: &mut AurawApp,
+    assets: &[LibraryAsset],
+    frame: &eframe::Frame,
+) {
+    app.start_library_ai_mask_refresh_android(android_targets(assets), frame);
+}
+
+pub(in crate::ui::library) fn start_local_library_export(
+    app: &mut AurawApp,
+    assets: &[LibraryAsset],
+    settings: ExportSettings,
+    format: ExportFormat,
+    _frame: &eframe::Frame,
+) -> bool {
+    let targets = android_targets(assets)
+        .into_iter()
+        .map(|(uri, display_name)| crate::app::AndroidLibraryExportTarget {
+            uri,
+            display_name,
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return false;
+    }
+    app.start_android_library_exports(targets, settings, format);
+    true
+}
+
 pub(in crate::ui::library) fn local_action_in_progress(app: &AurawApp) -> bool {
-    app.library.cloud_action_in_progress()
-        || app.library.cloud_upload_in_progress()
-        || app.library.image_paste_in_progress()
-        || app.library.cloud_open_receiver.is_some()
-        || app.picker_pending
+    app.library.local_mutation_in_progress() || app.picker_pending
 }
 
 pub(in crate::ui::library) fn local_folders_available(_app: &AurawApp) -> bool {
@@ -154,7 +179,7 @@ pub(in crate::ui::library) fn apply_local_toolbar_action(
     let action = match action {
         super::LocalFolderToolbarAction::Refresh => AndroidLibraryFolderUiAction::Refresh,
         super::LocalFolderToolbarAction::New => {
-            AndroidLibraryFolderUiAction::New(app.library.android_folder.clone())
+            AndroidLibraryFolderUiAction::New(app.library.platform.folder.clone())
         }
     };
     apply_android_library_folder_ui_action(app, action, context);
@@ -166,16 +191,19 @@ pub(in crate::ui::library) fn show_local_folder_tree(
     tree_height: f32,
     action_in_progress: bool,
 ) {
-    let folders = &app.library.android_folders;
+    let PlatformLibraryState {
+        folder: selected_folder,
+        folders,
+        expanded_folders,
+        ..
+    } = &mut app.library.platform;
     let mut children_by_parent = HashMap::<&str, Vec<&crate::android::LibraryFolder>>::new();
-    for folder in folders {
+    for folder in folders.iter() {
         children_by_parent
             .entry(android_folder_parent(&folder.path))
             .or_default()
             .push(folder);
     }
-    let selected_folder = &app.library.android_folder;
-    let expanded_folders = &mut app.library.android_expanded_folders;
     let mut requested_action = None;
 
     egui::ScrollArea::both()
@@ -188,7 +216,7 @@ pub(in crate::ui::library) fn show_local_folder_tree(
                 "",
                 "Library",
                 &children_by_parent,
-                selected_folder,
+                selected_folder.as_str(),
                 action_in_progress,
                 expanded_folders,
                 &mut requested_action,

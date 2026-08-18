@@ -1,56 +1,58 @@
 use super::super::*;
 use std::collections::BinaryHeap;
+use std::time::UNIX_EPOCH;
 
-pub(in crate::ui::library) struct RankedLibraryFile {
-    info: LibraryFileInfo,
+pub(in crate::ui::library) struct RankedLibraryAsset {
+    asset: LibraryAsset,
     lowercase_name: String,
 }
 
-impl RankedLibraryFile {
-    fn new(info: LibraryFileInfo) -> Self {
-        let lowercase_name = info.name.to_lowercase();
+impl RankedLibraryAsset {
+    fn new(asset: LibraryAsset) -> Self {
+        let lowercase_name = asset.display_name.to_lowercase();
         Self {
-            info,
+            asset,
             lowercase_name,
         }
     }
 }
 
-impl PartialEq for RankedLibraryFile {
+impl PartialEq for RankedLibraryAsset {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == CmpOrdering::Equal
     }
 }
 
-impl Eq for RankedLibraryFile {}
+impl Eq for RankedLibraryAsset {}
 
-impl PartialOrd for RankedLibraryFile {
+impl PartialOrd for RankedLibraryAsset {
     fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for RankedLibraryFile {
+impl Ord for RankedLibraryAsset {
     fn cmp(&self, other: &Self) -> CmpOrdering {
         // This is also the final display order: newest first, then stable
         // lexical tie-breakers. BinaryHeap therefore keeps the worst retained
         // item at its root, where a better candidate can replace it.
         other
-            .info
-            .modified
-            .cmp(&self.info.modified)
+            .asset
+            .metadata
+            .modified_seconds
+            .cmp(&self.asset.metadata.modified_seconds)
             .then_with(|| self.lowercase_name.cmp(&other.lowercase_name))
-            .then_with(|| self.info.display_path.cmp(&other.info.display_path))
-            .then_with(|| match (&self.info.source, &other.info.source) {
-                (LibrarySource::File(left), LibrarySource::File(right)) => left.cmp(right),
-                _ => self.info.display_path.cmp(&other.info.display_path),
-            })
+            .then_with(|| self.asset.display_path.cmp(&other.asset.display_path))
+            .then_with(|| self.asset.id.cmp(&other.asset.id))
     }
 }
 
-pub(in crate::ui::library) type FolderScan = (Vec<LibraryFileInfo>, usize, bool);
+pub(in crate::ui::library) type FolderScan = (Vec<LibraryAsset>, usize, bool);
 
-pub(in crate::ui::library) fn scan_folder_tree(root: &Path, is_cancelled: impl Fn() -> bool) -> Option<LibraryFolderNode> {
+pub(in crate::ui::library) fn scan_folder_tree(
+    root: &Path,
+    is_cancelled: impl Fn() -> bool,
+) -> Option<LibraryFolderNode> {
     fn visit(path: PathBuf, is_cancelled: &impl Fn() -> bool) -> Option<LibraryFolderNode> {
         if is_cancelled() {
             return None;
@@ -86,8 +88,6 @@ pub(in crate::ui::library) fn scan_folder_tree(root: &Path, is_cancelled: impl F
                     continue;
                 }
             };
-            // Directory symlinks are not followed, so a cycle cannot make the
-            // desktop folder hierarchy recurse forever.
             if !file_type.is_dir() {
                 continue;
             }
@@ -132,7 +132,7 @@ pub(in crate::ui::library) fn scan_folder_with_limit(
         return Err(format!("{} is not a folder", folder.display()));
     }
 
-    let mut files = BinaryHeap::with_capacity(maximum_files);
+    let mut assets = BinaryHeap::with_capacity(maximum_files);
     let mut warning_count = 0usize;
     let mut truncated = false;
     let entries = std::fs::read_dir(folder)
@@ -157,55 +157,52 @@ pub(in crate::ui::library) fn scan_folder_with_limit(
                 continue;
             }
         };
-        // Only direct children of the selected folder belong to this view.
-        // Symlinks and subdirectories are deliberately ignored.
         if !file_type.is_file() || !is_supported_raw_path(&entry.path()) {
             continue;
         }
         let path = entry.path();
         let file_metadata = entry.metadata().ok();
-        let candidate = RankedLibraryFile::new(LibraryFileInfo {
-            source: LibrarySource::File(path.clone()),
-            display_path: path.display().to_string(),
-            name: entry.file_name().to_string_lossy().into_owned(),
-            bytes: file_metadata.as_ref().map_or(0, std::fs::Metadata::len),
-            dimensions_hint: None,
-            cloud_downloaded: false,
-            cloud_sync_state: crate::cloud::CloudSyncState::Synced,
-            modified: file_metadata.and_then(|metadata| metadata.modified().ok()),
-        });
-        if files.len() < maximum_files {
-            files.push(candidate);
+        let modified_seconds = file_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_secs());
+        let asset = LibraryAsset::from_desktop_path(
+            path,
+            file_metadata.as_ref().map_or(0, std::fs::Metadata::len),
+            modified_seconds,
+            None,
+        );
+        let candidate = RankedLibraryAsset::new(asset);
+        if assets.len() < maximum_files {
+            assets.push(candidate);
         } else {
             truncated = true;
-            if files
+            if assets
                 .peek()
                 .is_some_and(|worst_retained| candidate < *worst_retained)
             {
-                files.pop();
-                files.push(candidate);
+                assets.pop();
+                assets.push(candidate);
             }
         }
     }
-    let mut files = files.into_vec();
-    files.sort();
-    let mut files = files
+    let mut assets = assets.into_vec();
+    assets.sort();
+    let mut assets = assets
         .into_iter()
-        .map(|ranked| ranked.info)
+        .map(|ranked| ranked.asset)
         .collect::<Vec<_>>();
 
-    // Reserve the final gallery geometry before any preview pixels arrive.
-    // LibRaw can expose display-oriented active dimensions from the header
-    // after open_file/identify without unpacking the sensor or decoding a
-    // thumbnail, so placeholders start at the same aspect ratio as the image.
-    for info in &mut files {
+    // Reserve stable gallery geometry before preview pixels arrive.
+    for asset in &mut assets {
         if is_cancelled() {
             return Ok(None);
         }
-        if let LibrarySource::File(path) = &info.source {
-            info.dimensions_hint = load_raw_display_dimensions(path).ok();
+        if let Some(path) = asset.desktop_path() {
+            asset.metadata.dimensions_hint = load_raw_display_dimensions(path).ok();
         }
     }
 
-    Ok(Some((files, warning_count, truncated)))
+    Ok(Some((assets, warning_count, truncated)))
 }

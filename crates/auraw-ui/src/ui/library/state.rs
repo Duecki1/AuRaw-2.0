@@ -1,32 +1,6 @@
 use super::*;
 
 impl LibraryState {
-    /// Refreshes one cached cloud asset after a sidecar/thumbnail worker has
-    /// changed its local sync metadata. This avoids a catalog rescan and keeps
-    /// queued, failed, conflict, and synced badges live.
-    pub(crate) fn update_cloud_sync_state_for_cached_raw(
-        &mut self,
-        raw_path: &Path,
-        context: &egui::Context,
-    ) {
-        let Some((asset_id, state)) = crate::cloud::cached_asset_sync_state(raw_path) else {
-            return;
-        };
-        let mut changed = false;
-        for entry in &mut self.entries {
-            let LibrarySource::Cloud(asset) = &entry.info.source else {
-                continue;
-            };
-            if asset.id == asset_id && entry.info.cloud_sync_state != state {
-                entry.info.cloud_sync_state = state;
-                changed = true;
-            }
-        }
-        if changed {
-            context.request_repaint();
-        }
-    }
-
     #[cfg(all(not(target_os = "android"), test))]
     pub(crate) fn new(context: &egui::Context) -> Self {
         Self::new_desktop_with_preferences(
@@ -51,34 +25,6 @@ impl LibraryState {
         crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
         Self {
             location: None,
-            local_location: None,
-            view: LibraryView::Local,
-            cloud_config: crate::cloud::CloudConfig::default(),
-            cloud_cache_root: None,
-            cloud_offline_reason: None,
-            cloud_connection_receiver: None,
-            cloud_connection_status: None,
-            cloud_open_receiver: None,
-            cloud_open_label: None,
-            cloud_upload_receiver: None,
-            cloud_upload_completion: None,
-            cloud_folders: Vec::new(),
-            cloud_asset_folders: HashMap::new(),
-            cloud_folder_id: crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned(),
-            cloud_expanded_folders: initial_cloud_expanded_folders(),
-            cloud_action_receiver: None,
-            cloud_clipboard: None,
-            image_clipboard: None,
-            image_paste_receiver: None,
-            cloud_name_dialog: None,
-            cloud_delete_confirmation: None,
-            cloud_trash_open: false,
-            cloud_trash_items: Vec::new(),
-            cloud_trash_server_time: 0,
-            cloud_trash_retention_days: 14,
-            cloud_trash_receiver: None,
-            cloud_trash_selection: HashSet::new(),
-            cloud_trash_delete_confirmation: None,
             folder: None,
             root_folder: None,
             folder_tree: None,
@@ -98,9 +44,10 @@ impl LibraryState {
             thumbnail_workers,
             sort_order,
             thumbnail_size,
-            selected_sources: HashSet::new(),
+            selected_assets: HashSet::new(),
             selection_mode: false,
-            file_action_receiver: None,
+            image_clipboard: None,
+            asset_transfer_receiver: None,
             raw_import_receiver: None,
             folder_operation_receiver: None,
             folder_clipboard: None,
@@ -143,43 +90,16 @@ impl LibraryState {
         let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
         crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
         let mut state = Self {
-            location: Some(location.clone()),
-            local_location: Some(location),
-            view: LibraryView::Local,
-            cloud_config: crate::cloud::CloudConfig::default(),
-            cloud_cache_root: None,
-            cloud_offline_reason: None,
-            cloud_connection_receiver: None,
-            cloud_connection_status: None,
-            cloud_open_receiver: None,
-            cloud_open_label: None,
-            cloud_upload_receiver: None,
-            cloud_upload_completion: None,
-            cloud_folders: Vec::new(),
-            cloud_asset_folders: HashMap::new(),
-            cloud_folder_id: crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned(),
-            cloud_expanded_folders: initial_cloud_expanded_folders(),
-            cloud_action_receiver: None,
-            cloud_clipboard: None,
-            image_clipboard: None,
-            image_paste_receiver: None,
-            cloud_name_dialog: None,
-            cloud_delete_confirmation: None,
-            cloud_trash_open: false,
-            cloud_trash_items: Vec::new(),
-            cloud_trash_server_time: 0,
-            cloud_trash_retention_days: 14,
-            cloud_trash_receiver: None,
-            cloud_trash_selection: HashSet::new(),
-            cloud_trash_delete_confirmation: None,
+            location: Some(location),
             folder_sidebar_open: false,
-            android_raw_name_dialog: None,
-            android_folder_name_dialog: None,
-            android_app,
-            android_root_location: root_location,
-            android_folder: selected_folder.clone(),
-            android_folders: Vec::new(),
-            android_expanded_folders: android_folder_ancestors(&selected_folder),
+            platform: PlatformLibraryState {
+                app: android_app,
+                root_location,
+                folder: selected_folder.clone(),
+                folders: Vec::new(),
+                expanded_folders: android_folder_ancestors(&selected_folder),
+                folder_name_dialog: None,
+            },
             entries: Vec::new(),
             entry_indices: HashMap::new(),
             event_receiver: None,
@@ -194,8 +114,11 @@ impl LibraryState {
             thumbnail_workers,
             sort_order,
             thumbnail_size,
-            selected_sources: HashSet::new(),
+            selected_assets: HashSet::new(),
             selection_mode: false,
+            image_clipboard: None,
+            asset_transfer_receiver: None,
+            raw_name_dialog: None,
             export_dialog: None,
             adjustment_paste_dialog: None,
             ai_mask_refresh_prompt: None,
@@ -208,9 +131,26 @@ impl LibraryState {
         self.status = status.into();
     }
 
-    #[cfg(target_os = "android")]
     pub(crate) fn has_selection(&self) -> bool {
-        !self.selected_sources.is_empty()
+        !self.selected_assets.is_empty()
+    }
+
+    pub(crate) fn asset_transfer_in_progress(&self) -> bool {
+        self.asset_transfer_receiver.is_some()
+    }
+
+    pub(crate) fn local_mutation_in_progress(&self) -> bool {
+        if self.asset_transfer_in_progress() {
+            return true;
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.raw_import_receiver.is_some() || self.folder_operation_receiver.is_some()
+        }
+        #[cfg(target_os = "android")]
+        {
+            false
+        }
     }
 
     pub(crate) fn selection_mode(&self) -> bool {
@@ -222,16 +162,16 @@ impl LibraryState {
     }
 
     pub(crate) fn clear_selection(&mut self) {
-        self.selected_sources.clear();
+        self.selected_assets.clear();
         self.selection_mode = false;
     }
 
-    pub(super) fn toggle_thumbnail_selection(&mut self, source: &LibrarySource) -> bool {
+    pub(super) fn toggle_thumbnail_selection(&mut self, asset_id: &LibraryAssetId) -> bool {
         self.begin_selection();
-        if !self.selected_sources.remove(source) {
-            self.selected_sources.insert(source.clone());
+        if !self.selected_assets.remove(asset_id) {
+            self.selected_assets.insert(asset_id.clone());
         }
-        if self.selected_sources.is_empty() {
+        if self.selected_assets.is_empty() {
             self.clear_selection();
         }
         self.selection_mode()
@@ -278,7 +218,7 @@ impl LibraryState {
             .entries
             .iter()
             .enumerate()
-            .map(|(index, entry)| (entry.info.source.clone(), index))
+            .map(|(index, entry)| (entry.asset.id.clone(), index))
             .collect();
     }
 
@@ -294,25 +234,16 @@ impl LibraryState {
         }
     }
 
-    /// Stops catalog-wide background thumbnail decoding while Develop owns the
-    /// full RAW. Explicit display-priority requests from the desktop filmstrip
-    /// may still run through the shared decode gate, which preserves full-RAW
-    /// decode exclusivity while keeping visible Develop thumbnails responsive.
     pub(crate) fn prepare_for_develop(&mut self) {
         self.decoding_paused.store(true, Ordering::Release);
         #[cfg(target_os = "android")]
         self.evict_textures_to_limit(ANDROID_DEVELOP_TEXTURE_CACHE_LIMIT);
     }
 
-    /// Returns the gate shared by all thumbnail generations. Full RAW workers
-    /// use the same gate so a sensor decode cannot overlap a preview decode.
     pub(crate) fn decode_gate(&self) -> Arc<RwLock<()>> {
         Arc::clone(&self.decode_gate)
     }
 
-    /// Cancels the current generation and drops every in-memory preview before
-    /// the platform cache directory is cleared. The caller takes the shared
-    /// decode gate's writer lock before deleting files, then calls `refresh`.
     pub(crate) fn prepare_for_thumbnail_cache_clear(&mut self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.event_receiver = None;
@@ -338,10 +269,6 @@ impl LibraryState {
     }
 
     pub(crate) fn refresh(&mut self, context: &egui::Context) {
-        if self.view == LibraryView::Cloud && self.cloud_trash_open {
-            self.refresh_cloud_trash(context);
-            return;
-        }
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let cancellation = Arc::clone(&self.generation);
         let decoding_paused = Arc::clone(&self.decoding_paused);
@@ -352,10 +279,6 @@ impl LibraryState {
         let (request_sender, request_receiver) = mpsc::sync_channel(MAX_PENDING_THUMBNAILS);
         self.event_receiver = Some(event_receiver);
         self.request_sender = Some(request_sender);
-        // Keep already decoded GPU textures visible while the same folder is
-        // rescanned. Catalog reconciliation below reuses only entries whose
-        // RAW identity is unchanged, so reopening/refreshing a folder does not
-        // flash every card back to a placeholder or decode cached previews again.
         for entry in &mut self.entries {
             entry.thumbnail_queued = false;
             entry.thumbnail_error = None;
@@ -365,111 +288,6 @@ impl LibraryState {
         self.scanning = true;
         self.catalog_ready = !self.entries.is_empty();
         self.usage_clock = 0;
-
-        if self.view == LibraryView::Cloud {
-            let config = self.cloud_config.clone();
-            let folder_id = self.cloud_folder_id.clone();
-            let allow_network = self.cloud_network_available();
-            let Some(cache_root) = self.cloud_cache_root.clone() else {
-                self.event_receiver = None;
-                self.request_sender = None;
-                self.scanning = false;
-                self.catalog_ready = true;
-                self.status = "AuRaw could not locate its private cloud cache.".to_owned();
-                return;
-            };
-            self.status = "Refreshing AuRaw Cloud…".to_owned();
-            let worker = std::thread::Builder::new()
-                .name("auraw-cloud-library".to_owned())
-                .spawn(move || {
-                    let snapshot =
-                        match crate::cloud::list_assets_cached(&config, &cache_root, allow_network)
-                        {
-                            Ok(snapshot) => snapshot,
-                            Err(error) => {
-                                send_scan_failure(&event_sender, generation, error, &repaint);
-                                return;
-                            }
-                        };
-                    let thumbnail_network_available = snapshot.offline_reason.is_none();
-                    let folder_id = cloud_folder_id_for_catalog(&folder_id, &snapshot.folders);
-                    let asset_folders = snapshot
-                        .items
-                        .iter()
-                        .map(|asset| (asset.id.clone(), asset.folder_id.clone()))
-                        .collect();
-                    if event_sender
-                        .send(ScanEvent::CloudAvailability {
-                            generation,
-                            offline_reason: snapshot.offline_reason,
-                            folders: snapshot.folders,
-                            folder_id: folder_id.clone(),
-                            asset_folders,
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
-                    let files = snapshot
-                        .items
-                        .into_iter()
-                        .filter(|asset| asset.folder_id == folder_id)
-                        .map(|asset| {
-                            let cloud_downloaded =
-                                crate::cloud::asset_available_offline(&config, &cache_root, &asset);
-                            let cloud_sync_state =
-                                crate::cloud::asset_sync_state(&config, &cache_root, &asset);
-                            LibraryFileInfo {
-                                display_path: format!("AuRaw Cloud / {}", asset.name),
-                                name: asset.name.clone(),
-                                bytes: asset.bytes,
-                                dimensions_hint: Some([asset.width, asset.height]),
-                                cloud_downloaded,
-                                cloud_sync_state,
-                                #[cfg(not(target_os = "android"))]
-                                modified: Some(crate::cloud::modified_time(asset.modified_seconds)),
-                                source: LibrarySource::Cloud(asset),
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    let thumbnail_config = config.clone();
-                    let thumbnail_cache = cache_root.clone();
-                    run_thumbnail_workers(
-                        ThumbnailWorker {
-                            files,
-                            warning_count: 0,
-                            truncated: false,
-                            generation,
-                            cancellation,
-                            decoding_paused,
-                            decode_gate,
-                            event_sender,
-                            request_receiver,
-                            repaint,
-                        },
-                        thumbnail_workers,
-                        Arc::new(move |source| match source {
-                            LibrarySource::Cloud(asset) => crate::cloud::load_thumbnail(
-                                &thumbnail_config,
-                                &thumbnail_cache,
-                                asset,
-                                THUMBNAIL_EDGE,
-                                thumbnail_network_available,
-                            )
-                            .map(|thumbnail| loaded_library_thumbnail(thumbnail, false)),
-                            _ => Err("invalid cloud thumbnail request".to_owned()),
-                        }),
-                    );
-                });
-            if let Err(error) = worker {
-                self.event_receiver = None;
-                self.request_sender = None;
-                self.scanning = false;
-                self.catalog_ready = true;
-                self.status = format!("Could not start the cloud library scanner: {error}");
-            }
-            return;
-        }
 
         #[cfg(not(target_os = "android"))]
         let worker = {
@@ -494,18 +312,17 @@ impl LibraryState {
                     let tree_sender = event_sender.clone();
                     let tree_repaint = repaint.clone();
                     let tree_cancellation = Arc::clone(&cancellation);
-                    let tree_worker = std::thread::Builder::new()
+                    if let Err(error) = std::thread::Builder::new()
                         .name("auraw-library-folders".to_owned())
                         .spawn(move || {
                             if let Some(tree) = scan_folder_tree(&root_folder, || {
                                 tree_cancellation.load(Ordering::Acquire) != generation
                             }) {
-                                let _ =
-                                    tree_sender.send(ScanEvent::FolderTree { generation, tree });
+                                let _ = tree_sender.send(ScanEvent::FolderTree { generation, tree });
                                 tree_repaint.request_repaint();
                             }
-                        });
-                    if let Err(error) = tree_worker {
+                        })
+                    {
                         log::warn!("could not start the library folder scanner: {error}");
                     }
                     let scan = match scan_folder(&folder, || {
@@ -517,12 +334,12 @@ impl LibraryState {
                             return;
                         }
                     };
-                    let Some((files, warning_count, truncated)) = scan else {
+                    let Some((assets, warning_count, truncated)) = scan else {
                         return;
                     };
                     run_thumbnail_workers(
                         ThumbnailWorker {
-                            files,
+                            assets,
                             warning_count,
                             truncated,
                             generation,
@@ -541,7 +358,7 @@ impl LibraryState {
 
         #[cfg(target_os = "android")]
         let worker = {
-            let android_app = self.android_app.clone();
+            let android_app = self.platform.app.clone();
             self.status = "Refreshing AuRaw library…".to_owned();
             std::thread::Builder::new()
                 .name("auraw-library".to_owned())
@@ -554,10 +371,7 @@ impl LibraryState {
                         }
                     };
                     if event_sender
-                        .send(ScanEvent::AndroidFolders {
-                            generation,
-                            folders,
-                        })
+                        .send(ScanEvent::AndroidFolders { generation, folders })
                         .is_err()
                     {
                         return;
@@ -570,35 +384,22 @@ impl LibraryState {
                         }
                     };
                     let truncated = documents.len() > MAX_LIBRARY_FILES;
-                    let files = documents
+                    let mut assets = documents
                         .into_iter()
                         .take(MAX_LIBRARY_FILES)
-                        .map(|document| {
-                            let dimensions_hint = crate::android::load_library_display_dimensions(
-                                &android_app,
-                                &document.uri,
-                            )
-                            .ok();
-                            LibraryFileInfo {
-                                source: LibrarySource::Android {
-                                    uri: document.uri,
-                                    display_name: document.display_name.clone(),
-                                    bytes: document.bytes,
-                                    modified_seconds: document.modified_seconds,
-                                },
-                                display_path: document.display_path,
-                                name: document.display_name,
-                                bytes: document.bytes,
-                                dimensions_hint,
-                                cloud_downloaded: false,
-                                cloud_sync_state: crate::cloud::CloudSyncState::Synced,
-                            }
-                        })
-                        .collect();
+                        .map(LibraryAsset::from_android_document)
+                        .collect::<Vec<_>>();
+                    for asset in &mut assets {
+                        if let Some(uri) = asset.android_uri() {
+                            asset.metadata.dimensions_hint =
+                                crate::android::load_library_display_dimensions(&android_app, uri)
+                                    .ok();
+                        }
+                    }
                     let thumbnail_app = android_app.clone();
                     run_thumbnail_workers(
                         ThumbnailWorker {
-                            files,
+                            assets,
                             warning_count: 0,
                             truncated,
                             generation,
@@ -610,8 +411,8 @@ impl LibraryState {
                             repaint,
                         },
                         thumbnail_workers,
-                        Arc::new(move |source| {
-                            load_android_library_thumbnail(&thumbnail_app, source)
+                        Arc::new(move |asset| {
+                            load_android_library_thumbnail(&thumbnail_app, asset)
                         }),
                     );
                 })
@@ -650,12 +451,12 @@ impl LibraryState {
 
     pub(crate) fn poll(&mut self, context: &egui::Context) {
         let pasted = self
-            .image_paste_receiver
+            .asset_transfer_receiver
             .as_ref()
             .map(mpsc::Receiver::try_recv);
         match pasted {
             Some(Ok(completion)) => {
-                self.image_paste_receiver = None;
+                self.asset_transfer_receiver = None;
                 if completion.clear_clipboard {
                     self.image_clipboard = None;
                 } else if let Some(remaining) = completion.remaining_clipboard {
@@ -668,101 +469,15 @@ impl LibraryState {
                 self.refresh(context);
             }
             Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                self.image_paste_receiver = None;
-                self.status = "The image paste stopped unexpectedly.".to_owned();
+                self.asset_transfer_receiver = None;
+                self.status = "The Library asset transfer stopped unexpectedly.".to_owned();
             }
             Some(Err(mpsc::TryRecvError::Empty)) | None => {}
-        }
-
-        loop {
-            let received = self
-                .cloud_upload_receiver
-                .as_ref()
-                .map(mpsc::Receiver::try_recv);
-            match received {
-                Some(Ok(CloudUploadEvent::Progress {
-                    position,
-                    total,
-                    label,
-                })) => {
-                    self.status =
-                        format!("Uploading {position} of {total} to AuRaw Cloud · {label}…");
-                }
-                Some(Ok(CloudUploadEvent::Finished {
-                    target,
-                    uploaded,
-                    failed,
-                    errors,
-                })) => {
-                    self.cloud_upload_receiver = None;
-                    let mut summary = match (uploaded, failed) {
-                        (0, 0) => "No RAW files were uploaded to AuRaw Cloud.".to_owned(),
-                        (_, 0) => format!(
-                            "Uploaded {uploaded} RAW {} to AuRaw Cloud.",
-                            if uploaded == 1 { "file" } else { "files" }
-                        ),
-                        _ => format!(
-                            "Uploaded {uploaded} RAW {}; {failed} failed.",
-                            if uploaded == 1 { "file" } else { "files" }
-                        ),
-                    };
-                    if !errors.is_empty() {
-                        summary.push('\n');
-                        summary.push_str(&errors.join("\n"));
-                    }
-                    if uploaded > 0
-                        && self.view == LibraryView::Cloud
-                        && self.cloud_config == target
-                    {
-                        self.cloud_upload_completion = Some(summary);
-                        self.refresh(context);
-                    } else {
-                        self.status = summary;
-                    }
-                    break;
-                }
-                Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                    self.cloud_upload_receiver = None;
-                    self.status = "The AuRaw Cloud upload stopped unexpectedly.".to_owned();
-                    break;
-                }
-                Some(Err(mpsc::TryRecvError::Empty)) | None => break,
-            }
         }
 
         #[cfg(not(target_os = "android"))]
         {
             self.poll_dropped_raw_import(context);
-
-            let completed = self
-                .file_action_receiver
-                .as_ref()
-                .map(mpsc::Receiver::try_recv);
-            match completed {
-                Some(Ok(Ok(destinations))) => {
-                    self.file_action_receiver = None;
-                    self.refresh(context);
-                    self.status = if destinations.len() == 1 {
-                        format!("Duplicated as {}", destinations[0].display())
-                    } else {
-                        format!("Duplicated {} selected RAW files", destinations.len())
-                    };
-                }
-                Some(Ok(Err(error))) => {
-                    self.file_action_receiver = None;
-                    self.refresh(context);
-                    self.status = self
-                        .cloud_upload_completion
-                        .take()
-                        .map(|summary| format!("{summary}\nCloud refresh failed: {error}"))
-                        .unwrap_or(error);
-                }
-                Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                    self.file_action_receiver = None;
-                    self.status = "The library file operation stopped unexpectedly.".to_owned();
-                }
-                Some(Err(mpsc::TryRecvError::Empty)) | None => {}
-            }
 
             let folder_completed = self
                 .folder_operation_receiver
@@ -814,26 +529,6 @@ impl LibraryState {
             };
 
             match event {
-                ScanEvent::CloudAvailability {
-                    generation,
-                    offline_reason,
-                    folders,
-                    folder_id,
-                    asset_folders,
-                } if generation == self.generation.load(Ordering::Acquire) => {
-                    self.cloud_offline_reason = offline_reason;
-                    self.cloud_folders = folders;
-                    self.cloud_asset_folders = asset_folders;
-                    self.cloud_expanded_folders.retain(|folder_id| {
-                        folder_id == crate::cloud::CLOUD_ROOT_FOLDER_ID
-                            || self
-                                .cloud_folders
-                                .iter()
-                                .any(|folder| &folder.id == folder_id)
-                    });
-                    self.cloud_folder_id = folder_id;
-                    self.update_cloud_location();
-                }
                 #[cfg(not(target_os = "android"))]
                 ScanEvent::FolderTree { generation, tree }
                     if generation == self.generation.load(Ordering::Acquire) =>
@@ -841,82 +536,66 @@ impl LibraryState {
                     self.folder_tree = Some(tree);
                 }
                 #[cfg(target_os = "android")]
-                ScanEvent::AndroidFolders {
-                    generation,
-                    folders,
-                } if generation == self.generation.load(Ordering::Acquire) => {
-                    self.android_folders = folders;
-                    self.android_expanded_folders.retain(|path| {
-                        path.is_empty()
-                            || self
-                                .android_folders
-                                .iter()
-                                .any(|folder| &folder.path == path)
+                ScanEvent::AndroidFolders { generation, folders }
+                    if generation == self.generation.load(Ordering::Acquire) =>
+                {
+                    self.platform.folders = folders;
+                    let folder_paths = self
+                        .platform
+                        .folders
+                        .iter()
+                        .map(|folder| folder.path.as_str())
+                        .collect::<HashSet<_>>();
+                    self.platform.expanded_folders.retain(|path| {
+                        path.is_empty() || folder_paths.contains(path.as_str())
                     });
-                    self.android_expanded_folders
-                        .extend(android_folder_ancestors(&self.android_folder));
+                    let selected_folder = self.platform.folder.clone();
+                    self.platform.expanded_folders
+                        .extend(android_folder_ancestors(&selected_folder));
                 }
                 ScanEvent::Catalog {
                     generation,
-                    files,
+                    assets,
                     warning_count,
                     truncated,
                 } if generation == self.generation.load(Ordering::Acquire) => {
                     let mut previous = std::mem::take(&mut self.entries)
                         .into_iter()
-                        .map(|entry| (entry.info.source.clone(), entry))
+                        .map(|entry| (entry.asset.id.clone(), entry))
                         .collect::<HashMap<_, _>>();
-                    self.entries = files
+                    self.entries = assets
                         .into_iter()
-                        .map(|info| {
-                            if let Some(mut entry) = previous.remove(&info.source) {
-                                if same_library_file_identity(&entry.info, &info) {
-                                    entry.info = info;
+                        .map(|asset| {
+                            if let Some(mut entry) = previous.remove(&asset.id) {
+                                if same_library_asset_identity(&entry.asset, &asset) {
+                                    entry.asset = asset;
                                     entry.thumbnail_error = None;
                                     entry.thumbnail_queued = false;
                                     entry.last_used = 0;
                                     return entry;
                                 }
                             }
-                            new_library_entry(info)
+                            new_library_entry(asset)
                         })
                         .collect();
                     self.sort_entries();
-                    self.selected_sources
-                        .retain(|source| self.entry_indices.contains_key(source));
-                    if self.selected_sources.is_empty() && !self.selection_mode {
+                    self.selected_assets
+                        .retain(|asset_id| self.entry_indices.contains_key(asset_id));
+                    if self.selected_assets.is_empty() && !self.selection_mode {
                         #[cfg(target_os = "android")]
                         crate::android::set_back_navigation_active(false);
                     }
                     self.scanning = false;
                     self.catalog_ready = true;
-                    let mut catalog_status = catalog_status(warning_count, truncated);
-                    if self.view == LibraryView::Cloud {
-                        if let Some(reason) = &self.cloud_offline_reason {
-                            let prefix = "Offline · cached cloud library";
-                            catalog_status = if catalog_status.is_empty() {
-                                format!("{prefix}\n{reason}")
-                            } else {
-                                format!("{prefix} · {catalog_status}\n{reason}")
-                            };
-                        }
-                    }
-                    self.status = match (
-                        self.cloud_upload_completion.take(),
-                        catalog_status.is_empty(),
-                    ) {
-                        (Some(summary), true) => summary,
-                        (Some(summary), false) => format!("{summary}\n{catalog_status}"),
-                        (None, _) => catalog_status,
-                    };
+                    self.status = catalog_status(warning_count, truncated);
                 }
                 ScanEvent::Thumbnail {
                     generation,
-                    source,
+                    asset_id,
                     display_priority,
                     result,
                 } if generation == self.generation.load(Ordering::Acquire) => {
-                    let Some(index) = self.entry_indices.get(&source).copied() else {
+                    let Some(index) = self.entry_indices.get(&asset_id).copied() else {
                         continue;
                     };
                     self.entries[index].thumbnail_queued = false;
@@ -976,17 +655,11 @@ impl LibraryState {
                     self.catalog_ready = true;
                     self.event_receiver = None;
                     self.request_sender = None;
-                    self.status = self
-                        .cloud_upload_completion
-                        .take()
-                        .map(|summary| format!("{summary}\nCloud refresh failed: {error}"))
-                        .unwrap_or(error);
+                    self.status = error;
                     break;
                 }
                 _ => {}
             }
         }
-        let _ = context;
     }
-
 }

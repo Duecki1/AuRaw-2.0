@@ -15,23 +15,6 @@ impl AurawApp {
         self.persist_performance_settings();
     }
 
-    pub(crate) fn set_cloud_settings(
-        &mut self,
-        enabled: bool,
-        server_url: String,
-        access_token: String,
-    ) {
-        let config = crate::cloud::CloudConfig {
-            enabled,
-            server_url,
-            access_token,
-        };
-        let cache_root = crate::cloud::cache_root(self.performance_settings_path.as_deref());
-        self.library
-            .configure_cloud(config, cache_root, &self.egui_ctx);
-        self.persist_performance_settings();
-    }
-
     pub(crate) fn thumbnail_worker_count(&self) -> usize {
         self.library.thumbnail_worker_count()
     }
@@ -178,40 +161,6 @@ impl AurawApp {
         }
     }
 
-    pub(crate) fn show_library_view(&mut self, view: crate::ui::library::LibraryView) {
-        let changed = match view {
-            crate::ui::library::LibraryView::Local => self.library.show_local(&self.egui_ctx),
-            crate::ui::library::LibraryView::Cloud => self.library.show_cloud(&self.egui_ctx),
-        };
-        if changed {
-            self.persist_performance_settings();
-        }
-    }
-
-    pub(crate) fn select_cloud_library_folder(&mut self, folder_id: String) {
-        if self
-            .library
-            .select_cloud_folder(folder_id, &self.egui_ctx)
-        {
-            self.persist_performance_settings();
-        }
-    }
-
-    pub(crate) fn show_cloud_library_trash(&mut self) {
-        if self.library.show_cloud_trash(&self.egui_ctx) {
-            self.persist_performance_settings();
-        }
-    }
-
-    pub(crate) fn remember_cloud_library_folder(&mut self, folder_id: String) {
-        if self
-            .library
-            .remember_cloud_folder_without_refresh(folder_id)
-        {
-            self.persist_performance_settings();
-        }
-    }
-
     pub(crate) fn set_library_folder_sidebar_open(&mut self, open: bool) {
         if self.library.set_folder_sidebar_open(open) {
             #[cfg(not(target_os = "android"))]
@@ -275,11 +224,6 @@ impl AurawApp {
             #[cfg(not(target_os = "android"))]
             display_profile_override: self.display_profile_override.clone(),
             adjustment_copy_settings: self.adjustment_copy_settings,
-            cloud_enabled: self.library.cloud_config().enabled,
-            cloud_server_url: self.library.cloud_config().server_url.clone(),
-            cloud_access_token: self.library.cloud_config().access_token.clone(),
-            last_library_view: self.library.view(),
-            last_cloud_library_folder: self.library.cloud_folder_id().to_owned(),
             #[cfg(target_os = "android")]
             last_android_library_folder: self.library.android_folder().to_owned(),
             #[cfg(not(target_os = "android"))]

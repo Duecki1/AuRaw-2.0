@@ -27,39 +27,6 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
-    pub(crate) fn open_cloud_upload_dialog(&mut self, _frame: &eframe::Frame) {
-        if self.desktop_picker_receiver.is_some() || self.library.cloud_upload_in_progress() {
-            return;
-        }
-        let extensions = crate::pipeline::SUPPORTED_RAW_EXTENSIONS
-            .iter()
-            .flat_map(|extension| [extension.to_string(), extension.to_ascii_uppercase()])
-            .collect::<Vec<_>>();
-        let initial_directory = self
-            .library
-            .folder()
-            .map(std::path::Path::to_path_buf)
-            .or_else(|| {
-                self.current_path
-                    .as_deref()
-                    .and_then(selected_picker_directory)
-            });
-        let mut dialog = rfd::AsyncFileDialog::new().add_filter("RAW and TIFF images", &extensions);
-        if let Some(directory) = initial_directory {
-            dialog = dialog.set_directory(directory);
-        }
-        self.desktop_picker_receiver = Some(spawn_ui_worker(&self.egui_ctx, move || {
-            let paths = pollster::block_on(dialog.pick_files()).map(|handles| {
-                handles
-                    .into_iter()
-                    .map(|handle| handle.path().to_path_buf())
-                    .collect()
-            });
-            crate::app::DesktopPickerEvent::CloudRawFiles(paths)
-        }));
-    }
-
-    #[cfg(not(target_os = "android"))]
     pub fn open_library_folder_dialog(&mut self) {
         if self.desktop_picker_receiver.is_some() {
             return;
@@ -99,29 +66,6 @@ impl AurawApp {
         }
     }
 
-    #[cfg(target_os = "android")]
-    pub(crate) fn open_cloud_upload_dialog(&mut self, _frame: &eframe::Frame) {
-        if self.android_foreground_task_active() {
-            self.notice = Some(
-                "Wait for the current foreground operation before selecting cloud uploads."
-                    .to_owned(),
-            );
-            self.egui_ctx.request_repaint();
-            return;
-        }
-        if self.picker_pending || self.library.cloud_upload_in_progress() {
-            return;
-        }
-        match crate::android::open_cloud_raw_documents(&self.android_app) {
-            Ok(()) => {
-                self.picker_pending = true;
-                self.notice = None;
-                self.status = "Choose one or more RAW or TIFF files for AuRaw Cloud…".to_owned();
-            }
-            Err(error) => self.notice = Some(error),
-        }
-    }
-
     #[cfg(not(target_os = "android"))]
     pub(crate) fn poll_desktop_picker(&mut self, frame: &eframe::Frame) {
         let result = self
@@ -134,11 +78,6 @@ impl AurawApp {
         self.desktop_picker_receiver = None;
         match result {
             crate::app::DesktopPickerEvent::RawFile(Some(path)) => self.open_path(path, frame),
-            crate::app::DesktopPickerEvent::CloudRawFiles(Some(paths)) => {
-                self.active_tab = AppTab::Library;
-                self.library
-                    .start_desktop_cloud_upload(paths, &self.egui_ctx);
-            }
             crate::app::DesktopPickerEvent::LibraryFolder(Some(folder)) => {
                 self.library.open_folder(folder, &self.egui_ctx);
                 self.persist_performance_settings();
@@ -292,22 +231,6 @@ impl AurawApp {
                             self.complete_android_library_ai_mask_open_failure(error, frame);
                         }
                     }
-                }
-                crate::android::PickerResult::CloudSelected {
-                    documents,
-                    failed,
-                    errors,
-                } => {
-                    self.develop_loading_thumbnail.clear();
-                    self.pending_android_profile_reload = None;
-                    self.pending_android_library_reset_reload = false;
-                    self.active_tab = AppTab::Library;
-                    self.library.start_android_cloud_upload(
-                        documents,
-                        failed,
-                        errors,
-                        &self.egui_ctx,
-                    );
                 }
                 crate::android::PickerResult::BatchImported {
                     imported,

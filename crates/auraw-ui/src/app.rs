@@ -50,14 +50,13 @@ use background_tasks::{
 mod edit_history;
 use edit_history::EditHistory;
 mod worker;
-use worker::{
-    drain_worker_events, show_cancellable_worker_popup, show_download_progress, spawn_ui_worker,
-};
+use worker::{drain_worker_events, show_cancellable_worker_popup, show_download_progress};
+#[cfg(not(target_os = "android"))]
+use worker::spawn_ui_worker;
 
 #[cfg(not(target_os = "android"))]
 pub(crate) enum DesktopPickerEvent {
     RawFile(Option<PathBuf>),
-    CloudRawFiles(Option<Vec<PathBuf>>),
     LibraryFolder(Option<PathBuf>),
     CameraProfileFolder(Option<PathBuf>),
     OnnxRuntime(Result<Option<(PathBuf, String)>, String>),
@@ -533,21 +532,6 @@ struct SidecarSaveJob {
 
 struct SidecarSaveEvent {
     job: SidecarSaveJob,
-    raw_path: Option<PathBuf>,
-    result: Result<String, String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CloudSidecarConflictResolution {
-    OverwriteServer,
-    OverwriteLocal,
-}
-
-struct CloudSidecarConflictEvent {
-    raw_path: PathBuf,
-    generation: u64,
-    revision: u64,
-    resolution: CloudSidecarConflictResolution,
     result: Result<String, String>,
 }
 
@@ -647,17 +631,15 @@ struct LibraryBatchExportJob {
 
 #[cfg(target_os = "android")]
 #[derive(Clone, Debug)]
-pub(crate) enum AndroidLibraryExportTarget {
-    Local { uri: String, display_name: String },
-    Cloud { path: PathBuf, display_name: String },
+pub(crate) struct AndroidLibraryExportTarget {
+    pub(crate) uri: String,
+    pub(crate) display_name: String,
 }
 
 #[cfg(target_os = "android")]
 impl AndroidLibraryExportTarget {
     fn display_name(&self) -> &str {
-        match self {
-            Self::Local { display_name, .. } | Self::Cloud { display_name, .. } => display_name,
-        }
+        &self.display_name
     }
 }
 
@@ -671,7 +653,6 @@ struct LibraryBatchExportJob {
 struct LibraryAdjustmentClipboard {
     edits: SidecarEditState,
     settings: AdjustmentCopySettings,
-    #[cfg(not(target_os = "android"))]
     source_label: String,
 }
 
@@ -986,8 +967,6 @@ pub struct AurawApp {
     sidecar_receiver: Option<mpsc::Receiver<SidecarSaveEvent>>,
     sidecar_save_feedback_until: Option<Instant>,
     sidecar_save_error_dialog: Option<String>,
-    sidecar_conflict_receiver: Option<mpsc::Receiver<CloudSidecarConflictEvent>>,
-    sidecar_conflict_resolution_error: Option<String>,
     sidecar_autosave_deadline: Option<SidecarAutosaveDeadline>,
     developed_thumbnail_pending: Option<DevelopedThumbnailJob>,
     developed_thumbnail_in_flight: Option<DevelopedThumbnailJob>,
@@ -1158,9 +1137,6 @@ impl AurawApp {
             self.thumbnail_cache_size = None;
             self.thumbnail_cache_size_receiver = None;
         }
-        if tab == AppTab::Library && self.library.is_cloud_view() {
-            self.library.refresh(&self.egui_ctx);
-        }
         self.active_tab = tab;
         self.sync_ai_model_cache_policy();
         #[cfg(target_os = "android")]
@@ -1233,7 +1209,9 @@ mod sidecar_persistence;
 mod background_task_runtime;
 mod eframe_impl;
 
-use lifecycle::{install_missing_range_sources, needs_canonical_mask_source};
+use lifecycle::needs_canonical_mask_source;
+#[cfg(not(target_os = "android"))]
+use lifecycle::install_missing_range_sources;
 use processing_export::{batch_export_overall_fraction, spawn_export_request};
 #[cfg(not(target_os = "android"))]
 use processing_export::{spawn_desktop_library_batch_export, DesktopLibraryBatchExportRequest};
