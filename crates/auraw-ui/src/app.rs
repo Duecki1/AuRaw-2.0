@@ -38,7 +38,7 @@ use crate::ui::top_bar::TopBar;
 use eframe::{egui, wgpu};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -688,24 +688,19 @@ struct LibraryBatchExportState {
 enum LibraryBatchExportEvent {
     Started {
         job: LibraryBatchExportJob,
-        completed: usize,
-        total: usize,
     },
     Progress {
-        completed: usize,
-        total: usize,
         completed_tiles: usize,
         total_tiles: usize,
     },
     ItemFinished {
-        completed: usize,
         error: Option<String>,
     },
     Finished {
         cancelled: bool,
+        error: Option<String>,
     },
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExportTaskKind {
@@ -719,10 +714,36 @@ enum ExportTaskReceiver {
     LibraryBatch(mpsc::Receiver<LibraryBatchExportEvent>),
 }
 
+#[derive(Clone, Debug)]
+enum ExportDestination {
+    File(PathBuf),
+    #[cfg(target_os = "android")]
+    AndroidDirect {
+        path: PathBuf,
+    },
+    #[cfg(target_os = "android")]
+    AndroidGallery {
+        path: PathBuf,
+        display_name: String,
+        format: ExportFormat,
+    },
+}
+
+impl ExportDestination {
+    fn path(&self) -> &Path {
+        match self {
+            Self::File(path) => path,
+            #[cfg(target_os = "android")]
+            Self::AndroidDirect { path } | Self::AndroidGallery { path, .. } => path,
+        }
+    }
+}
+
 struct ExportTask {
     kind: ExportTaskKind,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
     receiver: Option<ExportTaskReceiver>,
+    destination: Option<ExportDestination>,
     progress: f32,
     phase: String,
     completed: usize,
@@ -733,19 +754,23 @@ struct ExportTask {
     cancelling: bool,
 }
 
-struct ExportTaskRequest {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+struct PreparedExportSource {
     raw: Arc<LoadedRaw>,
     geometry: GeometryTransform,
     exposure: ExposureParams,
     masks: MaskStack,
     inpaint: Option<InpaintLayer>,
-    path: PathBuf,
+    source_file_name: Option<String>,
+    gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
+}
+
+struct ExportItemRequest {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    source: PreparedExportSource,
+    destination: ExportDestination,
     format: ExportFormat,
     settings: ExportSettings,
-    metadata: ExportMetadata,
-    gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
 
 struct LensCorrectionTaskRequest {

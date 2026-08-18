@@ -17,6 +17,28 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 }
 
 #[cfg(not(target_os = "android"))]
+#[test]
+fn library_export_naming_preserves_format_and_avoids_collisions() {
+    let root = unique_temp_dir("library-export-name-test");
+    let source = root.join("photo.CR3");
+    let existing = root.join("photo-auraw.jpg");
+    fs::write(&source, b"raw").unwrap();
+    fs::write(&existing, b"existing").unwrap();
+    let mut reserved = HashSet::new();
+
+    let destination = super::export::unique_library_export_path(
+        &root,
+        &source,
+        ExportFormat::Jpeg,
+        &mut reserved,
+    );
+
+    assert_eq!(destination, root.join("photo-auraw-2.jpg"));
+    assert!(reserved.contains(&destination));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(not(target_os = "android"))]
 fn test_developed_thumbnail() -> RawThumbnail {
     RawThumbnail {
         width: 16,
