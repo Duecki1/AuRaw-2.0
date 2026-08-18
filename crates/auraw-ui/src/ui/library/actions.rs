@@ -596,24 +596,16 @@ pub(crate) fn show_library_action_overlays(
     }
 
     if let Some((completed, total, failed, current_name)) = app.library_ai_mask_refresh_status() {
-        if app.library_ai_mask_refresh_progress_open() {
-            let (minimize, cancel) = show_ai_mask_refresh_progress(
-                ui,
-                completed,
-                total,
-                failed,
-                current_name.as_deref(),
-                cfg!(not(target_os = "android")),
-            );
-            #[cfg(not(target_os = "android"))]
-            if minimize {
-                app.minimize_library_ai_mask_refresh_progress();
-            }
-            #[cfg(target_os = "android")]
-            let _ = minimize;
-            if cancel {
-                app.cancel_library_ai_mask_refresh();
-            }
+        let (_, cancel) = show_ai_mask_refresh_progress(
+            ui,
+            completed,
+            total,
+            failed,
+            current_name.as_deref(),
+            false,
+        );
+        if cancel {
+            app.cancel_library_ai_mask_refresh();
         }
     }
 
@@ -700,5 +692,4 @@ pub(crate) fn show_library_action_overlays(
         app.library.export_dialog = None;
     }
 
-    show_library_batch_export_progress(ui, app);
 }

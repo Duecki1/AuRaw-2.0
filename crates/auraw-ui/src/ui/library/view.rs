@@ -99,6 +99,9 @@ impl Library {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 #[cfg(target_os = "android")]
+                app.show_export_task_indicator(ui);
+
+                #[cfg(target_os = "android")]
                 if (if compact_header {
                     crate::ui::icons::phosphor_icon_button(
                         ui,

@@ -322,7 +322,15 @@ impl Sidebar {
                 if jpeg_response.clicked() {
                     app.export_jpeg(frame);
                 }
-                if !app.can_export() && app.export_progress_state().is_none() {
+                if app.export_task_active() {
+                    ui.label(
+                        egui::RichText::new(
+                            "An export is already running. Minimize its progress window to keep editing.",
+                        )
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                } else if !app.can_export() && app.export_progress_state().is_none() {
                     ui.label(
                         egui::RichText::new(
                             "Export becomes available after a RAW image has finished loading.",

@@ -220,7 +220,7 @@ impl AurawApp {
         // Image-bound workers may still be inside a native phase. Request
         // cancellation before advancing the document identity, and keep their
         // receivers alive so their terminal events can be drained safely.
-        self.cancel_document_bound_background_tasks();
+        self.cancel_document_bound_foreground_operation();
         self.abandon_ai_denoise_worker();
         // A DPI rebuild belongs to the outgoing document. Dropping the
         // receiver lets its worker dispose the result instead of installing it
@@ -234,7 +234,7 @@ impl AurawApp {
         };
         let retained_preview_program_template = self.preview_program_template.clone();
         #[cfg(target_os = "android")]
-        let export_active_while_opening = self.export_receiver.is_some();
+        let export_active_while_opening = self.export_task.is_some();
         let startup_gpu_prewarm_receiver = self.gpu_preview_prewarm_receiver.take();
         self.original_raw = None;
         self.loaded_raw = None;
@@ -285,25 +285,9 @@ impl AurawApp {
         self.ai_mask_update_object_queue.clear();
         self.ai_mask_update_failed = false;
         self.subject_consent_open = false;
-        self.subject_generation = self.subject_generation.wrapping_add(1);
-        if self.subject_receiver.is_none() {
-            self.subject_task_id = None;
-            self.subject_download_progress = None;
-            self.subject_inferencing = false;
-        }
         self.object_consent_open = false;
         self.object_pending_target = None;
-        self.object_generation = self.object_generation.wrapping_add(1);
-        if self.object_receiver.is_none() {
-            self.object_task_id = None;
-            self.object_download_progress = None;
-            self.object_inferencing = false;
-            self.object_decoder_only = false;
-            self.object_job_generation = 0;
-            self.object_job_target = None;
-        }
         self.object_cache = None;
-        }
         self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
         self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
@@ -322,10 +306,6 @@ impl AurawApp {
         self.preview_revision = self.preview_revision.wrapping_add(1);
         self.lens_correction = LensCorrectionState::default();
         self.lens_correction_dirty = false;
-        self.lens_correction_generation = self.lens_correction_generation.wrapping_add(1);
-        if self.lens_correction_receiver.is_none() {
-            self.lens_correction_task_id = None;
-        }
         #[cfg(target_os = "android")]
         {
             self.lens_original_preview_cache = None;
@@ -1056,7 +1036,6 @@ impl AurawApp {
                 self.dirty_mask_layers.fill(false);
                 self.lens_correction = loaded.lens_correction;
                 self.lens_correction_dirty = false;
-                self.lens_correction_generation = self.lens_correction_generation.wrapping_add(1);
                 #[cfg(target_os = "android")]
                 {
                     if self.lens_correction.applied {
@@ -1094,7 +1073,7 @@ impl AurawApp {
                     loaded.sidecar_generation,
                     loaded.sidecar_needs_rewrite,
                 );
-                self.cancel_stale_document_background_tasks();
+                self.cancel_document_bound_foreground_operation();
                 self.resume_persisted_ai_denoise(frame);
                 log::info!("loaded RAW preview for {}", loaded.label);
                 self.on_library_ai_mask_refresh_load_finished(true, frame);

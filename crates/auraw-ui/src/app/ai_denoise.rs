@@ -1,13 +1,12 @@
-use super::{show_download_progress, AurawApp};
+use super::*;
 use crate::ai_denoise::{AiDenoiseEvent, RAWNIND_PACKAGE_BYTES};
 use eframe::egui;
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        atomic::AtomicBool,
+        Arc,
     },
-    time::Duration,
 };
 
 impl AurawApp {
@@ -86,9 +85,7 @@ impl AurawApp {
     pub(crate) fn set_ai_denoise_enabled(&mut self, enabled: bool, frame: &eframe::Frame) {
         if !enabled {
             self.ai_denoise_consent_open = false;
-            if let Some(cancellation) = &self.ai_denoise_cancellation {
-                cancellation.store(true, Ordering::Release);
-            }
+            self.cancel_foreground_operation_if(ForegroundOperationKind::AiDenoise);
             let changed = self.exposure.ai_denoise_enabled;
             self.exposure.ai_denoise_enabled = false;
             self.target_exposure.ai_denoise_enabled = false;
@@ -106,7 +103,8 @@ impl AurawApp {
             self.egui_ctx.request_repaint();
             return;
         }
-        if self.ai_denoise_receiver.is_some() {
+        if self.foreground_operation_active() {
+            self.notice = Some("Finish or cancel the current editing operation first.".to_owned());
             return;
         }
         if self.loaded_raw.is_none() {
@@ -160,7 +158,7 @@ impl AurawApp {
     }
 
     fn start_ai_denoise(&mut self, frame: &eframe::Frame, allow_model_download: bool) {
-        if self.ai_denoise_receiver.is_some() {
+        if self.foreground_operation_active() {
             return;
         }
         let Some(raw) = self.loaded_raw.as_ref().map(Arc::clone) else {
@@ -265,19 +263,20 @@ impl AurawApp {
             Arc::clone(&cancellation),
         );
         self.ai_denoise_consent_open = false;
-        self.ai_denoise_receiver = Some(receiver);
-        self.ai_denoise_download_progress = None;
-        self.ai_denoise_apply_progress = Some((
-            if saved_result_exists {
-                "Restoring saved AI denoise"
-            } else {
-                "Preparing RawNIND models"
-            },
-            0,
-            0,
-        ));
-        self.ai_denoise_cancellation = Some(cancellation);
-        self.ai_denoise_job_document_id = self.sidecar_generation;
+        let progress = ForegroundProgress::indeterminate(if saved_result_exists {
+            "Restoring saved AI denoise…"
+        } else {
+            "Preparing RawNIND models…"
+        });
+        self.begin_foreground_operation(ForegroundOperation {
+            kind: ForegroundOperationKind::AiDenoise,
+            document_id: self.sidecar_generation,
+            cancellation,
+            progress,
+            cancelling: false,
+            receiver: ForegroundOperationReceiver::AiDenoise(receiver),
+            context: ForegroundOperationContext::AiDenoise,
+        });
         let changed = !self.exposure.ai_denoise_enabled;
         self.exposure.ai_denoise_enabled = true;
         self.target_exposure.ai_denoise_enabled = true;
@@ -289,7 +288,7 @@ impl AurawApp {
         }
         crate::diagnostics::record(format!(
             "RawNIND worker started for document {} on {}",
-            self.ai_denoise_job_document_id,
+            self.sidecar_generation,
             if cfg!(target_os = "android") {
                 "Android"
             } else {
@@ -300,32 +299,50 @@ impl AurawApp {
     }
 
     pub(crate) fn poll_ai_denoise_worker(&mut self) {
-        let mut events = Vec::new();
-        let disconnected = if let Some(receiver) = &self.ai_denoise_receiver {
-            loop {
-                match receiver.try_recv() {
-                    Ok(event) => events.push(event),
-                    Err(mpsc::TryRecvError::Empty) => break false,
-                    Err(mpsc::TryRecvError::Disconnected) => break true,
-                }
-            }
-        } else {
-            false
+        if !self.foreground_operation_is(ForegroundOperationKind::AiDenoise) {
+            return;
+        }
+        let Some(mut operation) = self.foreground_operation.take() else {
+            return;
         };
+        let ForegroundOperationReceiver::AiDenoise(receiver) = &operation.receiver else {
+            self.foreground_operation = Some(operation);
+            return;
+        };
+        let (events, disconnected) = drain_worker_events(Some(receiver), |event| {
+            matches!(event, AiDenoiseEvent::Finished(_))
+        });
         let mut finished = None;
         for event in events {
             match event {
                 AiDenoiseEvent::DownloadProgress { downloaded, total } => {
-                    self.ai_denoise_download_progress = Some((downloaded, total));
-                    self.ai_denoise_apply_progress = None;
+                    operation.progress = ForegroundProgress::units(
+                        downloaded,
+                        total,
+                        Some("bytes".to_owned()),
+                        "Downloading verified RawNIND model package",
+                    )
+                    .with_detail(format!(
+                        "{:.1} / {:.1} MB",
+                        downloaded as f64 / 1_000_000.0,
+                        total as f64 / 1_000_000.0
+                    ));
                 }
                 AiDenoiseEvent::Progress {
                     phase,
                     completed,
                     total,
                 } => {
-                    self.ai_denoise_download_progress = None;
-                    self.ai_denoise_apply_progress = Some((phase, completed, total));
+                    operation.progress = if total > 0 {
+                        ForegroundProgress::units(
+                            completed as u64,
+                            total as u64,
+                            Some("tiles".to_owned()),
+                            phase,
+                        )
+                    } else {
+                        ForegroundProgress::indeterminate(format!("{phase}…"))
+                    };
                 }
                 AiDenoiseEvent::Finished(result) => finished = Some(result),
             }
@@ -334,13 +351,10 @@ impl AurawApp {
             finished = Some(Err("RawNIND worker stopped unexpectedly.".to_owned()));
         }
         let Some(result) = finished else {
+            self.foreground_operation = Some(operation);
             return;
         };
-        self.ai_denoise_receiver = None;
-        self.ai_denoise_download_progress = None;
-        self.ai_denoise_apply_progress = None;
-        self.ai_denoise_cancellation = None;
-        let stale = self.ai_denoise_job_document_id != self.sidecar_generation;
+        let stale = operation.document_id != self.sidecar_generation;
         if stale {
             return;
         }
@@ -355,7 +369,7 @@ impl AurawApp {
         self.navigation_pending_stage = None;
         self.preview_detail_urgent = false;
         match result {
-            Ok(image) if self.exposure.ai_denoise_enabled => {
+            Ok(image) if self.exposure.ai_denoise_enabled && !operation.is_cancelled() => {
                 let install = self
                     .loaded_raw
                     .as_ref()
@@ -363,9 +377,6 @@ impl AurawApp {
                     .and_then(|raw| raw.set_ai_denoised_image(image));
                 match install {
                     Ok(()) => {
-                        // Rebuild every proxy from the full native model result.
-                        // Ordinary stage invalidation cannot retrofit a new scene
-                        // source into already-allocated GPU pipelines.
                         self.notice = Some(
                             "AI denoise applied locally. Standard denoise values were preserved."
                                 .to_owned(),
@@ -383,7 +394,6 @@ impl AurawApp {
                 }
             }
             Ok(_) => {
-                // The user cancelled after the final tile was already running.
                 self.exposure.ai_denoise_enabled = false;
                 self.target_exposure.ai_denoise_enabled = false;
             }
@@ -403,21 +413,17 @@ impl AurawApp {
     }
 
     pub(crate) fn abandon_ai_denoise_worker(&mut self) {
-        if let Some(cancellation) = self.ai_denoise_cancellation.take() {
-            cancellation.store(true, Ordering::Release);
-        }
-        self.ai_denoise_receiver = None;
-        self.ai_denoise_download_progress = None;
-        self.ai_denoise_apply_progress = None;
+        self.cancel_foreground_operation_if(ForegroundOperationKind::AiDenoise);
         self.ai_denoise_consent_open = false;
     }
 
     pub(crate) fn resume_persisted_ai_denoise(&mut self, frame: &eframe::Frame) {
         self.ai_denoise_resume_pending = false;
-        if self.exposure.ai_denoise_enabled
-            && self.ai_denoise_receiver.is_none()
-            && self.loaded_raw.is_some()
-        {
+        if self.exposure.ai_denoise_enabled && self.loaded_raw.is_some() {
+            if self.foreground_operation_active() {
+                self.ai_denoise_resume_pending = true;
+                return;
+            }
             if self
                 .loaded_raw
                 .as_ref()
@@ -489,49 +495,5 @@ impl AurawApp {
             });
         }
 
-        if self.ai_denoise_receiver.is_some() {
-            let mut cancel = false;
-            crate::ui::responsive_popup(egui::Window::new("Applying AI denoise"), ctx, 440.0)
-                .collapsible(false)
-                .resizable(false)
-                .movable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.label("RawNIND is being applied before sharpening. This dialog stays open until the operation finishes or is cancelled.");
-                    if let Some((downloaded, total)) = self.ai_denoise_download_progress {
-                        show_download_progress(
-                            ui,
-                            "Downloading verified darktable-ai model package…",
-                            downloaded,
-                            total,
-                        );
-                    } else if let Some((phase, completed, total)) =
-                        self.ai_denoise_apply_progress
-                    {
-                        ui.label(format!("{phase}…"));
-                        if total > 0 {
-                            ui.add(
-                                egui::ProgressBar::new(completed as f32 / total as f32)
-                                    .show_percentage()
-                                    .text(format!("{completed} / {total} tiles")),
-                            );
-                        } else {
-                            ui.add(egui::ProgressBar::new(0.0).animate(true));
-                        }
-                    } else {
-                        ui.add(egui::ProgressBar::new(0.0).animate(true));
-                    }
-                    ui.add_space(8.0);
-                    cancel = ui.button("Cancel").clicked();
-                });
-            if cancel {
-                if let Some(cancellation) = &self.ai_denoise_cancellation {
-                    cancellation.store(true, Ordering::Release);
-                }
-                self.exposure.ai_denoise_enabled = false;
-                self.ai_denoise_apply_progress = Some(("Cancelling", 0, 0));
-            }
-            ctx.request_repaint_after(Duration::from_millis(50));
-        }
     }
 }

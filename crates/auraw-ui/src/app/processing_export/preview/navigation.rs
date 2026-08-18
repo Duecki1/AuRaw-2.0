@@ -2,7 +2,7 @@ use super::*;
 
 impl AurawApp {
     pub(in crate::app) fn advance_navigation_preview(&mut self, frame: &eframe::Frame) {
-        if self.ai_denoise_receiver.is_some() {
+        if self.foreground_operation_is(ForegroundOperationKind::AiDenoise) {
             return;
         }
         let zoomed = self.preview_zoom > DETAIL_ZOOM_START;

@@ -193,7 +193,7 @@ impl AurawApp {
             false
         };
         self.object_cache = backup.object_cache;
-        self.object_generation = self.object_generation.wrapping_add(1);
+        self.cancel_foreground_operation_if(ForegroundOperationKind::ObjectMask);
         self.last_brush_point = None;
         self.mask_drag = None;
         self.mask_interaction_dirty_layer = None;
@@ -254,46 +254,15 @@ impl AurawApp {
 
     pub(crate) fn ai_mask_update_busy(&self) -> bool {
         self.ai_mask_update_active
-            || self.subject_task_id.is_some()
-            || self.object_task_id.is_some()
-            || self.subject_receiver.is_some()
-            || self.object_receiver.is_some()
+            || matches!(
+                self.foreground_operation_kind(),
+                Some(
+                    ForegroundOperationKind::SubjectMask
+                        | ForegroundOperationKind::ObjectMask
+                )
+            )
             || self.subject_consent_open
             || self.object_consent_open
-    }
-
-    pub(in crate::app) fn recover_terminal_ai_mask_task_owners(&mut self) {
-        let stale_subject = self.subject_receiver.is_none()
-            && self.subject_task_id.is_some_and(|id| {
-                self.background_tasks
-                    .snapshot(id)
-                    .is_none_or(|task| task.status == TaskStatus::Failed)
-            });
-        if stale_subject {
-            if let Some(id) = self.subject_task_id {
-                self.clear_ai_mask_task_owner(id);
-            }
-        }
-
-        let stale_object = self.object_receiver.is_none()
-            && self.object_task_id.is_some_and(|id| {
-                self.background_tasks
-                    .snapshot(id)
-                    .is_none_or(|task| task.status == TaskStatus::Failed)
-            });
-        if stale_object {
-            if let Some(id) = self.object_task_id {
-                self.clear_ai_mask_task_owner(id);
-            }
-        }
-
-                self.background_tasks
-                    .snapshot(id)
-                    .is_none_or(|task| task.status == TaskStatus::Failed)
-            });
-                self.clear_ai_mask_task_owner(id);
-            }
-        }
     }
 
     pub(crate) fn ai_masks_need_update(&self) -> bool {
@@ -321,25 +290,9 @@ impl AurawApp {
             })
             .count();
         let current_object = usize::from(
-            self.object_receiver.is_some() || self.object_pending_target.is_some(),
+            self.foreground_operation_is(ForegroundOperationKind::ObjectMask)
+                || self.object_pending_target.is_some(),
         );
-        );
-        let subject_remaining = usize::from(self.ai_mask_update_subject_pending) * subject_targets;
-        subject_remaining
-            + self.ai_mask_update_object_queue.len()
-            + current_object
-    }
-
-    pub(in crate::app) fn generated_ai_mask_targets(&self) -> GeneratedAiMaskTargets {
-        let mut subject = false;
-        let mut objects = VecDeque::new();
-        for (mask_index, local_mask) in self.masks.masks.iter().enumerate() {
-            for (component_index, component) in local_mask.components.iter().enumerate() {
-                match (component.kind, &component.geometry) {
-                    (
-                        MaskKind::Subject | MaskKind::Background,
-                        MaskGeometry::Ai { .. },
-                    ) => subject = true,
                     (
                         MaskKind::Object,
                         MaskGeometry::Object { strokes, .. },
@@ -370,8 +323,15 @@ impl AurawApp {
         self.mask_source_cache = None;
         self.subject_mask_cache = None;
         self.object_cache = None;
-        self.subject_generation = self.subject_generation.wrapping_add(1);
-        self.object_generation = self.object_generation.wrapping_add(1);
+        if matches!(
+            self.foreground_operation_kind(),
+            Some(
+                ForegroundOperationKind::SubjectMask
+                    | ForegroundOperationKind::ObjectMask
+            )
+        ) {
+            self.cancel_foreground_operation();
+        }
         self.object_pending_target = None;
         self.ai_mask_update_active = false;
         self.ai_mask_update_subject_pending = false;
@@ -433,7 +393,6 @@ impl AurawApp {
     }
 
     pub(crate) fn request_update_all_ai_masks(&mut self, frame: &eframe::Frame) {
-        self.recover_terminal_ai_mask_task_owners();
         if self.ai_mask_update_busy() {
             self.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
             return;
@@ -516,8 +475,13 @@ impl AurawApp {
     pub(in crate::app) fn continue_ai_mask_update(&mut self) {
         if !self.ai_mask_update_active
             || self.ai_mask_update_subject_pending
-            || self.subject_receiver.is_some()
-            || self.object_receiver.is_some()
+            || matches!(
+                self.foreground_operation_kind(),
+                Some(
+                    ForegroundOperationKind::SubjectMask
+                        | ForegroundOperationKind::ObjectMask
+                )
+            )
             || self.subject_consent_open
             || self.object_consent_open
         {

@@ -2,17 +2,7 @@ use super::*;
 
 impl AurawApp {
     pub(crate) fn inpaint_busy(&self) -> bool {
-        self.inpaint_task_id.is_some()
-            || self.inpaint_receiver.is_some()
-            || self.inpaint_consent_open
-    }
-
-    pub(crate) fn inpaint_progress(&self) -> Option<(u64, u64)> {
-        self.inpaint_download_progress
-    }
-
-    pub(crate) fn inpaint_inferencing(&self) -> bool {
-        self.inpaint_inferencing
+        self.foreground_operation_active() || self.inpaint_consent_open
     }
 
     pub(crate) fn prepare_live_retouch_preview(&mut self, frame: &eframe::Frame) {
@@ -78,7 +68,7 @@ impl AurawApp {
     }
 
     pub(crate) fn clear_inpainting_tool(&mut self, kind: InpaintStrokeKind) {
-        if self.inpaint_receiver.is_some() {
+        if self.foreground_operation_is(ForegroundOperationKind::Inpaint) {
             return;
         }
         self.inpaint_stroke.clear();
@@ -103,13 +93,13 @@ impl AurawApp {
     }
 
     pub(crate) fn reset_inpainting_state(&mut self) {
-        // A native inference call may only notice cancellation between phases. Keep its
-        // receiver connected until the terminal event arrives, while invalidating its
-        // document generation so the result can never be installed into the new image.
-        if let Some(task_id) = self.inpaint_task_id {
-            self.cancel_background_task(task_id);
+        // Native inference may only notice cancellation between phases. Keep the
+        // shared receiver connected until the terminal event arrives; the document
+        // snapshot prevents a late result from being installed into the new image.
+        let worker_still_running = self.foreground_operation_is(ForegroundOperationKind::Inpaint);
+        if worker_still_running {
+            self.cancel_foreground_operation();
         }
-        let worker_still_running = self.inpaint_receiver.is_some();
         self.inpaint_stroke.clear();
         self.inpaint_strokes.clear();
         self.last_inpaint_brush_point = None;
@@ -131,11 +121,7 @@ impl AurawApp {
         self.inpaint_revision = self.inpaint_revision.wrapping_add(1);
         self.inpaint_consent_open = false;
         if !worker_still_running {
-            self.inpaint_task_id = None;
-            self.inpaint_receiver = None;
-            self.inpaint_active_dabs = None;
-            self.inpaint_download_progress = None;
-            self.inpaint_inferencing = false;
+            self.inpaint_replace_index = None;
         }
         self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
     }
@@ -519,7 +505,8 @@ impl AurawApp {
     }
 
     pub(super) fn start_inpaint_worker(&mut self, model_path: PathBuf) {
-        if self.inpaint_task_id.is_some() || self.inpaint_receiver.is_some() {
+        if self.foreground_operation_active() {
+            self.notice = Some("Finish or cancel the current editing operation first.".to_owned());
             return;
         }
         let Some(source) = self.inpaint_pending_source.take() else {
@@ -532,6 +519,7 @@ impl AurawApp {
             return;
         }
         let dabs = std::mem::take(&mut self.inpaint_stroke);
+        let replace_index = self.inpaint_replace_index.take();
         self.last_inpaint_brush_point = None;
         self.inpaint_stroke_texture = None;
         self.inpaint_stroke_texture_key = None;
@@ -543,89 +531,74 @@ impl AurawApp {
         let runtime_path = None;
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
-        let generation = self.inpaint_revision;
-        let request = InpaintTaskRequest {
-            document_id: self.sidecar_generation,
-            generation,
+
+        let needs_download = !model_path.exists();
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let receiver = spawn_inpaint(
             model_path,
             runtime_path,
             runtime_sha256,
-            request: InpaintRequest {
+            InpaintRequest {
                 source,
                 dabs: dabs.clone(),
             },
-            dabs,
-        };
-        let needs_download = !request.model_path.exists();
-        if needs_download {
-            let task_id = self.enqueue_background_action(
-                TaskKind::Inpainting {
-                    document_id: request.document_id,
-                    generation,
-                },
-                "Downloading inpainting model",
-                TaskProgress::indeterminate("Waiting for earlier background work…"),
-                true,
-                BackgroundAction::Inpainting(request),
-            );
-            self.inpaint_task_id = Some(task_id);
+            Arc::clone(&cancellation),
+        );
+        let progress = ForegroundProgress::indeterminate(if needs_download {
+            "Preparing inpainting model…"
         } else {
-            let task_id = self.background_tasks.start_nonblocking(
-                TaskKind::Inpainting {
-                    document_id: request.document_id,
-                    generation,
-                },
-                "Erasing selection",
-                TaskProgress::indeterminate("Running local LaMa inpainting…"),
-                true,
-            );
-            self.start_inpaint_task(task_id, request);
-        }
+            "Running local LaMa inpainting…"
+        });
+        self.begin_foreground_operation(ForegroundOperation {
+            kind: ForegroundOperationKind::Inpaint,
+            document_id: self.sidecar_generation,
+            cancellation,
+            progress,
+            cancelling: false,
+            receiver: ForegroundOperationReceiver::Inpaint(receiver),
+            context: ForegroundOperationContext::Inpaint {
+                dabs,
+                revision: self.inpaint_revision,
+                replace_index,
+            },
+        });
         self.egui_ctx.request_repaint();
     }
 
     pub(crate) fn poll_inpaint_worker(&mut self) {
-        let Some(task_id) = self.inpaint_task_id else {
+        if !self.foreground_operation_is(ForegroundOperationKind::Inpaint) {
+            return;
+        }
+        let Some(mut operation) = self.foreground_operation.take() else {
             return;
         };
-        let (events, disconnected) = drain_worker_events(
-            self.inpaint_receiver.as_ref(),
-            |event| matches!(event, InpaintEvent::Finished(_)),
-        );
+        let ForegroundOperationReceiver::Inpaint(receiver) = &operation.receiver else {
+            self.foreground_operation = Some(operation);
+            return;
+        };
+        let (events, disconnected) = drain_worker_events(Some(receiver), |event| {
+            matches!(event, InpaintEvent::Finished(_))
+        });
 
         let mut finished = None;
         for event in events {
             match event {
                 InpaintEvent::DownloadProgress { downloaded, total } => {
-                    self.inpaint_download_progress = Some((downloaded, total));
-                    self.inpaint_inferencing = false;
-                    self.background_tasks.set_global_visible(task_id, true);
-                    self.background_tasks
-                        .rename(task_id, "Downloading inpainting model");
-                    self.update_background_progress(
-                        Some(task_id),
-                        TaskProgress::units(
-                            downloaded,
-                            total,
-                            Some("bytes".to_owned()),
-                            "Downloading inpainting model",
-                        )
-                        .with_detail(format!(
-                            "{:.1} / {:.1} MB",
-                            downloaded as f64 / 1_000_000.0,
-                            total as f64 / 1_000_000.0
-                        )),
-                    );
+                    operation.progress = ForegroundProgress::units(
+                        downloaded,
+                        total,
+                        Some("bytes".to_owned()),
+                        "Downloading inpainting model",
+                    )
+                    .with_detail(format!(
+                        "{:.1} / {:.1} MB",
+                        downloaded as f64 / 1_000_000.0,
+                        total as f64 / 1_000_000.0
+                    ));
                 }
                 InpaintEvent::Inferencing => {
-                    self.inpaint_download_progress = None;
-                    self.inpaint_inferencing = true;
-                    self.background_tasks.set_global_visible(task_id, false);
-                    self.background_tasks.release_current(task_id);
-                    self.update_background_progress(
-                        Some(task_id),
-                        TaskProgress::indeterminate("Running local LaMa inpainting…"),
-                    );
+                    operation.progress =
+                        ForegroundProgress::indeterminate("Running local LaMa inpainting…");
                 }
                 InpaintEvent::Finished(result) => finished = Some(result),
             }
@@ -634,31 +607,28 @@ impl AurawApp {
             finished = Some(Err("The inpainting worker stopped unexpectedly.".to_owned()));
         }
         let Some(result) = finished else {
+            self.foreground_operation = Some(operation);
             return;
         };
 
-        let cancelled = self.background_task_cancelled(task_id);
-        let stale = self.inpaint_job_document_id != self.sidecar_generation
-            || self.inpaint_job_generation != self.inpaint_revision;
-        let failed_during_inference = self.inpaint_inferencing;
-        self.inpaint_receiver = None;
-        self.inpaint_task_id = None;
-        self.inpaint_download_progress = None;
-        self.inpaint_inferencing = false;
-
+        let (dabs, revision, replace_index) = match &operation.context {
+            ForegroundOperationContext::Inpaint {
+                dabs,
+                revision,
+                replace_index,
+            } => (dabs.clone(), *revision, *replace_index),
+            _ => (Vec::new(), 0, None),
+        };
+        let cancelled = operation.is_cancelled();
+        let stale = operation.document_id != self.sidecar_generation || revision != self.inpaint_revision;
         if cancelled || stale {
-            self.inpaint_active_dabs = None;
-            self.inpaint_replace_index = None;
-            self.finish_background_task(task_id);
             self.egui_ctx.request_repaint();
             return;
         }
 
         match result {
             Ok(result) => {
-                let dabs = self.inpaint_active_dabs.take().unwrap_or_default();
                 if let Some(stroke) = InpaintStroke::from_result(dabs, result) {
-                    let replace_index = self.inpaint_replace_index.take();
                     let mut pending_stroke = Some(stroke);
                     let preflight = if let Some(index) = replace_index {
                         if index >= self.inpaint_strokes.len() {
@@ -701,41 +671,21 @@ impl AurawApp {
                             } else {
                                 "Erase complete.".to_owned()
                             });
-                            self.finish_background_task(task_id);
                         }
                         Err(error) => {
-                            let message = format!(
+                            self.notice = Some(format!(
                                 "Erase result was not applied because the edit cannot fit in the platform sidecar: {error}. Delete an existing mask or erase result and try again."
-                            );
-                            self.notice = Some(message.clone());
-                            if failed_during_inference {
-                                self.finish_background_task(task_id);
-                            } else {
-                                self.fail_background_task(task_id, message);
-                            }
+                            ));
                         }
                     }
                 } else {
-                    self.inpaint_replace_index = None;
-                    let message = "Inpainting returned an empty result.".to_owned();
-                    self.notice = Some(message.clone());
-                    if failed_during_inference {
-                        self.finish_background_task(task_id);
-                    } else {
-                        self.fail_background_task(task_id, message);
-                    }
+                    self.notice = Some("Inpainting returned an empty result.".to_owned());
                 }
             }
             Err(error) => {
                 log::error!("Inpainting failed: {error}");
-                self.inpaint_active_dabs = None;
-                self.inpaint_replace_index = None;
-                let message = format!("Inpainting failed: {error}");
-                self.notice = Some(message.clone());
-                if failed_during_inference {
-                    self.finish_background_task(task_id);
-                } else {
-                    self.fail_background_task(task_id, message);
+                if !error.contains("cancelled") {
+                    self.notice = Some(format!("Inpainting failed: {error}"));
                 }
             }
         }
@@ -835,34 +785,12 @@ impl AurawApp {
                         if ui.button("Cancel").clicked() {
                             self.inpaint_consent_open = false;
                             self.inpaint_pending_source = None;
-                            self.inpaint_active_dabs = None;
                             self.inpaint_replace_index = None;
                             self.inpaint_stroke.clear();
                             self.last_inpaint_brush_point = None;
                         }
                     });
                 });
-        }
-        if self.inpaint_receiver.is_some()
-            && self
-                .inpaint_task_id
-                .is_some_and(|id| self.background_task_details_open(id))
-        {
-            let action = show_cancellable_worker_popup(ctx, "Erasing selection", 420.0, |ui| {
-                if let Some((downloaded, total)) = self.inpaint_download_progress {
-                    show_download_progress(ui, "Downloading lama_fp32.onnx…", downloaded, total);
-                } else if self.inpaint_inferencing {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Running local LaMa inpainting…");
-                    });
-                } else {
-                    ui.spinner();
-                }
-            });
-            let task_id = self.inpaint_task_id;
-            self.apply_worker_dialog_action(task_id, action);
-            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 }

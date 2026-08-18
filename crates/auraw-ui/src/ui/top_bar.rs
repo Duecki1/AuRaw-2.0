@@ -41,7 +41,7 @@ impl TopBar {
     fn show_android(ui: &mut Ui, app: &mut AurawApp, _frame: &eframe::Frame) {
         theme::prepare_toolbar(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            app.show_global_task_control(ui);
+            app.show_export_task_indicator(ui);
 
             let save_tooltip = if app.sidecar_save_in_progress() {
                 "Saving non-destructive edits…"
@@ -103,7 +103,7 @@ impl TopBar {
         let brand_width = if compact { 52.0 } else { 68.0 };
         let tab_width = if compact { 72.0 } else { 82.0 };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            app.show_global_task_control(ui);
+            app.show_export_task_indicator(ui);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add_sized(
                     [brand_width, theme::CONTROL_HEIGHT],

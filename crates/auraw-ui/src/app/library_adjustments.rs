@@ -446,11 +446,9 @@ pub(super) fn complete_library_ai_mask_refresh_item(state: &mut LibraryAiMaskRef
 
 impl AurawApp {
     pub(crate) fn can_start_library_ai_mask_refresh(&self) -> bool {
-        let duplicate = self
-            .background_task_snapshots()
-            .iter()
-            .any(|task| matches!(task.kind, TaskKind::LibraryAiMaskRefresh));
-        let ready = !duplicate && !self.sidecar_save_in_progress();
+        let ready = self.library_ai_mask_refresh.is_none()
+            && !self.foreground_operation_active()
+            && !self.sidecar_save_in_progress();
         #[cfg(not(target_os = "android"))]
         {
             ready
@@ -507,19 +505,18 @@ impl AurawApp {
     pub(crate) fn start_library_ai_mask_refresh_paths(
         &mut self,
         paths: Vec<PathBuf>,
-        _frame: &eframe::Frame,
+        frame: &eframe::Frame,
     ) {
         if paths.is_empty() {
             return;
         }
         if !self.can_start_library_ai_mask_refresh() {
             self.notice = Some(
-                "AI-mask refresh is already queued, or edits are still being saved.".to_owned(),
+                "Finish the current editing operation or sidecar save before refreshing AI masks."
+                    .to_owned(),
             );
             return;
         }
-        // The sidecar is loaded by the normal asynchronous document loader.
-        // Counting AI targets here would perform file I/O on the UI thread.
         let pending = paths
             .into_iter()
             .map(|source| LibraryAiMaskRefreshJob {
@@ -528,42 +525,37 @@ impl AurawApp {
             })
             .collect::<VecDeque<_>>();
         let total = pending.len();
-        let task_id = self.enqueue_background_action(
-            TaskKind::LibraryAiMaskRefresh,
-            format!(
-                "Refreshing AI masks for {total} {}",
-                if total == 1 { "image" } else { "images" }
-            ),
-            TaskProgress::units(
-                0,
-                total as u64,
-                Some("images".to_owned()),
-                "Waiting for earlier background work…",
-            ),
-            true,
-            BackgroundAction::LibraryAiMaskRefresh { jobs: pending },
-        );
-        self.background_tasks.set_global_visible(task_id, false);
-        self.library_ai_mask_refresh_task_id = Some(task_id);
+        self.library_ai_mask_refresh = Some(LibraryAiMaskRefreshState {
+            pending,
+            current: None,
+            phase: LibraryAiMaskRefreshPhase::Loading,
+            total,
+            completed: 0,
+            mask_total: 0,
+            mask_completed: 0,
+            failures: Vec::new(),
+            cancel_requested: false,
+        });
+        self.start_next_library_ai_mask_refresh(frame);
+        self.egui_ctx.request_repaint();
     }
 
     #[cfg(target_os = "android")]
     pub(crate) fn start_library_ai_mask_refresh_android(
         &mut self,
         targets: Vec<(String, String)>,
-        _frame: &eframe::Frame,
+        frame: &eframe::Frame,
     ) {
         if targets.is_empty() {
             return;
         }
         if !self.can_start_library_ai_mask_refresh() {
             self.notice = Some(
-                "AI-mask refresh is already queued, or edits are still being saved.".to_owned(),
+                "Finish the current editing operation or sidecar save before refreshing AI masks."
+                    .to_owned(),
             );
             return;
         }
-        // The sidecar is loaded by the normal asynchronous document loader.
-        // Counting AI targets here would perform file I/O on the UI thread.
         let pending = targets
             .into_iter()
             .map(|(uri, display_name)| LibraryAiMaskRefreshJob {
@@ -573,23 +565,19 @@ impl AurawApp {
             })
             .collect::<VecDeque<_>>();
         let total = pending.len();
-        let task_id = self.enqueue_background_action(
-            TaskKind::LibraryAiMaskRefresh,
-            format!(
-                "Refreshing AI masks for {total} {}",
-                if total == 1 { "image" } else { "images" }
-            ),
-            TaskProgress::units(
-                0,
-                total as u64,
-                Some("images".to_owned()),
-                "Waiting for earlier background work…",
-            ),
-            true,
-            BackgroundAction::LibraryAiMaskRefresh { jobs: pending },
-        );
-        self.background_tasks.set_global_visible(task_id, false);
-        self.library_ai_mask_refresh_task_id = Some(task_id);
+        self.library_ai_mask_refresh = Some(LibraryAiMaskRefreshState {
+            pending,
+            current: None,
+            phase: LibraryAiMaskRefreshPhase::Loading,
+            total,
+            completed: 0,
+            mask_total: 0,
+            mask_completed: 0,
+            failures: Vec::new(),
+            cancel_requested: false,
+        });
+        self.start_next_library_ai_mask_refresh(frame);
+        self.egui_ctx.request_repaint();
     }
 
     #[cfg(not(target_os = "android"))]
@@ -762,8 +750,24 @@ impl AurawApp {
         self.start_next_library_ai_mask_refresh(frame);
     }
 
+    pub(crate) fn cancel_library_ai_mask_refresh(&mut self) {
+        if let Some(state) = self.library_ai_mask_refresh.as_mut() {
+            state.cancel_requested = true;
+            state.pending.clear();
+        }
+        if matches!(
+            self.foreground_operation_kind(),
+            Some(
+                ForegroundOperationKind::SubjectMask
+                    | ForegroundOperationKind::ObjectMask
+            )
+        ) {
+            self.cancel_foreground_operation();
+        }
+        self.egui_ctx.request_repaint();
+    }
+
     pub(crate) fn poll_library_ai_mask_refresh(&mut self, frame: &eframe::Frame) {
-        self.sync_library_ai_mask_background_progress();
         let cancel_now = self
             .library_ai_mask_refresh
             .as_ref()
@@ -868,9 +872,7 @@ impl AurawApp {
         let Some(state) = self.library_ai_mask_refresh.take() else {
             return;
         };
-        let task_id = self.library_ai_mask_refresh_task_id.take();
-        let cancelled = state.cancel_requested
-            || task_id.is_some_and(|id| self.background_task_cancelled(id));
+        let cancelled = state.cancel_requested;
         let succeeded = state.completed.saturating_sub(state.failures.len());
         self.active_tab = AppTab::Library;
         self.library.refresh(&self.egui_ctx);
@@ -893,20 +895,6 @@ impl AurawApp {
         };
         self.library.set_status(summary.clone());
         self.notice = Some(summary);
-        if let Some(task_id) = task_id {
-            if cancelled || state.failures.is_empty() {
-                self.finish_background_task(task_id);
-            } else {
-                self.fail_background_task(
-                    task_id,
-                    format!(
-                        "{} AI-mask refresh item(s) failed: {}",
-                        state.failures.len(),
-                        state.failures.join(" · ")
-                    ),
-                );
-            }
-        }
         self.egui_ctx.request_repaint();
     }
 }
