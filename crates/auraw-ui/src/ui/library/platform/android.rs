@@ -156,7 +156,7 @@ pub(in crate::ui::library) fn start_local_library_export(
 }
 
 pub(in crate::ui::library) fn local_action_in_progress(app: &AurawApp) -> bool {
-    app.library.local_mutation_in_progress() || app.picker_pending
+    app.library.local_mutation_in_progress() || app.android.picker_pending
 }
 
 pub(in crate::ui::library) fn local_folders_available(_app: &AurawApp) -> bool {

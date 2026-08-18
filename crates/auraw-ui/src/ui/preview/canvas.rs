@@ -2,8 +2,8 @@ use super::*;
 
 pub(super) fn show_loading_thumbnail(ui: &mut Ui, app: &AurawApp, available: egui::Vec2) -> bool {
     let (Some(texture), Some([width, height])) = (
-        app.develop_loading_thumbnail.texture.as_ref(),
-        app.develop_loading_thumbnail.texture_size,
+        app.develop_ui.loading_thumbnail.texture.as_ref(),
+        app.develop_ui.loading_thumbnail.texture_size,
     ) else {
         return false;
     };

@@ -145,55 +145,54 @@ impl Sidebar {
     }
 
     pub(super) fn show_masks_horizontal_details(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        let Some(mask_index) = app.masks.selected_mask else {
+        let Some(mask_index) = app.masks.stack.selected_mask else {
             return;
         };
-        if mask_index >= app.masks.masks.len() {
+        if mask_index >= app.masks.stack.masks.len() {
             return;
         }
 
         ui.label(
-            egui::RichText::new(app.masks.masks[mask_index].name.clone())
+            egui::RichText::new(app.masks.stack.masks[mask_index].name.clone())
                 .strong()
                 .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(5.0);
 
-        let component_index = app.masks.selected_component.unwrap_or(0).min(
-            app.masks.masks[mask_index]
+        let component_index = app.masks.stack.selected_component.unwrap_or(0).min(
+            app.masks.stack.masks[mask_index]
                 .components
                 .len()
                 .saturating_sub(1),
         );
-        app.masks.selected_component = Some(component_index);
+        app.masks.stack.selected_component = Some(component_index);
 
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
         let mut effect_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
-        let mut brush_mode = app.brush_mode;
-        let selected_is_subject = app
-            .masks
+        let mut brush_mode = app.masks.brush_mode;
+        let selected_is_subject = app.masks.stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
             .is_some_and(|component| {
                 matches!(component.kind, MaskKind::Subject | MaskKind::Background)
             });
-        let mut refinement_active = app.subject_refinement_active && selected_is_subject;
-        let mut refinement_size = app.masks.subject_refinement.size;
-        let mut refinement_feather = app.masks.subject_refinement.feather;
-        let mut refinement_flow = app.masks.subject_refinement.flow;
+        let mut refinement_active = app.masks.subject_refinement_active && selected_is_subject;
+        let mut refinement_size = app.masks.stack.subject_refinement.size;
+        let mut refinement_feather = app.masks.stack.subject_refinement.feather;
+        let mut refinement_flow = app.masks.stack.subject_refinement.flow;
         let mut clear_refinement = false;
-        let mut local_curve_tab = app.tone_curve_tab;
-        let mut local_color_grade_tab = app.color_grade_tab;
-        let mut local_hsl_mixer_color = app.hsl_mixer_color;
-        let birefnet_quality = app.birefnet_quality;
+        let mut local_curve_tab = app.develop_ui.tone_curve_tab;
+        let mut local_color_grade_tab = app.develop_ui.color_grade_tab;
+        let mut local_hsl_mixer_color = app.develop_ui.hsl_mixer_color;
+        let birefnet_quality = app.ai.birefnet_quality;
         let birefnet_quality_change_enabled = app.birefnet_quality_change_enabled();
 
         {
-            let mask = &mut app.masks.masks[mask_index];
+            let mask = &mut app.masks.stack.masks[mask_index];
 
             effect_changed |= Self::show_mask_effect_picker(ui, &mut mask.effect);
             ui.add_space(crate::ui::theme::CARD_GAP);
@@ -264,19 +263,19 @@ impl Sidebar {
             }
         }
 
-        app.tone_curve_tab = local_curve_tab;
-        app.color_grade_tab = local_color_grade_tab;
-        app.hsl_mixer_color = local_hsl_mixer_color;
-        app.brush_mode = brush_mode;
-        app.subject_refinement_active = refinement_active;
-        let refinement_settings_changed = app.masks.subject_refinement.size != refinement_size
-            || app.masks.subject_refinement.feather != refinement_feather
-            || app.masks.subject_refinement.flow != refinement_flow;
-        app.masks.subject_refinement.size = refinement_size;
-        app.masks.subject_refinement.feather = refinement_feather;
-        app.masks.subject_refinement.flow = refinement_flow;
-        if clear_refinement && !app.masks.subject_refinement.is_empty() {
-            app.masks.subject_refinement.clear();
+        app.develop_ui.tone_curve_tab = local_curve_tab;
+        app.develop_ui.color_grade_tab = local_color_grade_tab;
+        app.develop_ui.hsl_mixer_color = local_hsl_mixer_color;
+        app.masks.brush_mode = brush_mode;
+        app.masks.subject_refinement_active = refinement_active;
+        let refinement_settings_changed = app.masks.stack.subject_refinement.size != refinement_size
+            || app.masks.stack.subject_refinement.feather != refinement_feather
+            || app.masks.stack.subject_refinement.flow != refinement_flow;
+        app.masks.stack.subject_refinement.size = refinement_size;
+        app.masks.stack.subject_refinement.feather = refinement_feather;
+        app.masks.stack.subject_refinement.flow = refinement_flow;
+        if clear_refinement && !app.masks.stack.subject_refinement.is_empty() {
+            app.masks.stack.subject_refinement.clear();
             app.mark_all_mask_layers_dirty();
         } else if refinement_settings_changed {
             app.note_mask_edit_changed();
@@ -290,7 +289,7 @@ impl Sidebar {
         }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if effect_changed {
-            app.mask_section = MaskSection::Properties;
+            app.develop_ui.mask_section = MaskSection::Properties;
             app.mark_mask_geometry_dirty(mask_index);
         }
         if adjustments_changed || effect_changed {
@@ -299,64 +298,62 @@ impl Sidebar {
     }
 
     pub(super) fn show_masks_vertical_details(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        let Some(mask_index) = app.masks.selected_mask else {
+        let Some(mask_index) = app.masks.stack.selected_mask else {
             return;
         };
-        if mask_index >= app.masks.masks.len() {
+        if mask_index >= app.masks.stack.masks.len() {
             return;
         }
 
         ui.label(
-            egui::RichText::new(app.masks.masks[mask_index].name.clone())
+            egui::RichText::new(app.masks.stack.masks[mask_index].name.clone())
                 .strong()
                 .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(5.0);
 
-        if app
-            .masks
+        if app.masks.stack
             .masks
             .get(mask_index)
             .is_some_and(|mask| !mask.effect.uses_adjustments())
         {
-            app.mask_section = MaskSection::Properties;
+            app.develop_ui.mask_section = MaskSection::Properties;
         }
-        let mask_section = app.mask_section;
-        let component_index = app.masks.selected_component.unwrap_or(0).min(
-            app.masks.masks[mask_index]
+        let mask_section = app.develop_ui.mask_section;
+        let component_index = app.masks.stack.selected_component.unwrap_or(0).min(
+            app.masks.stack.masks[mask_index]
                 .components
                 .len()
                 .saturating_sub(1),
         );
-        app.masks.selected_component = Some(component_index);
+        app.masks.stack.selected_component = Some(component_index);
 
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
         let mut effect_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
-        let mut brush_mode = app.brush_mode;
-        let selected_is_subject = app
-            .masks
+        let mut brush_mode = app.masks.brush_mode;
+        let selected_is_subject = app.masks.stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
             .is_some_and(|component| {
                 matches!(component.kind, MaskKind::Subject | MaskKind::Background)
             });
-        let mut refinement_active = app.subject_refinement_active && selected_is_subject;
-        let mut refinement_size = app.masks.subject_refinement.size;
-        let mut refinement_feather = app.masks.subject_refinement.feather;
-        let mut refinement_flow = app.masks.subject_refinement.flow;
+        let mut refinement_active = app.masks.subject_refinement_active && selected_is_subject;
+        let mut refinement_size = app.masks.stack.subject_refinement.size;
+        let mut refinement_feather = app.masks.stack.subject_refinement.feather;
+        let mut refinement_flow = app.masks.stack.subject_refinement.flow;
         let mut clear_refinement = false;
-        let mut local_curve_tab = app.tone_curve_tab;
-        let mut local_color_grade_tab = app.color_grade_tab;
-        let mut local_hsl_mixer_color = app.hsl_mixer_color;
-        let birefnet_quality = app.birefnet_quality;
+        let mut local_curve_tab = app.develop_ui.tone_curve_tab;
+        let mut local_color_grade_tab = app.develop_ui.color_grade_tab;
+        let mut local_hsl_mixer_color = app.develop_ui.hsl_mixer_color;
+        let birefnet_quality = app.ai.birefnet_quality;
         let birefnet_quality_change_enabled = app.birefnet_quality_change_enabled();
 
         {
-            let mask = &mut app.masks.masks[mask_index];
+            let mask = &mut app.masks.stack.masks[mask_index];
             effect_changed |= Self::show_mask_effect_picker(ui, &mut mask.effect);
             ui.add_space(crate::ui::theme::CARD_GAP);
 
@@ -454,19 +451,19 @@ impl Sidebar {
             }
         }
 
-        app.tone_curve_tab = local_curve_tab;
-        app.color_grade_tab = local_color_grade_tab;
-        app.hsl_mixer_color = local_hsl_mixer_color;
-        app.brush_mode = brush_mode;
-        app.subject_refinement_active = refinement_active;
-        let refinement_settings_changed = app.masks.subject_refinement.size != refinement_size
-            || app.masks.subject_refinement.feather != refinement_feather
-            || app.masks.subject_refinement.flow != refinement_flow;
-        app.masks.subject_refinement.size = refinement_size;
-        app.masks.subject_refinement.feather = refinement_feather;
-        app.masks.subject_refinement.flow = refinement_flow;
-        if clear_refinement && !app.masks.subject_refinement.is_empty() {
-            app.masks.subject_refinement.clear();
+        app.develop_ui.tone_curve_tab = local_curve_tab;
+        app.develop_ui.color_grade_tab = local_color_grade_tab;
+        app.develop_ui.hsl_mixer_color = local_hsl_mixer_color;
+        app.masks.brush_mode = brush_mode;
+        app.masks.subject_refinement_active = refinement_active;
+        let refinement_settings_changed = app.masks.stack.subject_refinement.size != refinement_size
+            || app.masks.stack.subject_refinement.feather != refinement_feather
+            || app.masks.stack.subject_refinement.flow != refinement_flow;
+        app.masks.stack.subject_refinement.size = refinement_size;
+        app.masks.stack.subject_refinement.feather = refinement_feather;
+        app.masks.stack.subject_refinement.flow = refinement_flow;
+        if clear_refinement && !app.masks.stack.subject_refinement.is_empty() {
+            app.masks.stack.subject_refinement.clear();
             app.mark_all_mask_layers_dirty();
         } else if refinement_settings_changed {
             app.note_mask_edit_changed();
@@ -480,7 +477,7 @@ impl Sidebar {
         }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if effect_changed {
-            app.mask_section = MaskSection::Properties;
+            app.develop_ui.mask_section = MaskSection::Properties;
             app.mark_mask_geometry_dirty(mask_index);
         }
         if adjustments_changed || effect_changed {

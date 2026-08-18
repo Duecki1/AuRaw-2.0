@@ -88,16 +88,14 @@ impl Preview {
 
         let (outer_rect, _) = ui.allocate_exact_size(available, Sense::hover());
         // Anchor zoom geometry to the full developed image, independent of proxy size.
-        let source_dimensions = app
-            .loaded_raw
+        let source_dimensions = app.develop.loaded_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((pipeline_width, pipeline_height));
-        let lens_geometry = app
-            .loaded_raw
+        let lens_geometry = app.develop.loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.clone());
-        let crop_preview = app.sidebar_tab == SidebarTab::Crop && !app.original_preview_visible();
+        let crop_preview = app.ui.sidebar_tab == SidebarTab::Crop && !app.preview.original_visible();
         // *start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);
         // *end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);
         // Every non-Crop Develop surface uses the same final geometry frame that
@@ -105,11 +103,11 @@ impl Preview {
         // into source coordinates below, so their tools remain accurate while the
         // pixels and overlays stay aligned with crop/rotation/flip/transform.
         let final_geometry_preview =
-            !crop_preview && (!app.geometry.is_identity() || lens_geometry.is_some());
+            !crop_preview && (!app.develop.geometry.is_identity() || lens_geometry.is_some());
         let (geometry_width, geometry_height) = if final_geometry_preview {
-            app.geometry
+            app.develop.geometry
                 .crop_pixel_dimensions(source_dimensions.0, source_dimensions.1)
-        } else if crop_preview && app.geometry.quarter_turns % 2 == 1 {
+        } else if crop_preview && app.develop.geometry.quarter_turns % 2 == 1 {
             (source_dimensions.1, source_dimensions.0)
         } else {
             source_dimensions
@@ -118,22 +116,22 @@ impl Preview {
             outer_rect.size(),
             geometry_width as f32 / geometry_height.max(1) as f32,
         );
-        app.preview_zoom = app.preview_zoom.clamp(MIN_PREVIEW_ZOOM, MAX_PREVIEW_ZOOM);
+        app.preview.zoom = app.preview.zoom.clamp(MIN_PREVIEW_ZOOM, MAX_PREVIEW_ZOOM);
         clamp_preview_center(
-            &mut app.preview_center,
+            &mut app.preview.center,
             outer_rect.size(),
-            base_size * app.preview_zoom,
+            base_size * app.preview.zoom,
         );
         let mut image_rect =
-            zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
+            zoomed_image_rect(outer_rect, base_size, app.preview.zoom, app.preview.center);
         let visible_image_rect = outer_rect.intersect(image_rect);
-        let mut interaction_rect = if app.sidebar_tab == SidebarTab::Masks {
+        let mut interaction_rect = if app.ui.sidebar_tab == SidebarTab::Masks {
             // Geometry handles for radial/linear masks are allowed to live in
             // the pasteboard around the image, so the mask canvas must receive
             // pointer input across the whole preview panel. Brush-like tools
             // still filter their pointer to the visible image below.
             outer_rect
-        } else if app.sidebar_tab == SidebarTab::Crop {
+        } else if app.ui.sidebar_tab == SidebarTab::Crop {
             // Crop edge/corner hit targets deliberately extend into the pasteboard,
             // which is especially important for finger input near image boundaries.
             outer_rect
@@ -149,13 +147,13 @@ impl Preview {
         // is armed it owns the Adjustments preview regardless of that mobile-
         // only section state.
         let white_balance_canvas =
-            white_balance_picker_owns_canvas(app.sidebar_tab, app.white_balance_picker_active);
+            white_balance_picker_owns_canvas(app.ui.sidebar_tab, app.develop_ui.white_balance_picker_active);
         if !white_balance_canvas {
-            app.white_balance_picker_drag = None;
+            app.develop_ui.white_balance_picker_drag = None;
         }
-        let brush_canvas = matches!(app.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting)
+        let brush_canvas = matches!(app.ui.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting)
             || white_balance_canvas;
-        let interaction_id = match app.sidebar_tab {
+        let interaction_id = match app.ui.sidebar_tab {
             SidebarTab::Masks => ui.id().with("develop-preview-mask-interaction"),
             SidebarTab::Inpainting => ui.id().with("develop-preview-inpaint-interaction"),
             SidebarTab::Adjustments if white_balance_canvas => {
@@ -188,11 +186,11 @@ impl Preview {
             ui.ctx().request_repaint();
         }
         if multi_touch.is_some() {
-            app.preview_touch_navigation_active = true;
+            app.preview.touch_navigation_active = true;
         } else if !any_touches {
-            app.preview_touch_navigation_active = false;
+            app.preview.touch_navigation_active = false;
         }
-        let touch_navigation = app.preview_touch_navigation_active;
+        let touch_navigation = app.preview.touch_navigation_active;
 
         if let Some(multi_touch) = multi_touch {
             // Keep the image point that was under the previous gesture center under
@@ -203,31 +201,31 @@ impl Preview {
                 outer_rect,
                 image_rect,
                 base_size,
-                &mut app.preview_zoom,
-                &mut app.preview_center,
+                &mut app.preview.zoom,
+                &mut app.preview.center,
                 previous_touch_center,
                 multi_touch.center_pos,
                 multi_touch.zoom_delta,
             );
             image_rect =
-                zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
+                zoomed_image_rect(outer_rect, base_size, app.preview.zoom, app.preview.center);
         }
 
         if multi_touch.is_some() {
             // A second finger switches a mask gesture into viewport navigation.
             // Roll back any pending mask stroke and prevent this frame from painting.
-            if app.sidebar_tab == SidebarTab::Masks {
+            if app.ui.sidebar_tab == SidebarTab::Masks {
                 app.cancel_mask_touch_gesture();
-            } else if app.sidebar_tab == SidebarTab::Crop {
-                app.crop_drag = None;
-                app.straighten_drag = None;
-            } else if app.sidebar_tab == SidebarTab::Inpainting {
-                app.inpaint_stroke.clear();
-                app.last_inpaint_brush_point = None;
-                app.inpaint_stroke_texture = None;
-                app.inpaint_stroke_texture_key = None;
+            } else if app.ui.sidebar_tab == SidebarTab::Crop {
+                app.develop_ui.crop_drag = None;
+                app.develop_ui.straighten_drag = None;
+            } else if app.ui.sidebar_tab == SidebarTab::Inpainting {
+                app.inpaint.stroke.clear();
+                app.inpaint.last_brush_point = None;
+                app.inpaint.stroke_texture = None;
+                app.inpaint.stroke_texture_key = None;
             } else if white_balance_canvas {
-                app.white_balance_picker_drag = None;
+                app.develop_ui.white_balance_picker_drag = None;
             }
         }
 
@@ -247,8 +245,8 @@ impl Preview {
                     outer_rect,
                     image_rect,
                     base_size,
-                    &mut app.preview_zoom,
-                    &mut app.preview_center,
+                    &mut app.preview.zoom,
+                    &mut app.preview.center,
                     pointer,
                     pointer,
                     (scroll_y * 0.0018).exp(),
@@ -263,26 +261,26 @@ impl Preview {
         let pan_with_primary = multi_touch.is_none()
             && !original_hold_tracking
             && !brush_canvas
-            && app.sidebar_tab != SidebarTab::Crop
+            && app.ui.sidebar_tab != SidebarTab::Crop
             && response.dragged_by(egui::PointerButton::Primary);
         let pan_with_middle = !touch_navigation && response.dragged_by(egui::PointerButton::Middle);
         if pan_with_primary || pan_with_middle {
             let delta = ui.input(|input| input.pointer.delta());
-            let image_size = base_size * app.preview_zoom;
-            app.preview_center[0] -= delta.x / image_size.x.max(1.0);
-            app.preview_center[1] -= delta.y / image_size.y.max(1.0);
-            clamp_preview_center(&mut app.preview_center, outer_rect.size(), image_size);
+            let image_size = base_size * app.preview.zoom;
+            app.preview.center[0] -= delta.x / image_size.x.max(1.0);
+            app.preview.center[1] -= delta.y / image_size.y.max(1.0);
+            clamp_preview_center(&mut app.preview.center, outer_rect.size(), image_size);
             moved |= delta.length_sq() > 0.0;
         }
 
         let fit_gesture = !white_balance_canvas && !touch_navigation && response.double_clicked();
         if fit_gesture {
-            app.preview_zoom = 1.0;
-            app.preview_center = [0.5, 0.5];
+            app.preview.zoom = 1.0;
+            app.preview.center = [0.5, 0.5];
             moved = true;
         }
 
-        image_rect = zoomed_image_rect(outer_rect, base_size, app.preview_zoom, app.preview_center);
+        image_rect = zoomed_image_rect(outer_rect, base_size, app.preview.zoom, app.preview.center);
         let visible_screen = outer_rect.intersect(image_rect);
         let pixels_per_point = physical_pixels_per_point(ui.ctx());
         let viewport_pixels = [
@@ -296,7 +294,7 @@ impl Preview {
             crop_workspace_visible_source_uv(
                 image_rect,
                 visible_screen,
-                app.geometry,
+                app.develop.geometry,
                 lens_geometry.as_deref(),
                 source_dimensions.0,
                 source_dimensions.1,
@@ -305,7 +303,7 @@ impl Preview {
             final_geometry_visible_source_uv(
                 image_rect,
                 visible_screen,
-                app.geometry,
+                app.develop.geometry,
                 lens_geometry.as_deref(),
                 source_dimensions.0,
                 source_dimensions.1,
@@ -326,8 +324,8 @@ impl Preview {
                 ],
             }
         };
-        if preview_uv_changed(app.preview_visible_uv, visible_uv) {
-            app.preview_visible_uv = visible_uv;
+        if preview_uv_changed(app.preview.visible_uv, visible_uv) {
+            app.preview.visible_uv = visible_uv;
             app.preview_source_region_changed();
         }
         if moved {
@@ -339,7 +337,7 @@ impl Preview {
                 ui,
                 texture_id,
                 image_rect,
-                app.geometry,
+                app.develop.geometry,
                 lens_geometry.as_deref(),
                 source_dimensions.0,
                 source_dimensions.1,
@@ -351,7 +349,7 @@ impl Preview {
                 ui,
                 texture_id,
                 image_rect,
-                app.geometry,
+                app.develop.geometry,
                 lens_geometry.as_deref(),
                 source_dimensions.0,
                 source_dimensions.1,
@@ -367,10 +365,9 @@ impl Preview {
             );
         }
 
-        if let Some(detail) = app
-            .preview_detail
+        if let Some(detail) = app.preview.detail
             .as_ref()
-            .filter(|detail| detail.revision == app.preview_revision)
+            .filter(|detail| detail.revision == app.preview.revision)
         {
             if let Some(detail_texture_id) = detail.pipeline.egui_texture_id {
                 let detail_texture_uv = Rect::from_min_max(
@@ -388,7 +385,7 @@ impl Preview {
                         ui,
                         detail_texture_id,
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_dimensions.0,
                         source_dimensions.1,
@@ -400,7 +397,7 @@ impl Preview {
                         ui,
                         detail_texture_id,
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         lens_geometry.as_deref(),
                         source_dimensions.0,
                         source_dimensions.1,
@@ -461,7 +458,7 @@ impl Preview {
             Color32::from_white_alpha(180),
         );
 
-        if app.original_preview_visible() {
+        if app.preview.original_visible() {
             painter.text(
                 outer_rect.right_top() + egui::vec2(-12.0, 12.0),
                 egui::Align2::RIGHT_TOP,
@@ -471,8 +468,8 @@ impl Preview {
             );
         }
 
-        if !app.original_preview_visible() {
-            if app.sidebar_tab == SidebarTab::Inpainting && !touch_navigation && !fit_gesture {
+        if !app.preview.original_visible() {
+            if app.ui.sidebar_tab == SidebarTab::Inpainting && !touch_navigation && !fit_gesture {
                 Self::handle_inpaint_interaction(
                     ui,
                     app,
@@ -518,7 +515,7 @@ impl Preview {
                 );
             }
 
-            if app.sidebar_tab == SidebarTab::Masks {
+            if app.ui.sidebar_tab == SidebarTab::Masks {
                 if !touch_navigation && !fit_gesture {
                     Self::handle_mask_interaction(
                         ui,

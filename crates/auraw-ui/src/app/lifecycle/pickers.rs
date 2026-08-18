@@ -3,15 +3,14 @@ use super::*;
 impl AurawApp {
     #[cfg(not(target_os = "android"))]
     pub fn open_file_dialog(&mut self, _frame: &eframe::Frame) {
-        if self.desktop_picker_receiver.is_some() {
+        if self.ui.desktop_picker_receiver.is_some() {
             return;
         }
         let extensions = crate::pipeline::SUPPORTED_RAW_EXTENSIONS
             .iter()
             .flat_map(|extension| [extension.to_string(), extension.to_ascii_uppercase()])
             .collect::<Vec<_>>();
-        let initial_directory = self
-            .current_path
+        let initial_directory = self.develop.current_path
             .as_deref()
             .and_then(selected_picker_directory)
             .or_else(|| self.library.folder().map(std::path::Path::to_path_buf));
@@ -19,7 +18,7 @@ impl AurawApp {
         if let Some(directory) = initial_directory {
             dialog = dialog.set_directory(directory);
         }
-        self.desktop_picker_receiver = Some(spawn_ui_worker(&self.egui_ctx, move || {
+        self.ui.desktop_picker_receiver = Some(spawn_ui_worker(&self.egui_ctx, move || {
             let path =
                 pollster::block_on(dialog.pick_file()).map(|handle| handle.path().to_path_buf());
             crate::app::DesktopPickerEvent::RawFile(path)
@@ -28,14 +27,14 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub fn open_library_folder_dialog(&mut self) {
-        if self.desktop_picker_receiver.is_some() {
+        if self.ui.desktop_picker_receiver.is_some() {
             return;
         }
         let mut dialog = rfd::AsyncFileDialog::new();
         if let Some(folder) = self.library.folder() {
             dialog = dialog.set_directory(folder);
         }
-        self.desktop_picker_receiver = Some(spawn_ui_worker(&self.egui_ctx, move || {
+        self.ui.desktop_picker_receiver = Some(spawn_ui_worker(&self.egui_ctx, move || {
             let folder =
                 pollster::block_on(dialog.pick_folder()).map(|handle| handle.path().to_path_buf());
             crate::app::DesktopPickerEvent::LibraryFolder(folder)
@@ -45,57 +44,56 @@ impl AurawApp {
     #[cfg(target_os = "android")]
     pub fn open_file_dialog(&mut self, _frame: &eframe::Frame) {
         if self.android_foreground_task_active() {
-            self.notice = Some(
+            self.ui.notice = Some(
                 "Wait for the current foreground operation to finish before opening another RAW."
                     .to_owned(),
             );
             self.egui_ctx.request_repaint();
             return;
         }
-        if self.picker_pending {
+        if self.android.picker_pending {
             return;
         }
-        self.develop_loading_thumbnail.clear();
-        match crate::android::open_raw_document(&self.android_app) {
+        self.develop_ui.loading_thumbnail.clear();
+        match crate::android::open_raw_document(&self.android.android_app) {
             Ok(()) => {
-                self.picker_pending = true;
-                self.notice = None;
-                self.status = "Choose one or more RAW or TIFF files…".to_owned();
+                self.android.picker_pending = true;
+                self.ui.notice = None;
+                self.ui.status = "Choose one or more RAW or TIFF files…".to_owned();
             }
-            Err(error) => self.notice = Some(error),
+            Err(error) => self.ui.notice = Some(error),
         }
     }
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn poll_desktop_picker(&mut self, frame: &eframe::Frame) {
-        let result = self
-            .desktop_picker_receiver
+        let result = self.ui.desktop_picker_receiver
             .as_ref()
             .and_then(|receiver| receiver.try_recv().ok());
         let Some(result) = result else {
             return;
         };
-        self.desktop_picker_receiver = None;
+        self.ui.desktop_picker_receiver = None;
         match result {
             crate::app::DesktopPickerEvent::RawFile(Some(path)) => self.open_path(path, frame),
             crate::app::DesktopPickerEvent::LibraryFolder(Some(folder)) => {
                 self.library.open_folder(folder, &self.egui_ctx);
                 self.persist_performance_settings();
-                self.active_tab = AppTab::Library;
+                self.ui.active_tab = AppTab::Library;
             }
             crate::app::DesktopPickerEvent::CameraProfileFolder(Some(folder)) => {
                 self.apply_camera_profile_folder(folder);
             }
             crate::app::DesktopPickerEvent::OnnxRuntime(Ok(Some((path, sha256)))) => {
-                self.onnx_runtime_path = Some(path);
-                self.onnx_runtime_sha256 = Some(sha256);
-                self.notice = Some(
+                self.ai.runtime_path = Some(path);
+                self.ai.runtime_sha256 = Some(sha256);
+                self.ui.notice = Some(
                     "ONNX Runtime selection and SHA-256 pin saved. Restart AuRaw before generating another subject mask."
                         .to_owned(),
                 );
             }
             crate::app::DesktopPickerEvent::OnnxRuntime(Err(error)) => {
-                self.notice = Some(error);
+                self.ui.notice = Some(error);
             }
             crate::app::DesktopPickerEvent::DisplayProfile(Some(path)) => {
                 self.apply_display_profile_override(path);
@@ -109,9 +107,9 @@ impl AurawApp {
         while let Some(result) = crate::android::take_camera_profile_folder_result() {
             match result {
                 crate::android::CameraProfileFolderResult::ImportStarted { label } => {
-                    self.camera_profile_folder_importing_label = Some(label.clone());
-                    self.status = format!("Importing DCP profiles from {label}…");
-                    self.notice = None;
+                    self.android.camera_profile_folder_importing_label = Some(label.clone());
+                    self.ui.status = format!("Importing DCP profiles from {label}…");
+                    self.ui.notice = None;
                     // The SAF picker has returned, but its tree is copied on a Java
                     // worker thread. Keep picker_pending set so a second picker cannot
                     // race the import; eframe_impl keeps polling while it is pending.
@@ -121,21 +119,21 @@ impl AurawApp {
                     label,
                     profiles,
                 } => {
-                    self.picker_pending = false;
-                    self.camera_profile_folder_importing_label = None;
+                    self.android.picker_pending = false;
+                    self.android.camera_profile_folder_importing_label = None;
                     crate::pipeline::invalidate_dcp_profile_index();
-                    let previous_folder = self.camera_profile_folder.replace(path);
-                    self.camera_profile_folder_label = Some(label.clone());
-                    self.camera_profile_auto_detect = false;
-                    self.last_camera_profile = None;
-                    self.raw_cache.clear();
+                    let previous_folder = self.preferences.camera_profile_folder.replace(path);
+                    self.preferences.camera_profile_folder_label = Some(label.clone());
+                    self.preferences.camera_profile_auto_detect = false;
+                    self.preferences.last_camera_profile = None;
+                    self.develop.raw_cache.clear();
                     if self.persist_performance_settings() {
                         if let Some(previous_folder) = previous_folder {
-                            if self.camera_profile_folder.as_deref()
+                            if self.preferences.camera_profile_folder.as_deref()
                                 != Some(previous_folder.as_path())
                             {
                                 if let Err(error) = crate::android::remove_camera_profile_mirror(
-                                    &self.android_app,
+                                    &self.android.android_app,
                                     &previous_folder,
                                 ) {
                                     log::warn!("{error}");
@@ -143,42 +141,42 @@ impl AurawApp {
                             }
                         }
                     }
-                    self.notice = Some(format!(
+                    self.ui.notice = Some(format!(
                         "Camera profile folder '{label}' imported with {profiles} DCP {}. Reopen the RAW to apply the new profile selection.",
                         if profiles == 1 { "profile" } else { "profiles" }
                     ));
                 }
                 crate::android::CameraProfileFolderResult::Cancelled => {
-                    self.picker_pending = false;
-                    self.camera_profile_folder_importing_label = None;
-                    self.notice = Some("No camera profile folder selected.".to_owned());
+                    self.android.picker_pending = false;
+                    self.android.camera_profile_folder_importing_label = None;
+                    self.ui.notice = Some("No camera profile folder selected.".to_owned());
                 }
                 crate::android::CameraProfileFolderResult::Failed(error) => {
-                    self.picker_pending = false;
-                    self.camera_profile_folder_importing_label = None;
-                    self.notice = Some(format!("Could not import camera profiles: {error}"));
+                    self.android.picker_pending = false;
+                    self.android.camera_profile_folder_importing_label = None;
+                    self.ui.notice = Some(format!("Could not import camera profiles: {error}"));
                 }
             }
         }
 
         while let Some(result) = crate::android::take_picker_result() {
-            self.picker_pending = false;
+            self.android.picker_pending = false;
             match result {
                 crate::android::PickerResult::Picked(document) => {
                     self.library.refresh(&self.egui_ctx);
-                    let batch_owned_open = self.android_batch_load_pending;
-                    let profile_reload_owned_open = self.pending_android_profile_reload.is_some();
+                    let batch_owned_open = self.export.android_batch_load_pending;
+                    let profile_reload_owned_open = self.android.pending_android_profile_reload.is_some();
                     let reset_reload_owned_open =
-                        std::mem::take(&mut self.pending_android_library_reset_reload);
+                        std::mem::take(&mut self.android.pending_android_library_reset_reload);
                     let library_refresh_owned_open = !batch_owned_open
                         && !profile_reload_owned_open
                         && !reset_reload_owned_open
-                        && self.library_ai_mask_refresh.is_some();
+                        && self.ai.library_mask_refresh.is_some();
                     let keep_library_for_profile_reload =
-                        profile_reload_owned_open && self.active_tab == AppTab::Library;
+                        profile_reload_owned_open && self.ui.active_tab == AppTab::Library;
                     let keep_library_for_reset =
-                        reset_reload_owned_open && self.active_tab == AppTab::Library;
-                    self.active_tab = if batch_owned_open
+                        reset_reload_owned_open && self.ui.active_tab == AppTab::Library;
+                    self.ui.active_tab = if batch_owned_open
                         || library_refresh_owned_open
                         || keep_library_for_profile_reload
                         || keep_library_for_reset
@@ -192,7 +190,7 @@ impl AurawApp {
                         display_name: document.display_name.clone(),
                     };
                     if let Some((selection, edit_override)) =
-                        self.pending_android_profile_reload.take()
+                        self.android.pending_android_profile_reload.take()
                     {
                         self.open_path_labeled_with_options(
                             document.path,
@@ -220,12 +218,12 @@ impl AurawApp {
                     // internal owner immediately; otherwise Android batch export or
                     // library AI refresh would wait forever for a load event that can
                     // never arrive.
-                    if self.load_receiver.is_none() {
-                        let error = self.notice.clone().unwrap_or_else(|| {
+                    if self.develop.load_receiver.is_none() {
+                        let error = self.ui.notice.clone().unwrap_or_else(|| {
                             "The RAW decode worker could not be started.".to_owned()
                         });
                         if batch_owned_open {
-                            self.android_batch_load_pending = false;
+                            self.export.android_batch_load_pending = false;
                             self.complete_android_library_batch_export_item(Err(error));
                         } else if library_refresh_owned_open {
                             self.complete_android_library_ai_mask_open_failure(error, frame);
@@ -237,11 +235,11 @@ impl AurawApp {
                     failed,
                     errors,
                 } => {
-                    self.develop_loading_thumbnail.clear();
-                    self.pending_android_library_reset_reload = false;
-                    self.active_tab = AppTab::Library;
+                    self.develop_ui.loading_thumbnail.clear();
+                    self.android.pending_android_library_reset_reload = false;
+                    self.ui.active_tab = AppTab::Library;
                     self.library.refresh(&self.egui_ctx);
-                    self.status = match (imported, failed) {
+                    self.ui.status = match (imported, failed) {
                         (0, 0) => "No RAW files were imported.".to_owned(),
                         (_, 0) => format!(
                             "Imported {imported} RAW {}.",
@@ -252,7 +250,7 @@ impl AurawApp {
                             if imported == 1 { "file" } else { "files" }
                         ),
                     };
-                    self.notice = if failed > 0 {
+                    self.ui.notice = if failed > 0 {
                         Some(if errors.is_empty() {
                             format!("{failed} selected RAW imports failed.")
                         } else {
@@ -263,44 +261,44 @@ impl AurawApp {
                     };
                 }
                 crate::android::PickerResult::Cancelled => {
-                    self.develop_loading_thumbnail.clear();
-                    self.pending_android_profile_reload = None;
+                    self.develop_ui.loading_thumbnail.clear();
+                    self.android.pending_android_profile_reload = None;
                     let was_reset_reload =
-                        std::mem::take(&mut self.pending_android_library_reset_reload);
-                    if self.android_batch_load_pending {
-                        self.android_batch_load_pending = false;
+                        std::mem::take(&mut self.android.pending_android_library_reset_reload);
+                    if self.export.android_batch_load_pending {
+                        self.export.android_batch_load_pending = false;
                         self.complete_android_library_batch_export_item(Err(
                             "RAW open was canceled".to_owned(),
                         ));
-                    } else if self.library_ai_mask_refresh.is_some() {
+                    } else if self.ai.library_mask_refresh.is_some() {
                         self.complete_android_library_ai_mask_open_failure(
                             "RAW open was canceled".to_owned(),
                             frame,
                         );
                     } else if was_reset_reload {
-                        self.notice = Some(
+                        self.ui.notice = Some(
                             "The RAW could not be reloaded after resetting adjustments. Reopen it from the Library before continuing in Develop."
                                 .to_owned(),
                         );
                     } else {
-                        self.notice = Some("No RAW files selected.".to_owned());
+                        self.ui.notice = Some("No RAW files selected.".to_owned());
                     }
                 }
                 crate::android::PickerResult::Failed(error) => {
-                    self.develop_loading_thumbnail.clear();
-                    let was_profile_reload = self.pending_android_profile_reload.take().is_some();
+                    self.develop_ui.loading_thumbnail.clear();
+                    let was_profile_reload = self.android.pending_android_profile_reload.take().is_some();
                     let was_reset_reload =
-                        std::mem::take(&mut self.pending_android_library_reset_reload);
-                    if self.android_batch_load_pending && !was_profile_reload && !was_reset_reload {
-                        self.android_batch_load_pending = false;
+                        std::mem::take(&mut self.android.pending_android_library_reset_reload);
+                    if self.export.android_batch_load_pending && !was_profile_reload && !was_reset_reload {
+                        self.export.android_batch_load_pending = false;
                         self.complete_android_library_batch_export_item(Err(error));
-                    } else if self.library_ai_mask_refresh.is_some()
+                    } else if self.ai.library_mask_refresh.is_some()
                         && !was_profile_reload
                         && !was_reset_reload
                     {
                         self.complete_android_library_ai_mask_open_failure(error, frame);
                     } else {
-                        self.notice = Some(if was_profile_reload {
+                        self.ui.notice = Some(if was_profile_reload {
                             format!("Could not reload RAW for camera profile: {error}")
                         } else if was_reset_reload {
                             format!("Could not reload RAW after resetting adjustments: {error}")

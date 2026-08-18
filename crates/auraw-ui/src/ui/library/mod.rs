@@ -590,6 +590,12 @@ impl LibraryFolderNode {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct LibraryAdjustmentClipboard {
+    pub(crate) edits: crate::sidecar::EditState,
+    pub(crate) settings: crate::sidecar::AdjustmentCopySettings,
+}
+
 pub(crate) struct LibraryState {
     location: Option<String>,
     #[cfg(not(target_os = "android"))]
@@ -620,6 +626,7 @@ pub(crate) struct LibraryState {
     selected_assets: HashSet<LibraryAssetId>,
     selection_mode: bool,
     image_clipboard: Option<ImageClipboard>,
+    pub(crate) adjustment_clipboard: Option<LibraryAdjustmentClipboard>,
     asset_transfer_receiver: Option<mpsc::Receiver<AssetTransferCompletion>>,
     #[cfg(not(target_os = "android"))]
     raw_import_receiver: Option<mpsc::Receiver<RawImportResult>>,

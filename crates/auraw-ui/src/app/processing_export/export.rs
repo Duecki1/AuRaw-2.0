@@ -82,15 +82,15 @@ pub(in crate::app) fn spawn_export_request(
 
 impl AurawApp {
     pub(crate) fn export_task_active(&self) -> bool {
-        self.export_task.is_some()
+        self.export.task.is_some()
     }
 
     pub(crate) fn can_export(&self) -> bool {
-        self.loaded_raw.is_some()
-            && self.preview_raw.is_some()
-            && self.export_task.is_none()
-            && !self.export_publish_pending
-            && self.load_receiver.is_none()
+        self.develop.loaded_raw.is_some()
+            && self.develop.preview_raw.is_some()
+            && self.export.task.is_none()
+            && !self.export.publish_pending
+            && self.develop.load_receiver.is_none()
     }
 
     #[cfg(not(target_os = "android"))]
@@ -101,13 +101,12 @@ impl AurawApp {
 
         let default_name = format!(
             "{}-auraw.png",
-            export_source_stem(self.current_path.as_deref(), self.current_label.as_deref())
+            export_source_stem(self.develop.current_path.as_deref(), self.develop.current_label.as_deref())
         );
         let mut dialog = rfd::FileDialog::new()
             .add_filter("PNG image", &["png"])
             .set_file_name(default_name);
-        if let Some(parent) = self
-            .current_path
+        if let Some(parent) = self.develop.current_path
             .as_deref()
             .and_then(|path| path.parent())
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -136,13 +135,12 @@ impl AurawApp {
 
         let default_name = format!(
             "{}-auraw.jpg",
-            export_source_stem(self.current_path.as_deref(), self.current_label.as_deref())
+            export_source_stem(self.develop.current_path.as_deref(), self.develop.current_label.as_deref())
         );
         let mut dialog = rfd::FileDialog::new()
             .add_filter("JPEG image", &["jpg", "jpeg"])
             .set_file_name(default_name);
-        if let Some(parent) = self
-            .current_path
+        if let Some(parent) = self.develop.current_path
             .as_deref()
             .and_then(|path| path.parent())
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -173,13 +171,12 @@ impl AurawApp {
 
         let default_name = format!(
             "{}-auraw.tif",
-            export_source_stem(self.current_path.as_deref(), self.current_label.as_deref())
+            export_source_stem(self.develop.current_path.as_deref(), self.develop.current_label.as_deref())
         );
         let mut dialog = rfd::FileDialog::new()
             .add_filter("TIFF image", &["tif", "tiff"])
             .set_file_name(default_name);
-        if let Some(parent) = self
-            .current_path
+        if let Some(parent) = self.develop.current_path
             .as_deref()
             .and_then(|path| path.parent())
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -223,13 +220,13 @@ impl AurawApp {
             return;
         }
 
-        let Some(data_dir) = self.android_app.internal_data_path() else {
-            self.notice = Some("Android did not provide an app data directory.".to_owned());
+        let Some(data_dir) = self.android.android_app.internal_data_path() else {
+            self.ui.notice = Some("Android did not provide an app data directory.".to_owned());
             return;
         };
         let export_dir = data_dir.join("cache").join("exports");
         if let Err(error) = std::fs::create_dir_all(&export_dir) {
-            self.notice = Some(format!("Could not prepare Android export cache: {error}"));
+            self.ui.notice = Some(format!("Could not prepare Android export cache: {error}"));
             return;
         }
         let timestamp = std::time::SystemTime::now()
@@ -238,7 +235,7 @@ impl AurawApp {
             .as_millis();
         let display_name = format!("AuRaw-{timestamp}.{}", format.extension());
         match crate::android::prepare_direct_export(
-            &self.android_app,
+            &self.android.android_app,
             &export_dir,
             &display_name,
             format.mime_type(),
@@ -246,7 +243,7 @@ impl AurawApp {
             Ok(Some(path)) => {
                 let direct_path = path.clone();
                 if self.start_export(path, frame, format).is_none() {
-                    crate::android::cancel_direct_export(&self.android_app, &direct_path);
+                    crate::android::cancel_direct_export(&self.android.android_app, &direct_path);
                 }
             }
             Ok(None) => {
@@ -266,39 +263,38 @@ impl AurawApp {
         frame: &eframe::Frame,
         format: ExportFormat,
     ) -> Option<ExportTaskRequest> {
-        if self.loaded_raw.is_none()
-            || self.preview_raw.is_none()
-            || self.export_publish_pending
-            || self.load_receiver.is_some()
+        if self.develop.loaded_raw.is_none()
+            || self.develop.preview_raw.is_none()
+            || self.export.publish_pending
+            || self.develop.load_receiver.is_some()
         {
             return None;
         }
 
-        let raw = self.loaded_raw.as_ref().map(Arc::clone)?;
+        let raw = self.develop.loaded_raw.as_ref().map(Arc::clone)?;
         let Some(render_state) = frame.wgpu_render_state() else {
-            self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+            self.ui.notice = Some("eframe is not running with the wgpu backend.".to_owned());
             return None;
         };
-        let source_file_name = self
-            .current_path
+        let source_file_name = self.develop.current_path
             .as_ref()
             .and_then(|source| source.file_name())
             .and_then(|name| name.to_str())
             .map(str::to_owned)
-            .or_else(|| self.current_label.clone());
+            .or_else(|| self.develop.current_label.clone());
         Some(ExportTaskRequest {
             device: render_state.device.clone(),
             queue: render_state.queue.clone(),
             metadata: ExportMetadata::from_raw(&raw, source_file_name),
             raw,
-            geometry: self.geometry,
-            exposure: self.exposure,
-            masks: self.masks.clone(),
-            inpaint: self.inpaint_layer.clone(),
+            geometry: self.develop.geometry,
+            exposure: self.develop.exposure,
+            masks: self.masks.stack.clone(),
+            inpaint: self.inpaint.layer.clone(),
             path,
             format,
-            settings: self.export_settings.clone(),
-            gpu_export_prewarm: self.gpu_export_prewarm.as_ref().map(Arc::clone),
+            settings: self.export.settings.clone(),
+            gpu_export_prewarm: self.export.gpu_prewarm.as_ref().map(Arc::clone),
         })
     }
 
@@ -313,7 +309,7 @@ impl AurawApp {
         }
         let request = self.capture_export_task_request(path, frame, format)?;
         if let Err(error) = self.start_export_task(request, ExportTaskKind::Single) {
-            self.notice = Some(format!("Export failed: {error}"));
+            self.ui.notice = Some(format!("Export failed: {error}"));
             return None;
         }
         Some(())
@@ -324,7 +320,7 @@ impl AurawApp {
         request: ExportTaskRequest,
         kind: ExportTaskKind,
     ) -> Result<(), String> {
-        let cancellation = match (kind, self.export_task.as_ref()) {
+        let cancellation = match (kind, self.export.task.as_ref()) {
             (ExportTaskKind::Single, None) => {
                 Arc::new(std::sync::atomic::AtomicBool::new(false))
             }
@@ -342,7 +338,7 @@ impl AurawApp {
         };
         let receiver = spawn_export_request(request, Arc::clone(&cancellation));
         if kind == ExportTaskKind::Single {
-            self.export_task = Some(ExportTask {
+            self.export.task = Some(ExportTask {
                 kind,
                 cancellation,
                 receiver: Some(ExportTaskReceiver::Tiled(receiver)),
@@ -355,23 +351,23 @@ impl AurawApp {
                 minimized: false,
                 cancelling: false,
             });
-        } else if let Some(task) = self.export_task.as_mut() {
+        } else if let Some(task) = self.export.task.as_mut() {
             task.receiver = Some(ExportTaskReceiver::Tiled(receiver));
             task.completed_tiles = 0;
             task.total_tiles = 0;
             task.phase = "Preparing tiled export…".to_owned();
         }
-        self.notice = None;
+        self.ui.notice = None;
         self.egui_ctx.request_repaint();
         Ok(())
     }
 
     pub(crate) fn cancel_export_task(&mut self) -> bool {
-        let Some(task) = self.export_task.as_mut() else {
+        let Some(task) = self.export.task.as_mut() else {
             return false;
         };
         task.request_cancel();
-        if let Some(batch) = self.library_batch_export.as_mut() {
+        if let Some(batch) = self.export.batch.as_mut() {
             batch.cancel_requested = true;
             batch.pending.clear();
         }
@@ -380,21 +376,21 @@ impl AurawApp {
     }
 
     pub(crate) fn minimize_export_task(&mut self) {
-        if let Some(task) = self.export_task.as_mut() {
+        if let Some(task) = self.export.task.as_mut() {
             task.minimize();
             self.egui_ctx.request_repaint();
         }
     }
 
     pub(crate) fn restore_export_task(&mut self) {
-        if let Some(task) = self.export_task.as_mut() {
+        if let Some(task) = self.export.task.as_mut() {
             task.restore();
             self.egui_ctx.request_repaint();
         }
     }
 
     pub(crate) fn show_export_task_indicator(&mut self, ui: &mut egui::Ui) {
-        let Some(task) = self.export_task.as_ref() else {
+        let Some(task) = self.export.task.as_ref() else {
             return;
         };
         if !task.minimized {
@@ -412,8 +408,8 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub(crate) fn sync_android_export_notification(&self) {
-        let Some(task) = self.export_task.as_ref() else {
-            if let Err(error) = crate::android::clear_background_task_notification(&self.android_app) {
+        let Some(task) = self.export.task.as_ref() else {
+            if let Err(error) = crate::android::clear_background_task_notification(&self.android.android_app) {
                 log::warn!("{error}");
             }
             return;
@@ -428,7 +424,7 @@ impl AurawApp {
         });
         let percent = (task.progress.clamp(0.0, 1.0) * 100.0).round() as i32;
         if let Err(error) = crate::android::update_background_task_notification(
-            &self.android_app,
+            &self.android.android_app,
             title,
             &task.phase,
             detail.as_deref(),
@@ -441,7 +437,7 @@ impl AurawApp {
     }
 
     pub(crate) fn show_export_task_dialog(&mut self, ctx: &egui::Context) {
-        let Some(task) = self.export_task.as_ref() else {
+        let Some(task) = self.export.task.as_ref() else {
             return;
         };
         if task.minimized {
@@ -505,7 +501,7 @@ impl AurawApp {
     }
 
     pub(in crate::app) fn poll_export_worker(&mut self, _frame: &eframe::Frame) {
-        let (events, disconnected) = match self.export_task.as_ref().and_then(|task| task.receiver.as_ref()) {
+        let (events, disconnected) = match self.export.task.as_ref().and_then(|task| task.receiver.as_ref()) {
             Some(ExportTaskReceiver::Tiled(receiver)) => {
                 drain_worker_events(Some(receiver), |event| matches!(event, ExportEvent::Finished(_)))
             }
@@ -521,11 +517,10 @@ impl AurawApp {
                     completed_tiles,
                     total_tiles,
                 } => {
-                    let batch_current = self
-                        .library_batch_export
+                    let batch_current = self.export.batch
                         .as_ref()
                         .is_some_and(|batch| batch.current.is_some());
-                    if let Some(task) = self.export_task.as_mut() {
+                    if let Some(task) = self.export.task.as_mut() {
                         task.completed_tiles = completed_tiles;
                         task.total_tiles = total_tiles;
                         let tile_fraction = if total_tiles == 0 {
@@ -555,16 +550,15 @@ impl AurawApp {
                 }
                 ExportEvent::Finished(result) => {
                     finished = true;
-                    if let Some(task) = self.export_task.as_mut() {
+                    if let Some(task) = self.export.task.as_mut() {
                         task.receiver = None;
                         task.completed_tiles = 0;
                         task.total_tiles = 0;
                         task.progress = task.progress.min(EXPORT_MAX_INCOMPLETE_FRACTION);
                         task.phase = "Finalizing export…".to_owned();
                     }
-                    let is_batch = self.library_batch_export.is_some();
-                    let was_cancelled = self
-                        .export_task
+                    let is_batch = self.export.batch.is_some();
+                    let was_cancelled = self.export.task
                         .as_ref()
                         .is_some_and(|task| task.cancelling);
 
@@ -573,8 +567,8 @@ impl AurawApp {
                             #[cfg(not(target_os = "android"))]
                             {
                                 if !is_batch {
-                                    self.notice = Some(format!("Exported {}", path.display()));
-                                    clear_export_task(&mut self.export_task);
+                                    self.ui.notice = Some(format!("Exported {}", path.display()));
+                                    clear_export_task(&mut self.export.task);
                                 }
                             }
 
@@ -582,24 +576,24 @@ impl AurawApp {
                             {
                                 if crate::android::is_direct_export_path(&path) {
                                     match crate::android::finalize_direct_export(
-                                        &self.android_app,
+                                        &self.android.android_app,
                                         &path,
                                     ) {
                                         Ok(location) => {
                                             if is_batch {
                                                 android_batch_result = Some(Ok(()));
                                             } else {
-                                                self.notice = Some(format!("Exported to {location}"));
-                                                clear_export_task(&mut self.export_task);
+                                                self.ui.notice = Some(format!("Exported to {location}"));
+                                                clear_export_task(&mut self.export.task);
                                             }
                                         }
                                         Err(error) => {
                                             if is_batch {
                                                 android_batch_result = Some(Err(error.clone()));
                                             } else {
-                                                clear_export_task(&mut self.export_task);
+                                                clear_export_task(&mut self.export.task);
                                             }
-                                            self.notice = Some(format!("Export failed: {error}"));
+                                            self.ui.notice = Some(format!("Export failed: {error}"));
                                             log::error!("Android direct export finalize failed: {error}");
                                         }
                                     }
@@ -614,8 +608,7 @@ impl AurawApp {
                                         _ => ExportFormat::Png,
                                     };
                                     let fallback_name = format!("AuRaw-export.{}", format.extension());
-                                    let display_name = self
-                                        .library_batch_export
+                                    let display_name = self.export.batch
                                         .as_ref()
                                         .and_then(|batch| batch.current.as_ref())
                                         .map(|job| {
@@ -633,15 +626,15 @@ impl AurawApp {
                                         })
                                         .unwrap_or(fallback_name);
                                     match crate::android::publish_image(
-                                        &self.android_app,
+                                        &self.android.android_app,
                                         &path,
                                         &display_name,
                                         format.mime_type(),
                                     ) {
                                         Ok(()) => {
-                                            self.export_publish_pending = true;
-                                            self.notice = Some("Saving to Pictures/AuRaw…".to_owned());
-                                            if let Some(task) = self.export_task.as_mut() {
+                                            self.export.publish_pending = true;
+                                            self.ui.notice = Some("Saving to Pictures/AuRaw…".to_owned());
+                                            if let Some(task) = self.export.task.as_mut() {
                                                 task.phase = "Publishing to Pictures/AuRaw…".to_owned();
                                                 task.progress = task.progress.max(EXPORT_MAX_INCOMPLETE_FRACTION);
                                             }
@@ -651,9 +644,9 @@ impl AurawApp {
                                             if is_batch {
                                                 android_batch_result = Some(Err(error.clone()));
                                             } else {
-                                                clear_export_task(&mut self.export_task);
+                                                clear_export_task(&mut self.export.task);
                                             }
-                                            self.notice = Some(format!("Export failed: {error}"));
+                                            self.ui.notice = Some(format!("Export failed: {error}"));
                                         }
                                     }
                                 }
@@ -662,22 +655,22 @@ impl AurawApp {
                         Err(error) => {
                             #[cfg(target_os = "android")]
                             {
-                                crate::android::cancel_all_direct_exports(&self.android_app);
+                                crate::android::cancel_all_direct_exports(&self.android.android_app);
                                 if is_batch {
                                     android_batch_result = Some(Err(error.clone()));
                                 } else {
-                                    clear_export_task(&mut self.export_task);
+                                    clear_export_task(&mut self.export.task);
                                 }
                             }
                             #[cfg(not(target_os = "android"))]
                             if !is_batch {
-                                clear_export_task(&mut self.export_task);
+                                clear_export_task(&mut self.export.task);
                             }
                             if was_cancelled {
-                                self.notice = Some("Export cancelled.".to_owned());
+                                self.ui.notice = Some("Export cancelled.".to_owned());
                                 log::info!("export cancelled");
                             } else {
-                                self.notice = Some(format!("Export failed: {error}"));
+                                self.ui.notice = Some(format!("Export failed: {error}"));
                                 log::error!("export failed: {error}");
                             }
                         }
@@ -687,22 +680,22 @@ impl AurawApp {
         }
 
         if disconnected && !finished {
-            if let Some(task) = self.export_task.as_mut() {
+            if let Some(task) = self.export.task.as_mut() {
                 task.receiver = None;
             }
-            self.notice = Some("Export worker stopped unexpectedly.".to_owned());
+            self.ui.notice = Some("Export worker stopped unexpectedly.".to_owned());
             #[cfg(target_os = "android")]
             {
-                crate::android::cancel_all_direct_exports(&self.android_app);
-                if self.library_batch_export.is_some() {
+                crate::android::cancel_all_direct_exports(&self.android.android_app);
+                if self.export.batch.is_some() {
                     android_batch_result = Some(Err("export worker stopped unexpectedly".to_owned()));
                 } else {
-                    clear_export_task(&mut self.export_task);
+                    clear_export_task(&mut self.export.task);
                 }
             }
             #[cfg(not(target_os = "android"))]
-            if self.library_batch_export.is_none() {
-                clear_export_task(&mut self.export_task);
+            if self.export.batch.is_none() {
+                clear_export_task(&mut self.export.task);
             }
         }
 
@@ -713,58 +706,58 @@ impl AurawApp {
     }
 
     pub(in crate::app) fn refresh_status(&mut self) {
-        self.status = if let Some(label) = &self.loading_label {
+        self.ui.status = if let Some(label) = &self.develop.loading_label {
             format!("Decoding and preparing proxy for {label}…")
         } else if self.lens_correction_busy() {
-            self.lens_correction.catalog.status.clone()
-        } else if let Some(task) = self.export_task.as_ref() {
+            self.develop.lens_correction.catalog.status.clone()
+        } else if let Some(task) = self.export.task.as_ref() {
             task.phase.clone()
-        } else if self.export_publish_pending {
+        } else if self.export.publish_pending {
             "Saving to Pictures/AuRaw…".to_owned()
-        } else if self.preview_zoom > DETAIL_ZOOM_START {
-            if let Some(stage) = self.preview_detail_pending_stage {
+        } else if self.preview.zoom > DETAIL_ZOOM_START {
+            if let Some(stage) = self.preview.detail_pending_stage {
                 format!("Updating visible zoom crop — {}…", stage.label())
-            } else if let Some(notice) = &self.notice {
+            } else if let Some(notice) = &self.ui.notice {
                 notice.clone()
             } else {
-                self.image_status.clone()
+                self.develop.image_status.clone()
             }
-        } else if let Some(stage) = self.pending_stage {
+        } else if let Some(stage) = self.preview.pending_stage {
             format!("Updating preview — {}…", stage.label())
-        } else if let Some(notice) = &self.notice {
+        } else if let Some(notice) = &self.ui.notice {
             notice.clone()
         } else {
-            self.image_status.clone()
+            self.develop.image_status.clone()
         };
     }
 
     pub(crate) fn reset_develop_adjustments(&mut self) {
-        let previous = self.exposure;
-        self.exposure = ExposureParams::scene_referred_default();
-        self.white_balance_picker_active = false;
-        self.white_balance_picker_drag = None;
+        let previous = self.develop.exposure;
+        self.develop.exposure = ExposureParams::scene_referred_default();
+        self.develop_ui.white_balance_picker_active = false;
+        self.develop_ui.white_balance_picker_drag = None;
 
         // Highlight reconstruction is an application-level processing preference,
         // not a Develop adjustment.
-        self.exposure.highlight_method = previous.highlight_method;
-        self.exposure.highlight_clip = previous.highlight_clip;
-        self.exposure.highlight_reconstruction = previous.highlight_reconstruction;
+        self.develop.exposure.highlight_method = previous.highlight_method;
+        self.develop.exposure.highlight_clip = previous.highlight_clip;
+        self.develop.exposure.highlight_reconstruction = previous.highlight_reconstruction;
 
         // Demosaic selection is likewise a raw-processing preference rather
         // than a Develop adjustment. Resetting exposure/tone controls must not
         // silently change the reconstruction algorithm.
-        self.exposure.demosaic_mode = previous.demosaic_mode;
-        self.exposure.dual_threshold = previous.dual_threshold;
-        self.exposure.frequency_chroma = previous.frequency_chroma;
+        self.develop.exposure.demosaic_mode = previous.demosaic_mode;
+        self.develop.exposure.dual_threshold = previous.dual_threshold;
+        self.develop.exposure.frequency_chroma = previous.frequency_chroma;
 
         self.mark_pipeline_dirty();
     }
 
     pub(crate) fn reset_highlight_reconstruction_settings(&mut self) {
         let defaults = ExposureParams::default();
-        self.exposure.highlight_method = defaults.highlight_method;
-        self.exposure.highlight_clip = defaults.highlight_clip;
-        self.exposure.highlight_reconstruction = defaults.highlight_reconstruction;
+        self.develop.exposure.highlight_method = defaults.highlight_method;
+        self.develop.exposure.highlight_clip = defaults.highlight_clip;
+        self.develop.exposure.highlight_reconstruction = defaults.highlight_reconstruction;
         self.mark_pipeline_dirty();
     }
 }

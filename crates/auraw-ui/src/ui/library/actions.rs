@@ -54,7 +54,7 @@ pub(crate) fn library_image_context_menu(
     }
     if ui
         .add_enabled(
-            action_enabled && app.has_copied_adjustments(),
+            action_enabled && app.library.has_copied_adjustments(),
             egui::Button::new(if selected_count > 1 {
                 "Paste adjustments to selected"
             } else {
@@ -148,7 +148,7 @@ pub(crate) fn apply_library_action(
             if !assets.is_empty() {
                 app.library.export_dialog = Some(LibraryExportDialog {
                     assets,
-                    settings: app.export_settings.clone(),
+                    settings: app.export.settings.clone(),
                     format: ExportFormat::Jpeg,
                 });
             }
@@ -203,7 +203,7 @@ pub(crate) fn apply_library_action(
         }
         LibraryAction::ResetAdjustments(assets) => {
             #[cfg(not(target_os = "android"))]
-            let current_to_reopen = app.current_path.as_ref().and_then(|current| {
+            let current_to_reopen = app.develop.current_path.as_ref().and_then(|current| {
                 assets
                     .iter()
                     .find(|asset| asset.desktop_path() == Some(current.as_path()))
@@ -522,7 +522,7 @@ pub(super) fn show_library_selection_action_bar(
                             ui,
                             count,
                             action_enabled,
-                            app.has_copied_adjustments(),
+                            app.library.has_copied_adjustments(),
                             compact,
                         )
                         .and_then(|command| library_selection_action(command, selected))

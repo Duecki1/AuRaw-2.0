@@ -11,11 +11,11 @@ impl Sidebar {
             }
             MaskKind::LuminanceRange | MaskKind::ColorRange => {
                 if let Err(error) = app.capture_mask_source(frame) {
-                    app.status = error;
+                    app.ui.status = error;
                     return;
                 }
-                let source = app.mask_source_cache.clone();
-                if let Some(component) = app.masks.selected_component_mut() {
+                let source = app.masks.source_cache.clone();
+                if let Some(component) = app.masks.stack.selected_component_mut() {
                     match &mut component.geometry {
                         MaskGeometry::LuminanceRange { source: target, .. }
                         | MaskGeometry::ColorRange { source: target, .. } => *target = source,

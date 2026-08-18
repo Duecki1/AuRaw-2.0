@@ -10,8 +10,7 @@ impl Preview {
         source_height: u32,
         response: &egui::Response,
     ) {
-        let lens_geometry = app
-            .loaded_raw
+        let lens_geometry = app.develop.loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.clone());
         let pointer = response
@@ -27,7 +26,7 @@ impl Preview {
         let pointer_uv = pointer.and_then(|position| {
             editable_source_uv(final_geometry_screen_to_native_source(
                 image_rect,
-                app.geometry,
+                app.develop.geometry,
                 lens_geometry.as_deref(),
                 source_width,
                 source_height,
@@ -37,17 +36,17 @@ impl Preview {
 
         if pressed {
             if let Some(uv) = pointer_uv {
-                app.white_balance_picker_drag = Some([uv, uv]);
+                app.develop_ui.white_balance_picker_drag = Some([uv, uv]);
             }
         } else if down {
-            if let (Some(area), Some(uv)) = (app.white_balance_picker_drag.as_mut(), pointer_uv) {
+            if let (Some(area), Some(uv)) = (app.develop_ui.white_balance_picker_drag.as_mut(), pointer_uv) {
                 area[1] = uv;
                 ui.ctx().request_repaint();
             }
         }
 
         if released {
-            if let Some(mut area) = app.white_balance_picker_drag.take() {
+            if let Some(mut area) = app.develop_ui.white_balance_picker_drag.take() {
                 if let Some(uv) = pointer_uv {
                     area[1] = uv;
                 }
@@ -72,16 +71,15 @@ impl Preview {
             egui::FontId::proportional(13.0),
             Color32::WHITE,
         );
-        let Some(area) = app.white_balance_picker_drag else {
+        let Some(area) = app.develop_ui.white_balance_picker_drag else {
             return;
         };
-        let lens_geometry = app
-            .loaded_raw
+        let lens_geometry = app.develop.loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.as_deref());
         let start = final_geometry_native_source_to_screen(
             image_rect,
-            app.geometry,
+            app.develop.geometry,
             lens_geometry,
             source_width,
             source_height,
@@ -89,7 +87,7 @@ impl Preview {
         );
         let current = final_geometry_native_source_to_screen(
             image_rect,
-            app.geometry,
+            app.develop.geometry,
             lens_geometry,
             source_width,
             source_height,

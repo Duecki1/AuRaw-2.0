@@ -245,7 +245,7 @@ impl Library {
             });
         } else {
             #[cfg(not(target_os = "android"))]
-            let current_path = app.current_path.clone();
+            let current_path = app.develop.current_path.clone();
             let available = ui.available_width().max(1.0);
             let available_height = ui.available_height().max(1.0);
             let gap = 6.0;
@@ -408,7 +408,7 @@ impl Library {
         if let Some(asset) = open_asset {
             #[cfg(not(target_os = "android"))]
             if let Some(path) = asset.desktop_path().map(Path::to_path_buf) {
-                app.active_tab = AppTab::Develop;
+                app.ui.active_tab = AppTab::Develop;
                 app.open_path(path, frame);
             }
             #[cfg(target_os = "android")]

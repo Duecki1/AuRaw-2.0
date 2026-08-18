@@ -4,13 +4,13 @@ impl AurawApp {
     #[cfg(target_os = "android")]
     pub fn open_android_library_document(&mut self, uri: &str, display_name: &str) {
         if self.android_foreground_task_active() {
-            self.notice = Some(format!(
+            self.ui.notice = Some(format!(
                 "{display_name} cannot be opened while an export or another foreground operation is running. Wait for it to finish or cancel it first."
             ));
             self.egui_ctx.request_repaint();
             return;
         }
-        if self.picker_pending {
+        if self.android.picker_pending {
             return;
         }
 
@@ -19,11 +19,11 @@ impl AurawApp {
         // user taps that exact item, reopening it would allocate a second preview
         // pipeline beside the export pipeline and exceed the mobile GPU budget.
         // The existing document is already the requested RAW, so just expose it.
-        let already_loaded = self.loaded_raw.is_some()
-            && self.preview_raw.is_some()
-            && self.gpu_pipeline.is_some()
+        let already_loaded = self.develop.loaded_raw.is_some()
+            && self.develop.preview_raw.is_some()
+            && self.preview.gpu_pipeline.is_some()
             && matches!(
-                self.sidecar_target.as_ref(),
+                self.persistence.sidecar_target.as_ref(),
                 Some(crate::sidecar::SidecarTarget::Android {
                     raw_uri,
                     display_name: current_name,
@@ -31,7 +31,7 @@ impl AurawApp {
             );
         if already_loaded {
             self.activate_tab(AppTab::Develop);
-            self.notice = None;
+            self.ui.notice = None;
             self.refresh_status();
             self.egui_ctx.request_repaint();
             return;
@@ -41,16 +41,16 @@ impl AurawApp {
 
         // This is a user-owned picker result. Keep it distinct from the
         // Android batch exporter's internal document-load result routing.
-        self.android_batch_load_pending = false;
-        match crate::android::open_library_document(&self.android_app, uri, display_name) {
+        self.export.android_batch_load_pending = false;
+        match crate::android::open_library_document(&self.android.android_app, uri, display_name) {
             Ok(()) => {
-                self.picker_pending = true;
-                self.notice = None;
-                self.status = format!("Opening {display_name}…");
+                self.android.picker_pending = true;
+                self.ui.notice = None;
+                self.ui.status = format!("Opening {display_name}…");
             }
             Err(error) => {
-                self.develop_loading_thumbnail.clear();
-                self.notice = Some(error);
+                self.develop_ui.loading_thumbnail.clear();
+                self.ui.notice = Some(error);
             }
         }
     }
@@ -61,25 +61,25 @@ impl AurawApp {
         uri: &str,
         display_name: &str,
     ) {
-        if self.picker_pending {
-            self.notice = Some(format!(
+        if self.android.picker_pending {
+            self.ui.notice = Some(format!(
                 "Could not reload {display_name} after resetting adjustments because another Android document operation is still pending."
             ));
             return;
         }
         // Establish ownership before invoking Java so even an unusually fast
         // result cannot be mistaken for an interactive open.
-        self.android_batch_load_pending = false;
-        self.pending_android_library_reset_reload = true;
-        match crate::android::open_library_document(&self.android_app, uri, display_name) {
+        self.export.android_batch_load_pending = false;
+        self.android.pending_android_library_reset_reload = true;
+        match crate::android::open_library_document(&self.android.android_app, uri, display_name) {
             Ok(()) => {
-                self.picker_pending = true;
-                self.notice = None;
-                self.status = format!("Reloading {display_name} after reset…");
+                self.android.picker_pending = true;
+                self.ui.notice = None;
+                self.ui.status = format!("Reloading {display_name} after reset…");
             }
             Err(error) => {
-                self.pending_android_library_reset_reload = false;
-                self.notice = Some(format!(
+                self.android.pending_android_library_reset_reload = false;
+                self.ui.notice = Some(format!(
                     "Could not reload {display_name} after resetting adjustments: {error}"
                 ));
             }
@@ -88,7 +88,7 @@ impl AurawApp {
 
     pub fn open_path(&mut self, path: PathBuf, frame: &eframe::Frame) {
         let label = path.display().to_string();
-        self.active_tab = AppTab::Develop;
+        self.ui.active_tab = AppTab::Develop;
         let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
             raw_path: path.clone(),
         };
@@ -145,42 +145,42 @@ impl AurawApp {
         edit_override: Option<SidecarEditState>,
         raw_fd_guard: Option<std::fs::File>,
     ) {
-        if self.load_receiver.is_some() {
+        if self.develop.load_receiver.is_some() {
             if delete_after_decode && raw_fd_guard.is_none() {
                 remove_temporary_raw(&path);
             }
-            self.notice = Some("Wait for the current RAW to finish opening.".to_owned());
+            self.ui.notice = Some("Wait for the current RAW to finish opening.".to_owned());
             return;
         }
         let Some(render_state) = frame.wgpu_render_state() else {
             if delete_after_decode && raw_fd_guard.is_none() {
                 remove_temporary_raw(&path);
             }
-            self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+            self.ui.notice = Some("eframe is not running with the wgpu backend.".to_owned());
             self.refresh_status();
             return;
         };
 
         #[cfg(not(target_os = "android"))]
         {
-            if self.active_tab == AppTab::Develop {
+            if self.ui.active_tab == AppTab::Develop {
                 let crate::sidecar::SidecarTarget::Desktop { raw_path } = &sidecar_target;
                 self.prepare_develop_loading_thumbnail(raw_path);
             } else {
-                self.develop_loading_thumbnail.clear();
+                self.develop_ui.loading_thumbnail.clear();
             }
         }
         #[cfg(target_os = "android")]
         {
-            let loading_thumbnail_matches = self.active_tab == AppTab::Develop
+            let loading_thumbnail_matches = self.ui.active_tab == AppTab::Develop
                 && matches!(
                     &sidecar_target,
                     crate::sidecar::SidecarTarget::Android { raw_uri, .. }
-                        if self.develop_loading_thumbnail.source_uri.as_deref()
+                        if self.develop_ui.loading_thumbnail.source_uri.as_deref()
                             == Some(raw_uri.as_str())
                 );
             if !loading_thumbnail_matches {
-                self.develop_loading_thumbnail.clear();
+                self.develop_ui.loading_thumbnail.clear();
             }
         }
 
@@ -196,8 +196,8 @@ impl AurawApp {
         let raw_cache_key = format!(
             "{}|profile:{}|folder:{}|selection:{}",
             raw_cache_key_for_target(&sidecar_target),
-            self.camera_profile_mode.cache_key(),
-            self.camera_profile_folder
+            self.preferences.camera_profile_mode.cache_key(),
+            self.preferences.camera_profile_folder
                 .as_deref()
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -207,15 +207,15 @@ impl AurawApp {
         // sidecar, which is intentionally read on the worker. Do not reuse an
         // ambiguous cache entry before that selection is known.
         let cache_selection_is_known = profile_selection_override.is_some()
-            || self.camera_profile_mode == CameraProfileMode::MatrixOnly
-            || self.camera_profile_folder.is_none();
+            || self.preferences.camera_profile_mode == CameraProfileMode::MatrixOnly
+            || self.preferences.camera_profile_folder.is_none();
         let cached_original_raw = cache_selection_is_known
             .then(|| self.cached_raw_decode(&raw_cache_key))
             .flatten();
         let decode_was_cached = cached_original_raw.is_some();
         crate::diagnostics::record(format!(
             "RAW open requested: label=\"{label}\" cached={decode_was_cached} preview_quality={}",
-            self.preview_quality.label()
+            self.preview.quality.label()
         ));
         // Image-bound workers may still be inside a native phase. Request
         // cancellation before advancing the document identity, and keep their
@@ -225,91 +225,91 @@ impl AurawApp {
         // A DPI rebuild belongs to the outgoing document. Dropping the
         // receiver lets its worker dispose the result instead of installing it
         // over the newly opened RAW.
-        self.preview_rebuild_receiver = None;
+        self.preview.rebuild_receiver = None;
         let sidecar_generation = self.begin_sidecar_open();
         // Reuse compiled GPU programs across RAW opens; retire the old texture IDs for next-frame cleanup.
         let reusable_preview_pipeline = {
             let mut renderer = render_state.renderer.write();
             self.take_preview_pipeline_and_release_textures(&mut renderer)
         };
-        let retained_preview_program_template = self.preview_program_template.clone();
+        let retained_preview_program_template = self.preview.program_template.clone();
         #[cfg(target_os = "android")]
-        let export_active_while_opening = self.export_task.is_some();
-        let startup_gpu_prewarm_receiver = self.gpu_preview_prewarm_receiver.take();
-        self.original_raw = None;
-        self.loaded_raw = None;
-        self.preview_raw = None;
-        self.white_balance_picker_active = false;
-        self.white_balance_picker_drag = None;
-        self.current_path = None;
-        self.current_label = None;
-        self.selected_camera_profile = None;
-        self.image_status = format!("Loading {label}…");
+        let export_active_while_opening = self.export.task.is_some();
+        let startup_gpu_prewarm_receiver = self.preview.gpu_prewarm_receiver.take();
+        self.develop.original_raw = None;
+        self.develop.loaded_raw = None;
+        self.develop.preview_raw = None;
+        self.develop_ui.white_balance_picker_active = false;
+        self.develop_ui.white_balance_picker_drag = None;
+        self.develop.current_path = None;
+        self.develop.current_label = None;
+        self.develop.selected_camera_profile = None;
+        self.develop.image_status = format!("Loading {label}…");
         let initial_exposure = self.new_image_exposure();
-        let preview_quality_setting = self.preview_quality;
-        let preview_viewport_pixels_setting = self.preview_viewport_pixels;
-        let camera_profile_mode = self.camera_profile_mode;
-        let camera_profile_folder = self.camera_profile_folder.clone();
-        let last_camera_profile = self.last_camera_profile.clone();
+        let preview_quality_setting = self.preview.quality;
+        let preview_viewport_pixels_setting = self.preview.viewport_pixels;
+        let camera_profile_mode = self.preferences.camera_profile_mode;
+        let camera_profile_folder = self.preferences.camera_profile_folder.clone();
+        let last_camera_profile = self.preferences.last_camera_profile.clone();
         let ai_denoise_cache_path = self.rawnind_result_cache_path_for_target(&sidecar_target);
-        self.original_preview_exposure = initial_exposure;
-        self.original_preview_requested = false;
-        self.original_preview_rendered_state = None;
-        self.android_original_hold = None;
-        self.exposure = initial_exposure;
-        self.target_exposure = initial_exposure;
-        self.masks.clear();
+        self.preview.original_exposure = initial_exposure;
+        self.preview.original_requested = false;
+        self.preview.original_rendered_state = None;
+        self.preview.original_hold = None;
+        self.develop.exposure = initial_exposure;
+        self.develop.target_exposure = initial_exposure;
+        self.masks.stack.clear();
         self.reset_inpainting_state();
-        self.active_mask_tool = None;
-        self.brush_mode = BrushMode::Paint;
-        self.subject_refinement_active = false;
-        self.mask_drag = None;
-        self.last_brush_point = None;
-        self.mask_touch_gesture_backup = None;
-        self.mask_interaction_dirty_layer = None;
-        self.mask_interaction_last_upload = None;
-        self.mask_interaction_has_uncommitted_change = false;
-        self.mask_overlay_revision = self.mask_overlay_revision.wrapping_add(1);
-        self.mask_overlay_texture = None;
-        self.mask_overlay_texture_key = None;
-        self.mask_overlay_blink = None;
-        self.mask_thumbnail_group_textures.clear();
-        self.mask_thumbnail_component_mask = None;
-        self.mask_thumbnail_component_textures.clear();
-        self.mask_thumbnail_revision = self.mask_overlay_revision;
-        self.mask_source_cache = None;
-        self.subject_mask_cache = None;
-        self.ai_masks_need_update = false;
-        self.ai_mask_update_active = false;
-        self.ai_mask_update_subject_pending = false;
-        self.ai_mask_update_object_queue.clear();
-        self.ai_mask_update_failed = false;
-        self.subject_consent_open = false;
-        self.object_consent_open = false;
-        self.object_pending_target = None;
-        self.object_cache = None;
-        self.dirty_mask_layers = [false; MAX_LOCAL_MASKS];
-        self.detail_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
-        self.navigation_dirty_mask_layers = [false; MAX_LOCAL_MASKS];
-        self.pending_stage = None;
-        self.preview_detail_pending_stage = None;
-        self.navigation_pending_stage = None;
-        self.preview_detail_urgent = false;
-        self.preview_zoom = 1.0;
-        self.preview_center = [0.5, 0.5];
-        self.preview_visible_uv = PreviewUvRect {
+        self.masks.active_tool = None;
+        self.masks.brush_mode = BrushMode::Paint;
+        self.masks.subject_refinement_active = false;
+        self.masks.drag = None;
+        self.masks.last_brush_point = None;
+        self.masks.touch_gesture_backup = None;
+        self.masks.interaction_dirty_layer = None;
+        self.masks.interaction_last_upload = None;
+        self.masks.interaction_has_uncommitted_change = false;
+        self.masks.overlay_revision = self.masks.overlay_revision.wrapping_add(1);
+        self.masks.overlay_texture = None;
+        self.masks.overlay_texture_key = None;
+        self.masks.overlay_blink = None;
+        self.masks.thumbnail_group_textures.clear();
+        self.masks.thumbnail_component_mask = None;
+        self.masks.thumbnail_component_textures.clear();
+        self.masks.thumbnail_revision = self.masks.overlay_revision;
+        self.masks.source_cache = None;
+        self.masks.subject_cache = None;
+        self.ai.masks_need_update = false;
+        self.ai.mask_update_active = false;
+        self.ai.mask_update_subject_pending = false;
+        self.ai.mask_update_object_queue.clear();
+        self.ai.mask_update_failed = false;
+        self.ai.subject_consent_open = false;
+        self.ai.object_consent_open = false;
+        self.ai.object_pending_target = None;
+        self.ai.object_cache = None;
+        self.masks.dirty_layers = [false; MAX_LOCAL_MASKS];
+        self.masks.detail_dirty_layers = [false; MAX_LOCAL_MASKS];
+        self.masks.navigation_dirty_layers = [false; MAX_LOCAL_MASKS];
+        self.preview.pending_stage = None;
+        self.preview.detail_pending_stage = None;
+        self.preview.navigation_pending_stage = None;
+        self.preview.detail_urgent = false;
+        self.preview.zoom = 1.0;
+        self.preview.center = [0.5, 0.5];
+        self.preview.visible_uv = PreviewUvRect {
             min: [0.0, 0.0],
             max: [1.0, 1.0],
         };
-        self.preview_motion_at = None;
-        self.preview_touch_navigation_active = false;
-        self.preview_revision = self.preview_revision.wrapping_add(1);
-        self.lens_correction = LensCorrectionState::default();
-        self.lens_correction_dirty = false;
+        self.preview.motion_at = None;
+        self.preview.touch_navigation_active = false;
+        self.preview.revision = self.preview.revision.wrapping_add(1);
+        self.develop.lens_correction = LensCorrectionState::default();
+        self.develop.lens_correction_dirty = false;
         #[cfg(target_os = "android")]
         {
-            self.lens_original_preview_cache = None;
-            self.lens_corrected_preview_cache = None;
+            self.preview.lens_original_cache = None;
+            self.preview.lens_corrected_cache = None;
         }
         self.reset_edit_history();
         let fd_backed_source = raw_fd_guard.is_some();
@@ -319,13 +319,13 @@ impl AurawApp {
         let cleanup_path_on_spawn_failure =
             (delete_after_decode && !fd_backed_source).then(|| path.clone());
         #[cfg(target_os = "android")]
-        let sidecar_android_app = self.android_app.clone();
+        let sidecar_android_app = self.android.android_app.clone();
         #[cfg(not(target_os = "android"))]
-        let display_output_transform = self.display_output_transform.clone();
+        let display_output_transform = self.preferences.display_output_transform.clone();
 
-        self.load_receiver = Some(receiver);
-        self.loading_label = Some(label.clone());
-        self.notice = None;
+        self.develop.load_receiver = Some(receiver);
+        self.develop.loading_label = Some(label.clone());
+        self.ui.notice = None;
         self.refresh_status();
 
         let spawn_result = std::thread::Builder::new()
@@ -891,29 +891,28 @@ impl AurawApp {
             if let Some(path) = cleanup_path_on_spawn_failure {
                 remove_temporary_raw(&path);
             }
-            self.load_receiver = None;
-            self.loading_label = None;
-            self.develop_loading_thumbnail.clear();
-            self.notice = Some(format!("could not start RAW decode worker: {error}"));
+            self.develop.load_receiver = None;
+            self.develop.loading_label = None;
+            self.develop_ui.loading_thumbnail.clear();
+            self.ui.notice = Some(format!("could not start RAW decode worker: {error}"));
             self.refresh_status();
         }
     }
 
     pub(in crate::app) fn poll_load_worker(&mut self, frame: &eframe::Frame) {
-        let received = self
-            .load_receiver
+        let received = self.develop.load_receiver
             .as_ref()
             .map(|receiver| receiver.try_recv());
         let event = match received {
             Some(Ok(event)) => Some(event),
             Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                self.load_receiver = None;
-                self.loading_label = None;
-                self.develop_loading_thumbnail.clear();
-                self.notice = Some("RAW decode worker stopped unexpectedly.".to_owned());
+                self.develop.load_receiver = None;
+                self.develop.loading_label = None;
+                self.develop_ui.loading_thumbnail.clear();
+                self.ui.notice = Some("RAW decode worker stopped unexpectedly.".to_owned());
                 self.on_library_ai_mask_refresh_load_finished(false, frame);
                 #[cfg(target_os = "android")]
-                if std::mem::take(&mut self.android_batch_load_pending) {
+                if std::mem::take(&mut self.export.android_batch_load_pending) {
                     self.on_library_batch_load_finished(false, frame);
                 }
                 #[cfg(not(target_os = "android"))]
@@ -926,16 +925,16 @@ impl AurawApp {
             return;
         };
 
-        self.load_receiver = None;
-        self.loading_label = None;
-        self.develop_loading_thumbnail.clear();
+        self.develop.load_receiver = None;
+        self.develop.loading_label = None;
+        self.develop_ui.loading_thumbnail.clear();
         #[cfg(target_os = "android")]
-        let batch_owned_load = std::mem::take(&mut self.android_batch_load_pending);
+        let batch_owned_load = std::mem::take(&mut self.export.android_batch_load_pending);
 
         match result {
             Ok(mut loaded) => {
                 let Some(render_state) = frame.wgpu_render_state() else {
-                    self.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+                    self.ui.notice = Some("eframe is not running with the wgpu backend.".to_owned());
                     self.on_library_ai_mask_refresh_load_finished(false, frame);
                     #[cfg(target_os = "android")]
                     if batch_owned_load {
@@ -972,7 +971,7 @@ impl AurawApp {
                     .as_deref()
                     .map(|name| format!(", profile {name}"))
                     .unwrap_or_default();
-                self.image_status = format!(
+                self.develop.image_status = format!(
                     "{} {} — full {}×{}, preview {}×{} ({}{})",
                     loaded.full_raw.camera_make,
                     loaded.full_raw.camera_model,
@@ -980,90 +979,89 @@ impl AurawApp {
                     full_height,
                     preview_width,
                     preview_height,
-                    self.preview_quality.label(),
+                    self.preview.quality.label(),
                     profile_label,
                 );
-                self.current_path = loaded.source_path;
-                self.current_label = Some(loaded.label.clone());
-                self.selected_camera_profile = loaded.selected_camera_profile.clone();
+                self.develop.current_path = loaded.source_path;
+                self.develop.current_label = Some(loaded.label.clone());
+                self.develop.selected_camera_profile = loaded.selected_camera_profile.clone();
                 // Loading an existing sidecar must not change the sticky global
                 // profile preference. Only an explicit user dropdown change in
                 // `select_camera_profile_for_current` may update it.
                 self.cache_raw_decode(loaded.raw_cache_key, Arc::clone(&loaded.original_raw));
-                self.original_raw = Some(loaded.original_raw);
-                self.loaded_raw = Some(loaded.full_raw);
-                self.preview_raw = Some(loaded.preview_raw);
-                self.preview_program_template = Some(loaded.pipeline.program_template());
-                self.gpu_pipeline = Some(loaded.pipeline);
-                self.exposure = loaded.rendered_exposure;
-                self.geometry = loaded.geometry.sanitized();
-                self.crop_constraint_reference = None;
-                self.crop_drag = None;
-                self.straighten_tool_active = false;
-                self.straighten_drag = None;
-                self.geometry_revision = 0;
-                self.masks = loaded.rendered_masks;
-                self.inpaint_strokes = loaded.inpaint_strokes;
-                self.inpaint_layer = compose_inpaint_strokes(&self.inpaint_strokes);
-                self.inpaint_texture = None;
-                self.inpaint_texture_key = None;
-                self.inpaint_texture_revision = self.inpaint_texture_revision.wrapping_add(1);
-                self.inpaint_revision = 0;
-                self.inpaint_source_cache = loaded.inpaint_source;
-                self.ai_masks_need_update = loaded.ai_masks_need_update;
+                self.develop.original_raw = Some(loaded.original_raw);
+                self.develop.loaded_raw = Some(loaded.full_raw);
+                self.develop.preview_raw = Some(loaded.preview_raw);
+                self.preview.program_template = Some(loaded.pipeline.program_template());
+                self.preview.gpu_pipeline = Some(loaded.pipeline);
+                self.develop.exposure = loaded.rendered_exposure;
+                self.develop.geometry = loaded.geometry.sanitized();
+                self.develop_ui.crop_constraint_reference = None;
+                self.develop_ui.crop_drag = None;
+                self.develop_ui.straighten_tool_active = false;
+                self.develop_ui.straighten_drag = None;
+                self.develop.geometry_revision = 0;
+                self.masks.stack = loaded.rendered_masks;
+                self.inpaint.strokes = loaded.inpaint_strokes;
+                self.inpaint.layer = compose_inpaint_strokes(&self.inpaint.strokes);
+                self.inpaint.texture = None;
+                self.inpaint.texture_key = None;
+                self.inpaint.texture_revision = self.inpaint.texture_revision.wrapping_add(1);
+                self.inpaint.revision = 0;
+                self.inpaint.source_cache = loaded.inpaint_source;
+                self.ai.masks_need_update = loaded.ai_masks_need_update;
                 self.rehydrate_restored_mask_state();
-                self.ai_masks_need_update |= loaded.ai_masks_need_update;
+                self.ai.masks_need_update |= loaded.ai_masks_need_update;
                 if loaded.mask_source.is_some() {
-                    self.mask_source_cache = loaded.mask_source;
+                    self.masks.source_cache = loaded.mask_source;
                 }
-                self.preview_zoom = 1.0;
-                self.preview_center = [0.5, 0.5];
-                self.preview_visible_uv = PreviewUvRect {
+                self.preview.zoom = 1.0;
+                self.preview.center = [0.5, 0.5];
+                self.preview.visible_uv = PreviewUvRect {
                     min: [0.0, 0.0],
                     max: [1.0, 1.0],
                 };
-                self.preview_motion_at = None;
-                self.preview_touch_navigation_active = false;
-                self.preview_revision = self.preview_revision.wrapping_add(1);
-                self.original_preview_rendered_state = None;
-                self.preview_detail = None;
-                self.preview_navigation = None;
-                self.preview_detail_pending_stage = None;
-                self.navigation_pending_stage = None;
-                self.preview_detail_urgent = false;
-                self.detail_dirty_mask_layers.fill(false);
-                self.navigation_dirty_mask_layers.fill(false);
-                self.dirty_mask_layers.fill(false);
-                self.lens_correction = loaded.lens_correction;
-                self.lens_correction_dirty = false;
+                self.preview.motion_at = None;
+                self.preview.touch_navigation_active = false;
+                self.preview.revision = self.preview.revision.wrapping_add(1);
+                self.preview.original_rendered_state = None;
+                self.preview.detail = None;
+                self.preview.navigation = None;
+                self.preview.detail_pending_stage = None;
+                self.preview.navigation_pending_stage = None;
+                self.preview.detail_urgent = false;
+                self.masks.detail_dirty_layers.fill(false);
+                self.masks.navigation_dirty_layers.fill(false);
+                self.masks.dirty_layers.fill(false);
+                self.develop.lens_correction = loaded.lens_correction;
+                self.develop.lens_correction_dirty = false;
                 #[cfg(target_os = "android")]
                 {
-                    if self.lens_correction.applied {
-                        self.lens_corrected_preview_cache = match (
-                            self.lens_correction.selected_lens(),
-                            self.loaded_raw.as_ref(),
-                            self.preview_raw.as_ref(),
+                    if self.develop.lens_correction.applied {
+                        self.preview.lens_corrected_cache = match (
+                            self.develop.lens_correction.selected_lens(),
+                            self.develop.loaded_raw.as_ref(),
+                            self.develop.preview_raw.as_ref(),
                         ) {
                             (Some(selection), Some(full_raw), Some(preview_raw)) => Some((
                                 selection,
-                                self.preview_quality,
+                                self.preview.quality,
                                 Arc::clone(full_raw),
                                 Arc::clone(preview_raw),
                             )),
                             _ => None,
                         };
-                        self.lens_original_preview_cache = None;
+                        self.preview.lens_original_cache = None;
                     } else {
-                        self.lens_original_preview_cache = self
-                            .preview_raw
+                        self.preview.lens_original_cache = self.develop.preview_raw
                             .as_ref()
-                            .map(|raw| (self.preview_quality, Arc::clone(raw)));
-                        self.lens_corrected_preview_cache = None;
+                            .map(|raw| (self.preview.quality, Arc::clone(raw)));
+                        self.preview.lens_corrected_cache = None;
                     }
                 }
-                self.target_exposure = loaded.rendered_exposure;
-                self.pending_stage = None;
-                self.notice = loaded.sidecar_warning;
+                self.develop.target_exposure = loaded.rendered_exposure;
+                self.preview.pending_stage = None;
+                self.ui.notice = loaded.sidecar_warning;
                 // Automatic lens matching and initial render setup are the
                 // baseline for this RAW, not user edits inherited from the
                 // previous image or from the decode worker.
@@ -1085,7 +1083,7 @@ impl AurawApp {
                 self.on_library_batch_load_finished(true, frame);
             }
             Err(error) => {
-                self.notice = Some(format!("Failed to decode or render RAW: {error}"));
+                self.ui.notice = Some(format!("Failed to decode or render RAW: {error}"));
                 log::error!("RAW load failed: {error}");
                 self.on_library_ai_mask_refresh_load_finished(false, frame);
                 #[cfg(target_os = "android")]
