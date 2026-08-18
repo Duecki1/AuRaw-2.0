@@ -58,16 +58,7 @@ impl Sidebar {
     ) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
-        if app.masks.stack.masks.is_empty() {
-            app.masks.stack.selected_mask = None;
-            app.masks.stack.selected_component = None;
-        } else if app.masks.stack
-            .selected_mask
-            .is_none_or(|index| index >= app.masks.stack.masks.len())
-        {
-            app.masks.stack.selected_mask = Some(app.masks.stack.masks.len().saturating_sub(1));
-            app.masks.stack.selected_component = Some(0);
-        }
+        app.masks.stack.ensure_selection();
 
         Self::refresh_mask_thumbnails(ui, app);
 
@@ -410,10 +401,10 @@ impl Sidebar {
                 .request_repaint_after(std::time::Duration::from_millis(50));
         }
         if let Some(index) = hover_open_mask {
-            app.masks.stack.selected_mask = Some(index);
-            app.masks.stack.selected_component = Some(0);
-            app.masks.thumbnail_component_mask = None;
-            ui.ctx().request_repaint();
+            if app.masks.stack.select_mask(index) {
+                app.masks.thumbnail_component_mask = None;
+                ui.ctx().request_repaint();
+            }
         }
 
         let component_drop = if pointer_released {
@@ -445,7 +436,9 @@ impl Sidebar {
         }
 
         if let Some((drag, (target_mask, target_insert))) = component_drop {
-            if app.masks.stack
+            if app
+                .masks
+                .stack
                 .move_submask_component(
                     drag.source_mask,
                     drag.source_component,
@@ -455,29 +448,15 @@ impl Sidebar {
                 .is_some()
             {
                 app.mark_all_mask_layers_dirty();
-                app.masks.thumbnail_component_mask = None;
-                if let Some(kind) = app.masks.stack
-                    .selected_component()
-                    .map(|component| component.kind)
-                {
-                    app.select_mask_tool(kind);
-                }
+                app.sync_selected_mask_tool();
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some(index) = remove_mask {
-            app.masks.stack.selected_mask = Some(index);
-            app.masks.stack.remove_selected_mask();
-            app.mark_all_mask_layers_dirty();
-            app.masks.thumbnail_component_mask = None;
-            if let Some(kind) = app.masks.stack
-                .selected_component()
-                .map(|component| component.kind)
-            {
-                app.select_mask_tool(kind);
-            } else {
-                app.masks.active_tool = None;
+            if app.masks.stack.delete_mask(index) {
+                app.mark_all_mask_layers_dirty();
+                app.sync_selected_mask_tool();
+                Self::refresh_mask_thumbnails(ui, app);
             }
-            Self::refresh_mask_thumbnails(ui, app);
         } else if let Some((index, invert)) = duplicate_mask {
             if Self::duplicate_mask_group(app, index, invert) {
                 Self::refresh_mask_thumbnails(ui, app);
@@ -487,17 +466,9 @@ impl Sidebar {
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some((mask_index, component_index)) = remove_component {
-            app.masks.stack.selected_mask = Some(mask_index);
-            app.masks.stack.selected_component = Some(component_index);
-            if app.masks.stack.remove_selected_component().is_some() {
+            if app.masks.stack.delete_component(mask_index, component_index) {
                 app.mark_mask_geometry_dirty(mask_index);
-                app.masks.thumbnail_component_mask = None;
-                if let Some(kind) = app.masks.stack
-                    .selected_component()
-                    .map(|component| component.kind)
-                {
-                    app.select_mask_tool(kind);
-                }
+                app.sync_selected_mask_tool();
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some((mask_index, component_index, invert)) = duplicate_component {
@@ -527,26 +498,18 @@ impl Sidebar {
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some(index) = select_mask {
-            app.masks.stack.selected_mask = Some(index);
-            app.masks.stack.selected_component = Some(0);
-            app.masks.thumbnail_component_mask = None;
-            if let Some(kind) = app.masks.stack
-                .selected_component()
-                .map(|component| component.kind)
-            {
-                app.select_mask_tool(kind);
+            if app.masks.stack.select_mask(index) {
+                app.sync_selected_mask_tool();
+                app.blink_selected_mask();
+                Self::refresh_mask_thumbnails(ui, app);
             }
-            app.blink_selected_mask();
-            Self::refresh_mask_thumbnails(ui, app);
         } else if let Some(component_index) = select_component {
-            app.masks.stack.selected_component = Some(component_index);
-            if let Some(kind) = app.masks.stack
-                .selected_component()
-                .map(|component| component.kind)
-            {
-                app.select_mask_tool(kind);
+            if let Some(mask_index) = app.masks.stack.selected_mask {
+                if app.masks.stack.select_component(mask_index, component_index) {
+                    app.sync_selected_mask_tool();
+                    app.blink_selected_component();
+                }
             }
-            app.blink_selected_component();
         }
 
         Self::show_mask_rename_dialog(ui.ctx(), app);

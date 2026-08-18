@@ -125,6 +125,29 @@ impl Sidebar {
         }
     }
 
+    fn mask_grow_slider(ui: &mut Ui, grow: &mut f32) -> bool {
+        adjustment_slider(
+            ui,
+            "Grow",
+            grow,
+            -1.0..=1.0,
+            2,
+            0.01,
+            Some("Positive values expand the mask; negative values shrink it inward."),
+        )
+    }
+
+    fn mask_feather_slider(
+        ui: &mut Ui,
+        label: &str,
+        feather: &mut f32,
+        range: std::ops::RangeInclusive<f32>,
+        help: &str,
+        reset: f32,
+    ) -> bool {
+        adjustment_slider_with_reset(ui, label, feather, range, 2, 0.01, Some(help), reset)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn show_vertical_mask_properties(
         ui: &mut Ui,
@@ -143,15 +166,19 @@ impl Sidebar {
             refinement_flow,
             clear_refinement,
         ) = refinement_controls;
+        let mut opacity = mask.opacity;
         let mut geometry_changed = adjustment_slider(
             ui,
             "Mask opacity",
-            &mut mask.opacity,
+            &mut opacity,
             0.0..=1.0,
             2,
             0.01,
             Some("Controls the strength of the entire mask before its selected type is applied."),
         );
+        if geometry_changed {
+            mask.set_opacity(opacity);
+        }
 
         let Some(component) = mask.components.get_mut(component_index) else {
             return geometry_changed;
@@ -162,21 +189,25 @@ impl Sidebar {
             ui.horizontal_wrapped(|ui| {
                 ui.strong(component.name.as_str());
                 ui.weak(component.kind.label());
-                geometry_changed |= ui.checkbox(&mut component.invert, "Invert").changed();
+                let mut inverted = component.invert;
+                if ui.checkbox(&mut inverted, "Invert").changed() {
+                    component.common.toggle_invert();
+                    geometry_changed = true;
+                }
                 if component_index > 0 {
-                    let before = component.combine;
+                    let mut combine = component.combine;
                     egui::ComboBox::from_id_salt("vertical-mask-combine")
-                        .selected_text(component.combine.label())
+                        .selected_text(combine.label())
                         .show_ui(ui, |ui| {
                             for mode in [
                                 MaskCombineMode::Add,
                                 MaskCombineMode::Subtract,
                                 MaskCombineMode::Intersect,
                             ] {
-                                ui.selectable_value(&mut component.combine, mode, mode.label());
+                                ui.selectable_value(&mut combine, mode, mode.label());
                             }
                         });
-                    geometry_changed |= before != component.combine;
+                    geometry_changed |= component.set_combine(combine);
                 }
             });
 
@@ -226,14 +257,12 @@ impl Sidebar {
                         0.0025,
                         Some("Brush stays the same size on screen; zoom in for finer image-space detail."),
                     );
-                    geometry_changed |= adjustment_slider_with_reset(
+                    geometry_changed |= Self::mask_feather_slider(
                         ui,
                         "Feather",
                         feather,
                         0.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Softness from the brush core to its edge."),
+                        "Softness from the brush core to its edge.",
                         0.55,
                     );
                     ui.horizontal(|ui| {
@@ -281,26 +310,22 @@ impl Sidebar {
                     ui.small(format!("{} brush dabs", dabs.len()));
                 }
                 MaskGeometry::Radial { feather, .. } => {
-                    geometry_changed |= adjustment_slider_with_reset(
+                    geometry_changed |= Self::mask_feather_slider(
                         ui,
                         "Feather",
                         feather,
                         0.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Soft transition from the ellipse interior to its edge."),
+                        "Soft transition from the ellipse interior to its edge.",
                         0.55,
                     );
                 }
                 MaskGeometry::Linear { feather, .. } => {
-                    geometry_changed |= adjustment_slider_with_reset(
+                    geometry_changed |= Self::mask_feather_slider(
                         ui,
                         "Feather",
                         feather,
                         0.02..=1.0,
-                        2,
-                        0.01,
-                        Some("Controls the width of the gradient transition."),
+                        "Controls the width of the gradient transition.",
                         1.0,
                     );
                 }
@@ -362,14 +387,12 @@ impl Sidebar {
                                     "Brush stays the same size on screen; zoom in for finer image-space detail.",
                                 ),
                             );
-                            adjustment_slider_with_reset(
+                            Self::mask_feather_slider(
                                 ui,
                                 "Feather",
                                 refinement_feather,
                                 0.0..=1.0,
-                                2,
-                                0.01,
-                                Some("Softness of newly painted refinement strokes."),
+                                "Softness of newly painted refinement strokes.",
                                 0.55,
                             );
                             adjustment_slider_with_reset(
@@ -418,23 +441,13 @@ impl Sidebar {
                             ui.spinner();
                         }
                     });
-                    geometry_changed |= adjustment_slider(
-                        ui,
-                        "Grow",
-                        grow,
-                        -1.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Positive values expand the mask; negative values shrink it inward."),
-                    );
-                    geometry_changed |= adjustment_slider_with_reset(
+                    geometry_changed |= Self::mask_grow_slider(ui, grow);
+                    geometry_changed |= Self::mask_feather_slider(
                         ui,
                         "Feather",
                         feather,
                         0.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Softens the BiRefNet subject boundary."),
+                        "Softens the BiRefNet subject boundary.",
                         0.0,
                     );
                 }
@@ -463,23 +476,13 @@ impl Sidebar {
                         Some("Controls the hard-edged selection brush. Its on-screen size stays constant while zooming for finer detail."),
                     );
                     ui.add_space(4.0);
-                    geometry_changed |= adjustment_slider(
-                        ui,
-                        "Grow",
-                        grow,
-                        -1.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Positive values expand the mask; negative values shrink it inward."),
-                    );
-                    geometry_changed |= adjustment_slider_with_reset(
+                    geometry_changed |= Self::mask_grow_slider(ui, grow);
+                    geometry_changed |= Self::mask_feather_slider(
                         ui,
                         "Mask feather",
                         feather,
                         0.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Softens the final object mask after SAM selection."),
+                        "Softens the final object mask after SAM selection.",
                         0.0,
                     );
                     let refine_changed = adjustment_slider(
@@ -546,23 +549,13 @@ impl Sidebar {
                         0.01,
                         Some("Highest included scene luminance."),
                     );
-                    geometry_changed |= adjustment_slider(
-                        ui,
-                        "Grow",
-                        grow,
-                        -1.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Positive values expand the mask; negative values shrink it inward."),
-                    );
-                    geometry_changed |= adjustment_slider_with_reset(
+                    geometry_changed |= Self::mask_grow_slider(ui, grow);
+                    geometry_changed |= Self::mask_feather_slider(
                         ui,
                         "Range feather",
                         feather,
                         0.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Softens both luminance-range boundaries."),
+                        "Softens both luminance-range boundaries.",
                         0.15,
                     );
                 }
@@ -587,23 +580,13 @@ impl Sidebar {
                         0.005,
                         Some("Expands the selected color region in perceptual OkLab space."),
                     );
-                    geometry_changed |= adjustment_slider(
-                        ui,
-                        "Grow",
-                        grow,
-                        -1.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Positive values expand the mask; negative values shrink it inward."),
-                    );
-                    geometry_changed |= adjustment_slider_with_reset(
+                    geometry_changed |= Self::mask_grow_slider(ui, grow);
+                    geometry_changed |= Self::mask_feather_slider(
                         ui,
                         "Color feather",
                         feather,
                         0.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Softens the color-distance cutoff."),
+                        "Softens the color-distance cutoff.",
                         0.12,
                     );
                 }
