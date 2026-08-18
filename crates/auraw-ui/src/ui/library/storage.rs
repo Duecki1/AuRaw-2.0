@@ -23,104 +23,25 @@ pub(super) fn android_targets(assets: &[LibraryAsset]) -> Vec<(String, String)> 
 }
 
 
-pub(super) fn start_library_ai_mask_refresh(
+pub(super) fn reset_asset_adjustments(
     app: &mut AurawApp,
-    assets: &[LibraryAsset],
-    frame: &eframe::Frame,
-) {
-    #[cfg(not(target_os = "android"))]
-    app.start_library_ai_mask_refresh_paths(desktop_paths(assets), frame);
-    #[cfg(target_os = "android")]
-    app.start_library_ai_mask_refresh_android(android_targets(assets), frame);
-}
-
-pub(super) fn start_library_export(
-    app: &mut AurawApp,
-    assets: &[LibraryAsset],
-    settings: ExportSettings,
-    format: ExportFormat,
-    _frame: &eframe::Frame,
-) -> bool {
+    asset: &LibraryAsset,
+) -> Result<bool, String> {
     #[cfg(not(target_os = "android"))]
     {
-        let Some(jobs) = library_export_jobs(&desktop_paths(assets), format) else {
-            return false;
-        };
-        app.start_library_exports(jobs, settings, format, _frame);
-        true
+        let path = asset
+            .desktop_path()
+            .ok_or_else(|| "Library asset is not available from desktop storage".to_owned())?;
+        crate::sidecar::reset_desktop_adjustments(path)
     }
     #[cfg(target_os = "android")]
     {
-        let targets = android_targets(assets)
-            .into_iter()
-            .map(|(uri, display_name)| crate::app::AndroidLibraryExportTarget {
-                uri,
-                display_name,
-            })
-            .collect::<Vec<_>>();
-        app.start_android_library_exports(targets, settings, format);
-        true
+        let uri = asset
+            .android_uri()
+            .ok_or_else(|| "Library asset is not available from Android storage".to_owned())?;
+        app.reset_android_library_adjustments(uri, &asset.display_name)?;
+        Ok(true)
     }
-}
-
-pub(super) fn copy_adjustments(app: &mut AurawApp, asset: &LibraryAsset) -> Result<(), String> {
-    app.copy_library_adjustments(asset)
-}
-
-pub(super) fn adjustment_edit_count(
-    app: &mut AurawApp,
-    assets: &[LibraryAsset],
-) -> (usize, Vec<String>) {
-    app.library_adjustment_edit_count(assets)
-}
-
-/// Apply the shared adjustment clipboard and return (completed, needs AI refresh, failures).
-pub(super) fn paste_adjustments(
-    app: &mut AurawApp,
-    assets: &[LibraryAsset],
-    mode: crate::sidecar::AdjustmentPasteMode,
-    frame: &eframe::Frame,
-) -> (usize, Vec<LibraryAsset>, Vec<String>) {
-    app.paste_library_adjustments(assets, mode, frame)
-}
-
-pub(super) fn reset_adjustments(
-    app: &mut AurawApp,
-    assets: &[LibraryAsset],
-) -> (usize, Vec<String>) {
-    let mut changed = 0usize;
-    let mut failures = Vec::new();
-    #[cfg(not(target_os = "android"))]
-    for asset in assets {
-        let Some(path) = asset.desktop_path() else { continue };
-        match crate::sidecar::reset_desktop_adjustments(path) {
-            Ok(reset) => {
-                app.library.invalidate_adjustment_thumbnail_for_path(path);
-                changed += usize::from(reset);
-            }
-            Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
-        }
-    }
-    #[cfg(target_os = "android")]
-    for asset in assets {
-        let Some(uri) = asset.android_uri() else { continue };
-        match app.reset_android_library_adjustments(uri, &asset.display_name) {
-            Ok(()) => {
-                app.library.invalidate_android_adjustment_thumbnail(uri);
-                changed += 1;
-            }
-            Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
-        }
-    }
-    (changed, failures)
-}
-
-pub(super) fn duplicate_assets(
-    app: &mut AurawApp,
-    assets: &[LibraryAsset],
-    context: &egui::Context,
-) {
-    duplicate_materialized_assets(app, assets, context);
 }
 
 pub(super) fn rename_asset(
@@ -160,47 +81,32 @@ pub(super) fn rename_asset(
     }
 }
 
-pub(super) fn delete_assets(
+pub(super) fn delete_library_asset(
     app: &mut AurawApp,
-    assets: &[LibraryAsset],
-) -> (usize, Vec<String>) {
-    let total = assets.len();
-    let mut deleted = 0usize;
-    let mut failures = Vec::new();
+    asset: &LibraryAsset,
+) -> Result<(), String> {
     #[cfg(not(target_os = "android"))]
     {
-        let current = app.current_path.clone();
-        if let Some(path) = current.as_deref() {
-            if assets.iter().any(|asset| asset.desktop_path() == Some(path)) {
-                app.detach_current_file_for_library_action(path);
-            }
+        let path = asset
+            .desktop_path()
+            .ok_or_else(|| "Library asset is not available from desktop storage".to_owned())?;
+        let was_current = app.current_path.as_deref() == Some(path);
+        if was_current {
+            app.detach_current_file_for_library_action(path);
         }
-        for asset in assets {
-            let Some(path) = asset.desktop_path() else { continue };
-            match fs::remove_file(path) {
-                Ok(()) => {
-                    deleted += 1;
-                    if current.as_deref() == Some(path) {
-                        app.current_path = None;
-                    }
-                    if let Err(error) = crate::sidecar::remove_desktop_edits(path) {
-                        failures.push(format!("{} sidecar: {error}", asset.display_name));
-                    }
-                }
-                Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
-            }
+        remove_local_raw_bundle(path)?;
+        if was_current {
+            app.current_path = None;
         }
+        Ok(())
     }
     #[cfg(target_os = "android")]
-    for asset in assets {
-        let Some(uri) = asset.android_uri() else { continue };
-        match app.delete_android_library_item(uri, &asset.display_name) {
-            Ok(()) => deleted += 1,
-            Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
-        }
+    {
+        let uri = asset
+            .android_uri()
+            .ok_or_else(|| "Library asset is not available from Android storage".to_owned())?;
+        app.delete_android_library_item(uri, &asset.display_name)
     }
-    debug_assert!(deleted <= total);
-    (deleted, failures)
 }
 
 #[derive(Debug)]
@@ -264,11 +170,11 @@ pub(super) fn materialize_library_asset(
 
 pub(super) fn asset_is_at_destination(
     asset: &LibraryAsset,
-    destination: &ImagePasteDestination,
+    destination: &LibraryTransferDestination,
 ) -> bool {
     #[cfg(not(target_os = "android"))]
     {
-        let ImagePasteDestination::LocalFolder(folder) = destination;
+        let LibraryTransferDestination::LocalFolder(folder) = destination;
         asset
             .desktop_path()
             .and_then(Path::parent)
@@ -276,10 +182,29 @@ pub(super) fn asset_is_at_destination(
     }
     #[cfg(target_os = "android")]
     {
-        let ImagePasteDestination::LocalLibrary { path } = destination;
+        let LibraryTransferDestination::LocalLibrary { path } = destination;
         Path::new(&asset.display_path)
             .parent()
             .is_some_and(|parent| parent == Path::new(path))
+    }
+}
+
+pub(super) fn duplicate_destination(asset: &LibraryAsset) -> Result<LibraryTransferDestination, String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let parent = asset
+            .desktop_path()
+            .and_then(Path::parent)
+            .ok_or_else(|| "Library asset has no destination folder".to_owned())?;
+        Ok(LibraryTransferDestination::LocalFolder(parent.to_owned()))
+    }
+    #[cfg(target_os = "android")]
+    {
+        let path = Path::new(&asset.display_path)
+            .parent()
+            .map(|parent| parent.display().to_string())
+            .unwrap_or_default();
+        Ok(LibraryTransferDestination::LocalLibrary { path })
     }
 }
 
@@ -293,12 +218,12 @@ pub(super) enum ImportedLibraryAsset {
 
 pub(super) fn import_materialized_library_asset(
     materialized: &MaterializedLibraryAsset,
-    destination: &ImagePasteDestination,
+    destination: &LibraryTransferDestination,
     #[cfg(target_os = "android")] app: &auraw_ffi::AndroidApp,
 ) -> Result<ImportedLibraryAsset, String> {
     #[cfg(not(target_os = "android"))]
     {
-        let ImagePasteDestination::LocalFolder(folder) = destination;
+        let LibraryTransferDestination::LocalFolder(folder) = destination;
         let destination = copy_raw_bundle_to_folder(
             &materialized.raw_path,
             std::ffi::OsStr::new(&materialized.display_name),
@@ -308,7 +233,7 @@ pub(super) fn import_materialized_library_asset(
     }
     #[cfg(target_os = "android")]
     {
-        let ImagePasteDestination::LocalLibrary { .. } = destination;
+        let LibraryTransferDestination::LocalLibrary { .. } = destination;
         crate::android::import_local_library_document(
             app,
             &materialized.raw_path,
@@ -380,56 +305,5 @@ pub(super) fn rollback_imported_library_asset(
                 log::warn!("could not roll back imported Android Library bundle: {error}");
             }
         }
-    }
-}
-
-pub(super) fn duplicate_materialized_assets(
-    app: &mut AurawApp,
-    assets: &[LibraryAsset],
-    context: &egui::Context,
-) {
-    #[cfg(not(target_os = "android"))]
-    {
-        // Desktop can preserve its asynchronous filesystem implementation; it
-        // already copies RAW+sidecar as a single storage operation.
-        app.library.duplicate_raws_with_sidecars(desktop_paths(assets), context);
-    }
-    #[cfg(target_os = "android")]
-    {
-        let total = assets.len();
-        let mut completed = 0usize;
-        let mut failures = Vec::new();
-        let android_app = app.library.android_app.clone();
-        for asset in assets {
-            let materialized = match materialize_library_asset(asset, &android_app) {
-                Ok(materialized) => materialized,
-                Err(error) => {
-                    failures.push(format!("{}: {error}", asset.display_name));
-                    continue;
-                }
-            };
-            let result = import_materialized_library_asset(
-                &materialized,
-                &ImagePasteDestination::LocalLibrary { path: String::new() },
-                &android_app,
-            );
-            let result = result.and_then(|imported| {
-                preserve_imported_thumbnail(asset, &imported, &android_app).map_err(|error| {
-                    rollback_imported_library_asset(imported, &android_app);
-                    error
-                })
-            });
-            materialized.cleanup();
-            match result {
-                Ok(()) => completed += 1,
-                Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
-            }
-        }
-        app.library.status = if failures.is_empty() {
-            format!("Duplicated {completed} selected {}", if completed == 1 { "image" } else { "images" })
-        } else {
-            format!("Duplicated {completed} of {total} selected images. {}", failures.join(" · "))
-        };
-        app.library.refresh(context);
     }
 }

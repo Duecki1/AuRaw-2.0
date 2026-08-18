@@ -2,7 +2,7 @@ use super::super::*;
 
 impl LibraryState {
     pub(crate) fn android_folder(&self) -> &str {
-        &self.android_folder
+        &self.platform.folder
     }
 
     pub(crate) fn select_android_folder(
@@ -10,18 +10,18 @@ impl LibraryState {
         folder: String,
         context: &egui::Context,
     ) -> bool {
-        if self.android_folder == folder {
+        if self.platform.folder == folder {
             return false;
         }
-        if let Err(error) = crate::android::select_library_folder(&self.android_app, &folder) {
+        if let Err(error) = crate::android::select_library_folder(&self.platform.app, &folder) {
             self.status = error;
             return false;
         }
-        self.android_folder = folder;
-        self.android_expanded_folders
-            .extend(android_folder_ancestors(&self.android_folder));
-        let location =
-            android_library_location_label(&self.android_root_location, &self.android_folder);
+        self.platform.folder = folder;
+        let selected_folder = self.platform.folder.clone();
+        self.platform.expanded_folders
+            .extend(android_folder_ancestors(&selected_folder));
+        let location = android_library_location_label(&self.platform.root_location, &selected_folder);
         self.location = Some(location);
         self.entries.clear();
         self.entry_indices.clear();

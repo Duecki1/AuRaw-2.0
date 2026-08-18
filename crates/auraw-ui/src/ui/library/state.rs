@@ -47,8 +47,7 @@ impl LibraryState {
             selected_assets: HashSet::new(),
             selection_mode: false,
             image_clipboard: None,
-            image_paste_receiver: None,
-            file_action_receiver: None,
+            asset_transfer_receiver: None,
             raw_import_receiver: None,
             folder_operation_receiver: None,
             folder_clipboard: None,
@@ -93,11 +92,14 @@ impl LibraryState {
         let mut state = Self {
             location: Some(location),
             folder_sidebar_open: false,
-            android_app,
-            android_root_location: root_location,
-            android_folder: selected_folder.clone(),
-            android_folders: Vec::new(),
-            android_expanded_folders: android_folder_ancestors(&selected_folder),
+            platform: PlatformLibraryState {
+                app: android_app,
+                root_location,
+                folder: selected_folder.clone(),
+                folders: Vec::new(),
+                expanded_folders: android_folder_ancestors(&selected_folder),
+                folder_name_dialog: None,
+            },
             entries: Vec::new(),
             entry_indices: HashMap::new(),
             event_receiver: None,
@@ -115,9 +117,8 @@ impl LibraryState {
             selected_assets: HashSet::new(),
             selection_mode: false,
             image_clipboard: None,
-            image_paste_receiver: None,
+            asset_transfer_receiver: None,
             raw_name_dialog: None,
-            android_folder_name_dialog: None,
             export_dialog: None,
             adjustment_paste_dialog: None,
             ai_mask_refresh_prompt: None,
@@ -134,8 +135,22 @@ impl LibraryState {
         !self.selected_assets.is_empty()
     }
 
-    pub(crate) fn image_paste_in_progress(&self) -> bool {
-        self.image_paste_receiver.is_some()
+    pub(crate) fn asset_transfer_in_progress(&self) -> bool {
+        self.asset_transfer_receiver.is_some()
+    }
+
+    pub(crate) fn local_mutation_in_progress(&self) -> bool {
+        if self.asset_transfer_in_progress() {
+            return true;
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.raw_import_receiver.is_some() || self.folder_operation_receiver.is_some()
+        }
+        #[cfg(target_os = "android")]
+        {
+            false
+        }
     }
 
     pub(crate) fn selection_mode(&self) -> bool {
@@ -343,7 +358,7 @@ impl LibraryState {
 
         #[cfg(target_os = "android")]
         let worker = {
-            let android_app = self.android_app.clone();
+            let android_app = self.platform.app.clone();
             self.status = "Refreshing AuRaw library…".to_owned();
             std::thread::Builder::new()
                 .name("auraw-library".to_owned())
@@ -436,12 +451,12 @@ impl LibraryState {
 
     pub(crate) fn poll(&mut self, context: &egui::Context) {
         let pasted = self
-            .image_paste_receiver
+            .asset_transfer_receiver
             .as_ref()
             .map(mpsc::Receiver::try_recv);
         match pasted {
             Some(Ok(completion)) => {
-                self.image_paste_receiver = None;
+                self.asset_transfer_receiver = None;
                 if completion.clear_clipboard {
                     self.image_clipboard = None;
                 } else if let Some(remaining) = completion.remaining_clipboard {
@@ -454,8 +469,8 @@ impl LibraryState {
                 self.refresh(context);
             }
             Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                self.image_paste_receiver = None;
-                self.status = "The image paste stopped unexpectedly.".to_owned();
+                self.asset_transfer_receiver = None;
+                self.status = "The Library asset transfer stopped unexpectedly.".to_owned();
             }
             Some(Err(mpsc::TryRecvError::Empty)) | None => {}
         }
@@ -463,32 +478,6 @@ impl LibraryState {
         #[cfg(not(target_os = "android"))]
         {
             self.poll_dropped_raw_import(context);
-
-            let completed = self
-                .file_action_receiver
-                .as_ref()
-                .map(mpsc::Receiver::try_recv);
-            match completed {
-                Some(Ok(Ok(destinations))) => {
-                    self.file_action_receiver = None;
-                    self.refresh(context);
-                    self.status = if destinations.len() == 1 {
-                        format!("Duplicated as {}", destinations[0].display())
-                    } else {
-                        format!("Duplicated {} selected RAW files", destinations.len())
-                    };
-                }
-                Some(Ok(Err(error))) => {
-                    self.file_action_receiver = None;
-                    self.refresh(context);
-                    self.status = error;
-                }
-                Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                    self.file_action_receiver = None;
-                    self.status = "The library file operation stopped unexpectedly.".to_owned();
-                }
-                Some(Err(mpsc::TryRecvError::Empty)) | None => {}
-            }
 
             let folder_completed = self
                 .folder_operation_receiver
@@ -550,16 +539,19 @@ impl LibraryState {
                 ScanEvent::AndroidFolders { generation, folders }
                     if generation == self.generation.load(Ordering::Acquire) =>
                 {
-                    self.android_folders = folders;
-                    self.android_expanded_folders.retain(|path| {
-                        path.is_empty()
-                            || self
-                                .android_folders
-                                .iter()
-                                .any(|folder| &folder.path == path)
+                    self.platform.folders = folders;
+                    let folder_paths = self
+                        .platform
+                        .folders
+                        .iter()
+                        .map(|folder| folder.path.as_str())
+                        .collect::<HashSet<_>>();
+                    self.platform.expanded_folders.retain(|path| {
+                        path.is_empty() || folder_paths.contains(path.as_str())
                     });
-                    self.android_expanded_folders
-                        .extend(android_folder_ancestors(&self.android_folder));
+                    let selected_folder = self.platform.folder.clone();
+                    self.platform.expanded_folders
+                        .extend(android_folder_ancestors(&selected_folder));
                 }
                 ScanEvent::Catalog {
                     generation,

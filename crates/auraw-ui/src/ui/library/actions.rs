@@ -154,13 +154,13 @@ pub(crate) fn apply_library_action(
             }
         }
         LibraryAction::CopyAdjustments(asset) => {
-            app.library.status = match copy_adjustments(app, &asset) {
+            app.library.status = match app.copy_library_adjustments(&asset) {
                 Ok(()) => format!("Copied adjustments from {}", asset.display_name),
                 Err(error) => format!("Could not copy adjustments: {error}"),
             };
         }
         LibraryAction::PasteAdjustments(assets) => {
-            let (edited_count, failures) = adjustment_edit_count(app, &assets);
+            let (edited_count, failures) = app.library_adjustment_edit_count(&assets);
             if !failures.is_empty() {
                 app.library.status = format!(
                     "Could not inspect selected adjustments. {}",
@@ -191,7 +191,7 @@ pub(crate) fn apply_library_action(
             app.library.clear_selection();
             #[cfg(target_os = "android")]
             crate::android::set_back_navigation_active(false);
-            duplicate_assets(app, &assets, ui.ctx());
+            start_duplicate_assets(app, &assets, ui.ctx());
         }
         LibraryAction::Rename(asset) => {
             app.library.raw_name_dialog = Some(LibraryRawNameDialog {
@@ -215,7 +215,17 @@ pub(crate) fn apply_library_action(
             }
 
             let total = assets.len();
-            let (changed, failures) = reset_adjustments(app, &assets);
+            let mut changed = 0usize;
+            let mut failures = Vec::new();
+            for asset in &assets {
+                match reset_asset_adjustments(app, asset) {
+                    Ok(reset) => {
+                        changed += usize::from(reset);
+                        app.library.invalidate_adjustment_thumbnail_for_asset(asset);
+                    }
+                    Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
+                }
+            }
             app.library.clear_selection();
             #[cfg(target_os = "android")]
             crate::android::set_back_navigation_active(false);
@@ -239,7 +249,14 @@ pub(crate) fn apply_library_action(
         }
         LibraryAction::Delete(assets) => {
             let total = assets.len();
-            let (deleted, failures) = delete_assets(app, &assets);
+            let mut deleted = 0usize;
+            let mut failures = Vec::new();
+            for asset in &assets {
+                match delete_library_asset(app, asset) {
+                    Ok(()) => deleted += 1,
+                    Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
+                }
+            }
             app.library.clear_selection();
             #[cfg(target_os = "android")]
             crate::android::set_back_navigation_active(false);
@@ -666,7 +683,7 @@ pub(crate) fn show_library_action_overlays(
 
     if confirm_export {
         if let Some(dialog) = app.library.export_dialog.clone() {
-            if start_library_export(
+            if start_local_library_export(
                 app,
                 &dialog.assets,
                 dialog.settings,

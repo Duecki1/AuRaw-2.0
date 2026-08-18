@@ -421,7 +421,7 @@ fn resetting_adjustments_allows_an_unedited_thumbnail_to_replace_the_developed_o
     library.entries.push(entry);
     library.rebuild_entry_indices();
 
-    library.invalidate_adjustment_thumbnail_for_path(&path);
+    library.invalidate_adjustment_thumbnail_for_asset(&test_asset(path.clone()));
 
     let entry = &library.entries[0];
     assert!(entry.texture.is_none());
@@ -716,27 +716,6 @@ fn dropping_a_raw_already_in_the_library_is_a_noop() {
     fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn duplicate_raw_copies_matching_sidecar_and_uses_unique_names() {
-    let root = unique_temp_dir("library-duplicate-test");
-    let raw = root.join("photo.CR3");
-    fs::write(&raw, b"raw-bytes").unwrap();
-    fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"sidecar-bytes").unwrap();
-    install_test_developed_thumbnail(&raw);
-
-    let first = duplicate_raw_and_sidecar(&raw).unwrap();
-    let second = duplicate_raw_and_sidecar(&raw).unwrap();
-    assert_eq!(first.file_name().unwrap(), "photo copy.CR3");
-    assert_eq!(second.file_name().unwrap(), "photo copy 2.CR3");
-    assert_eq!(fs::read(&first).unwrap(), b"raw-bytes");
-    assert_eq!(fs::read(crate::sidecar::sidecar_path_for_raw(&first)).unwrap(), b"sidecar-bytes");
-    assert_eq!(fs::read(crate::sidecar::sidecar_path_for_raw(&second)).unwrap(), b"sidecar-bytes");
-    assert_test_developed_thumbnail(&first);
-    assert_test_developed_thumbnail(&second);
-
-    fs::remove_dir_all(root).unwrap();
-}
-
 #[cfg(not(target_os = "android"))]
 #[test]
 fn shared_clipboard_flow_copies_and_moves_raw_sidecar_bundles() {
@@ -753,7 +732,7 @@ fn shared_clipboard_flow_copies_and_moves_raw_sidecar_bundles() {
     let asset = LibraryAsset::from_desktop_path(raw.clone(), 9, 1, None);
     let copy = run_image_paste(
         ImageClipboard { mode: ImageClipboardMode::Copy, assets: vec![asset.clone()] },
-        ImagePasteDestination::LocalFolder(destination.clone()),
+        LibraryTransferDestination::LocalFolder(destination.clone()),
     );
     assert!(copy.result.is_ok());
     assert!(!copy.clear_clipboard);
@@ -765,7 +744,7 @@ fn shared_clipboard_flow_copies_and_moves_raw_sidecar_bundles() {
 
     let cut = run_image_paste(
         ImageClipboard { mode: ImageClipboardMode::Cut, assets: vec![asset] },
-        ImagePasteDestination::LocalFolder(destination.clone()),
+        LibraryTransferDestination::LocalFolder(destination.clone()),
     );
     assert!(cut.result.is_ok());
     assert!(cut.clear_clipboard);
@@ -782,6 +761,30 @@ fn shared_clipboard_flow_copies_and_moves_raw_sidecar_bundles() {
 
 #[cfg(not(target_os = "android"))]
 #[test]
+fn duplicate_uses_shared_materialize_import_flow() {
+    let root = unique_temp_dir("library-shared-duplicate-test");
+    let raw = root.join("photo.CR3");
+    fs::write(&raw, b"raw-bytes").unwrap();
+    fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"sidecar-bytes").unwrap();
+    install_test_developed_thumbnail(&raw);
+    let asset = LibraryAsset::from_desktop_path(raw.clone(), 9, 1, None);
+
+    let completion = run_duplicate_assets(vec![asset]);
+    assert!(completion.result.is_ok());
+    assert!(!completion.clear_clipboard);
+    let duplicate = root.join("photo (1).CR3");
+    assert_eq!(fs::read(&duplicate).unwrap(), b"raw-bytes");
+    assert_eq!(
+        fs::read(crate::sidecar::sidecar_path_for_raw(&duplicate)).unwrap(),
+        b"sidecar-bytes"
+    );
+    assert_test_developed_thumbnail(&duplicate);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(not(target_os = "android"))]
+#[test]
 fn shared_clipboard_same_folder_copy_duplicates_but_cut_is_noop() {
     let root = unique_temp_dir("library-same-folder-clipboard-test");
     let raw = root.join("photo.CR3");
@@ -795,7 +798,7 @@ fn shared_clipboard_same_folder_copy_duplicates_but_cut_is_noop() {
             mode: ImageClipboardMode::Copy,
             assets: vec![asset.clone()],
         },
-        ImagePasteDestination::LocalFolder(root.clone()),
+        LibraryTransferDestination::LocalFolder(root.clone()),
     );
     assert!(copy.result.is_ok());
     let duplicate = root.join("photo (1).CR3");
@@ -811,7 +814,7 @@ fn shared_clipboard_same_folder_copy_duplicates_but_cut_is_noop() {
             mode: ImageClipboardMode::Cut,
             assets: vec![asset],
         },
-        ImagePasteDestination::LocalFolder(root.clone()),
+        LibraryTransferDestination::LocalFolder(root.clone()),
     );
     assert!(cut.result.is_ok());
     assert!(cut.clear_clipboard);
@@ -841,7 +844,7 @@ fn partial_cut_keeps_only_failed_assets_on_clipboard() {
                 LibraryAsset::from_desktop_path(missing.clone(), 0, 1, None),
             ],
         },
-        ImagePasteDestination::LocalFolder(destination.clone()),
+        LibraryTransferDestination::LocalFolder(destination.clone()),
     );
 
     assert!(completion.result.is_err());

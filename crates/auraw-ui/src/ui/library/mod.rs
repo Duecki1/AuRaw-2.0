@@ -380,14 +380,14 @@ impl ImageClipboard {
 }
 
 #[derive(Clone, Debug)]
-enum ImagePasteDestination {
+enum LibraryTransferDestination {
     #[cfg(not(target_os = "android"))]
     LocalFolder(PathBuf),
     #[cfg(target_os = "android")]
     LocalLibrary { path: String },
 }
 
-struct ImagePasteCompletion {
+struct AssetTransferCompletion {
     result: Result<String, String>,
     clear_clipboard: bool,
     remaining_clipboard: Option<ImageClipboard>,
@@ -549,6 +549,16 @@ struct AndroidLibraryFolderNameDialog {
 }
 
 #[cfg(target_os = "android")]
+struct PlatformLibraryState {
+    app: auraw_ffi::AndroidApp,
+    root_location: String,
+    folder: String,
+    folders: Vec<crate::android::LibraryFolder>,
+    expanded_folders: HashSet<String>,
+    folder_name_dialog: Option<AndroidLibraryFolderNameDialog>,
+}
+
+#[cfg(target_os = "android")]
 enum AndroidLibraryFolderUiAction {
     Select(String),
     New(String),
@@ -592,15 +602,7 @@ pub(crate) struct LibraryState {
     expanded_folders: HashSet<PathBuf>,
     folder_sidebar_open: bool,
     #[cfg(target_os = "android")]
-    android_app: auraw_ffi::AndroidApp,
-    #[cfg(target_os = "android")]
-    android_root_location: String,
-    #[cfg(target_os = "android")]
-    android_folder: String,
-    #[cfg(target_os = "android")]
-    android_folders: Vec<crate::android::LibraryFolder>,
-    #[cfg(target_os = "android")]
-    android_expanded_folders: HashSet<String>,
+    platform: PlatformLibraryState,
     entries: Vec<LibraryEntry>,
     entry_indices: HashMap<LibraryAssetId, usize>,
     event_receiver: Option<mpsc::Receiver<ScanEvent>>,
@@ -618,9 +620,7 @@ pub(crate) struct LibraryState {
     selected_assets: HashSet<LibraryAssetId>,
     selection_mode: bool,
     image_clipboard: Option<ImageClipboard>,
-    image_paste_receiver: Option<mpsc::Receiver<ImagePasteCompletion>>,
-    #[cfg(not(target_os = "android"))]
-    file_action_receiver: Option<mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
+    asset_transfer_receiver: Option<mpsc::Receiver<AssetTransferCompletion>>,
     #[cfg(not(target_os = "android"))]
     raw_import_receiver: Option<mpsc::Receiver<RawImportResult>>,
     #[cfg(not(target_os = "android"))]
@@ -632,8 +632,6 @@ pub(crate) struct LibraryState {
     #[cfg(not(target_os = "android"))]
     folder_delete_confirmation: Option<PathBuf>,
     raw_name_dialog: Option<LibraryRawNameDialog>,
-    #[cfg(target_os = "android")]
-    android_folder_name_dialog: Option<AndroidLibraryFolderNameDialog>,
     export_dialog: Option<LibraryExportDialog>,
     adjustment_paste_dialog: Option<LibraryAdjustmentPasteDialog>,
     ai_mask_refresh_prompt: Option<LibraryAiMaskRefreshPrompt>,

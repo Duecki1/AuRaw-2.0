@@ -97,18 +97,8 @@ impl LibraryState {
         self.install_developed_thumbnail_at(index, thumbnail, context, revision);
     }
 
-    #[cfg(not(target_os = "android"))]
-    pub(crate) fn invalidate_adjustment_thumbnail_for_path(&mut self, raw_path: &Path) {
-        let asset_id = LibraryAssetId::Desktop(raw_path.to_owned());
-        if let Some(index) = self.entry_indices.get(&asset_id).copied() {
-            self.invalidate_adjustment_thumbnail_at(index);
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    pub(crate) fn invalidate_android_adjustment_thumbnail(&mut self, raw_uri: &str) {
-        let asset_id = LibraryAssetId::Android(raw_uri.to_owned());
-        if let Some(index) = self.entry_indices.get(&asset_id).copied() {
+    pub(crate) fn invalidate_adjustment_thumbnail_for_asset(&mut self, asset: &LibraryAsset) {
+        if let Some(index) = self.entry_indices.get(&asset.id).copied() {
             self.invalidate_adjustment_thumbnail_at(index);
         }
     }

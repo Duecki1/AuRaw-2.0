@@ -174,7 +174,7 @@ pub(super) fn show_ai_mask_refresh_progress(
 pub(super) fn show_android_library_folder_dialog(ui: &mut Ui, app: &mut AurawApp) {
     let mut close = false;
     let mut create = None;
-    if let Some(dialog) = app.library.android_folder_name_dialog.as_mut() {
+    if let Some(dialog) = app.library.platform.folder_name_dialog.as_mut() {
         crate::ui::responsive_popup(egui::Window::new("New folder"), ui.ctx(), 380.0)
             .id(egui::Id::new("android-library-folder-name-dialog"))
             .collapsible(false)
@@ -206,18 +206,18 @@ pub(super) fn show_android_library_folder_dialog(ui: &mut Ui, app: &mut AurawApp
             });
     }
     if close {
-        app.library.android_folder_name_dialog = None;
+        app.library.platform.folder_name_dialog = None;
     }
     if let Some((parent, name)) = create {
-        match crate::android::create_library_folder(&app.library.android_app, &parent, &name) {
+        match crate::android::create_library_folder(&app.library.platform.app, &parent, &name) {
             Ok(folder) => {
-                app.library.android_folder_name_dialog = None;
-                app.library.android_expanded_folders.insert(parent);
+                app.library.platform.folder_name_dialog = None;
+                app.library.platform.expanded_folders.insert(parent);
                 app.library.status = format!("Created folder {folder}");
                 app.library.refresh(ui.ctx());
             }
             Err(error) => {
-                if let Some(dialog) = app.library.android_folder_name_dialog.as_mut() {
+                if let Some(dialog) = app.library.platform.folder_name_dialog.as_mut() {
                     dialog.error = Some(error);
                 }
             }

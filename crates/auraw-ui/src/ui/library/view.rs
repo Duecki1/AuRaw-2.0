@@ -187,10 +187,10 @@ impl Library {
             #[cfg(not(target_os = "android"))]
             let location_label = _location.to_owned();
             #[cfg(target_os = "android")]
-            let location_label = if app.library.android_folder.is_empty() {
+            let location_label = if app.library.platform.folder.is_empty() {
                 "Local / Library".to_owned()
             } else {
-                format!("Local / {}", app.library.android_folder)
+                format!("Local / {}", app.library.platform.folder)
             };
             ui.add(
                 egui::Label::new(
@@ -423,7 +423,7 @@ fn show_local_image_paste_bar(ui: &mut Ui, app: &mut AurawApp) {
         return;
     };
     let label = clipboard.paste_label();
-    let in_progress = app.library.image_paste_in_progress();
+    let in_progress = app.library.asset_transfer_in_progress();
     let mut paste = false;
     let mut clear = false;
     ui.horizontal(|ui| {
@@ -451,14 +451,14 @@ fn show_local_image_paste_bar(ui: &mut Ui, app: &mut AurawApp) {
     if paste {
         #[cfg(not(target_os = "android"))]
         if let Some(folder) = app.library.folder.clone() {
-            start_image_clipboard_paste(app, ImagePasteDestination::LocalFolder(folder), ui.ctx());
+            start_image_clipboard_paste(app, LibraryTransferDestination::LocalFolder(folder), ui.ctx());
         }
         #[cfg(target_os = "android")]
         {
             let path = app.library.location.clone().unwrap_or_default();
             start_image_clipboard_paste(
                 app,
-                ImagePasteDestination::LocalLibrary { path },
+                LibraryTransferDestination::LocalLibrary { path },
                 ui.ctx(),
             );
         }

@@ -8,7 +8,7 @@ pub(super) fn apply_library_adjustment_paste(
     frame: &eframe::Frame,
 ) {
     let total = assets.len();
-    let (completed, ai_refresh, failures) = paste_adjustments(app, &assets, mode, frame);
+    let (completed, ai_refresh, failures) = app.paste_library_adjustments(&assets, mode, frame);
     app.library.clear_selection();
     #[cfg(target_os = "android")]
     crate::android::set_back_navigation_active(false);
@@ -33,5 +33,5 @@ pub(super) fn start_library_ai_mask_refresh_for_assets(
     assets: Vec<LibraryAsset>,
     frame: &eframe::Frame,
 ) {
-    start_library_ai_mask_refresh(app, &assets, frame);
+    start_local_library_ai_mask_refresh(app, &assets, frame);
 }

@@ -41,10 +41,7 @@ impl LibraryState {
     }
 
     pub(in crate::ui::library) fn file_action_in_progress(&self) -> bool {
-        self.file_action_receiver.is_some()
-            || self.raw_import_receiver.is_some()
-            || self.folder_operation_receiver.is_some()
-            || self.image_paste_in_progress()
+        self.local_mutation_in_progress()
     }
 
     pub(in crate::ui::library) fn start_folder_operation(
@@ -173,53 +170,6 @@ impl LibraryState {
             }
         }
         self.refresh(context);
-    }
-
-    pub(in crate::ui::library) fn duplicate_raws_with_sidecars(&mut self, raw_paths: Vec<PathBuf>, context: &egui::Context) {
-        if self.file_action_in_progress() {
-            self.status = "Another library file action is still running.".to_owned();
-            return;
-        }
-        if raw_paths.is_empty() {
-            return;
-        }
-
-        let (sender, receiver) = mpsc::channel();
-        self.file_action_receiver = Some(receiver);
-        self.status = if raw_paths.len() == 1 {
-            format!("Duplicating {}…", raw_paths[0].display())
-        } else {
-            format!("Duplicating {} selected RAW files…", raw_paths.len())
-        };
-        let repaint = context.clone();
-        let spawn = std::thread::Builder::new()
-            .name("auraw-library-duplicate".to_owned())
-            .spawn(move || {
-                let total = raw_paths.len();
-                let mut destinations = Vec::with_capacity(total);
-                let mut failures = Vec::new();
-                for raw_path in raw_paths {
-                    match duplicate_raw_and_sidecar(&raw_path) {
-                        Ok(destination) => destinations.push(destination),
-                        Err(error) => failures.push(error),
-                    }
-                }
-                let result = if failures.is_empty() {
-                    Ok(destinations)
-                } else {
-                    Err(format!(
-                        "Duplicated {} of {total} selected RAW files. {}",
-                        destinations.len(),
-                        failures.join(" · ")
-                    ))
-                };
-                let _ = sender.send(result);
-                repaint.request_repaint();
-            });
-        if let Err(error) = spawn {
-            self.file_action_receiver = None;
-            self.status = format!("Could not start duplicate operation: {error}");
-        }
     }
 
     pub(crate) fn import_dropped_raws(
