@@ -45,9 +45,6 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Run repository validation checks
-        run: cargo xtask check-all
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 

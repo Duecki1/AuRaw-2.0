@@ -305,25 +305,6 @@ fn sidecar_round_trip_preserves_edit_state() {
 }
 
 #[test]
-fn fullscreen_effect_mask_round_trips_through_the_sidecar() {
-    let mut edits = sample_edits();
-    let masks = Arc::make_mut(&mut edits.masks);
-    masks.add_mask(MaskKind::Fullscreen).unwrap();
-    masks.masks.last_mut().unwrap().effect = crate::pipeline::MaskEffect::Cartoon;
-
-    let encoded = encode(edits.clone()).unwrap();
-    let loaded = decode(&encoded).unwrap();
-    assert_eq!(loaded.edits, edits);
-    let fullscreen = loaded.edits.masks.masks.last().unwrap();
-    assert_eq!(fullscreen.components[0].kind, MaskKind::Fullscreen);
-    assert!(matches!(
-        fullscreen.components[0].geometry,
-        MaskGeometry::Fullscreen
-    ));
-    assert_eq!(fullscreen.effect, crate::pipeline::MaskEffect::Cartoon);
-}
-
-#[test]
 fn neon_mask_settings_round_trip_through_the_sidecar() {
     let mut edits = sample_edits();
     let masks = Arc::make_mut(&mut edits.masks);

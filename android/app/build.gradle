@@ -14,65 +14,25 @@ def loadWorkspaceMetadata = {
 
     def metadataCommand = providers.exec {
         workingDir(repositoryRoot)
-        commandLine("cargo", "xtask", "print-metadata", "--format", "json")
+        commandLine("cargo", "metadata", "--locked", "--no-deps", "--format-version", "1")
         ignoreExitValue = true
     }
-
     def executionResult
     try {
         executionResult = metadataCommand.result.get()
     } catch (Exception error) {
-        throw new GradleException(
-            "Unable to run `cargo xtask print-metadata` while configuring the Android build. " +
-            "Install Rust with Cargo, ensure `cargo` is available in PATH, and retry from " +
-            "${repositoryRoot}.",
-            error
-        )
+        throw new GradleException("Unable to run `cargo metadata` while configuring Android.", error)
     }
-
     def stderr = metadataCommand.standardError.asText.get().trim()
     if (executionResult.exitValue != 0) {
-        def details = stderr.isEmpty() ? "No error output was produced." : stderr
-        throw new GradleException(
-            "`cargo xtask print-metadata` failed with exit code ${executionResult.exitValue}. " +
-            "Ensure the pinned Rust toolchain is installed and the xtask can build.\n${details}"
-        )
+        throw new GradleException("`cargo metadata` failed: ${stderr}")
     }
 
-    def stdout = metadataCommand.standardOutput.asText.get().trim()
-    if (stdout.isEmpty()) {
-        throw new GradleException(
-            "`cargo xtask print-metadata` completed successfully but produced no JSON output."
-        )
+    def document = new JsonSlurper().parseText(metadataCommand.standardOutput.asText.get())
+    if (!(document?.metadata instanceof Map)) {
+        throw new GradleException("Cargo metadata did not contain workspace metadata.")
     }
-
-    def buildContract
-    try {
-        buildContract = new JsonSlurper().parseText(stdout)
-    } catch (Exception error) {
-        throw new GradleException(
-            "Unable to parse JSON from `cargo xtask print-metadata`. Output was:\n${stdout}",
-            error
-        )
-    }
-    if (!(buildContract instanceof Map)) {
-        throw new GradleException(
-            "`cargo xtask print-metadata` must output a JSON object; received ${buildContract?.getClass()?.simpleName ?: 'null'}."
-        )
-    }
-
-    // Preserve the existing Gradle-facing metadata names so the rest of this
-    // script and all property overrides continue to behave exactly as before.
-    return [
-        android_ndk_version: buildContract.ndkVersion,
-        android_build_tools_version: buildContract.buildToolsVersion,
-        android_compile_sdk: buildContract.compileSdk,
-        android_min_sdk: buildContract.minSdk,
-        android_target_sdk: buildContract.targetSdk,
-        libraw_revision: buildContract.librawRevision,
-        lensfun_revision: buildContract.lensfunRevision,
-        android_use_legacy_packaging: buildContract.useLegacyPackaging,
-    ]
+    return document.metadata
 }
 
 def workspaceMetadata = loadWorkspaceMetadata()
@@ -259,21 +219,5 @@ if (buildRustEnabled) {
         it.name == "mergeReleaseNativeLibs" || it.name == "mergeReleaseJniLibFolders"
     }.configureEach {
         dependsOn("buildRustRelease")
-    }
-}
-
-
-tasks.register("printAndroidBuildContract") {
-    doLast {
-        println groovy.json.JsonOutput.toJson([
-            ndkVersion: aurawNdkVersion,
-            buildToolsVersion: aurawBuildToolsVersion,
-            compileSdk: aurawCompileSdk,
-            minSdk: aurawMinSdk,
-            targetSdk: aurawTargetSdk,
-            useLegacyPackaging: aurawUseLegacyPackaging,
-            librawRevision: aurawLibrawRevision,
-            lensfunRevision: aurawLensfunRevision,
-        ])
     }
 }

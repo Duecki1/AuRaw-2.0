@@ -884,7 +884,7 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
                 ],
             )
         }
-        _ => return None,
+        MaskEffect::Adjustment => return None,
     };
     Some(data)
 }

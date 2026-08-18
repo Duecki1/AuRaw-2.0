@@ -35,8 +35,6 @@ Install JDK 17, the Android SDK/NDK versions declared in `Cargo.toml`, CMake
 rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-eval "$(cargo xtask print-metadata --format shell)"
-export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$AURAW_ANDROID_NDK_VERSION"
 ./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -49,7 +47,6 @@ See [ANDROID.md](ANDROID.md) for platform-specific details.
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo xtask check-all
 ```
 
 Architecture and format notes:
