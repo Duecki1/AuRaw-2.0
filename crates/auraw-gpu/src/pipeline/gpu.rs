@@ -11,7 +11,6 @@ use crate::pipeline::{
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use std::sync::{Arc, Condvar, Mutex};
-use wgpu::util::DeviceExt;
 
 use crate::gpu_errors::GpuErrorScopes;
 
@@ -2175,16 +2174,13 @@ impl RawGpuPipeline {
         let black_texture = create_black_texture(device, queue, raw);
 
         // All demosaic stages sample this canonical reconstructed CFA.
-        let reconstructed_raw_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw reconstructed raw CFA"),
+        let reconstructed_raw_texture = create_processing_texture(
+            device,
             size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[wgpu::TextureFormat::R32Float],
-        });
+            wgpu::TextureFormat::R32Float,
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            "auraw reconstructed raw CFA",
+        );
 
         // Shared demosaic work surfaces. Bayer dual mode and X-Trans reuse
         // these after highlight reconstruction has written the canonical CFA.
@@ -2220,18 +2216,15 @@ impl RawGpuPipeline {
         let display_linear_texture =
             create_demosaic_texture(device, size, work_format, "auraw display-linear Rec.2020");
 
-        let out_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw output texture"),
+        let out_texture = create_processing_texture(
+            device,
             size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
-        });
+            "auraw output texture",
+        );
 
         let tex1 = create_demosaic_texture(device, size, demosaic_format, "auraw tex1");
         let tex2 = create_demosaic_texture(device, size, demosaic_format, "auraw tex2");
@@ -2250,52 +2243,39 @@ impl RawGpuPipeline {
         // The ordinary full-frame interactive pipeline reserves all 32 layers
         // so masks can be added without rebuilding it. Explicit-edge detail and
         // export pipelines allocate only the layers they actually sample.
-        let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw normalized local-mask atlas"),
-            size: wgpu::Extent3d {
-                width: mask_atlas_edge,
-                height: mask_atlas_edge,
-                depth_or_array_layers: mask_layer_capacity as u32,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[wgpu::TextureFormat::R16Float],
-        });
+        let mask_texture = create_processing_texture_array(
+            device,
+            mask_atlas_edge,
+            mask_atlas_edge,
+            mask_layer_capacity as u32,
+            wgpu::TextureFormat::R16Float,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            "auraw normalized local-mask atlas",
+        );
         // Light Rays needs the same full-image emission field in the fit
         // preview, zoom-detail crops, and independently processed export tiles.
         // A compact dedicated atlas is sufficient because shafts intentionally
         // integrate and soften their source over a long distance.
-        let light_rays_mask_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw full-image Light Rays emission atlas"),
-            size: wgpu::Extent3d {
-                width: LIGHT_RAYS_MASK_ATLAS_EDGE,
-                height: LIGHT_RAYS_MASK_ATLAS_EDGE,
-                depth_or_array_layers: mask_layer_capacity as u32,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[wgpu::TextureFormat::R16Float],
-        });
+        let light_rays_mask_texture = create_processing_texture_array(
+            device,
+            LIGHT_RAYS_MASK_ATLAS_EDGE,
+            LIGHT_RAYS_MASK_ATLAS_EDGE,
+            mask_layer_capacity as u32,
+            wgpu::TextureFormat::R16Float,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            "auraw full-image Light Rays emission atlas",
+        );
         // Do not upload an all-zero atlas here. With 32 supported layers that would
         // create a very large temporary CPU allocation. Every active layer is uploaded
         // before the first recompute, and shaders never sample layers beyond mask_counts.x.
 
-        let inpaint_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw pre-adjustment inpaint layer"),
+        let inpaint_texture = create_processing_texture(
+            device,
             size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[wgpu::TextureFormat::Rgba16Float],
-        });
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            "auraw pre-adjustment inpaint layer",
+        );
         let empty_inpaint_len = usize::try_from(
             u64::from(raw.width)
                 .checked_mul(u64::from(raw.height))
@@ -2319,24 +2299,20 @@ impl RawGpuPipeline {
             size,
         );
 
-        let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let display_linear_view =
-            display_linear_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let reconstructed_raw_view =
-            reconstructed_raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let highlight_work_a_view =
-            highlight_work_a.create_view(&wgpu::TextureViewDescriptor::default());
-        let highlight_work_b_view =
-            highlight_work_b.create_view(&wgpu::TextureViewDescriptor::default());
-        let scene_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let tex1_view = tex1.create_view(&wgpu::TextureViewDescriptor::default());
-        let tex2_view = tex2.create_view(&wgpu::TextureViewDescriptor::default());
-        let tone_guide_a_view = tone_guide_a.create_view(&wgpu::TextureViewDescriptor::default());
-        let tone_guide_b_view = tone_guide_b.create_view(&wgpu::TextureViewDescriptor::default());
-        let raw_view = raw_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let black_view = black_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let inpaint_view = inpaint_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = default_texture_view(&out_texture);
+        let display_linear_view = default_texture_view(&display_linear_texture);
+        let reconstructed_raw_view = default_texture_view(&reconstructed_raw_texture);
+        let highlight_work_a_view = default_texture_view(&highlight_work_a);
+        let highlight_work_b_view = default_texture_view(&highlight_work_b);
+        let scene_view = default_texture_view(&scene_texture);
+        let tex1_view = default_texture_view(&tex1);
+        let tex2_view = default_texture_view(&tex2);
+        let tone_guide_a_view = default_texture_view(&tone_guide_a);
+        let tone_guide_b_view = default_texture_view(&tone_guide_b);
+        let raw_view = default_texture_view(&raw_texture);
+        let color_view = default_texture_view(&color_texture);
+        let black_view = default_texture_view(&black_texture);
+        let inpaint_view = default_texture_view(&inpaint_texture);
         let mask_view = mask_texture.create_view(&wgpu::TextureViewDescriptor {
             label: Some("auraw local-mask array view"),
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -2361,49 +2337,52 @@ impl RawGpuPipeline {
 
         let output_lut_offset_bytes =
             u64::from(profile_gpu_data.layout.output[3]) * std::mem::size_of::<[f32; 4]>() as u64;
-        let profile_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("auraw DCP and ICC profile LUTs"),
-            contents: bytemuck::cast_slice(&profile_gpu_data.words),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+        let profile_buffer = create_initialized_buffer(
+            device,
+            "auraw DCP and ICC profile LUTs",
+            bytemuck::cast_slice(&profile_gpu_data.words),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
 
-        let camera_uniforms_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("auraw camera uniforms"),
-            contents: params.camera_bytes(),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let scene_tone_uniforms_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("auraw scene-tone uniforms"),
-                contents: params.scene_tone_bytes(),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-        let effects_uniforms_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("auraw effects uniforms"),
-                contents: params.effects_bytes(),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-        let mask_data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("auraw local-mask data"),
-            contents: params.mask_data_bytes(),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+        let camera_uniforms_buffer = create_initialized_buffer(
+            device,
+            "auraw camera uniforms",
+            params.camera_bytes(),
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let scene_tone_uniforms_buffer = create_initialized_buffer(
+            device,
+            "auraw scene-tone uniforms",
+            params.scene_tone_bytes(),
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let effects_uniforms_buffer = create_initialized_buffer(
+            device,
+            "auraw effects uniforms",
+            params.effects_bytes(),
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let mask_data_buffer = create_initialized_buffer(
+            device,
+            "auraw local-mask data",
+            params.mask_data_bytes(),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
 
-        let tone_histogram_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("auraw tone histogram"),
-            size: 256 * std::mem::size_of::<u32>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let tone_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("auraw tone statistics"),
-            size: TONE_STATS_SIZE_BYTES,
-            usage: wgpu::BufferUsages::STORAGE
+        let tone_histogram_buffer = create_gpu_buffer(
+            device,
+            "auraw tone histogram",
+            256 * std::mem::size_of::<u32>() as u64,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let tone_stats_buffer = create_gpu_buffer(
+            device,
+            "auraw tone statistics",
+            TONE_STATS_SIZE_BYTES,
+            wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        );
 
         let common_entries = [
             buffer_entry(0),
@@ -2418,30 +2397,30 @@ impl RawGpuPipeline {
         let bgl_scene_tone = program_template
             .map(|template| template.pipelines[0].get_bind_group_layout(1))
             .unwrap_or_else(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl scene-tone uniforms"),
-                    entries: &[buffer_entry(0)],
-                })
+                create_bind_group_layout(
+                    device,
+                    "bgl scene-tone uniforms",
+                    &[buffer_entry(0)],
+                )
             });
         let bgl_effects = program_template
             .map(|template| template.pipelines[0].get_bind_group_layout(2))
             .unwrap_or_else(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl effects uniforms"),
-                    entries: &[buffer_entry(0)],
-                })
+                create_bind_group_layout(device, "bgl effects uniforms", &[buffer_entry(0)])
             });
 
-        let scene_tone_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg scene-tone uniforms"),
-            layout: &bgl_scene_tone,
-            entries: &[buffer_binding(0, &scene_tone_uniforms_buffer)],
-        });
-        let effects_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg effects uniforms"),
-            layout: &bgl_effects,
-            entries: &[buffer_binding(0, &effects_uniforms_buffer)],
-        });
+        let scene_tone_bind_group = create_bind_group(
+            device,
+            "bg scene-tone uniforms",
+            &bgl_scene_tone,
+            &[buffer_binding(0, &scene_tone_uniforms_buffer)],
+        );
+        let effects_bind_group = create_bind_group(
+            device,
+            "bg effects uniforms",
+            &bgl_effects,
+            &[buffer_binding(0, &effects_uniforms_buffer)],
+        );
 
         let demosaic_start_for_programs = 1;
         let demosaic_high_pass_count = match raw.cfa_kind {
@@ -2460,9 +2439,7 @@ impl RawGpuPipeline {
         };
 
         let bgl_highlights = reused_layout(0).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl highlights"),
-                entries: &[
+            create_bind_group_layout(device, "bgl highlights", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2472,14 +2449,11 @@ impl RawGpuPipeline {
                         wgpu::TextureFormat::R32Float,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl1 = reused_layout(demosaic_start_for_programs).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl1"),
-                entries: &[
+            create_bind_group_layout(device, "bgl1", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2490,14 +2464,11 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl2 = reused_layout(demosaic_start_for_programs + 1).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl2"),
-                entries: &[
+            create_bind_group_layout(device, "bgl2", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2509,14 +2480,11 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl3 = reused_layout(demosaic_start_for_programs + 2).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl3"),
-                entries: &[
+            create_bind_group_layout(device, "bgl3", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2528,14 +2496,11 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl_dual_green = reused_layout(dual_green_for_programs).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl dual demosaic green"),
-                entries: &[
+            create_bind_group_layout(device, "bgl dual demosaic green", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2546,14 +2511,11 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl_dual_rgb = reused_layout(dual_rgb_for_programs).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl dual demosaic rgb"),
-                entries: &[
+            create_bind_group_layout(device, "bgl dual demosaic rgb", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2565,17 +2527,14 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl4 = (matches!(raw.cfa_kind, CfaKind::Bayer)
             .then(|| reused_layout(demosaic_finish_for_programs))
             .flatten())
         .unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl4"),
-                entries: &[
+            create_bind_group_layout(device, "bgl4", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2589,8 +2548,7 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         // X-Trans Markesteijn-3 uses the two highlight work textures as
@@ -2601,9 +2559,7 @@ impl RawGpuPipeline {
             .then(|| reused_layout(demosaic_start_for_programs + 4))
             .flatten())
         .unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl X-Trans derivatives"),
-                entries: &[
+            create_bind_group_layout(device, "bgl X-Trans derivatives", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2620,17 +2576,14 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl_xtrans_homogeneity = (matches!(raw.cfa_kind, CfaKind::XTrans)
             .then(|| reused_layout(demosaic_start_for_programs + 5))
             .flatten())
         .unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl X-Trans homogeneity"),
-                entries: &[
+            create_bind_group_layout(device, "bgl X-Trans homogeneity", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2648,17 +2601,14 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl_xtrans_accumulate = (matches!(raw.cfa_kind, CfaKind::XTrans)
             .then(|| reused_layout(demosaic_start_for_programs + 6))
             .flatten())
         .unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl X-Trans accumulate"),
-                entries: &[
+            create_bind_group_layout(device, "bgl X-Trans accumulate", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2672,17 +2622,14 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl_xtrans_finish = (matches!(raw.cfa_kind, CfaKind::XTrans)
             .then(|| reused_layout(demosaic_finish_for_programs))
             .flatten())
         .unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl X-Trans finish"),
-                entries: &[
+            create_bind_group_layout(device, "bgl X-Trans finish", &[
                     common_entries[0],
                     common_entries[1],
                     common_entries[2],
@@ -2695,14 +2642,11 @@ impl RawGpuPipeline {
                         demosaic_format,
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
-                ],
-            })
+                ])
         });
 
         let bgl_color_denoise = reused_layout(color_denoise_for_programs).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl multiscale color denoise"),
-                entries: &[
+            create_bind_group_layout(device, "bgl multiscale color denoise", &[
                     buffer_entry(0),
                     storage_texture_entry(
                         10,
@@ -2710,50 +2654,38 @@ impl RawGpuPipeline {
                         wgpu::StorageTextureAccess::WriteOnly,
                     ),
                     texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                ],
-            })
+                ])
         });
 
         let bgl_tone_prepare = reused_layout(tone_prepare_for_programs).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl tone prepare"),
-                entries: &[
+            create_bind_group_layout(device, "bgl tone prepare", &[
                     buffer_entry(0),
                     texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_buffer_entry(15, false),
                     storage_buffer_entry(20, true),
                     storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
                     texture_entry(32, wgpu::TextureSampleType::Float { filterable: false }),
-                ],
-            })
+                ])
         });
 
         let bgl_tone_blur = reused_layout(tone_prepare_for_programs + 1).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl tone guide blur"),
-                entries: &[
+            create_bind_group_layout(device, "bgl tone guide blur", &[
                     buffer_entry(0),
                     texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
                     storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
-                ],
-            })
+                ])
         });
 
         let bgl_tone_reduce = reused_layout(tone_prepare_for_programs + 3).unwrap_or_else(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bgl tone histogram reduction"),
-                entries: &[
+            create_bind_group_layout(device, "bgl tone histogram reduction", &[
                     storage_buffer_entry(15, false),
                     storage_buffer_entry(16, false),
-                ],
-            })
+                ])
         });
 
         let bgl_adjust_prepare =
             reused_layout(adjustment_prepare_for_programs).unwrap_or_else(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl scene preparation"),
-                    entries: &[
+                create_bind_group_layout(device, "bgl scene preparation", &[
                         common_entries[0],
                         common_entries[1],
                         common_entries[2],
@@ -2774,15 +2706,12 @@ impl RawGpuPipeline {
                         sampler_entry(28),
                         texture_entry(32, wgpu::TextureSampleType::Float { filterable: false }),
                         storage_buffer_entry(33, true),
-                    ],
-                })
+                    ])
             });
 
         let bgl_adjust_tone =
             reused_layout(adjustment_prepare_for_programs + 1).unwrap_or_else(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl scene tone edits"),
-                    entries: &[
+                create_bind_group_layout(device, "bgl scene tone edits", &[
                         buffer_entry(0),
                         texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
                         storage_texture_entry(
@@ -2799,15 +2728,12 @@ impl RawGpuPipeline {
                         ),
                         sampler_entry(28),
                         storage_buffer_entry(33, true),
-                    ],
-                })
+                    ])
             });
 
         let bgl_adjust_effects =
             reused_layout(adjustment_prepare_for_programs + 3).unwrap_or_else(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl scene presence and color"),
-                    entries: &[
+                create_bind_group_layout(device, "bgl scene presence and color", &[
                         buffer_entry(0),
                         texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
                         storage_texture_entry(
@@ -2822,15 +2748,12 @@ impl RawGpuPipeline {
                         ),
                         sampler_entry(28),
                         storage_buffer_entry(33, true),
-                    ],
-                })
+                    ])
             });
 
         let bgl_mask_blur =
             reused_layout(adjustment_prepare_for_programs + 5).unwrap_or_else(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl mask Blur diffusion"),
-                    entries: &[
+                create_bind_group_layout(device, "bgl mask Blur diffusion", &[
                         buffer_entry(0),
                         texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
                         storage_texture_entry(
@@ -2844,15 +2767,12 @@ impl RawGpuPipeline {
                         ),
                         sampler_entry(28),
                         storage_buffer_entry(33, true),
-                    ],
-                })
+                    ])
             });
 
         let bgl_glow_prepare =
             reused_layout(adjustment_prepare_for_programs + 10).unwrap_or_else(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl Glow source extraction"),
-                    entries: &[
+                create_bind_group_layout(device, "bgl Glow source extraction", &[
                         buffer_entry(0),
                         texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
                         storage_texture_entry(
@@ -2866,15 +2786,12 @@ impl RawGpuPipeline {
                         ),
                         sampler_entry(28),
                         storage_buffer_entry(33, true),
-                    ],
-                })
+                    ])
             });
 
         let bgl_glow_blur =
             reused_layout(adjustment_prepare_for_programs + 11).unwrap_or_else(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl Glow diffusion"),
-                    entries: &[
+                create_bind_group_layout(device, "bgl Glow diffusion", &[
                         buffer_entry(0),
                         texture_entry(30, wgpu::TextureSampleType::Float { filterable: false }),
                         storage_texture_entry(
@@ -2882,15 +2799,12 @@ impl RawGpuPipeline {
                             work_format,
                             wgpu::StorageTextureAccess::WriteOnly,
                         ),
-                    ],
-                })
+                    ])
             });
 
         let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 16)
             .unwrap_or_else(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("bgl creative glow"),
-                    entries: &[
+                create_bind_group_layout(device, "bgl creative glow", &[
                         buffer_entry(0),
                         texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
                         storage_texture_entry(
@@ -2909,13 +2823,10 @@ impl RawGpuPipeline {
                             34,
                             wgpu::TextureSampleType::Float { filterable: true },
                         ),
-                    ],
-                })
+                    ])
             });
 
-        let bgl_adjust_render = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl scene look view and output"),
-            entries: &[
+        let bgl_adjust_render = create_bind_group_layout(device, "bgl scene look view and output", &[
                 buffer_entry(0),
                 storage_texture_entry(
                     12,
@@ -2933,40 +2844,28 @@ impl RawGpuPipeline {
                 sampler_entry(28),
                 storage_texture_entry(29, work_format, wgpu::StorageTextureAccess::WriteOnly),
                 storage_buffer_entry(33, true),
-            ],
-        });
+            ]);
         let bgl_adjust_render =
             reused_layout(adjustment_prepare_for_programs + 17).unwrap_or(bgl_adjust_render);
 
-        let bg_highlights = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg highlight reconstruction"),
-            layout: &bgl_highlights,
-            entries: &[
+        let bg_highlights = create_bind_group(device, "bg highlight reconstruction", &bgl_highlights, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
                 texture_binding(19, &black_view),
                 texture_binding(3, &reconstructed_raw_view),
-            ],
-        });
+            ]);
 
-        let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg1"),
-            layout: &bgl1,
-            entries: &[
+        let bg1 = create_bind_group(device, "bg1", &bgl1, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
                 texture_binding(19, &black_view),
                 texture_binding(3, &reconstructed_raw_view),
                 texture_binding(4, &tex1_view),
-            ],
-        });
+            ]);
 
-        let bg2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg2"),
-            layout: &bgl2,
-            entries: &[
+        let bg2 = create_bind_group(device, "bg2", &bgl2, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -2974,13 +2873,9 @@ impl RawGpuPipeline {
                 texture_binding(3, &reconstructed_raw_view),
                 texture_binding(5, &tex1_view),
                 texture_binding(6, &tex2_view),
-            ],
-        });
+            ]);
 
-        let bg3 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg3"),
-            layout: &bgl3,
-            entries: &[
+        let bg3 = create_bind_group(device, "bg3", &bgl3, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -2988,31 +2883,23 @@ impl RawGpuPipeline {
                 texture_binding(3, &reconstructed_raw_view),
                 texture_binding(7, &tex2_view),
                 texture_binding(8, &tex1_view),
-            ],
-        });
+            ]);
 
         let (dual_green_view, dual_low_view) = match raw.cfa_kind {
             CfaKind::Bayer => (&highlight_work_a_view, &highlight_work_b_view),
             CfaKind::XTrans => (&tex1_view, &tex2_view),
         };
 
-        let bg_dual_green = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg dual demosaic green"),
-            layout: &bgl_dual_green,
-            entries: &[
+        let bg_dual_green = create_bind_group(device, "bg dual demosaic green", &bgl_dual_green, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
                 texture_binding(19, &black_view),
                 texture_binding(3, &reconstructed_raw_view),
                 texture_binding(20, dual_green_view),
-            ],
-        });
+            ]);
 
-        let bg_dual_rgb = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg dual demosaic rgb"),
-            layout: &bgl_dual_rgb,
-            entries: &[
+        let bg_dual_rgb = create_bind_group(device, "bg dual demosaic rgb", &bgl_dual_rgb, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -3020,13 +2907,9 @@ impl RawGpuPipeline {
                 texture_binding(3, &reconstructed_raw_view),
                 texture_binding(21, dual_green_view),
                 texture_binding(22, dual_low_view),
-            ],
-        });
+            ]);
 
-        let bg4 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg4"),
-            layout: &bgl4,
-            entries: &[
+        let bg4 = create_bind_group(device, "bg4", &bgl4, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -3036,13 +2919,9 @@ impl RawGpuPipeline {
                 texture_binding(9, &tex1_view),
                 texture_binding(23, dual_low_view),
                 texture_binding(10, &scene_view),
-            ],
-        });
+            ]);
 
-        let bg_xtrans_derivatives = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg X-Trans derivatives"),
-            layout: &bgl_xtrans_derivatives,
-            entries: &[
+        let bg_xtrans_derivatives = create_bind_group(device, "bg X-Trans derivatives", &bgl_xtrans_derivatives, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -3051,13 +2930,9 @@ impl RawGpuPipeline {
                 texture_binding(9, &tex2_view),
                 texture_binding(20, &highlight_work_a_view),
                 texture_binding(21, &highlight_work_b_view),
-            ],
-        });
+            ]);
 
-        let bg_xtrans_homogeneity = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg X-Trans homogeneity"),
-            layout: &bgl_xtrans_homogeneity,
-            entries: &[
+        let bg_xtrans_homogeneity = create_bind_group(device, "bg X-Trans homogeneity", &bgl_xtrans_homogeneity, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -3067,13 +2942,9 @@ impl RawGpuPipeline {
                 texture_binding(28, &highlight_work_b_view),
                 texture_binding(24, &tex1_view),
                 texture_binding(25, &scene_view),
-            ],
-        });
+            ]);
 
-        let bg_xtrans_accumulate = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg X-Trans accumulate"),
-            layout: &bgl_xtrans_accumulate,
-            entries: &[
+        let bg_xtrans_accumulate = create_bind_group(device, "bg X-Trans accumulate", &bgl_xtrans_accumulate, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -3083,13 +2954,9 @@ impl RawGpuPipeline {
                 texture_binding(29, &tex1_view),
                 texture_binding(30, &scene_view),
                 texture_binding(26, &highlight_work_a_view),
-            ],
-        });
+            ]);
 
-        let bg_xtrans_finish = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg X-Trans finish"),
-            layout: &bgl_xtrans_finish,
-            entries: &[
+        let bg_xtrans_finish = create_bind_group(device, "bg X-Trans finish", &bgl_xtrans_finish, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -3098,20 +2965,15 @@ impl RawGpuPipeline {
                 texture_binding(26, &highlight_work_a_view),
                 texture_binding(23, dual_low_view),
                 texture_binding(10, &scene_view),
-            ],
-        });
+            ]);
 
         let make_color_denoise_bind_group =
             |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &bgl_color_denoise,
-                    entries: &[
+                create_bind_group(device, label, &bgl_color_denoise, &[
                         buffer_binding(0, &camera_uniforms_buffer),
                         texture_binding(10, write_view),
                         texture_binding(11, read_view),
-                    ],
-                })
+                    ])
             };
         // Six passes end back in scene_texture. Disabled Fast/Balanced scales
         // are explicit copies so every quality setting has identical parity.
@@ -3128,30 +2990,22 @@ impl RawGpuPipeline {
         let bg_color_denoise_5 =
             make_color_denoise_bind_group("bg color denoise scale 32", &tex1_view, &scene_view);
 
-        let bg_tone_prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg tone prepare"),
-            layout: &bgl_tone_prepare,
-            entries: &[
+        let bg_tone_prepare = create_bind_group(device, "bg tone prepare", &bgl_tone_prepare, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(11, &scene_view),
                 buffer_binding(15, &tone_histogram_buffer),
                 buffer_binding(20, &profile_buffer),
                 texture_binding(18, &tone_guide_a_view),
                 texture_binding(32, &inpaint_view),
-            ],
-        });
+            ]);
 
         let make_tone_blur_bind_group =
             |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &bgl_tone_blur,
-                    entries: &[
+                create_bind_group(device, label, &bgl_tone_blur, &[
                         buffer_binding(0, &camera_uniforms_buffer),
                         texture_binding(17, read_view),
                         texture_binding(18, write_view),
-                    ],
-                })
+                    ])
             };
         let bg_tone_horizontal = make_tone_blur_bind_group(
             "bg tone guide horizontal",
@@ -3164,19 +3018,12 @@ impl RawGpuPipeline {
             &tone_guide_a_view,
         );
 
-        let bg_tone_reduce = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg tone histogram reduction"),
-            layout: &bgl_tone_reduce,
-            entries: &[
+        let bg_tone_reduce = create_bind_group(device, "bg tone histogram reduction", &bgl_tone_reduce, &[
                 buffer_binding(15, &tone_histogram_buffer),
                 buffer_binding(16, &tone_stats_buffer),
-            ],
-        });
+            ]);
 
-        let bg_adjust_prepare = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bg adjustment preparation"),
-            layout: &bgl_adjust_prepare,
-            entries: &[
+        let bg_adjust_prepare = create_bind_group(device, "bg adjustment preparation", &bgl_adjust_prepare, &[
                 buffer_binding(0, &camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -3190,15 +3037,11 @@ impl RawGpuPipeline {
                 sampler_binding(28, &mask_sampler),
                 texture_binding(32, &inpaint_view),
                 buffer_binding(33, &mask_data_buffer),
-            ],
-        });
+            ]);
 
         let make_adjust_tone_bind_group =
             |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &bgl_adjust_tone,
-                    entries: &[
+                create_bind_group(device, label, &bgl_adjust_tone, &[
                         buffer_binding(0, &camera_uniforms_buffer),
                         texture_binding(22, input),
                         texture_binding(23, output),
@@ -3208,8 +3051,7 @@ impl RawGpuPipeline {
                         texture_binding(27, &mask_view),
                         sampler_binding(28, &mask_sampler),
                         buffer_binding(33, &mask_data_buffer),
-                    ],
-                })
+                    ])
             };
         let bg_adjust_tone =
             make_adjust_tone_bind_group("bg scene tone edits", &tex1_view, &tex2_view);
@@ -3218,10 +3060,7 @@ impl RawGpuPipeline {
 
         let make_adjust_effects_bind_group =
             |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &bgl_adjust_effects,
-                    entries: &[
+                create_bind_group(device, label, &bgl_adjust_effects, &[
                         buffer_binding(0, &camera_uniforms_buffer),
                         texture_binding(22, input),
                         texture_binding(23, output),
@@ -3229,8 +3068,7 @@ impl RawGpuPipeline {
                         texture_binding(27, &mask_view),
                         sampler_binding(28, &mask_sampler),
                         buffer_binding(33, &mask_data_buffer),
-                    ],
-                })
+                    ])
             };
         let bg_adjust_effects = make_adjust_effects_bind_group(
             "bg scene presence and color",
@@ -3245,18 +3083,14 @@ impl RawGpuPipeline {
         // chain has fully incorporated mask coverage and Amount.
         let make_mask_blur_bind_group =
             |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &bgl_mask_blur,
-                    entries: &[
+                create_bind_group(device, label, &bgl_mask_blur, &[
                         buffer_binding(0, &camera_uniforms_buffer),
                         texture_binding(24, read_view),
                         texture_binding(25, write_view),
                         texture_binding(27, &mask_view),
                         sampler_binding(28, &mask_sampler),
                         buffer_binding(33, &mask_data_buffer),
-                    ],
-                })
+                    ])
             };
         let bg_mask_blur_0 =
             make_mask_blur_bind_group("bg mask Blur diffusion 0", &tex1_view, &tex2_view);
@@ -3275,18 +3109,14 @@ impl RawGpuPipeline {
         // final render overwrites it only after the creative composite.
         let make_glow_prepare_bind_group =
             |label: &str, source: &wgpu::TextureView, extracted: &wgpu::TextureView| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &bgl_glow_prepare,
-                    entries: &[
+                create_bind_group(device, label, &bgl_glow_prepare, &[
                         buffer_binding(0, &camera_uniforms_buffer),
                         texture_binding(24, source),
                         texture_binding(31, extracted),
                         texture_binding(27, &mask_view),
                         sampler_binding(28, &mask_sampler),
                         buffer_binding(33, &mask_data_buffer),
-                    ],
-                })
+                    ])
             };
         let bg_glow_prepare = make_glow_prepare_bind_group(
             "bg Glow source extraction",
@@ -3296,15 +3126,11 @@ impl RawGpuPipeline {
 
         let make_glow_blur_bind_group =
             |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &bgl_glow_blur,
-                    entries: &[
+                create_bind_group(device, label, &bgl_glow_blur, &[
                         buffer_binding(0, &camera_uniforms_buffer),
                         texture_binding(30, read_view),
                         texture_binding(31, write_view),
-                    ],
-                })
+                    ])
             };
         let bg_glow_blur_0 =
             make_glow_blur_bind_group("bg Glow diffusion 0", &tex2_view, &display_linear_view);
@@ -3357,10 +3183,7 @@ impl RawGpuPipeline {
         // always-dispatched display-linear view pass.
         let make_adjust_creative_bind_group =
             |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &bgl_adjust_creative,
-                    entries: &[
+                create_bind_group(device, label, &bgl_adjust_creative, &[
                         buffer_binding(0, &camera_uniforms_buffer),
                         texture_binding(24, input),
                         texture_binding(25, output),
@@ -3369,8 +3192,7 @@ impl RawGpuPipeline {
                         sampler_binding(28, &mask_sampler),
                         buffer_binding(33, &mask_data_buffer),
                         texture_binding(34, &light_rays_mask_view),
-                    ],
-                })
+                    ])
             };
         let bg_adjust_creative =
             make_adjust_creative_bind_group("bg creative glow", &tex1_view, &tex2_view);
@@ -3381,10 +3203,7 @@ impl RawGpuPipeline {
         );
 
         let make_adjust_render_bind_group = |label: &str, source: &wgpu::TextureView| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &bgl_adjust_render,
-                entries: &[
+            create_bind_group(device, label, &bgl_adjust_render, &[
                     buffer_binding(0, &camera_uniforms_buffer),
                     texture_binding(12, &out_view),
                     texture_binding(26, source),
@@ -3394,8 +3213,7 @@ impl RawGpuPipeline {
                     sampler_binding(28, &mask_sampler),
                     texture_binding(29, &display_linear_view),
                     buffer_binding(33, &mask_data_buffer),
-                ],
-            })
+                ])
         };
         let bg_adjust_render =
             make_adjust_render_bind_group("bg scene look view and output", &tex2_view);
@@ -3440,175 +3258,102 @@ impl RawGpuPipeline {
         // One validated Naga module per WGSL entrypoint source. Entry-point
         // pipelines below share these modules instead of recompiling the same
         // source for every pass.
-        let highlight_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw highlight module",
-                    SHADER_HIGHLIGHTS,
-                    "highlights.wgsl",
-                )
-            })
-            .transpose()?;
-        let bayer_rcd_p1_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw Bayer RCD pass 1",
-                    bayer_rcd_p1.as_ref(),
-                    "pass1.wgsl",
-                )
-            })
-            .transpose()?;
-        let bayer_rcd_p2_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw Bayer RCD pass 2",
-                    bayer_rcd_p2.as_ref(),
-                    "pass2.wgsl",
-                )
-            })
-            .transpose()?;
-        let bayer_rcd_p3_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw Bayer RCD pass 3",
-                    bayer_rcd_p3.as_ref(),
-                    "pass3.wgsl",
-                )
-            })
-            .transpose()?;
-        let bayer_rcd_p4_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw Bayer RCD pass 4",
-                    bayer_rcd_p4.as_ref(),
-                    "pass4.wgsl",
-                )
-            })
-            .transpose()?;
-        let dual_demosaic_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw robust dual demosaic",
-                    dual_demosaic.as_ref(),
-                    "dual_demosaic.wgsl",
-                )
-            })
-            .transpose()?;
-        let xtrans_demosaic_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw grouped X-Trans demosaic",
-                    xtrans_demosaic.as_ref(),
-                    "xtrans_demosaic.wgsl",
-                )
-            })
-            .transpose()?;
-        let xtrans_finish_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw X-Trans finish",
-                    xtrans_finish.as_ref(),
-                    "xtrans_finish.wgsl",
-                )
-            })
-            .transpose()?;
-        let color_denoise_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw multiscale color denoise",
-                    color_denoise_shader.as_ref(),
-                    "color_denoise.wgsl",
-                )
-            })
-            .transpose()?;
-        let tone_analysis_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw tone analysis",
-                    SHADER_TONE_ANALYSIS,
-                    "tone_analysis.wgsl",
-                )
-            })
-            .transpose()?;
-        let scene_adjustments_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw scene adjustments",
-                    scene_adjustments_shader.as_ref(),
-                    "scene_adjustments.wgsl",
-                )
-            })
-            .transpose()?;
-        let creative_effects_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw creative effects",
-                    SHADER_CREATIVE_EFFECTS,
-                    "creative_effects.wgsl",
-                )
-            })
-            .transpose()?;
-        let view_transform_module = program_template
-            .is_none()
-            .then(|| {
-                create_shader(
-                    "auraw view transform",
-                    SHADER_VIEW_TRANSFORM,
-                    "view_transform.wgsl",
-                )
-            })
-            .transpose()?;
+        let mut load_shader = |label: &'static str, source: &str, file_name: &str| {
+            if program_template.is_some() {
+                Ok(None)
+            } else {
+                create_shader(label, source, file_name).map(Some)
+            }
+        };
+        let highlight_module =
+            load_shader("auraw highlight module", SHADER_HIGHLIGHTS, "highlights.wgsl")?;
+        let bayer_rcd_p1_module =
+            load_shader("auraw Bayer RCD pass 1", bayer_rcd_p1.as_ref(), "pass1.wgsl")?;
+        let bayer_rcd_p2_module =
+            load_shader("auraw Bayer RCD pass 2", bayer_rcd_p2.as_ref(), "pass2.wgsl")?;
+        let bayer_rcd_p3_module =
+            load_shader("auraw Bayer RCD pass 3", bayer_rcd_p3.as_ref(), "pass3.wgsl")?;
+        let bayer_rcd_p4_module =
+            load_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref(), "pass4.wgsl")?;
+        let dual_demosaic_module = load_shader(
+            "auraw robust dual demosaic",
+            dual_demosaic.as_ref(),
+            "dual_demosaic.wgsl",
+        )?;
+        let xtrans_demosaic_module = load_shader(
+            "auraw grouped X-Trans demosaic",
+            xtrans_demosaic.as_ref(),
+            "xtrans_demosaic.wgsl",
+        )?;
+        let xtrans_finish_module = load_shader(
+            "auraw X-Trans finish",
+            xtrans_finish.as_ref(),
+            "xtrans_finish.wgsl",
+        )?;
+        let color_denoise_module = load_shader(
+            "auraw multiscale color denoise",
+            color_denoise_shader.as_ref(),
+            "color_denoise.wgsl",
+        )?;
+        let tone_analysis_module =
+            load_shader("auraw tone analysis", SHADER_TONE_ANALYSIS, "tone_analysis.wgsl")?;
+        let scene_adjustments_module = load_shader(
+            "auraw scene adjustments",
+            scene_adjustments_shader.as_ref(),
+            "scene_adjustments.wgsl",
+        )?;
+        let creative_effects_module = load_shader(
+            "auraw creative effects",
+            SHADER_CREATIVE_EFFECTS,
+            "creative_effects.wgsl",
+        )?;
+        let view_transform_module =
+            load_shader("auraw view transform", SHADER_VIEW_TRANSFORM, "view_transform.wgsl")?;
 
         let mut next_program_index = 0usize;
-        let mut make_pipeline = |shader: Option<&wgpu::ShaderModule>,
-                                 entry: &str,
-                                 bgl: &wgpu::BindGroupLayout|
-         -> wgpu::ComputePipeline {
+        let mut make_pass = |shader: Option<&wgpu::ShaderModule>,
+                             entry: &str,
+                             bgl: &wgpu::BindGroupLayout,
+                             bind_group: wgpu::BindGroup,
+                             workgroups: [u32; 3]|
+         -> Pass {
             let program_index = next_program_index;
             next_program_index += 1;
-            if let Some(template) = program_template {
-                return template.pipelines[program_index].clone();
+            let pipeline = if let Some(template) = program_template {
+                template.pipelines[program_index].clone()
+            } else {
+                let shader = shader.expect("shader module exists without a program template");
+                let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some(&format!("pll_{}", entry)),
+                    bind_group_layouts: &[Some(bgl), Some(&bgl_scene_tone), Some(&bgl_effects)],
+                    immediate_size: 0,
+                });
+                create_compute_pipeline(
+                    device,
+                    entry,
+                    &pll,
+                    shader,
+                    entry,
+                    pipeline_cache.as_ref().map(|cache| cache.raw()),
+                )
+            };
+            Pass {
+                pipeline,
+                bind_group,
+                workgroups,
             }
-            let shader = shader.expect("shader module exists without a program template");
-            let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(&format!("pll_{}", entry)),
-                bind_group_layouts: &[Some(bgl), Some(&bgl_scene_tone), Some(&bgl_effects)],
-                immediate_size: 0,
-            });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pll),
-                module: shader,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: pipeline_cache.as_ref().map(|cache| cache.raw()),
-            })
         };
 
         let mut passes = Vec::with_capacity(expected_pass_count(raw.cfa_kind));
 
         // Reconstruct clipped photosites before every demosaic path.
-        passes.push(Pass {
-            pipeline: make_pipeline(
-                highlight_module.as_ref(),
-                "highlight_reconstruct",
-                &bgl_highlights,
-            ),
-            bind_group: bg_highlights,
-            workgroups: image_workgroups,
-        });
+        passes.push(make_pass(
+            highlight_module.as_ref(),
+            "highlight_reconstruct",
+            &bgl_highlights,
+            bg_highlights,
+            image_workgroups,
+        ));
 
         let demosaic_start_index = passes.len();
         // Build the high-detail reference first. The robust low-frequency
@@ -3616,132 +3361,92 @@ impl RawGpuPipeline {
         // dispatches are skipped at encode time unless Dual mode is selected.
         match raw.cfa_kind {
             CfaKind::Bayer => passes.extend([
-                Pass {
-                    pipeline: make_pipeline(
-                        bayer_rcd_p1_module.as_ref(),
-                        "bayer_rcd_directional",
-                        &bgl1,
-                    ),
-                    bind_group: bg1,
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(bayer_rcd_p2_module.as_ref(), "bayer_rcd_green", &bgl2),
-                    bind_group: bg2,
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(
-                        bayer_rcd_p3_module.as_ref(),
-                        "bayer_rcd_chroma",
-                        &bgl3,
-                    ),
-                    bind_group: bg3,
-                    workgroups: image_workgroups,
-                },
+                make_pass(bayer_rcd_p1_module.as_ref(), "bayer_rcd_directional", &bgl1, bg1, image_workgroups),
+                make_pass(bayer_rcd_p2_module.as_ref(), "bayer_rcd_green", &bgl2, bg2, image_workgroups),
+                make_pass(bayer_rcd_p3_module.as_ref(), "bayer_rcd_chroma", &bgl3, bg3, image_workgroups),
             ]),
             CfaKind::XTrans => passes.extend([
-                Pass {
-                    pipeline: make_pipeline(xtrans_demosaic_module.as_ref(), "xtrans_seed", &bgl1),
-                    bind_group: bg1,
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(
-                        xtrans_demosaic_module.as_ref(),
-                        "xtrans_markesteijn_pass1",
-                        &bgl2,
-                    ),
-                    bind_group: bg2.clone(),
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(
-                        xtrans_demosaic_module.as_ref(),
-                        "xtrans_markesteijn_pass2",
-                        &bgl3,
-                    ),
-                    bind_group: bg3,
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(
-                        xtrans_demosaic_module.as_ref(),
-                        "xtrans_markesteijn_pass3",
-                        &bgl2,
-                    ),
-                    bind_group: bg2,
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(
-                        xtrans_demosaic_module.as_ref(),
-                        "xtrans_markesteijn_derivatives",
-                        &bgl_xtrans_derivatives,
-                    ),
-                    bind_group: bg_xtrans_derivatives,
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(
-                        xtrans_demosaic_module.as_ref(),
-                        "xtrans_markesteijn_homogeneity",
-                        &bgl_xtrans_homogeneity,
-                    ),
-                    bind_group: bg_xtrans_homogeneity,
-                    workgroups: image_workgroups,
-                },
-                Pass {
-                    pipeline: make_pipeline(
-                        xtrans_demosaic_module.as_ref(),
-                        "xtrans_markesteijn_accumulate",
-                        &bgl_xtrans_accumulate,
-                    ),
-                    bind_group: bg_xtrans_accumulate,
-                    workgroups: image_workgroups,
-                },
+                make_pass(xtrans_demosaic_module.as_ref(), "xtrans_seed", &bgl1, bg1, image_workgroups),
+                make_pass(
+                    xtrans_demosaic_module.as_ref(),
+                    "xtrans_markesteijn_pass1",
+                    &bgl2,
+                    bg2.clone(),
+                    image_workgroups,
+                ),
+                make_pass(
+                    xtrans_demosaic_module.as_ref(),
+                    "xtrans_markesteijn_pass2",
+                    &bgl3,
+                    bg3,
+                    image_workgroups,
+                ),
+                make_pass(
+                    xtrans_demosaic_module.as_ref(),
+                    "xtrans_markesteijn_pass3",
+                    &bgl2,
+                    bg2,
+                    image_workgroups,
+                ),
+                make_pass(
+                    xtrans_demosaic_module.as_ref(),
+                    "xtrans_markesteijn_derivatives",
+                    &bgl_xtrans_derivatives,
+                    bg_xtrans_derivatives,
+                    image_workgroups,
+                ),
+                make_pass(
+                    xtrans_demosaic_module.as_ref(),
+                    "xtrans_markesteijn_homogeneity",
+                    &bgl_xtrans_homogeneity,
+                    bg_xtrans_homogeneity,
+                    image_workgroups,
+                ),
+                make_pass(
+                    xtrans_demosaic_module.as_ref(),
+                    "xtrans_markesteijn_accumulate",
+                    &bgl_xtrans_accumulate,
+                    bg_xtrans_accumulate,
+                    image_workgroups,
+                ),
             ]),
         }
 
         let demosaic_dual_start_index = passes.len();
         passes.extend([
-            Pass {
-                pipeline: make_pipeline(
-                    dual_demosaic_module.as_ref(),
-                    "dual_green_reconstruct",
-                    &bgl_dual_green,
-                ),
-                bind_group: bg_dual_green,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    dual_demosaic_module.as_ref(),
-                    "dual_rgb_reconstruct",
-                    &bgl_dual_rgb,
-                ),
-                bind_group: bg_dual_rgb,
-                workgroups: image_workgroups,
-            },
+            make_pass(
+                dual_demosaic_module.as_ref(),
+                "dual_green_reconstruct",
+                &bgl_dual_green,
+                bg_dual_green,
+                image_workgroups,
+            ),
+            make_pass(
+                dual_demosaic_module.as_ref(),
+                "dual_rgb_reconstruct",
+                &bgl_dual_rgb,
+                bg_dual_rgb,
+                image_workgroups,
+            ),
         ]);
         let demosaic_dual_end_index = passes.len();
 
         let demosaic_finish_index = passes.len();
         match raw.cfa_kind {
-            CfaKind::Bayer => passes.push(Pass {
-                pipeline: make_pipeline(bayer_rcd_p4_module.as_ref(), "bayer_rcd_output", &bgl4),
-                bind_group: bg4,
-                workgroups: image_workgroups,
-            }),
-            CfaKind::XTrans => passes.push(Pass {
-                pipeline: make_pipeline(
-                    xtrans_finish_module.as_ref(),
-                    "xtrans_demosaic_finish",
-                    &bgl_xtrans_finish,
-                ),
-                bind_group: bg_xtrans_finish,
-                workgroups: image_workgroups,
-            }),
+            CfaKind::Bayer => passes.push(make_pass(
+                bayer_rcd_p4_module.as_ref(),
+                "bayer_rcd_output",
+                &bgl4,
+                bg4,
+                image_workgroups,
+            )),
+            CfaKind::XTrans => passes.push(make_pass(
+                xtrans_finish_module.as_ref(),
+                "xtrans_demosaic_finish",
+                &bgl_xtrans_finish,
+                bg_xtrans_finish,
+                image_workgroups,
+            )),
         }
 
         let color_denoise_start_index = passes.len();
@@ -3757,11 +3462,13 @@ impl RawGpuPipeline {
             .iter()
             .zip(color_denoise_bind_groups)
         {
-            passes.push(Pass {
-                pipeline: make_pipeline(color_denoise_module.as_ref(), entry, &bgl_color_denoise),
+            passes.push(make_pass(
+                color_denoise_module.as_ref(),
+                entry,
+                &bgl_color_denoise,
                 bind_group,
-                workgroups: image_workgroups,
-            });
+                image_workgroups,
+            ));
         }
         let color_denoise_end_index = passes.len();
 
@@ -3770,42 +3477,34 @@ impl RawGpuPipeline {
         // recompute() clears the histogram immediately before this pass.
         let tone_prepare_pass_index = passes.len();
         passes.extend([
-            Pass {
-                pipeline: make_pipeline(
-                    tone_analysis_module.as_ref(),
-                    "tone_guide_prepare",
-                    &bgl_tone_prepare,
-                ),
-                bind_group: bg_tone_prepare,
-                workgroups: tone_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    tone_analysis_module.as_ref(),
-                    "tone_guide_horizontal",
-                    &bgl_tone_blur,
-                ),
-                bind_group: bg_tone_horizontal,
-                workgroups: tone_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    tone_analysis_module.as_ref(),
-                    "tone_guide_vertical",
-                    &bgl_tone_blur,
-                ),
-                bind_group: bg_tone_vertical,
-                workgroups: tone_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    tone_analysis_module.as_ref(),
-                    "tone_reduce_histogram",
-                    &bgl_tone_reduce,
-                ),
-                bind_group: bg_tone_reduce,
-                workgroups: single_workgroup,
-            },
+            make_pass(
+                tone_analysis_module.as_ref(),
+                "tone_guide_prepare",
+                &bgl_tone_prepare,
+                bg_tone_prepare,
+                tone_workgroups,
+            ),
+            make_pass(
+                tone_analysis_module.as_ref(),
+                "tone_guide_horizontal",
+                &bgl_tone_blur,
+                bg_tone_horizontal,
+                tone_workgroups,
+            ),
+            make_pass(
+                tone_analysis_module.as_ref(),
+                "tone_guide_vertical",
+                &bgl_tone_blur,
+                bg_tone_vertical,
+                tone_workgroups,
+            ),
+            make_pass(
+                tone_analysis_module.as_ref(),
+                "tone_reduce_histogram",
+                &bgl_tone_reduce,
+                bg_tone_reduce,
+                single_workgroup,
+            ),
         ]);
 
         let tone_reduce_pass_index = tone_prepare_pass_index + 3;
@@ -3822,168 +3521,132 @@ impl RawGpuPipeline {
         let adjustment_render_pass_index = adjustment_creative_pass_index + 1;
 
         passes.extend([
-            Pass {
-                pipeline: make_pipeline(
-                    scene_adjustments_module.as_ref(),
-                    "prepare_scene_node",
-                    &bgl_adjust_prepare,
-                ),
-                bind_group: bg_adjust_prepare,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    scene_adjustments_module.as_ref(),
-                    "apply_scene_tone_node",
-                    &bgl_adjust_tone,
-                ),
-                bind_group: bg_adjust_tone,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    scene_adjustments_module.as_ref(),
-                    "apply_local_scene_tone_node",
-                    &bgl_adjust_tone,
-                ),
-                bind_group: bg_adjust_local_tone,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "apply_scene_effects_node",
-                    &bgl_adjust_effects,
-                ),
-                bind_group: bg_adjust_effects,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "copy_scene_effects_node",
-                    &bgl_adjust_effects,
-                ),
-                bind_group: bg_adjust_effects_copy,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_mask_blur_0",
-                    &bgl_mask_blur,
-                ),
-                bind_group: bg_mask_blur_0,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_mask_blur_1",
-                    &bgl_mask_blur,
-                ),
-                bind_group: bg_mask_blur_1,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_mask_blur_2",
-                    &bgl_mask_blur,
-                ),
-                bind_group: bg_mask_blur_2,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_mask_blur_3",
-                    &bgl_mask_blur,
-                ),
-                bind_group: bg_mask_blur_3,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_mask_blur_4",
-                    &bgl_mask_blur,
-                ),
-                bind_group: bg_mask_blur_4,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "prepare_glow_source",
-                    &bgl_glow_prepare,
-                ),
-                bind_group: bg_glow_prepare,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_glow_0",
-                    &bgl_glow_blur,
-                ),
-                bind_group: bg_glow_blur_0,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_glow_1",
-                    &bgl_glow_blur,
-                ),
-                bind_group: bg_glow_blur_1,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_glow_2",
-                    &bgl_glow_blur,
-                ),
-                bind_group: bg_glow_blur_2,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_glow_3",
-                    &bgl_glow_blur,
-                ),
-                bind_group: bg_glow_blur_3,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "diffuse_glow_4",
-                    &bgl_glow_blur,
-                ),
-                bind_group: bg_glow_blur_4,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    creative_effects_module.as_ref(),
-                    "apply_creative_effects",
-                    &bgl_adjust_creative,
-                ),
-                bind_group: bg_adjust_creative,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: make_pipeline(
-                    view_transform_module.as_ref(),
-                    "apply_view_node",
-                    &bgl_adjust_render,
-                ),
-                bind_group: bg_adjust_render,
-                workgroups: image_workgroups,
-            },
+            make_pass(
+                scene_adjustments_module.as_ref(),
+                "prepare_scene_node",
+                &bgl_adjust_prepare,
+                bg_adjust_prepare,
+                image_workgroups,
+            ),
+            make_pass(
+                scene_adjustments_module.as_ref(),
+                "apply_scene_tone_node",
+                &bgl_adjust_tone,
+                bg_adjust_tone,
+                image_workgroups,
+            ),
+            make_pass(
+                scene_adjustments_module.as_ref(),
+                "apply_local_scene_tone_node",
+                &bgl_adjust_tone,
+                bg_adjust_local_tone,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "apply_scene_effects_node",
+                &bgl_adjust_effects,
+                bg_adjust_effects,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "copy_scene_effects_node",
+                &bgl_adjust_effects,
+                bg_adjust_effects_copy,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_mask_blur_0",
+                &bgl_mask_blur,
+                bg_mask_blur_0,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_mask_blur_1",
+                &bgl_mask_blur,
+                bg_mask_blur_1,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_mask_blur_2",
+                &bgl_mask_blur,
+                bg_mask_blur_2,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_mask_blur_3",
+                &bgl_mask_blur,
+                bg_mask_blur_3,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_mask_blur_4",
+                &bgl_mask_blur,
+                bg_mask_blur_4,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "prepare_glow_source",
+                &bgl_glow_prepare,
+                bg_glow_prepare,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_glow_0",
+                &bgl_glow_blur,
+                bg_glow_blur_0,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_glow_1",
+                &bgl_glow_blur,
+                bg_glow_blur_1,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_glow_2",
+                &bgl_glow_blur,
+                bg_glow_blur_2,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_glow_3",
+                &bgl_glow_blur,
+                bg_glow_blur_3,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "diffuse_glow_4",
+                &bgl_glow_blur,
+                bg_glow_blur_4,
+                image_workgroups,
+            ),
+            make_pass(
+                creative_effects_module.as_ref(),
+                "apply_creative_effects",
+                &bgl_adjust_creative,
+                bg_adjust_creative,
+                image_workgroups,
+            ),
+            make_pass(
+                view_transform_module.as_ref(),
+                "apply_view_node",
+                &bgl_adjust_render,
+                bg_adjust_render,
+                image_workgroups,
+            ),
         ]);
 
         // These variants reuse the same compiled pipelines with bind groups
@@ -4863,33 +4526,20 @@ impl RawGpuPipeline {
     ) -> Result<Vec<f32>> {
         self.upload_params(queue, params);
         let size = texture_size(self.width, self.height);
-        let working_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw scene conversion RGBA32F"),
+        let working_texture = create_processing_texture(
+            device,
             size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[wgpu::TextureFormat::Rgba32Float],
-        });
-        let working_view = working_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let scene_view = self
-            .scene_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let raw_view = self
-            .raw_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let color_view = self
-            .color_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let black_view = self
-            .black_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+            wgpu::TextureFormat::Rgba32Float,
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            "auraw scene conversion RGBA32F",
+        );
+        let working_view = default_texture_view(&working_texture);
+        let scene_view = default_texture_view(&self.scene_texture);
+        let raw_view = default_texture_view(&self.raw_texture);
+        let color_view = default_texture_view(&self.color_texture);
+        let black_view = default_texture_view(&self.black_texture);
 
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("auraw scene conversion layout"),
-            entries: &[
+        let layout = create_bind_group_layout(device, "auraw scene conversion layout", &[
                 buffer_entry(0),
                 texture_entry(1, wgpu::TextureSampleType::Uint),
                 texture_entry(2, wgpu::TextureSampleType::Uint),
@@ -4901,12 +4551,8 @@ impl RawGpuPipeline {
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
                 storage_buffer_entry(20, true),
-            ],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("auraw scene conversion bind group"),
-            layout: &layout,
-            entries: &[
+            ]);
+        let bind_group = create_bind_group(device, "auraw scene conversion bind group", &layout, &[
                 buffer_binding(0, &self.camera_uniforms_buffer),
                 texture_binding(1, &raw_view),
                 texture_binding(2, &color_view),
@@ -4914,8 +4560,7 @@ impl RawGpuPipeline {
                 texture_binding(11, &scene_view),
                 texture_binding(12, &working_view),
                 buffer_binding(20, &self.profile_buffer),
-            ],
-        });
+            ]);
         let mut shader_manager =
             ShaderManager::new(processing_work_format(self.processing_quality))
                 .context("initialize scene-conversion WGSL composer")?;
@@ -4930,29 +4575,26 @@ impl RawGpuPipeline {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("auraw scene conversion pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some(entry_point),
-            compilation_options: Default::default(),
-            cache: self.pipeline_cache.as_ref().map(|cache| cache.raw()),
-        });
+        let pipeline = create_compute_pipeline(
+            device,
+            "auraw scene conversion pipeline",
+            &pipeline_layout,
+            &shader,
+            entry_point,
+            self.pipeline_cache.as_ref().map(|cache| cache.raw()),
+        );
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw scene conversion encoder"),
         });
         self.encode_raw_stage(&mut encoder, params);
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("auraw scene conversion pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = dispatch_for_extent(self.width, self.height);
-            pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
-        }
+        dispatch_compute(
+            &mut encoder,
+            "auraw scene conversion pass",
+            &pipeline,
+            &[&bind_group],
+            dispatch_for_extent(self.width, self.height),
+        );
         queue.submit(Some(encoder.finish()));
         read_rgba32_texture_rgb_blocking(
             device,
@@ -4992,20 +4634,15 @@ impl RawGpuPipeline {
         }
 
         self.upload_params(queue, params);
-        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auraw inpaint working resize RGBA32F"),
-            size: texture_size(output_width, output_height),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[wgpu::TextureFormat::Rgba32Float],
-        });
-        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let scene_view = self
-            .scene_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let output_texture = create_processing_texture(
+            device,
+            texture_size(output_width, output_height),
+            wgpu::TextureFormat::Rgba32Float,
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            "auraw inpaint working resize RGBA32F",
+        );
+        let output_view = default_texture_view(&output_texture);
+        let scene_view = default_texture_view(&self.scene_texture);
         let resize_params = InpaintResizeParams {
             source_origin_x: source_x,
             source_origin_y: source_y,
@@ -5019,14 +4656,13 @@ impl RawGpuPipeline {
             cam_to_working_1: params.camera.cam_to_srgb_1,
             cam_to_working_2: params.camera.cam_to_srgb_2,
         };
-        let resize_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("auraw inpaint resize params"),
-            contents: bytemuck::bytes_of(&resize_params),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("auraw inpaint resize layout"),
-            entries: &[
+        let resize_params_buffer = create_initialized_buffer(
+            device,
+            "auraw inpaint resize params",
+            bytemuck::bytes_of(&resize_params),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let layout = create_bind_group_layout(device, "auraw inpaint resize layout", &[
                 buffer_entry(0),
                 texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
                 storage_texture_entry(
@@ -5034,17 +4670,12 @@ impl RawGpuPipeline {
                     wgpu::TextureFormat::Rgba32Float,
                     wgpu::StorageTextureAccess::WriteOnly,
                 ),
-            ],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("auraw inpaint resize bind group"),
-            layout: &layout,
-            entries: &[
+            ]);
+        let bind_group = create_bind_group(device, "auraw inpaint resize bind group", &layout, &[
                 buffer_binding(0, &resize_params_buffer),
                 texture_binding(1, &scene_view),
                 texture_binding(2, &output_view),
-            ],
-        });
+            ]);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("auraw inpaint resize shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER_INPAINT_DOWNSAMPLE.into()),
@@ -5054,29 +4685,26 @@ impl RawGpuPipeline {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("auraw inpaint resize pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: self.pipeline_cache.as_ref().map(|cache| cache.raw()),
-        });
+        let pipeline = create_compute_pipeline(
+            device,
+            "auraw inpaint resize pipeline",
+            &pipeline_layout,
+            &shader,
+            "main",
+            self.pipeline_cache.as_ref().map(|cache| cache.raw()),
+        );
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw inpaint resize encoder"),
         });
         self.encode_raw_stage(&mut encoder, params);
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("auraw inpaint resize pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = dispatch_for_extent(output_width, output_height);
-            pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
-        }
+        dispatch_compute(
+            &mut encoder,
+            "auraw inpaint resize pass",
+            &pipeline,
+            &[&bind_group],
+            dispatch_for_extent(output_width, output_height),
+        );
         queue.submit(Some(encoder.finish()));
         read_rgba32_texture_rgb_blocking(
             device,
@@ -5209,16 +4837,17 @@ impl RawGpuPipeline {
         pass_record: &Pass,
         label: &str,
     ) {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some(label),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&pass_record.pipeline);
-        pass.set_bind_group(0, &pass_record.bind_group, &[]);
-        pass.set_bind_group(1, &self.scene_tone_bind_group, &[]);
-        pass.set_bind_group(2, &self.effects_bind_group, &[]);
-        let workgroups = pass_record.workgroups;
-        pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
+        dispatch_compute(
+            encoder,
+            label,
+            &pass_record.pipeline,
+            &[
+                &pass_record.bind_group,
+                &self.scene_tone_bind_group,
+                &self.effects_bind_group,
+            ],
+            pass_record.workgroups,
+        );
     }
 
     fn encode_pass_range(&self, encoder: &mut wgpu::CommandEncoder, start: usize, end: usize) {
