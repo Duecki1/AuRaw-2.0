@@ -1,6 +1,7 @@
 use half::f16;
 use rayon::prelude::*;
 use std::f32::consts::TAU;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 mod effects;
@@ -1708,28 +1709,92 @@ impl MaskGeometry {
             Self::Placeholder => false,
         }
     }
+
+    pub fn set_feather(&mut self, value: f32) -> bool {
+        let feather = match self {
+            Self::Brush { feather, .. }
+            | Self::Radial { feather, .. }
+            | Self::Linear { feather, .. }
+            | Self::Ai { feather, .. }
+            | Self::Landscape { feather, .. }
+            | Self::Object { feather, .. }
+            | Self::LuminanceRange { feather, .. }
+            | Self::ColorRange { feather, .. } => feather,
+            Self::Fullscreen | Self::Placeholder => return false,
+        };
+        set_if_changed(feather, value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct MaskCommon {
+    pub name: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub invert: bool,
+}
+
+impl MaskCommon {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            enabled: true,
+            invert: false,
+        }
+    }
+
+    pub fn rename(&mut self, name: impl Into<String>) -> bool {
+        set_if_changed(&mut self.name, name.into())
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) -> bool {
+        set_if_changed(&mut self.enabled, enabled)
+    }
+
+    pub fn toggle_invert(&mut self) {
+        self.invert = !self.invert;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MaskComponent {
-    pub name: String,
+    #[serde(flatten)]
+    pub common: MaskCommon,
     pub kind: MaskKind,
     pub combine: MaskCombineMode,
-    pub enabled: bool,
-    pub invert: bool,
     pub geometry: MaskGeometry,
+}
+
+impl Deref for MaskComponent {
+    type Target = MaskCommon;
+
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+
+impl DerefMut for MaskComponent {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.common
+    }
 }
 
 impl MaskComponent {
     pub fn new(kind: MaskKind, combine: MaskCombineMode) -> Self {
         Self {
-            name: kind.label().to_owned(),
+            common: MaskCommon::new(kind.label()),
             kind,
             combine,
-            enabled: true,
-            invert: false,
             geometry: MaskGeometry::for_kind(kind),
         }
+    }
+
+    pub fn set_combine(&mut self, combine: MaskCombineMode) -> bool {
+        set_if_changed(&mut self.combine, combine)
+    }
+
+    pub fn set_feather(&mut self, feather: f32) -> bool {
+        self.geometry.set_feather(feather)
     }
 }
 
@@ -1833,8 +1898,8 @@ impl LocalAdjustments {
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LocalMask {
-    pub name: String,
-    pub enabled: bool,
+    #[serde(flatten)]
+    pub common: MaskCommon,
     /// What the combined mask coverage does. Missing in older sidecars, which
     /// must retain the original adjustment-mask behavior.
     #[serde(default)]
@@ -1844,25 +1909,39 @@ pub struct LocalMask {
     /// settings belonging to another type.
     #[serde(default, skip_serializing_if = "MaskEffectSettings::is_default")]
     pub effect_settings: MaskEffectSettings,
-    #[serde(default)]
-    pub invert: bool,
     pub opacity: f32,
     pub components: Vec<MaskComponent>,
     pub adjustments: LocalAdjustments,
 }
 
+impl Deref for LocalMask {
+    type Target = MaskCommon;
+
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+
+impl DerefMut for LocalMask {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.common
+    }
+}
+
 impl LocalMask {
     pub fn new(kind: MaskKind, number: usize) -> Self {
         Self {
-            name: format!("Mask {number}"),
-            enabled: true,
+            common: MaskCommon::new(format!("Mask {number}")),
             effect: MaskEffect::default(),
             effect_settings: MaskEffectSettings::default(),
-            invert: false,
             opacity: 1.0,
             components: vec![MaskComponent::new(kind, MaskCombineMode::Add)],
             adjustments: LocalAdjustments::default(),
         }
+    }
+
+    pub fn set_opacity(&mut self, opacity: f32) -> bool {
+        set_if_changed(&mut self.opacity, opacity)
     }
 }
 
@@ -2002,8 +2081,7 @@ impl MaskStack {
         }
         let mask_index = self.masks.len();
         self.masks.push(LocalMask::new(kind, mask_index + 1));
-        self.selected_mask = Some(mask_index);
-        self.selected_component = Some(0);
+        self.select_mask(mask_index);
         Some((mask_index, 0))
     }
 
@@ -2047,6 +2125,53 @@ impl MaskStack {
             .get_mut(component_index)
     }
 
+    pub fn ensure_selection(&mut self) -> Option<(usize, usize)> {
+        if self.masks.is_empty() {
+            self.selected_mask = None;
+            self.selected_component = None;
+            return None;
+        }
+        let mask_index = self
+            .selected_mask
+            .filter(|&index| index < self.masks.len())
+            .unwrap_or(self.masks.len() - 1);
+        let component_count = self.masks[mask_index].components.len();
+        if component_count == 0 {
+            self.selected_mask = Some(mask_index);
+            self.selected_component = None;
+            return None;
+        }
+        let component_index = self
+            .selected_component
+            .filter(|&index| index < component_count)
+            .unwrap_or(0);
+        self.selected_mask = Some(mask_index);
+        self.selected_component = Some(component_index);
+        Some((mask_index, component_index))
+    }
+
+    pub fn select_mask(&mut self, mask_index: usize) -> bool {
+        if mask_index >= self.masks.len() {
+            return false;
+        }
+        self.selected_mask = Some(mask_index);
+        self.selected_component = (!self.masks[mask_index].components.is_empty()).then_some(0);
+        true
+    }
+
+    pub fn select_component(&mut self, mask_index: usize, component_index: usize) -> bool {
+        if self
+            .masks
+            .get(mask_index)
+            .is_none_or(|mask| component_index >= mask.components.len())
+        {
+            return false;
+        }
+        self.selected_mask = Some(mask_index);
+        self.selected_component = Some(component_index);
+        true
+    }
+
     /// Source-pixel context needed around a partial mask raster so grow and
     /// feather produce the same boundary as a full-frame raster. Procedural
     /// brushes and gradients do not need a halo because their geometry remains
@@ -2084,12 +2209,11 @@ impl MaskStack {
             .unwrap_or(2)
     }
 
-    pub fn remove_selected_mask(&mut self) -> Option<usize> {
-        let index = self.selected_mask?;
-        if index >= self.masks.len() {
-            return None;
+    pub fn delete_mask(&mut self, mask_index: usize) -> bool {
+        if mask_index >= self.masks.len() {
+            return false;
         }
-        self.masks.remove(index);
+        self.masks.remove(mask_index);
         for (number, mask) in self.masks.iter_mut().enumerate() {
             if mask.name.starts_with("Mask ") {
                 mask.name = format!("Mask {}", number + 1);
@@ -2099,22 +2223,96 @@ impl MaskStack {
             self.selected_mask = None;
             self.selected_component = None;
         } else {
-            self.selected_mask = Some(index.min(self.masks.len() - 1));
-            self.selected_component = Some(0);
+            self.select_mask(mask_index.min(self.masks.len() - 1));
         }
-        Some(index)
+        true
     }
 
-    pub fn remove_selected_component(&mut self) -> Option<(usize, usize)> {
-        let mask_index = self.selected_mask?;
-        let component_index = self.selected_component?;
-        let mask = self.masks.get_mut(mask_index)?;
+    pub fn delete_component(&mut self, mask_index: usize, component_index: usize) -> bool {
+        let Some(mask) = self.masks.get_mut(mask_index) else {
+            return false;
+        };
         if mask.components.len() <= 1 || component_index >= mask.components.len() {
-            return None;
+            return false;
         }
         mask.components.remove(component_index);
+        self.selected_mask = Some(mask_index);
         self.selected_component = Some(component_index.min(mask.components.len() - 1));
-        Some((mask_index, component_index))
+        true
+    }
+
+    pub fn duplicate_mask(&mut self, mask_index: usize, invert: bool) -> bool {
+        let Some(mask) = self.masks.get(mask_index).cloned() else {
+            return false;
+        };
+        self.insert_mask_copy(mask_index, mask, invert)
+    }
+
+    pub fn insert_mask_copy(
+        &mut self,
+        mask_index: usize,
+        mut mask: LocalMask,
+        invert: bool,
+    ) -> bool {
+        if self.masks.len() >= MAX_LOCAL_MASKS || mask_index >= self.masks.len() {
+            return false;
+        }
+        mask.name = copied_name(&mask.name, |candidate| {
+            self.masks.iter().any(|mask| mask.name == candidate)
+        });
+        if invert {
+            mask.common.toggle_invert();
+            // A complementary duplicate keeps coverage but intentionally starts
+            // from neutral local adjustments, matching the existing UI action.
+            mask.adjustments.reset();
+        }
+        let insert_at = mask_index + 1;
+        self.masks.insert(insert_at, mask);
+        self.select_mask(insert_at);
+        true
+    }
+
+    pub fn duplicate_component(
+        &mut self,
+        mask_index: usize,
+        component_index: usize,
+        invert: bool,
+    ) -> bool {
+        let Some(component) = self
+            .masks
+            .get(mask_index)
+            .and_then(|mask| mask.components.get(component_index))
+            .cloned()
+        else {
+            return false;
+        };
+        self.insert_component_copy(mask_index, component_index, component, invert)
+    }
+
+    pub fn insert_component_copy(
+        &mut self,
+        mask_index: usize,
+        component_index: usize,
+        mut component: MaskComponent,
+        invert: bool,
+    ) -> bool {
+        let Some(mask) = self.masks.get_mut(mask_index) else {
+            return false;
+        };
+        if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len() {
+            return false;
+        }
+        component.name = copied_name(&component.name, |candidate| {
+            mask.components.iter().any(|component| component.name == candidate)
+        });
+        if invert {
+            component.common.toggle_invert();
+        }
+        let insert_at = component_index + 1;
+        mask.components.insert(insert_at, component);
+        self.selected_mask = Some(mask_index);
+        self.selected_component = Some(insert_at);
+        true
     }
 
     pub fn move_submask_component(
@@ -2346,6 +2544,29 @@ fn crop_sampling_rect(source: [f32; 4], u0: f32, v0: f32, du: f32, dv: f32) -> [
         source[0] + (u0 + du) * source_width,
         source[1] + (v0 + dv) * source_height,
     ]
+}
+
+fn set_if_changed<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        false
+    } else {
+        *slot = value;
+        true
+    }
+}
+
+fn copied_name(base: &str, exists: impl Fn(&str) -> bool) -> String {
+    for number in 1..=10_000usize {
+        let candidate = if number == 1 {
+            format!("{base} Copy")
+        } else {
+            format!("{base} Copy {number}")
+        };
+        if !exists(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{base} Copy")
 }
 
 fn moved_index(selected: usize, from: usize, to: usize) -> usize {

@@ -238,7 +238,7 @@ pub(super) fn thumbnail_tile(
 ) -> egui::Response {
     let response = ui.interact(
         rect,
-        ui.make_persistent_id(("library-thumbnail-tile", entry.info.display_path.as_str())),
+        ui.make_persistent_id(("library-thumbnail-tile", entry.asset.display_path.as_str())),
         Sense::click(),
     );
     let visuals = ui.visuals();
@@ -288,87 +288,12 @@ pub(super) fn thumbnail_tile(
     ui.painter().text(
         egui::pos2(rect.left() + 8.0, rect.bottom() - 7.0),
         Align2::LEFT_BOTTOM,
-        elide_middle(&entry.info.name, max_chars),
+        elide_middle(&entry.asset.display_name, max_chars),
         FontId::proportional(12.5),
         Color32::WHITE,
     );
 
-    if let LibrarySource::Cloud(asset) = &entry.info.source {
-        let (icon, color, _) =
-            cloud_sync_badge(entry.info.cloud_sync_state, entry.info.cloud_downloaded);
-        let badge = egui::Rect::from_min_size(
-            egui::pos2(rect.right() - 37.0, rect.top() + 7.0),
-            egui::vec2(29.0, 25.0),
-        );
-        ui.painter()
-            .rect_filled(badge, 4.0, Color32::from_black_alpha(176));
-        ui.painter().text(
-            badge.center(),
-            Align2::CENTER_CENTER,
-            icon,
-            FontId::proportional(16.0),
-            color,
-        );
-        if let Some(icon) = cloud_preview_icon(asset.thumbnail_kind) {
-            // Android reserves the top-left corner for the always-visible
-            // selection checkbox, so keep cloud preview metadata immediately
-            // below it instead of painting the two controls on top of each other.
-            let preview_badge_top = if cfg!(target_os = "android") {
-                rect.top() + 37.0
-            } else {
-                rect.top() + 7.0
-            };
-            let preview_badge = egui::Rect::from_min_size(
-                egui::pos2(rect.left() + 7.0, preview_badge_top),
-                egui::vec2(29.0, 25.0),
-            );
-            ui.painter()
-                .rect_filled(preview_badge, 4.0, Color32::from_black_alpha(176));
-            ui.painter().text(
-                preview_badge.center(),
-                Align2::CENTER_CENTER,
-                icon,
-                FontId::proportional(16.0),
-                Color32::from_rgb(170, 205, 245),
-            );
-        }
-        if let Some(label) = cloud_preview_label(asset.thumbnail_kind) {
-            let label_width =
-                (label.chars().count() as f32 * 6.4 + 14.0).min((rect.width() - 53.0).max(0.0));
-            if label_width >= 58.0 {
-                let preview_badge_top = if cfg!(target_os = "android") {
-                    rect.top() + 37.0
-                } else {
-                    rect.top() + 7.0
-                };
-                let preview_badge = egui::Rect::from_min_size(
-                    egui::pos2(rect.left() + 7.0, preview_badge_top),
-                    egui::vec2(label_width, 25.0),
-                );
-                ui.painter()
-                    .rect_filled(preview_badge, 4.0, Color32::from_black_alpha(176));
-                ui.painter().text(
-                    preview_badge.center(),
-                    Align2::CENTER_CENTER,
-                    label,
-                    FontId::proportional(10.5),
-                    Color32::from_rgb(170, 205, 245),
-                );
-            }
-        }
-    }
-
-    let mut tooltip = entry.info.display_path.clone();
-    if let LibrarySource::Cloud(asset) = &entry.info.source {
-        let (_, _, sync_text) =
-            cloud_sync_badge(entry.info.cloud_sync_state, entry.info.cloud_downloaded);
-        tooltip.push('\n');
-        tooltip.push_str(sync_text);
-        if let Some(preview_notice) = cloud_preview_notice(asset.thumbnail_kind) {
-            tooltip.push('\n');
-            tooltip.push_str(preview_notice);
-        }
-    }
+    let mut tooltip = entry.asset.display_path.clone();
     if let Some(error) = &entry.thumbnail_error {
         tooltip.push_str("\nPreview: ");
         tooltip.push_str(error);
@@ -399,7 +324,7 @@ pub(super) fn thumbnail_selection_checkbox(
             hit_rect,
             ui.make_persistent_id((
                 "library-thumbnail-selection-checkbox",
-                entry.info.display_path.as_str(),
+                entry.asset.display_path.as_str(),
             )),
             Sense::click(),
         )

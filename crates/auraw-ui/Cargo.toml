@@ -23,13 +23,10 @@ auraw-gpu.workspace = true
 anyhow.workspace = true
 egui-phosphor.workspace = true
 half.workspace = true
-hex.workspace = true
 image.workspace = true
 log.workspace = true
-ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ureq.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { workspace = true, features = ["accesskit", "wgpu", "default_fonts", "wayland", "x11"] }

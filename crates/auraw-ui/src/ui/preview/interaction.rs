@@ -23,20 +23,20 @@ impl Preview {
         });
 
         let allowed = !matches!(
-            app.sidebar_tab,
+            app.ui.sidebar_tab,
             SidebarTab::Crop | SidebarTab::Masks | SidebarTab::Inpainting
         ) && !touch_navigation
             && !multi_touch
             && any_touches;
         if !allowed {
-            app.android_original_hold = None;
+            app.preview.original_hold = None;
             app.set_original_preview_requested(false);
             return false;
         }
 
         if pressed {
             if let Some(position) = pointer.filter(|position| preview_rect.contains(*position)) {
-                app.android_original_hold = Some(crate::app::AndroidOriginalHold {
+                app.preview.original_hold = Some(crate::app::AndroidOriginalHold {
                     start: position,
                     started_at: std::time::Instant::now(),
                     showing_original: false,
@@ -44,7 +44,7 @@ impl Preview {
             }
         }
 
-        let Some(hold) = app.android_original_hold else {
+        let Some(hold) = app.preview.original_hold else {
             return false;
         };
 
@@ -52,7 +52,7 @@ impl Preview {
             .map(|position| position.distance(hold.start) > MAX_STATIONARY_DISTANCE)
             .unwrap_or(false);
         if moved_too_far || released || !down {
-            app.android_original_hold = None;
+            app.preview.original_hold = None;
             app.set_original_preview_requested(false);
             return false;
         }
@@ -60,7 +60,7 @@ impl Preview {
         if !hold.showing_original {
             let elapsed = hold.started_at.elapsed();
             if elapsed >= HOLD_TIME {
-                if let Some(active_hold) = app.android_original_hold.as_mut() {
+                if let Some(active_hold) = app.preview.original_hold.as_mut() {
                     active_hold.showing_original = true;
                 }
                 app.set_original_preview_requested(true);

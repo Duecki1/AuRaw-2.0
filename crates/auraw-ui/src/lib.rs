@@ -10,7 +10,6 @@ pub mod file_ops {
 
 pub(crate) mod performance_settings;
 
-pub mod cloud;
 
 pub mod thumbnail_cache {
     pub use auraw_core::thumbnail_cache::*;

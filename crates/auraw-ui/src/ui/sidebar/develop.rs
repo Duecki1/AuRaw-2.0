@@ -1,7 +1,7 @@
 impl Sidebar {
     fn show_optics(ui: &mut Ui, app: &mut AurawApp, foldable: bool) -> bool {
         let mut rebuild = false;
-        let capture = app.original_raw.as_ref().map(|raw| {
+        let capture = app.develop.original_raw.as_ref().map(|raw| {
             let lens = match (raw.lens_make.trim(), raw.lens_model.trim()) {
                 ("", "") => "Not reported".to_owned(),
                 ("", model) => model.to_owned(),
@@ -15,7 +15,7 @@ impl Sidebar {
 
         Self::adjustment_section(ui, "Lens Corrections", false, foldable, |ui| {
             let lens_correction_busy = app.lens_correction_busy();
-            let state = &mut app.lens_correction;
+            let state = &mut app.develop.lens_correction;
             let has_selection = state.selected_lens().is_some();
             let enabled_response = ui.add_enabled(
                 state.catalog.available && has_selection && !lens_correction_busy,

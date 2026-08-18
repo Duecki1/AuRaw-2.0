@@ -6,7 +6,7 @@ impl Sidebar {
     }
 
     pub(in crate::ui::sidebar) fn show_masks(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
-        if app.ai_masks_need_update() {
+        if app.ai.masks_need_update {
             crate::ui::theme::section_card(ui, "Masks need updating", |ui| {
                 ui.label(
                     "The image used by existing masks changed. Refresh masks to rebuild content-aware masks and mask sources without deleting your edits.",
@@ -24,7 +24,7 @@ impl Sidebar {
             ui.add_space(crate::ui::theme::CARD_GAP);
         }
 
-        if app.masks.masks.is_empty() {
+        if app.masks.stack.masks.is_empty() {
             crate::ui::theme::section_card(ui, "No masks yet", |_| {});
             return;
         }
@@ -58,22 +58,12 @@ impl Sidebar {
     ) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
-        if app.masks.masks.is_empty() {
-            app.masks.selected_mask = None;
-            app.masks.selected_component = None;
-        } else if app
-            .masks
-            .selected_mask
-            .is_none_or(|index| index >= app.masks.masks.len())
-        {
-            app.masks.selected_mask = Some(app.masks.masks.len().saturating_sub(1));
-            app.masks.selected_component = Some(0);
-        }
+        app.masks.stack.ensure_selection();
 
         Self::refresh_mask_thumbnails(ui, app);
 
-        let selected_mask_before = app.masks.selected_mask;
-        let selected_component_before = app.masks.selected_component;
+        let selected_mask_before = app.masks.stack.selected_mask;
+        let selected_component_before = app.masks.stack.selected_component;
         let mut select_mask = None;
         let mut select_component = None;
         let mut new_mask = None;
@@ -110,26 +100,26 @@ impl Sidebar {
 
         {
             let mut show_cards = |ui: &mut Ui| {
-                ui.add_enabled_ui(app.masks.masks.len() < MAX_LOCAL_MASKS, |ui| {
+                ui.add_enabled_ui(app.masks.stack.masks.len() < MAX_LOCAL_MASKS, |ui| {
                     Self::create_mask_group_card(ui, &mut new_mask, orientation);
                 });
                 ui.add_space(2.0);
 
-                for index in (0..app.masks.masks.len()).rev() {
-                    let mask_name = app.masks.masks[index].name.clone();
-                    let mask_enabled = app.masks.masks[index].enabled;
-                    let component_count = app.masks.masks[index].components.len();
+                for index in (0..app.masks.stack.masks.len()).rev() {
+                    let mask_name = app.masks.stack.masks[index].name.clone();
+                    let mask_enabled = app.masks.stack.masks[index].enabled;
+                    let component_count = app.masks.stack.masks[index].components.len();
                     let badge = component_count.to_string();
                     let response = Self::mask_thumbnail_card(
                         ui,
-                        app.mask_thumbnail_group_textures.get(index),
+                        app.masks.thumbnail_group_textures.get(index),
                         &mask_name,
                         selected_mask_before == Some(index),
                         Some(&badge),
                         mask_enabled,
                         MaskCardSize::Group,
                     );
-                    let can_add_group = app.masks.masks.len() < MAX_LOCAL_MASKS;
+                    let can_add_group = app.masks.stack.masks.len() < MAX_LOCAL_MASKS;
                     #[cfg(target_os = "android")]
                     let overflow_clicked = {
                         let menu_id = ui.make_persistent_id(("android-mask-group-overflow", index));
@@ -137,7 +127,7 @@ impl Sidebar {
                             let mut geometry_changed = false;
                             Self::mask_group_context_menu(
                                 ui,
-                                &mut app.masks.masks[index],
+                                &mut app.masks.stack.masks[index],
                                 can_add_group,
                                 &mut group_enabled_changed,
                                 &mut geometry_changed,
@@ -167,7 +157,7 @@ impl Sidebar {
                             );
                             hovered_group_this_frame = Some(index);
                             drag.drop_target =
-                                Some((index, app.masks.masks[index].components.len()));
+                                Some((index, app.masks.stack.masks[index].components.len()));
                             match drag.hover_group {
                                 Some((hovered, started)) if hovered == index => {
                                     if started.elapsed() >= std::time::Duration::from_millis(650) {
@@ -184,7 +174,7 @@ impl Sidebar {
                         let mut geometry_changed = false;
                         Self::mask_group_context_menu(
                             ui,
-                            &mut app.masks.masks[index],
+                            &mut app.masks.stack.masks[index],
                             can_add_group,
                             &mut group_enabled_changed,
                             &mut geometry_changed,
@@ -215,7 +205,7 @@ impl Sidebar {
                                     }
                                 }
                             }
-                            let component = &app.masks.masks[index].components[component_index];
+                            let component = &app.masks.stack.masks[index].components[component_index];
                             let component_name = component.name.clone();
                             let component_enabled = component.enabled;
                             let component_badge =
@@ -232,7 +222,7 @@ impl Sidebar {
                             }
                             let response = Self::mask_thumbnail_card(
                                 ui,
-                                app.mask_thumbnail_component_textures.get(component_index),
+                                app.masks.thumbnail_component_textures.get(component_index),
                                 &component_name,
                                 selected_component_before == Some(component_index),
                                 Some(component_badge),
@@ -264,7 +254,7 @@ impl Sidebar {
                                     |ui| {
                                         Self::submask_context_menu(
                                             ui,
-                                            &mut app.masks.masks[index].components[component_index],
+                                            &mut app.masks.stack.masks[index].components[component_index],
                                             component_count > 1,
                                             component_count < MAX_MASK_COMPONENTS,
                                             &mut menu_geometry_changed,
@@ -287,8 +277,7 @@ impl Sidebar {
                                 submask_drag = Some(SubmaskDragState {
                                     source_mask: index,
                                     source_component: component_index,
-                                    source_texture: app
-                                        .mask_thumbnail_component_textures
+                                    source_texture: app.masks.thumbnail_component_textures
                                         .get(component_index)
                                         .cloned(),
                                     source_name: component_name.clone(),
@@ -323,7 +312,7 @@ impl Sidebar {
                             response.context_menu(|ui| {
                                 Self::submask_context_menu(
                                     ui,
-                                    &mut app.masks.masks[index].components[component_index],
+                                    &mut app.masks.stack.masks[index].components[component_index],
                                     component_count > 1,
                                     component_count < MAX_MASK_COMPONENTS,
                                     &mut menu_geometry_changed,
@@ -412,10 +401,10 @@ impl Sidebar {
                 .request_repaint_after(std::time::Duration::from_millis(50));
         }
         if let Some(index) = hover_open_mask {
-            app.masks.selected_mask = Some(index);
-            app.masks.selected_component = Some(0);
-            app.mask_thumbnail_component_mask = None;
-            ui.ctx().request_repaint();
+            if app.masks.stack.select_mask(index) {
+                app.masks.thumbnail_component_mask = None;
+                ui.ctx().request_repaint();
+            }
         }
 
         let component_drop = if pointer_released {
@@ -449,6 +438,7 @@ impl Sidebar {
         if let Some((drag, (target_mask, target_insert))) = component_drop {
             if app
                 .masks
+                .stack
                 .move_submask_component(
                     drag.source_mask,
                     drag.source_component,
@@ -458,31 +448,15 @@ impl Sidebar {
                 .is_some()
             {
                 app.mark_all_mask_layers_dirty();
-                app.mask_thumbnail_component_mask = None;
-                if let Some(kind) = app
-                    .masks
-                    .selected_component()
-                    .map(|component| component.kind)
-                {
-                    app.select_mask_tool(kind);
-                }
+                app.sync_selected_mask_tool();
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some(index) = remove_mask {
-            app.masks.selected_mask = Some(index);
-            app.masks.remove_selected_mask();
-            app.mark_all_mask_layers_dirty();
-            app.mask_thumbnail_component_mask = None;
-            if let Some(kind) = app
-                .masks
-                .selected_component()
-                .map(|component| component.kind)
-            {
-                app.select_mask_tool(kind);
-            } else {
-                app.active_mask_tool = None;
+            if app.masks.stack.delete_mask(index) {
+                app.mark_all_mask_layers_dirty();
+                app.sync_selected_mask_tool();
+                Self::refresh_mask_thumbnails(ui, app);
             }
-            Self::refresh_mask_thumbnails(ui, app);
         } else if let Some((index, invert)) = duplicate_mask {
             if Self::duplicate_mask_group(app, index, invert) {
                 Self::refresh_mask_thumbnails(ui, app);
@@ -492,18 +466,9 @@ impl Sidebar {
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some((mask_index, component_index)) = remove_component {
-            app.masks.selected_mask = Some(mask_index);
-            app.masks.selected_component = Some(component_index);
-            if app.masks.remove_selected_component().is_some() {
+            if app.masks.stack.delete_component(mask_index, component_index) {
                 app.mark_mask_geometry_dirty(mask_index);
-                app.mask_thumbnail_component_mask = None;
-                if let Some(kind) = app
-                    .masks
-                    .selected_component()
-                    .map(|component| component.kind)
-                {
-                    app.select_mask_tool(kind);
-                }
+                app.sync_selected_mask_tool();
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some((mask_index, component_index, invert)) = duplicate_component {
@@ -515,46 +480,36 @@ impl Sidebar {
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some(kind) = new_mask {
-            if let Some((mask_index, _)) = app.masks.add_mask(kind) {
+            if let Some((mask_index, _)) = app.masks.stack.add_mask(kind) {
                 app.activate_mask_tool(kind);
                 Self::prepare_content_mask(app, frame, kind);
                 app.mark_mask_geometry_dirty(mask_index);
-                app.mask_thumbnail_component_mask = None;
+                app.masks.thumbnail_component_mask = None;
                 app.blink_selected_mask();
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some((kind, combine)) = add_component {
-            if let Some((mask_index, _)) = app.masks.add_component(kind, combine) {
+            if let Some((mask_index, _)) = app.masks.stack.add_component(kind, combine) {
                 app.activate_mask_tool(kind);
                 Self::prepare_content_mask(app, frame, kind);
                 app.mark_mask_geometry_dirty(mask_index);
-                app.mask_thumbnail_component_mask = None;
+                app.masks.thumbnail_component_mask = None;
                 app.blink_selected_component();
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some(index) = select_mask {
-            app.masks.selected_mask = Some(index);
-            app.masks.selected_component = Some(0);
-            app.mask_thumbnail_component_mask = None;
-            if let Some(kind) = app
-                .masks
-                .selected_component()
-                .map(|component| component.kind)
-            {
-                app.select_mask_tool(kind);
+            if app.masks.stack.select_mask(index) {
+                app.sync_selected_mask_tool();
+                app.blink_selected_mask();
+                Self::refresh_mask_thumbnails(ui, app);
             }
-            app.blink_selected_mask();
-            Self::refresh_mask_thumbnails(ui, app);
         } else if let Some(component_index) = select_component {
-            app.masks.selected_component = Some(component_index);
-            if let Some(kind) = app
-                .masks
-                .selected_component()
-                .map(|component| component.kind)
-            {
-                app.select_mask_tool(kind);
+            if let Some(mask_index) = app.masks.stack.selected_mask {
+                if app.masks.stack.select_component(mask_index, component_index) {
+                    app.sync_selected_mask_tool();
+                    app.blink_selected_component();
+                }
             }
-            app.blink_selected_component();
         }
 
         Self::show_mask_rename_dialog(ui.ctx(), app);

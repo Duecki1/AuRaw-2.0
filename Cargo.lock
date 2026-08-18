@@ -520,15 +520,12 @@ dependencies = [
  "egui-phosphor",
  "env_logger",
  "half",
- "hex",
  "image",
  "log",
  "pollster",
  "rfd",
- "ring",
  "serde",
  "serde_json",
- "ureq",
 ]
 
 [[package]]

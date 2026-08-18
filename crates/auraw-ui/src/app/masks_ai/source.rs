@@ -8,12 +8,10 @@ impl AurawApp {
         let render_state = frame
             .wgpu_render_state()
             .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-        let raw = self
-            .preview_raw
+        let raw = self.develop.preview_raw
             .as_ref()
             .ok_or_else(|| "The preview image is not available yet.".to_owned())?;
-        let pipeline = self
-            .gpu_pipeline
+        let pipeline = self.preview.gpu_pipeline
             .as_ref()
             .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
 
@@ -49,16 +47,16 @@ impl AurawApp {
         // `recompute` updates the complete graph, so restore exactly the state
         // the user should see even when the readback failed. A failure must not
         // leave the preview displaying the neutral AI-mask rendition.
-        let restore_params = if self.original_preview_requested {
-            GpuParams::new(&self.original_preview_exposure, &reference_masks, raw)
-                .with_vignette_geometry(self.geometry)
+        let restore_params = if self.preview.original_requested {
+            GpuParams::new(&self.preview.original_exposure, &reference_masks, raw)
+                .with_vignette_geometry(self.develop.geometry)
         } else {
-            GpuParams::new(&self.target_exposure, &self.masks, raw)
-                .with_vignette_geometry(self.geometry)
+            GpuParams::new(&self.develop.target_exposure, &self.masks.stack, raw)
+                .with_vignette_geometry(self.develop.geometry)
         };
         #[cfg(not(target_os = "android"))]
         let display_restore = pipeline
-            .write_output_transform(&render_state.queue, &self.display_output_transform)
+            .write_output_transform(&render_state.queue, &self.preferences.display_output_transform)
             .map_err(|error| format!("Could not restore the preview color output: {error:#}"));
         pipeline.recompute(&render_state.queue, &render_state.device, &restore_params);
 
@@ -71,14 +69,14 @@ impl AurawApp {
     }
 
     pub(crate) fn capture_mask_source(&mut self, frame: &eframe::Frame) -> Result<(), String> {
-        if self.mask_source_cache.is_some() {
+        if self.masks.source_cache.is_some() {
             return Ok(());
         }
 
         #[cfg(target_os = "android")]
         {
             let source = self.capture_mask_source_from_active_preview(frame)?;
-            self.mask_source_cache = Some(source);
+            self.masks.source_cache = Some(source);
             Ok(())
         }
 
@@ -87,14 +85,12 @@ impl AurawApp {
             let render_state = frame
                 .wgpu_render_state()
                 .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-            let program_template = self
-                .gpu_pipeline
+            let program_template = self.preview.gpu_pipeline
                 .as_ref()
                 .map(RawGpuPipeline::program_template)
-                .or_else(|| self.preview_program_template.clone())
+                .or_else(|| self.preview.program_template.clone())
                 .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
-            let full_raw = self
-                .loaded_raw
+            let full_raw = self.develop.loaded_raw
                 .as_ref()
                 .ok_or_else(|| "The original RAW is not available.".to_owned())?;
             let source_edge = ai_mask_source_proxy_edge(full_raw.width, full_raw.height);
@@ -137,7 +133,7 @@ impl AurawApp {
                         "Dedicated AI mask-source graph exceeded the coexistence budget; using the active preview graph: {error:#}"
                     ));
                     let source = self.capture_mask_source_from_active_preview(frame)?;
-                    self.mask_source_cache = Some(source);
+                    self.masks.source_cache = Some(source);
                     return Ok(());
                 }
                 Err(error) => {
@@ -149,7 +145,7 @@ impl AurawApp {
             reference_pipeline
                 .update_inpaint_layer(
                     &render_state.queue,
-                    self.inpaint_layer.as_ref(),
+                    self.inpaint.layer.as_ref(),
                     0,
                     0,
                     raw.width,
@@ -177,14 +173,14 @@ impl AurawApp {
                 rgba,
             )
             .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())?;
-            self.mask_source_cache = Some(source);
+            self.masks.source_cache = Some(source);
             Ok(())
         }
     }
 
     pub(crate) fn report_ai_mask_error(&mut self, error: String) {
-        self.notice = Some(error.clone());
-        self.object_error_dialog = Some(error);
+        self.ui.notice = Some(error.clone());
+        self.ai.object_error_dialog = Some(error);
         self.egui_ctx.request_repaint();
     }
 }

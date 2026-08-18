@@ -1,35 +1,40 @@
 use super::*;
 
-impl AurawApp {
-    pub(in crate::app) fn preview_detail_is_current(&self) -> bool {
-        self.preview_detail
+impl PreviewState {
+    pub(in crate::app) fn detail_is_current(&self) -> bool {
+        self.detail
             .as_ref()
-            .is_some_and(|detail| detail.revision == self.preview_revision)
+            .is_some_and(|detail| detail.revision == self.revision)
     }
 
-    pub(crate) fn preview_processing_pending(&self) -> bool {
-        self.preview_detail_pending_stage.is_some()
+    pub(crate) fn processing_pending(&self) -> bool {
+        self.detail_pending_stage.is_some()
             || self.navigation_pending_stage.is_some()
             || (self.pending_stage.is_some()
-                && (self.preview_zoom <= DETAIL_ZOOM_START
-                    || !self.preview_detail_is_current()))
+                && (self.zoom <= DETAIL_ZOOM_START || !self.detail_is_current()))
     }
 
+    pub(crate) fn original_visible(&self) -> bool {
+        self.original_requested
+    }
+}
+
+impl AurawApp {
     pub(crate) fn note_preview_motion(&mut self) {
-        let edit_was_pending = self.preview_detail_pending_stage.is_some();
-        let rendered_content_was_current = self.original_preview_rendered_state
-            == Some((self.original_preview_requested, self.preview_revision));
-        self.preview_revision = self.preview_revision.wrapping_add(1);
+        let edit_was_pending = self.preview.detail_pending_stage.is_some();
+        let rendered_content_was_current = self.preview.original_rendered_state
+            == Some((self.preview.original_requested, self.preview.revision));
+        self.preview.revision = self.preview.revision.wrapping_add(1);
         // `preview_revision` also invalidates the viewport-specific detail crop,
         // but panning and pinching do not change developed pixels. Carry the
         // rendered-content marker forward so `sync_original_preview` does not
         // dispatch the full RAW compute graph for every navigation sample.
         if rendered_content_was_current {
-            self.original_preview_rendered_state =
-                Some((self.original_preview_requested, self.preview_revision));
+            self.preview.original_rendered_state =
+                Some((self.preview.original_requested, self.preview.revision));
         }
-        self.preview_detail_urgent = edit_was_pending;
-        self.preview_motion_at = Some(Instant::now());
+        self.preview.detail_urgent = edit_was_pending;
+        self.preview.motion_at = Some(Instant::now());
         if edit_was_pending {
             self.egui_ctx.request_repaint();
         } else {
@@ -39,51 +44,48 @@ impl AurawApp {
     }
 
     pub(crate) fn queue_preview_processing(&mut self, stage: ProcessingStage) {
-        self.pending_stage = Some(match self.pending_stage {
+        self.preview.pending_stage = Some(match self.preview.pending_stage {
             Some(existing) => existing.min(stage),
             None => stage,
         });
 
-        if self.preview_zoom > DETAIL_ZOOM_START {
-            self.preview_detail_pending_stage = Some(match self.preview_detail_pending_stage {
+        if self.preview.zoom > DETAIL_ZOOM_START {
+            self.preview.detail_pending_stage = Some(match self.preview.detail_pending_stage {
                 Some(existing) => existing.min(stage),
                 None => stage,
             });
-            self.preview_detail_urgent = true;
+            self.preview.detail_urgent = true;
         }
 
-        if self.preview_zoom > DETAIL_ZOOM_START {
-            self.navigation_pending_stage = Some(match self.navigation_pending_stage {
-                Some(existing) => existing.min(stage),
-                None => stage,
-            });
+        if self.preview.zoom > DETAIL_ZOOM_START {
+            self.preview.navigation_pending_stage =
+                Some(match self.preview.navigation_pending_stage {
+                    Some(existing) => existing.min(stage),
+                    None => stage,
+                });
         }
 
-        self.notice = None;
+        self.ui.notice = None;
         self.egui_ctx.request_repaint();
     }
 
-    pub(crate) fn original_preview_visible(&self) -> bool {
-        self.original_preview_requested
-    }
-
     pub(crate) fn set_original_preview_requested(&mut self, requested: bool) {
-        if self.original_preview_requested == requested {
+        if self.preview.original_requested == requested {
             return;
         }
-        self.original_preview_requested = requested;
-        self.original_preview_rendered_state = None;
+        self.preview.original_requested = requested;
+        self.preview.original_rendered_state = None;
         self.egui_ctx.request_repaint();
     }
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn toggle_original_preview(&mut self) {
-        self.set_original_preview_requested(!self.original_preview_requested);
+        self.set_original_preview_requested(!self.preview.original_requested);
     }
 
     pub(crate) fn sync_original_preview(&mut self, frame: &eframe::Frame) {
-        let requested_state = (self.original_preview_requested, self.preview_revision);
-        if self.original_preview_rendered_state == Some(requested_state) {
+        let requested_state = (self.preview.original_requested, self.preview.revision);
+        if self.preview.original_rendered_state == Some(requested_state) {
             return;
         }
 
@@ -91,20 +93,20 @@ impl AurawApp {
             return;
         };
         let empty_masks = MaskStack::default();
-        let exposure = if self.original_preview_requested {
-            &self.original_preview_exposure
+        let exposure = if self.preview.original_requested {
+            &self.preview.original_exposure
         } else {
-            &self.target_exposure
+            &self.develop.target_exposure
         };
-        let masks = if self.original_preview_requested {
+        let masks = if self.preview.original_requested {
             &empty_masks
         } else {
-            &self.masks
+            &self.masks.stack
         };
-        let inpaint = if self.original_preview_requested {
+        let inpaint = if self.preview.original_requested {
             None
         } else {
-            self.inpaint_layer.as_ref()
+            self.inpaint.layer.as_ref()
         };
         let mut textures_to_retire = Vec::new();
 
@@ -112,7 +114,7 @@ impl AurawApp {
         // pipelines are caches: a failed cache upload must not make inpainting or
         // original-preview toggling fail globally. Drop only the failed optional
         // cache and let its normal scheduler rebuild it.
-        if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
+        if let (Some(raw), Some(pipeline)) = (&self.develop.preview_raw, &self.preview.gpu_pipeline) {
             if let Err(error) = pipeline.update_inpaint_layer(
                 &render_state.queue,
                 inpaint,
@@ -121,9 +123,9 @@ impl AurawApp {
                 raw.width,
                 raw.height,
             ) {
-                self.original_preview_rendered_state = None;
-                self.pending_stage = Some(ProcessingStage::Output);
-                self.notice = Some(
+                self.preview.original_rendered_state = None;
+                self.preview.pending_stage = Some(ProcessingStage::Output);
+                self.ui.notice = Some(
                     "Could not update preview inpainting. The last complete preview is still shown."
                         .to_owned(),
                 );
@@ -135,7 +137,7 @@ impl AurawApp {
             }
         }
 
-        let navigation_upload_error = self.preview_navigation.as_ref().and_then(|navigation| {
+        let navigation_upload_error = self.preview.navigation.as_ref().and_then(|navigation| {
             navigation
                 .pipeline
                 .update_inpaint_layer(
@@ -152,18 +154,17 @@ impl AurawApp {
             crate::diagnostics::record(format!(
                 "discarding navigation preview after inpaint upload failure: {error:#}"
             ));
-            if let Some(old) = self.preview_navigation.take() {
+            if let Some(old) = self.preview.navigation.take() {
                 if let Some(texture_id) = old.pipeline.egui_texture_id {
                     textures_to_retire.push(texture_id);
                 }
             }
-            self.navigation_pending_stage = Some(ProcessingStage::Output);
+            self.preview.navigation_pending_stage = Some(ProcessingStage::Output);
         }
 
-        let detail_upload_error = self
-            .preview_detail
+        let detail_upload_error = self.preview.detail
             .as_ref()
-            .filter(|detail| detail.revision == self.preview_revision)
+            .filter(|detail| detail.revision == self.preview.revision)
             .and_then(|detail| {
                 detail
                     .pipeline
@@ -181,31 +182,31 @@ impl AurawApp {
             crate::diagnostics::record(format!(
                 "discarding zoom detail after inpaint upload failure: {error:#}"
             ));
-            if let Some(old) = self.preview_detail.take() {
+            if let Some(old) = self.preview.detail.take() {
                 if let Some(texture_id) = old.pipeline.egui_texture_id {
                     textures_to_retire.push(texture_id);
                 }
             }
-            self.preview_motion_at = Some(Instant::now());
-            self.preview_detail_pending_stage = Some(ProcessingStage::Output);
-            self.preview_detail_urgent = true;
+            self.preview.motion_at = Some(Instant::now());
+            self.preview.detail_pending_stage = Some(ProcessingStage::Output);
+            self.preview.detail_urgent = true;
         }
 
-        if let (Some(raw), Some(pipeline)) = (&self.preview_raw, &self.gpu_pipeline) {
-            let params = GpuParams::new(exposure, masks, raw).with_vignette_geometry(self.geometry);
+        if let (Some(raw), Some(pipeline)) = (&self.develop.preview_raw, &self.preview.gpu_pipeline) {
+            let params = GpuParams::new(exposure, masks, raw)
+                .with_vignette_geometry(self.develop.geometry);
             pipeline.recompute(&render_state.queue, &render_state.device, &params);
         }
-        if let Some(navigation) = self.preview_navigation.as_ref() {
+        if let Some(navigation) = self.preview.navigation.as_ref() {
             let params = GpuParams::new(exposure, masks, &navigation.raw)
-                .with_vignette_geometry(self.geometry);
+                .with_vignette_geometry(self.develop.geometry);
             navigation
                 .pipeline
                 .recompute(&render_state.queue, &render_state.device, &params);
         }
-        if let Some(detail) = self
-            .preview_detail
+        if let Some(detail) = self.preview.detail
             .as_ref()
-            .filter(|detail| detail.revision == self.preview_revision)
+            .filter(|detail| detail.revision == self.preview.revision)
         {
             let mut params = GpuParams::new_for_tile(
                 exposure,
@@ -216,8 +217,8 @@ impl AurawApp {
                 detail.virtual_full_size[0],
                 detail.virtual_full_size[1],
             )
-            .with_vignette_geometry(self.geometry);
-            if let Some(full_raw) = self.loaded_raw.as_ref() {
+            .with_vignette_geometry(self.develop.geometry);
+            if let Some(full_raw) = self.develop.loaded_raw.as_ref() {
                 let mask_region = detail_mask_source_region(
                     masks,
                     detail.source_origin,
@@ -238,7 +239,7 @@ impl AurawApp {
             self.retire_egui_texture(texture_id);
         }
 
-        self.original_preview_rendered_state = Some(requested_state);
+        self.preview.original_rendered_state = Some(requested_state);
         self.egui_ctx.request_repaint();
     }
 }

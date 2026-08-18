@@ -52,16 +52,6 @@ pub(crate) struct PerformanceSettings {
     pub display_profile_override: Option<PathBuf>,
     #[serde(default)]
     pub adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings,
-    #[serde(default)]
-    pub cloud_enabled: bool,
-    #[serde(default)]
-    pub cloud_server_url: String,
-    #[serde(default)]
-    pub cloud_access_token: String,
-    #[serde(default)]
-    pub(crate) last_library_view: crate::ui::library::LibraryView,
-    #[serde(default = "default_cloud_library_folder")]
-    pub(crate) last_cloud_library_folder: String,
     #[cfg(target_os = "android")]
     #[serde(default)]
     pub(crate) last_android_library_folder: String,
@@ -91,10 +81,6 @@ fn default_raw_cache_files() -> usize {
 
 fn default_thumbnail_workers() -> usize {
     crate::ui::library::default_thumbnail_worker_count()
-}
-
-fn default_cloud_library_folder() -> String {
-    crate::cloud::CLOUD_ROOT_FOLDER_ID.to_owned()
 }
 
 const fn default_camera_profile_auto_detect() -> bool {
@@ -145,11 +131,6 @@ impl Default for PerformanceSettings {
             #[cfg(not(target_os = "android"))]
             display_profile_override: None,
             adjustment_copy_settings: crate::sidecar::AdjustmentCopySettings::default(),
-            cloud_enabled: false,
-            cloud_server_url: String::new(),
-            cloud_access_token: String::new(),
-            last_library_view: crate::ui::library::LibraryView::Local,
-            last_cloud_library_folder: default_cloud_library_folder(),
             #[cfg(target_os = "android")]
             last_android_library_folder: String::new(),
             #[cfg(not(target_os = "android"))]
@@ -361,11 +342,6 @@ mod tests {
                 inpainting: true,
                 lens_correction: false,
             },
-            cloud_enabled: true,
-            cloud_server_url: "http://cloud.test:8787".to_owned(),
-            cloud_access_token: "test-token".to_owned(),
-            last_library_view: crate::ui::library::LibraryView::Cloud,
-            last_cloud_library_folder: "a".repeat(64),
             #[cfg(not(target_os = "android"))]
             last_library_folder: None,
             #[cfg(not(target_os = "android"))]
@@ -417,11 +393,6 @@ mod tests {
         assert!(!settings.adjustment_copy_settings.masks);
         assert!(settings.adjustment_copy_settings.ai_masks);
         assert!(!settings.adjustment_copy_settings.lens_correction);
-        assert_eq!(
-            settings.last_library_view,
-            crate::ui::library::LibraryView::Cloud
-        );
-        assert_eq!(settings.last_cloud_library_folder, "a".repeat(64));
     }
 
     #[test]
@@ -488,14 +459,12 @@ mod tests {
     }
 
     #[test]
-    fn library_view_preferences_round_trip() {
+    fn library_preferences_round_trip() {
         let mut settings = PerformanceSettings {
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Enormous,
             library_sort_order: crate::ui::library::LibrarySortOrder::SmallestFirst,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             image_relative_brush_size: true,
-            last_library_view: crate::ui::library::LibraryView::Cloud,
-            last_cloud_library_folder: "b".repeat(64),
             ..Default::default()
         };
         #[cfg(not(target_os = "android"))]
@@ -523,11 +492,6 @@ mod tests {
             crate::ai_masks::BiRefNetQuality::High
         );
         assert!(restored.image_relative_brush_size);
-        assert_eq!(
-            restored.last_library_view,
-            crate::ui::library::LibraryView::Cloud
-        );
-        assert_eq!(restored.last_cloud_library_folder, "b".repeat(64));
         #[cfg(not(target_os = "android"))]
         {
             assert!(!restored.ai_gpu_acceleration);
@@ -568,19 +532,5 @@ mod tests {
         }
     }
 
-    #[test]
-    fn old_settings_default_to_the_local_library_and_cloud_root() {
-        let settings: PerformanceSettings =
-            serde_json::from_str(r#"{"version":9,"raw_cache_files":1,"thumbnail_workers":1}"#)
-                .unwrap();
 
-        assert_eq!(
-            settings.last_library_view,
-            crate::ui::library::LibraryView::Local
-        );
-        assert_eq!(
-            settings.last_cloud_library_folder,
-            crate::cloud::CLOUD_ROOT_FOLDER_ID
-        );
-    }
 }

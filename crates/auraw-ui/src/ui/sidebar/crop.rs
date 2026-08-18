@@ -2,8 +2,7 @@ use crate::pipeline::{CropAspectRatio, GeometryTransform};
 
 impl Sidebar {
     fn show_crop(ui: &mut Ui, app: &mut AurawApp) {
-        let source_dimensions = app
-            .loaded_raw
+        let source_dimensions = app.develop.loaded_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((1, 1));
@@ -22,28 +21,28 @@ impl Sidebar {
                 )
                 .clicked()
                 {
-                    app.geometry = GeometryTransform::default();
-                    app.crop_constraint_reference = Some(app.geometry.crop);
-                    app.crop_drag = None;
-                    app.straighten_tool_active = false;
-                    app.straighten_drag = None;
+                    app.develop.geometry = GeometryTransform::default();
+                    app.develop_ui.crop_constraint_reference = Some(app.develop.geometry.crop);
+                    app.develop_ui.crop_drag = None;
+                    app.develop_ui.straighten_tool_active = false;
+                    app.develop_ui.straighten_drag = None;
                     app.note_geometry_changed();
                 }
             });
         });
         ui.add_space(4.0);
 
-        let before = app.geometry;
-        if app.crop_constraint_reference.is_none() {
-            app.crop_constraint_reference = Some(app.geometry.crop);
+        let before = app.develop.geometry;
+        if app.develop_ui.crop_constraint_reference.is_none() {
+            app.develop_ui.crop_constraint_reference = Some(app.develop.geometry.crop);
         }
         crate::ui::theme::section_card(ui, "Crop", |ui| {
-            let previous_aspect = app.geometry.aspect_ratio;
+            let previous_aspect = app.develop.geometry.aspect_ratio;
             crate::ui::theme::form_combo(
                 ui,
                 "Aspect ratio",
                 "crop-aspect-ratio",
-                app.geometry.aspect_ratio.label(),
+                app.develop.geometry.aspect_ratio.label(),
                 150.0,
                 |ui| {
                     for aspect in [
@@ -57,13 +56,13 @@ impl Sidebar {
                         CropAspectRatio::SixteenNine,
                         CropAspectRatio::NineSixteen,
                     ] {
-                        ui.selectable_value(&mut app.geometry.aspect_ratio, aspect, aspect.label());
+                        ui.selectable_value(&mut app.develop.geometry.aspect_ratio, aspect, aspect.label());
                     }
                 },
             );
-            if app.geometry.aspect_ratio != previous_aspect {
+            if app.develop.geometry.aspect_ratio != previous_aspect {
                 Self::apply_crop_aspect(app, source_dimensions.0, source_dimensions.1);
-                app.crop_constraint_reference = Some(app.geometry.crop);
+                app.develop_ui.crop_constraint_reference = Some(app.develop.geometry.crop);
             }
         });
 
@@ -79,7 +78,7 @@ impl Sidebar {
                 )
                 .clicked()
                 {
-                    app.geometry.rotate_quarter_turn(false);
+                    app.develop.geometry.rotate_quarter_turn(false);
                 }
                 if crate::ui::icons::icon_toggle_button(
                     ui,
@@ -90,44 +89,44 @@ impl Sidebar {
                 )
                 .clicked()
                 {
-                    app.geometry.rotate_quarter_turn(true);
+                    app.develop.geometry.rotate_quarter_turn(true);
                 }
             });
             adjustment_slider(
                 ui,
                 "Straighten",
-                &mut app.geometry.rotation_degrees,
+                &mut app.develop.geometry.rotation_degrees,
                 -45.0..=45.0,
                 1,
                 0.1,
                 Some("Fine rotation for leveling the image."),
             );
-            let straighten_label = if app.straighten_tool_active {
+            let straighten_label = if app.develop_ui.straighten_tool_active {
                 "Drawing straighten line…"
             } else {
                 "Draw straighten line"
             };
             if ui
-                .selectable_label(app.straighten_tool_active, straighten_label)
+                .selectable_label(app.develop_ui.straighten_tool_active, straighten_label)
                 .on_hover_text("Drag along a horizon or vertical edge in the Crop preview. AuRaw rotates the image so that line becomes level.")
                 .clicked()
             {
-                app.straighten_tool_active = !app.straighten_tool_active;
-                app.straighten_drag = None;
-                app.crop_drag = None;
+                app.develop_ui.straighten_tool_active = !app.develop_ui.straighten_tool_active;
+                app.develop_ui.straighten_drag = None;
+                app.develop_ui.crop_drag = None;
             }
         });
 
         ui.add_space(crate::ui::theme::CARD_GAP);
         crate::ui::theme::section_card(ui, "Transform", |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut app.geometry.flip_horizontal, "Flip horizontal");
-                ui.checkbox(&mut app.geometry.flip_vertical, "Flip vertical");
+                ui.checkbox(&mut app.develop.geometry.flip_horizontal, "Flip horizontal");
+                ui.checkbox(&mut app.develop.geometry.flip_vertical, "Flip vertical");
             });
             adjustment_slider(
                 ui,
                 "Horizontal",
-                &mut app.geometry.horizontal_transform,
+                &mut app.develop.geometry.horizontal_transform,
                 -30.0..=30.0,
                 1,
                 0.1,
@@ -136,7 +135,7 @@ impl Sidebar {
             adjustment_slider(
                 ui,
                 "Vertical",
-                &mut app.geometry.vertical_transform,
+                &mut app.develop.geometry.vertical_transform,
                 -30.0..=30.0,
                 1,
                 0.1,
@@ -144,35 +143,35 @@ impl Sidebar {
             );
         });
 
-        app.geometry = app.geometry.sanitized();
+        app.develop.geometry = app.develop.geometry.sanitized();
         let containment_transform_changed =
-            (app.geometry.rotation_degrees - before.rotation_degrees).abs() > 1e-6
-                || (app.geometry.horizontal_transform - before.horizontal_transform).abs() > 1e-6
-                || (app.geometry.vertical_transform - before.vertical_transform).abs() > 1e-6;
+            (app.develop.geometry.rotation_degrees - before.rotation_degrees).abs() > 1e-6
+                || (app.develop.geometry.horizontal_transform - before.horizontal_transform).abs() > 1e-6
+                || (app.develop.geometry.vertical_transform - before.vertical_transform).abs() > 1e-6;
         if containment_transform_changed {
             // Re-fit from the user's unconstrained crop rather than repeatedly
             // shrinking the already-fitted result. This makes the white crop
             // rectangle expand again when straighten/keystone is reduced.
-            if let Some(reference) = app.crop_constraint_reference {
-                app.geometry.crop = reference;
+            if let Some(reference) = app.develop_ui.crop_constraint_reference {
+                app.develop.geometry.crop = reference;
             }
         }
         // Keep the crop rectangle itself inside the usable transformed image.
         // Fine rotation and keystone otherwise expose pasteboard at the crop
         // corners even though the overlay can be visually clipped there.
-        app.geometry
+        app.develop.geometry
             .fit_crop_inside_transformed_source(source_dimensions.0, source_dimensions.1);
-        if app.geometry != before {
+        if app.develop.geometry != before {
             app.note_geometry_changed();
         }
 
     }
 
     fn apply_crop_aspect(app: &mut AurawApp, source_width: u32, source_height: u32) {
-        let Some(ratio) = app.geometry.aspect_ratio.value(source_width, source_height) else {
+        let Some(ratio) = app.develop.geometry.aspect_ratio.value(source_width, source_height) else {
             return;
         };
-        let crop = app.geometry.crop;
+        let crop = app.develop.geometry.crop;
         let center_x = (crop[0] + crop[2]) * 0.5;
         let center_y = (crop[1] + crop[3]) * 0.5;
         let source_aspect = source_width.max(1) as f32 / source_height.max(1) as f32;
@@ -188,6 +187,6 @@ impl Sidebar {
         height = height.clamp(GeometryTransform::MIN_CROP_EXTENT, 1.0);
         let left = (center_x - width * 0.5).clamp(0.0, 1.0 - width);
         let top = (center_y - height * 0.5).clamp(0.0, 1.0 - height);
-        app.geometry.crop = [left, top, left + width, top + height];
+        app.develop.geometry.crop = [left, top, left + width, top + height];
     }
 }

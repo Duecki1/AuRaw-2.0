@@ -41,9 +41,6 @@ Imports use Android's document picker and are copied to
 to each RAW. Legacy layouts are migrated only after a successful copy. Exports
 are published to `Pictures/AuRaw` through MediaStore where available.
 
-Cloud files are downloaded to private cache on demand. Offline edits remain
-queued until synchronization succeeds. Plain HTTP is intended only for trusted
-local networks.
 
 Long-running operations require the app to remain open. Android 13 and newer
 may request notification permission for progress updates.

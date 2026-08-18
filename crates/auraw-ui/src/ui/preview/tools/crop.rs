@@ -15,68 +15,68 @@ impl Preview {
         let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
         let primary_down = ui.input(|input| input.pointer.primary_down());
         let primary_released = ui.input(|input| input.pointer.primary_released());
-        let quarter_turns = app.geometry.quarter_turns % 4;
+        let quarter_turns = app.develop.geometry.quarter_turns % 4;
 
-        if app.straighten_tool_active {
+        if app.develop_ui.straighten_tool_active {
             if primary_pressed {
                 if let Some(pointer) = pointer.filter(|point| image_rect.contains(*point)) {
                     let uv = crop_workspace_screen_to_source(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         source_width,
                         source_height,
                         pointer,
                     );
                     if source_uv_inside_image(uv) {
-                        app.straighten_drag = Some(StraightenDragState {
+                        app.develop_ui.straighten_drag = Some(StraightenDragState {
                             start: pointer,
                             current: pointer,
                         });
-                        app.crop_drag = None;
+                        app.develop_ui.crop_drag = None;
                     }
                 }
             }
             if primary_down {
-                if let (Some(pointer), Some(mut drag)) = (pointer, app.straighten_drag) {
+                if let (Some(pointer), Some(mut drag)) = (pointer, app.develop_ui.straighten_drag) {
                     let uv = crop_workspace_screen_to_source(
                         image_rect,
-                        app.geometry,
+                        app.develop.geometry,
                         source_width,
                         source_height,
                         pointer,
                     );
                     if source_uv_inside_image(uv) {
                         drag.current = pointer;
-                        app.straighten_drag = Some(drag);
+                        app.develop_ui.straighten_drag = Some(drag);
                     }
                 }
             }
             if primary_released {
-                if let Some(drag) = app.straighten_drag.take() {
+                if let Some(drag) = app.develop_ui.straighten_drag.take() {
                     let delta = drag.current - drag.start;
                     if delta.length() >= 12.0 {
                         let angle = delta.y.atan2(delta.x).to_degrees();
                         let target = nearest_straight_axis_degrees(angle);
                         let correction = normalize_degrees(target - angle);
-                        let previous = app.geometry.rotation_degrees;
-                        app.geometry.rotation_degrees = (previous + correction).clamp(-45.0, 45.0);
-                        if (app.geometry.rotation_degrees - previous).abs() > 1e-4 {
-                            let reference = if let Some(reference) = app.crop_constraint_reference {
+                        let previous = app.develop.geometry.rotation_degrees;
+                        app.develop.geometry.rotation_degrees = (previous + correction).clamp(-45.0, 45.0);
+                        if (app.develop.geometry.rotation_degrees - previous).abs() > 1e-4 {
+                            let reference = if let Some(reference) = app.develop_ui.crop_constraint_reference {
                                 reference
                             } else {
-                                let reference = app.geometry.crop;
-                                app.crop_constraint_reference = Some(reference);
+                                let reference = app.develop.geometry.crop;
+                                app.develop_ui.crop_constraint_reference = Some(reference);
                                 reference
                             };
-                            app.geometry.crop = reference;
-                            app.geometry
+                            app.develop.geometry.crop = reference;
+                            app.develop.geometry
                                 .fit_crop_inside_transformed_source(source_width, source_height);
                             app.note_geometry_changed();
                         }
                     }
                 }
             } else if !primary_down {
-                app.straighten_drag = None;
+                app.develop_ui.straighten_drag = None;
             }
             return;
         }
@@ -85,7 +85,7 @@ impl Preview {
             if let Some(pointer) = pointer.filter(|point| image_rect.expand(28.0).contains(*point))
             {
                 let display_crop_rect =
-                    crop_preview_screen_rect(image_rect, app.geometry, source_width, source_height);
+                    crop_preview_screen_rect(image_rect, app.develop.geometry, source_width, source_height);
                 if let Some(display_handle) = crop_handle_at(display_crop_rect, pointer, 28.0) {
                     let handle = crop_source_handle_for_display(display_handle, quarter_turns);
                     let start = crop_preview_pointer_to_source_normalized(
@@ -95,17 +95,17 @@ impl Preview {
                         source_height,
                         pointer,
                     );
-                    app.crop_drag = Some(CropDragState {
+                    app.develop_ui.crop_drag = Some(CropDragState {
                         handle,
                         start,
-                        crop: app.geometry.crop,
+                        crop: app.develop.geometry.crop,
                     });
                 }
             }
         }
 
         if primary_down {
-            if let (Some(pointer), Some(drag)) = (pointer, app.crop_drag) {
+            if let (Some(pointer), Some(drag)) = (pointer, app.develop_ui.crop_drag) {
                 let current = crop_preview_pointer_to_source_normalized(
                     image_rect,
                     quarter_turns,
@@ -157,25 +157,25 @@ impl Preview {
                 // image. Clamp the actual crop rectangle to the last valid drag
                 // position so all four white crop corners remain over source
                 // pixels and the exported frame contains no pasteboard.
-                crop = app.geometry.constrain_crop_drag_to_transformed_source(
+                crop = app.develop.geometry.constrain_crop_drag_to_transformed_source(
                     drag.crop,
                     crop,
                     source_width,
                     source_height,
                 );
-                if crop != app.geometry.crop {
-                    app.geometry.crop = crop;
+                if crop != app.develop.geometry.crop {
+                    app.develop.geometry.crop = crop;
                     // A manual crop becomes the new user intent. Future
                     // straighten changes may auto-fit from this rectangle, but
                     // must never expand beyond it.
-                    app.crop_constraint_reference = Some(crop);
+                    app.develop_ui.crop_constraint_reference = Some(crop);
                     app.note_geometry_changed();
                 }
             }
         }
 
         if primary_released || !primary_down {
-            app.crop_drag = None;
+            app.develop_ui.crop_drag = None;
         }
     }
 
@@ -194,7 +194,7 @@ impl Preview {
         // the crop touched an image boundary.
         let painter = ui.painter_at(overlay_clip_rect);
         let crop_rect =
-            crop_preview_screen_rect(image_rect, app.geometry, source_width, source_height);
+            crop_preview_screen_rect(image_rect, app.develop.geometry, source_width, source_height);
         let visible_crop = crop_rect.intersect(visible_rect);
         if visible_crop.width() <= 0.0 || visible_crop.height() <= 0.0 {
             return;
@@ -205,7 +205,7 @@ impl Preview {
         // photograph. Clip each outside-crop band against the transformed full-
         // image quadrilateral instead.
         let image_polygon =
-            crop_workspace_image_polygon(image_rect, app.geometry, source_width, source_height);
+            crop_workspace_image_polygon(image_rect, app.develop.geometry, source_width, source_height);
         let shade = Color32::from_black_alpha(150);
         for rect in [
             Rect::from_min_max(
@@ -243,7 +243,7 @@ impl Preview {
         for (a, b) in crop_rect_segments(crop_rect) {
             if let Some([a, b]) = clip_crop_workspace_segment_to_source_image(
                 image_rect,
-                app.geometry,
+                app.develop.geometry,
                 source_width,
                 source_height,
                 a,
@@ -267,7 +267,7 @@ impl Preview {
             ] {
                 if let Some([a, b]) = clip_crop_workspace_segment_to_source_image(
                     image_rect,
-                    app.geometry,
+                    app.develop.geometry,
                     source_width,
                     source_height,
                     a,
@@ -281,7 +281,7 @@ impl Preview {
         for point in crop_handle_points(crop_rect) {
             let uv = crop_workspace_screen_to_source(
                 image_rect,
-                app.geometry,
+                app.develop.geometry,
                 source_width,
                 source_height,
                 point,
@@ -292,7 +292,7 @@ impl Preview {
             }
         }
 
-        if let Some(line) = app.straighten_drag {
+        if let Some(line) = app.develop_ui.straighten_drag {
             let stroke = Stroke::new(2.0, Color32::WHITE);
             painter.line_segment([line.start, line.current], stroke);
             painter.circle_filled(line.start, 4.0, Color32::WHITE);
