@@ -1,3 +1,5 @@
+use super::params::edge_glow::*;
+
 /// Editable parameters for the non-destructive mask Edge Glow effect.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -17,25 +19,17 @@ pub struct EdgeGlowEffectSettings {
 impl Default for EdgeGlowEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            edge_width: 1.5,
-            detail: 35.0,
-            glow: 55.0,
-            color: [1.0, 0.42, 0.08],
+            amount: AMOUNT.default,
+            edge_width: EDGE_WIDTH.default,
+            detail: DETAIL.default,
+            glow: GLOW.default,
+            color: COLOR.default,
         }
     }
 }
 
 impl EdgeGlowEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

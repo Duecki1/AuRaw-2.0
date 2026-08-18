@@ -34,6 +34,7 @@ pub use masks::{
     build_retouch_patch, compose_inpaint_strokes, ellipse_outline_points, export_mask_atlas_edge,
     export_mask_atlas_edge_limit, mask_atlas_edge, rasterize_brush_dabs,
     rasterize_inpaint_dabs_binary, BlurEffectSettings, BrushDab, BrushMode, EdgeGlowEffectSettings,
+    effect_params,
     FogEffectSettings, GlowEffectSettings, InpaintLayer, InpaintPatch, InpaintStroke,
     InpaintStrokeKind, LandscapeCategory, LensBlurEffectSettings, LightRaysEffectSettings,
     LocalAdjustments, LocalMask, MaskCombineMode, MaskCommon, MaskComponent, MaskEffect,

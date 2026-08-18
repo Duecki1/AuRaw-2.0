@@ -1,3 +1,5 @@
+use super::params::fog::*;
+
 /// Editable parameters for the non-destructive mask Fog effect.
 ///
 /// The procedural field is anchored in full-image coordinates, so previews,
@@ -25,27 +27,19 @@ pub struct FogEffectSettings {
 impl Default for FogEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            density: 55.0,
-            scale: 65.0,
-            softness: 70.0,
-            variation: 45.0,
-            seed: 0.0,
-            color: [0.82, 0.87, 0.92],
+            amount: AMOUNT.default,
+            density: DENSITY.default,
+            scale: SCALE.default,
+            softness: SOFTNESS.default,
+            variation: VARIATION.default,
+            seed: SEED.default,
+            color: COLOR.default,
         }
     }
 }
 
 impl FogEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6 && self.density > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

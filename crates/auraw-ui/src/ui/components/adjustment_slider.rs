@@ -207,20 +207,21 @@ where
 /// other adjustment slider. The only specialization is its visual track and
 /// explicit neutral reset value.
 pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&str>) -> bool {
+    let spec = crate::pipeline::effect_params::adjustment::HUE;
     adjustment_slider_impl(
         ui,
-        "Hue",
+        spec.label,
         value,
-        -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES..=crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
+        spec.range(),
         SliderOptions {
-            decimals: 1,
-            speed: 1.0,
+            decimals: spec.decimals,
+            speed: spec.step,
             hover_text,
-            explicit_reset_value: Some(0.0),
+            explicit_reset_value: Some(f64::from(spec.default)),
             accent: None,
             gradient: Some(SliderGradient::HueDegrees {
-                start: -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
-                end: crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
+                start: spec.min,
+                end: spec.max,
             }),
         },
     )

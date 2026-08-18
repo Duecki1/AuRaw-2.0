@@ -12,6 +12,7 @@ mod light_rays;
 mod motion_blur;
 mod neon;
 mod pixelate;
+pub mod params;
 mod radial_blur;
 mod smoke;
 mod tilt_shift;
@@ -28,6 +29,10 @@ pub use pixelate::PixelateEffectSettings;
 pub use radial_blur::{RadialBlurEffectSettings, RadialBlurMode};
 pub use smoke::SmokeEffectSettings;
 pub use tilt_shift::TiltShiftEffectSettings;
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
 
 /// The operation driven by a mask group's combined coverage.
 ///
@@ -155,29 +160,29 @@ impl MaskEffectCategory {
 /// type switch is reversible and never resets another effect's edit state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MaskEffectSettings {
-    #[serde(default, skip_serializing_if = "BlurEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub blur: BlurEffectSettings,
-    #[serde(default, skip_serializing_if = "LensBlurEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub lens_blur: LensBlurEffectSettings,
-    #[serde(default, skip_serializing_if = "MotionBlurEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub motion_blur: MotionBlurEffectSettings,
-    #[serde(default, skip_serializing_if = "RadialBlurEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub radial_blur: RadialBlurEffectSettings,
-    #[serde(default, skip_serializing_if = "TiltShiftEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub tilt_shift: TiltShiftEffectSettings,
-    #[serde(default, skip_serializing_if = "EdgeGlowEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub edge_glow: EdgeGlowEffectSettings,
-    #[serde(default, skip_serializing_if = "GlowEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub glow: GlowEffectSettings,
-    #[serde(default, skip_serializing_if = "LightRaysEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub light_rays: LightRaysEffectSettings,
-    #[serde(default, skip_serializing_if = "NeonEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub neon: NeonEffectSettings,
-    #[serde(default, skip_serializing_if = "PixelateEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub pixelate: PixelateEffectSettings,
-    #[serde(default, skip_serializing_if = "FogEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub fog: FogEffectSettings,
-    #[serde(default, skip_serializing_if = "SmokeEffectSettings::is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub smoke: SmokeEffectSettings,
 }
 

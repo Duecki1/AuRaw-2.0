@@ -2,11 +2,10 @@ use super::basicadj::sigmoid_contrast_from_percent;
 use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
-    export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind, ExposureParams,
-    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, MaskEffect,
-    LocalMask, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent, SigmoidParams,
-    GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, HUE_ROTATION_LIMIT_DEGREES,
-    MAX_LOCAL_MASKS,
+    effect_params, export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind,
+    ExposureParams, GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw,
+    LocalMask, MaskEffect, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
+    SigmoidParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -515,7 +514,7 @@ fn pack_view_color_options(grading: crate::pipeline::ColorGrading, hue: f32) -> 
     [
         (grading.blending / 100.0).clamp(0.0, 1.0),
         (grading.balance / 100.0).clamp(-1.0, 1.0),
-        hue.clamp(-HUE_ROTATION_LIMIT_DEGREES, HUE_ROTATION_LIMIT_DEGREES),
+        effect_params::adjustment::HUE.clamp(hue),
         0.0,
     ]
 }
@@ -674,7 +673,12 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
             effect_mask_data(
                 mask.effect,
                 mask.enabled && effect.is_active(),
-                [effect.amount.clamp(0.0, 100.0), effect.radius.clamp(0.0, 16.0), 0.0, 0.0],
+                [
+                    effect_params::blur::AMOUNT.clamp(effect.amount),
+                    effect_params::blur::RADIUS.clamp(effect.radius),
+                    0.0,
+                    0.0,
+                ],
                 zero,
                 zero,
             )
@@ -685,12 +689,17 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.radius.clamp(0.0, 48.0),
-                    effect.blades.clamp(3.0, 12.0).round(),
-                    effect.rotation.clamp(-180.0, 180.0),
+                    effect_params::lens_blur::AMOUNT.clamp(effect.amount),
+                    effect_params::lens_blur::RADIUS.clamp(effect.radius),
+                    effect_params::lens_blur::BLADES.clamp(effect.blades).round(),
+                    effect_params::lens_blur::ROTATION.clamp(effect.rotation),
                 ],
-                [effect.highlight_boost.clamp(0.0, 100.0), 0.0, 0.0, 0.0],
+                [
+                    effect_params::lens_blur::HIGHLIGHTS.clamp(effect.highlight_boost),
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
                 zero,
             )
         }
@@ -700,9 +709,9 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.distance.clamp(0.0, 96.0),
-                    effect.angle.clamp(-180.0, 180.0),
+                    effect_params::motion_blur::AMOUNT.clamp(effect.amount),
+                    effect_params::motion_blur::DISTANCE.clamp(effect.distance),
+                    effect_params::motion_blur::ANGLE.clamp(effect.angle),
                     0.0,
                 ],
                 zero,
@@ -715,10 +724,10 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.strength.clamp(0.0, 96.0),
-                    effect.center[0].clamp(-50.0, 150.0),
-                    effect.center[1].clamp(-50.0, 150.0),
+                    effect_params::radial_blur::AMOUNT.clamp(effect.amount),
+                    effect_params::radial_blur::STRENGTH.clamp(effect.strength),
+                    effect_params::radial_blur::CENTER_X.clamp(effect.center[0]),
+                    effect_params::radial_blur::CENTER_Y.clamp(effect.center[1]),
                 ],
                 [effect.mode.shader_value(), 0.0, 0.0, 0.0],
                 zero,
@@ -730,15 +739,15 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.radius.clamp(0.0, 48.0),
-                    effect.center[0].clamp(-50.0, 150.0),
-                    effect.center[1].clamp(-50.0, 150.0),
+                    effect_params::tilt_shift::AMOUNT.clamp(effect.amount),
+                    effect_params::tilt_shift::RADIUS.clamp(effect.radius),
+                    effect_params::tilt_shift::CENTER_X.clamp(effect.center[0]),
+                    effect_params::tilt_shift::CENTER_Y.clamp(effect.center[1]),
                 ],
                 [
-                    effect.angle.clamp(-180.0, 180.0),
-                    effect.focus_width.clamp(0.0, 100.0),
-                    effect.feather.clamp(0.1, 100.0),
+                    effect_params::tilt_shift::ANGLE.clamp(effect.angle),
+                    effect_params::tilt_shift::FOCUS_WIDTH.clamp(effect.focus_width),
+                    effect_params::tilt_shift::FEATHER.clamp(effect.feather),
                     0.0,
                 ],
                 zero,
@@ -746,19 +755,20 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
         }
         MaskEffect::EdgeGlow => {
             let effect = mask.effect_settings.edge_glow;
+            let color = effect_params::edge_glow::COLOR.clamp(effect.color);
             effect_mask_data(
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.edge_width.clamp(0.5, 8.0),
-                    effect.detail.clamp(0.0, 100.0),
-                    effect.glow.clamp(0.0, 100.0),
+                    effect_params::edge_glow::AMOUNT.clamp(effect.amount),
+                    effect_params::edge_glow::EDGE_WIDTH.clamp(effect.edge_width),
+                    effect_params::edge_glow::DETAIL.clamp(effect.detail),
+                    effect_params::edge_glow::GLOW.clamp(effect.glow),
                 ],
                 [
-                    effect.color[0].clamp(0.0, 1.0),
-                    effect.color[1].clamp(0.0, 1.0),
-                    effect.color[2].clamp(0.0, 1.0),
+                    color[0],
+                    color[1],
+                    color[2],
                     0.0,
                 ],
                 zero,
@@ -766,19 +776,20 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
         }
         MaskEffect::Glow => {
             let effect = mask.effect_settings.glow;
+            let color = effect_params::glow::COLOR.clamp(effect.color);
             effect_mask_data(
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.radius.clamp(0.0, 100.0),
-                    effect.core.clamp(0.0, 100.0),
+                    effect_params::glow::AMOUNT.clamp(effect.amount),
+                    effect_params::glow::RADIUS.clamp(effect.radius),
+                    effect_params::glow::CORE.clamp(effect.core),
                     0.0,
                 ],
                 [
-                    effect.color[0].clamp(0.0, 1.0),
-                    effect.color[1].clamp(0.0, 1.0),
-                    effect.color[2].clamp(0.0, 1.0),
+                    color[0],
+                    color[1],
+                    color[2],
                     0.0,
                 ],
                 zero,
@@ -786,46 +797,48 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
         }
         MaskEffect::Neon => {
             let effect = mask.effect_settings.neon;
+            let color = effect_params::neon::COLOR.clamp(effect.color);
             effect_mask_data(
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.edge_width.clamp(0.5, 8.0),
-                    effect.detail.clamp(0.0, 100.0),
-                    effect.glow.clamp(0.0, 100.0),
+                    effect_params::neon::AMOUNT.clamp(effect.amount),
+                    effect_params::neon::EDGE_WIDTH.clamp(effect.edge_width),
+                    effect_params::neon::DETAIL.clamp(effect.detail),
+                    effect_params::neon::GLOW.clamp(effect.glow),
                 ],
                 [
-                    effect.color[0].clamp(0.0, 1.0),
-                    effect.color[1].clamp(0.0, 1.0),
-                    effect.color[2].clamp(0.0, 1.0),
-                    effect.background.clamp(0.0, 100.0),
+                    color[0],
+                    color[1],
+                    color[2],
+                    effect_params::neon::BACKGROUND.clamp(effect.background),
                 ],
                 zero,
             )
         }
         MaskEffect::LightRays => {
             let effect = mask.effect_settings.light_rays;
+            let color = effect_params::light_rays::COLOR.clamp(effect.color);
             effect_mask_data(
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.length.clamp(0.0, 200.0),
-                    effect.source[0].clamp(-50.0, 150.0),
-                    effect.source[1].clamp(-50.0, 150.0),
+                    effect_params::light_rays::AMOUNT.clamp(effect.amount),
+                    effect_params::light_rays::LENGTH.clamp(effect.length),
+                    effect_params::light_rays::SOURCE_X.clamp(effect.source[0]),
+                    effect_params::light_rays::SOURCE_Y.clamp(effect.source[1]),
                 ],
                 [
-                    effect.color[0].clamp(0.0, 1.0),
-                    effect.color[1].clamp(0.0, 1.0),
-                    effect.color[2].clamp(0.0, 1.0),
-                    effect.fade.clamp(0.0, 100.0),
+                    color[0],
+                    color[1],
+                    color[2],
+                    effect_params::light_rays::FADE.clamp(effect.fade),
                 ],
                 [
-                    effect.spread.clamp(0.0, 45.0),
-                    effect.ray_count.clamp(4.0, 96.0),
-                    effect.variation.clamp(0.0, 100.0),
-                    effect.softness.clamp(0.0, 100.0),
+                    effect_params::light_rays::SPREAD.clamp(effect.spread),
+                    effect_params::light_rays::RAY_COUNT.clamp(effect.ray_count),
+                    effect_params::light_rays::VARIATION.clamp(effect.variation),
+                    effect_params::light_rays::SOFTNESS.clamp(effect.softness),
                 ],
             )
         }
@@ -834,51 +847,58 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
             effect_mask_data(
                 mask.effect,
                 mask.enabled && effect.is_active(),
-                [effect.amount.clamp(0.0, 100.0), effect.block_size.clamp(2.0, 32.0), 0.0, 0.0],
+                [
+                    effect_params::pixelate::AMOUNT.clamp(effect.amount),
+                    effect_params::pixelate::BLOCK_SIZE.clamp(effect.block_size),
+                    0.0,
+                    0.0,
+                ],
                 zero,
                 zero,
             )
         }
         MaskEffect::Fog => {
             let effect = mask.effect_settings.fog;
+            let color = effect_params::fog::COLOR.clamp(effect.color);
             effect_mask_data(
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.density.clamp(0.0, 100.0),
-                    effect.scale.clamp(1.0, 100.0),
-                    effect.softness.clamp(0.0, 100.0),
+                    effect_params::fog::AMOUNT.clamp(effect.amount),
+                    effect_params::fog::DENSITY.clamp(effect.density),
+                    effect_params::fog::SCALE.clamp(effect.scale),
+                    effect_params::fog::SOFTNESS.clamp(effect.softness),
                 ],
                 [
-                    effect.color[0].clamp(0.0, 1.0),
-                    effect.color[1].clamp(0.0, 1.0),
-                    effect.color[2].clamp(0.0, 1.0),
-                    effect.variation.clamp(0.0, 100.0),
+                    color[0],
+                    color[1],
+                    color[2],
+                    effect_params::fog::VARIATION.clamp(effect.variation),
                 ],
-                [effect.seed.clamp(0.0, 1_000.0), 0.0, 0.0, 0.0],
+                [effect_params::fog::SEED.clamp(effect.seed), 0.0, 0.0, 0.0],
             )
         }
         MaskEffect::Smoke => {
             let effect = mask.effect_settings.smoke;
+            let color = effect_params::smoke::COLOR.clamp(effect.color);
             effect_mask_data(
                 mask.effect,
                 mask.enabled && effect.is_active(),
                 [
-                    effect.amount.clamp(0.0, 100.0),
-                    effect.density.clamp(0.0, 100.0),
-                    effect.scale.clamp(1.0, 100.0),
-                    effect.turbulence.clamp(0.0, 100.0),
+                    effect_params::smoke::AMOUNT.clamp(effect.amount),
+                    effect_params::smoke::DENSITY.clamp(effect.density),
+                    effect_params::smoke::SCALE.clamp(effect.scale),
+                    effect_params::smoke::TURBULENCE.clamp(effect.turbulence),
                 ],
                 [
-                    effect.color[0].clamp(0.0, 1.0),
-                    effect.color[1].clamp(0.0, 1.0),
-                    effect.color[2].clamp(0.0, 1.0),
-                    effect.angle.clamp(-180.0, 180.0),
+                    color[0],
+                    color[1],
+                    color[2],
+                    effect_params::smoke::ANGLE.clamp(effect.angle),
                 ],
                 [
-                    effect.softness.clamp(0.0, 100.0),
-                    effect.seed.clamp(0.0, 1_000.0),
+                    effect_params::smoke::SOFTNESS.clamp(effect.softness),
+                    effect_params::smoke::SEED.clamp(effect.seed),
                     0.0,
                     0.0,
                 ],
@@ -891,7 +911,7 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
 
 fn pack_adjustment_mask(mask: &LocalMask) -> MaskData {
     let adjustment = mask.adjustments;
-    // Placeholder effect types retain adjustment values for reversible UI
+    // Non-adjustment effect types retain adjustment values for reversible UI
     // switching, but only the Adjustment variant is allowed to apply them.
     let adjustment_enabled = mask.enabled && mask.effect.uses_adjustments();
     let has_hsl = adjustment.has_color_mixer();
@@ -909,22 +929,22 @@ fn pack_adjustment_mask(mask: &LocalMask) -> MaskData {
             u32::from(has_hsl) | (u32::from(has_grading) << 1) | (u32::from(has_hue) << 2),
         ],
         adjust_0: [
-            adjustment.exposure.clamp(-5.0, 5.0),
-            adjustment.contrast.clamp(-100.0, 100.0),
-            adjustment.highlights.clamp(-100.0, 100.0),
-            adjustment.shadows.clamp(-100.0, 100.0),
+            effect_params::adjustment::EXPOSURE.clamp(adjustment.exposure),
+            effect_params::adjustment::CONTRAST.clamp(adjustment.contrast),
+            effect_params::adjustment::HIGHLIGHTS.clamp(adjustment.highlights),
+            effect_params::adjustment::SHADOWS.clamp(adjustment.shadows),
         ],
         adjust_1: [
-            adjustment.whites.clamp(-100.0, 100.0),
-            adjustment.blacks.clamp(-100.0, 100.0),
-            adjustment.temperature.clamp(-100.0, 100.0),
-            adjustment.tint.clamp(-100.0, 100.0),
+            effect_params::adjustment::WHITES.clamp(adjustment.whites),
+            effect_params::adjustment::BLACKS.clamp(adjustment.blacks),
+            effect_params::adjustment::TEMPERATURE.clamp(adjustment.temperature),
+            effect_params::adjustment::TINT.clamp(adjustment.tint),
         ],
         adjust_2: [
-            adjustment.saturation.clamp(-100.0, 100.0),
-            adjustment.texture.clamp(-100.0, 100.0),
-            adjustment.clarity.clamp(-100.0, 100.0),
-            adjustment.dehaze.clamp(-100.0, 100.0),
+            effect_params::adjustment::SATURATION.clamp(adjustment.saturation),
+            effect_params::adjustment::TEXTURE.clamp(adjustment.texture),
+            effect_params::adjustment::CLARITY.clamp(adjustment.clarity),
+            effect_params::adjustment::DEHAZE.clamp(adjustment.dehaze),
         ],
         curves: pack_local_point_curve(&adjustment.tone_curve),
         grade_shadows: pack_color_grade_wheel(adjustment.color_grading.shadows),
