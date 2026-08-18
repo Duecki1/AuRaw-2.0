@@ -127,11 +127,7 @@ pub(super) fn apply_android_library_folder_ui_action(
 }
 
 pub(in crate::ui::library) fn local_action_in_progress(app: &AurawApp) -> bool {
-    app.library.cloud_action_in_progress()
-        || app.library.cloud_upload_in_progress()
-        || app.library.image_paste_in_progress()
-        || app.library.cloud_open_receiver.is_some()
-        || app.picker_pending
+    app.library.image_paste_in_progress() || app.picker_pending
 }
 
 pub(in crate::ui::library) fn local_folders_available(_app: &AurawApp) -> bool {

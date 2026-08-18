@@ -29,7 +29,7 @@ impl LibraryState {
         }
         let request = ThumbnailRequest {
             generation,
-            source: entry.info.source.clone(),
+            asset_id: entry.asset.id.clone(),
             display_priority: true,
         };
         if request_sender
@@ -75,8 +75,8 @@ impl LibraryState {
         context: &egui::Context,
         revision: u64,
     ) {
-        let source = LibrarySource::File(raw_path.to_owned());
-        let Some(index) = self.entry_indices.get(&source).copied() else {
+        let asset_id = LibraryAssetId::Desktop(raw_path.to_owned());
+        let Some(index) = self.entry_indices.get(&asset_id).copied() else {
             return;
         };
         self.install_developed_thumbnail_at(index, thumbnail, context, revision);
@@ -90,12 +90,8 @@ impl LibraryState {
         context: &egui::Context,
         revision: u64,
     ) {
-        let Some(index) = self.entries.iter().position(|entry| {
-            matches!(
-                &entry.info.source,
-                LibrarySource::Android { uri, .. } if uri == raw_uri
-            )
-        }) else {
+        let asset_id = LibraryAssetId::Android(raw_uri.to_owned());
+        let Some(index) = self.entry_indices.get(&asset_id).copied() else {
             return;
         };
         self.install_developed_thumbnail_at(index, thumbnail, context, revision);
@@ -103,20 +99,16 @@ impl LibraryState {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn invalidate_adjustment_thumbnail_for_path(&mut self, raw_path: &Path) {
-        let source = LibrarySource::File(raw_path.to_owned());
-        if let Some(index) = self.entry_indices.get(&source).copied() {
+        let asset_id = LibraryAssetId::Desktop(raw_path.to_owned());
+        if let Some(index) = self.entry_indices.get(&asset_id).copied() {
             self.invalidate_adjustment_thumbnail_at(index);
         }
     }
 
     #[cfg(target_os = "android")]
     pub(crate) fn invalidate_android_adjustment_thumbnail(&mut self, raw_uri: &str) {
-        if let Some(index) = self.entries.iter().position(|entry| {
-            matches!(
-                &entry.info.source,
-                LibrarySource::Android { uri, .. } if uri == raw_uri
-            )
-        }) {
+        let asset_id = LibraryAssetId::Android(raw_uri.to_owned());
+        if let Some(index) = self.entry_indices.get(&asset_id).copied() {
             self.invalidate_adjustment_thumbnail_at(index);
         }
     }
@@ -287,13 +279,13 @@ impl LibraryState {
     }
 }
 
-pub(super) fn new_library_entry(info: LibraryFileInfo) -> LibraryEntry {
+pub(super) fn new_library_entry(asset: LibraryAsset) -> LibraryEntry {
     // Keep gallery geometry immutable for the lifetime of the catalog entry.
     // Header probing supplies the real display ratio for normal supported RAWs;
     // 3:2 is only a last-resort fallback when metadata cannot be inspected.
-    let layout_size = Some(info.dimensions_hint.unwrap_or([3, 2]));
+    let layout_size = Some(asset.metadata.dimensions_hint.unwrap_or([3, 2]));
     LibraryEntry {
-        info,
+        asset,
         texture: None,
         resident_thumbnail: None,
         texture_is_resident: false,
@@ -308,18 +300,10 @@ pub(super) fn new_library_entry(info: LibraryFileInfo) -> LibraryEntry {
     }
 }
 
-pub(super) fn same_library_file_identity(left: &LibraryFileInfo, right: &LibraryFileInfo) -> bool {
-    if left.source != right.source || left.bytes != right.bytes {
-        return false;
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        left.modified == right.modified
-    }
-    #[cfg(target_os = "android")]
-    {
-        true
-    }
+pub(super) fn same_library_asset_identity(left: &LibraryAsset, right: &LibraryAsset) -> bool {
+    left.id == right.id
+        && left.metadata.bytes == right.metadata.bytes
+        && left.metadata.modified_seconds == right.metadata.modified_seconds
 }
 
 pub(super) fn compare_library_entries(
@@ -327,42 +311,48 @@ pub(super) fn compare_library_entries(
     right: &LibraryEntry,
     sort_order: LibrarySortOrder,
 ) -> CmpOrdering {
-    let name_order = compare_library_names(&left.info, &right.info);
+    let name_order = compare_library_names(&left.asset, &right.asset);
 
     match sort_order {
-        LibrarySortOrder::NewestFirst => library_modified_key(&right.info)
-            .cmp(&library_modified_key(&left.info))
+        LibrarySortOrder::NewestFirst => right
+            .asset
+            .metadata
+            .modified_seconds
+            .cmp(&left.asset.metadata.modified_seconds)
             .then(name_order),
-        LibrarySortOrder::OldestFirst => library_modified_key(&left.info)
-            .cmp(&library_modified_key(&right.info))
+        LibrarySortOrder::OldestFirst => left
+            .asset
+            .metadata
+            .modified_seconds
+            .cmp(&right.asset.metadata.modified_seconds)
             .then(name_order),
         LibrarySortOrder::NameAscending => name_order,
         LibrarySortOrder::NameDescending => name_order.reverse(),
-        LibrarySortOrder::LargestFirst => right.info.bytes.cmp(&left.info.bytes).then(name_order),
-        LibrarySortOrder::SmallestFirst => left.info.bytes.cmp(&right.info.bytes).then(name_order),
+        LibrarySortOrder::LargestFirst => right
+            .asset
+            .metadata
+            .bytes
+            .cmp(&left.asset.metadata.bytes)
+            .then(name_order),
+        LibrarySortOrder::SmallestFirst => left
+            .asset
+            .metadata
+            .bytes
+            .cmp(&right.asset.metadata.bytes)
+            .then(name_order),
     }
 }
 
-pub(super) fn compare_library_names(left: &LibraryFileInfo, right: &LibraryFileInfo) -> CmpOrdering {
-    left.name
+pub(super) fn compare_library_names(left: &LibraryAsset, right: &LibraryAsset) -> CmpOrdering {
+    left.display_name
         .to_lowercase()
-        .cmp(&right.name.to_lowercase())
+        .cmp(&right.display_name.to_lowercase())
         .then_with(|| left.display_path.cmp(&right.display_path))
+        .then_with(|| left.id.cmp(&right.id))
 }
 
-#[cfg(not(target_os = "android"))]
-pub(super) fn library_modified_key(info: &LibraryFileInfo) -> Option<SystemTime> {
-    info.modified
-}
-
-#[cfg(target_os = "android")]
-pub(super) fn library_modified_key(info: &LibraryFileInfo) -> u64 {
-    match &info.source {
-        LibrarySource::Android {
-            modified_seconds, ..
-        } => *modified_seconds,
-        LibrarySource::Cloud(asset) => asset.modified_seconds,
-    }
+pub(super) fn library_modified_key(asset: &LibraryAsset) -> u64 {
+    asset.metadata.modified_seconds
 }
 
 pub(super) fn make_resident_thumbnail(thumbnail: &RawThumbnail) -> RawThumbnail {
@@ -396,7 +386,7 @@ pub(super) fn loaded_library_thumbnail(thumbnail: RawThumbnail, developed: bool)
 }
 
 pub(super) type ThumbnailLoader =
-    Arc<dyn Fn(&LibrarySource) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static>;
+    Arc<dyn Fn(&LibraryAsset) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static>;
 
 #[cfg(not(target_os = "android"))]
 pub(super) struct DevelopedThumbnailGpu {
@@ -730,10 +720,10 @@ pub(crate) fn load_desktop_cached_thumbnail(
 
 #[cfg(not(target_os = "android"))]
 pub(super) fn load_desktop_library_thumbnail(
-    source: &LibrarySource,
+    asset: &LibraryAsset,
 ) -> Result<LoadedLibraryThumbnail, String> {
-    let LibrarySource::File(path) = source else {
-        return Err("invalid local thumbnail request".to_owned());
+    let Some(path) = asset.desktop_path() else {
+        return Err("invalid desktop thumbnail request".to_owned());
     };
     match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
@@ -779,17 +769,14 @@ pub(super) fn load_desktop_library_thumbnail(
 #[cfg(target_os = "android")]
 pub(super) fn load_android_library_thumbnail(
     app: &auraw_ffi::AndroidApp,
-    source: &LibrarySource,
+    asset: &LibraryAsset,
 ) -> Result<LoadedLibraryThumbnail, String> {
-    let LibrarySource::Android {
-        uri,
-        display_name,
-        bytes,
-        modified_seconds,
-    } = source
-    else {
+    let Some(uri) = asset.android_uri() else {
         return Err("invalid Android thumbnail request".to_owned());
     };
+    let display_name = asset.display_name.as_str();
+    let bytes = asset.metadata.bytes;
+    let modified_seconds = asset.metadata.modified_seconds;
     match crate::android::load_developed_thumbnail_cache(app, uri, display_name, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
         Ok(None) => {}
@@ -801,8 +788,8 @@ pub(super) fn load_android_library_thumbnail(
         app,
         uri,
         display_name,
-        *bytes,
-        *modified_seconds,
+        bytes,
+        modified_seconds,
         THUMBNAIL_EDGE,
     )?;
     // Android cannot headlessly rebuild all adjustments while browsing the
@@ -819,7 +806,7 @@ pub(super) fn load_android_library_thumbnail(
 
 pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize, load: ThumbnailLoader) {
     let ThumbnailWorker {
-        files,
+        assets,
         warning_count,
         truncated,
         generation,
@@ -833,11 +820,11 @@ pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize
     if cancellation.load(Ordering::Acquire) != generation {
         return;
     }
-    let work_queue = Arc::new(Mutex::new(ThumbnailWorkQueue::new(generation, &files)));
+    let work_queue = Arc::new(Mutex::new(ThumbnailWorkQueue::new(generation, &assets)));
     if event_sender
         .send(ScanEvent::Catalog {
             generation,
-            files,
+            assets: assets.clone(),
             warning_count,
             truncated,
         })
@@ -847,6 +834,7 @@ pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize
     }
     repaint.request_repaint();
 
+    let assets = Arc::new(assets);
     let request_receiver = Arc::new(Mutex::new(request_receiver));
     let worker_count = worker_count.clamp(1, maximum_thumbnail_worker_count());
     let mut handles = Vec::with_capacity(worker_count);
@@ -859,10 +847,12 @@ pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize
         let work_queue = Arc::clone(&work_queue);
         let repaint = repaint.clone();
         let load = Arc::clone(&load);
+        let assets = Arc::clone(&assets);
         let spawn = std::thread::Builder::new()
             .name(format!("auraw-thumbnail-{worker_index}"))
             .spawn(move || {
                 run_one_thumbnail_worker(ThumbnailWorkerContext {
+                    assets,
                     generation,
                     cancellation,
                     decoding_paused,
@@ -897,6 +887,7 @@ pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize
 }
 
 struct ThumbnailWorkerContext {
+    assets: Arc<Vec<LibraryAsset>>,
     generation: u64,
     cancellation: Arc<AtomicU64>,
     decoding_paused: Arc<AtomicBool>,
@@ -910,6 +901,7 @@ struct ThumbnailWorkerContext {
 
 fn run_one_thumbnail_worker(context: ThumbnailWorkerContext) {
     let ThumbnailWorkerContext {
+        assets,
         generation,
         cancellation,
         decoding_paused,
@@ -994,16 +986,19 @@ fn run_one_thumbnail_worker(context: ThumbnailWorkerContext) {
                 drop(decode_guard);
                 continue;
             }
-            break load(&request.source);
+            let Some(asset) = assets.iter().find(|asset| asset.id == request.asset_id) else {
+                break Err("thumbnail asset disappeared from the catalog".to_owned());
+            };
+            break load(asset);
         };
         let display_priority = work_queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish(&request.source);
+            .finish(&request.asset_id);
         if event_sender
             .send(ScanEvent::Thumbnail {
                 generation,
-                source: request.source,
+                asset_id: request.asset_id,
                 display_priority,
                 result,
             })

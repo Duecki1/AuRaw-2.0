@@ -183,7 +183,7 @@ pub(in crate::ui::library) fn remove_local_raw_bundle(raw_path: &Path) -> Result
 }
 
 pub(in crate::ui::library) fn rename_raw_bundle(source_raw: &Path, requested_name: &str) -> Result<PathBuf, String> {
-    validate_cloud_item_name(requested_name, true)?;
+    validate_library_item_name(requested_name, true)?;
     let parent = source_raw
         .parent()
         .ok_or_else(|| "The RAW has no parent folder.".to_owned())?;

@@ -33,9 +33,9 @@ pub(super) enum LocalFolderToolbarAction {
 }
 
 pub(super) use selected::{
-    apply_local_toolbar_action, can_create_local_folder, close_sidebar_after_navigation,
-    default_thumbnail_worker_count, local_action_in_progress, local_folders_available,
-    maximum_thumbnail_worker_count, navigation_enabled, show_local_folder_tree,
+    apply_local_toolbar_action, can_create_local_folder, default_thumbnail_worker_count,
+    local_action_in_progress, local_folders_available, maximum_thumbnail_worker_count,
+    show_local_folder_tree,
     show_page_dialogs, show_sidebar_dialogs,
 };
 

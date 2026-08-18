@@ -5,20 +5,20 @@ impl AurawApp {
         self.adjustment_clipboard.is_some()
     }
 
-    #[cfg(not(target_os = "android"))]
     pub(crate) fn copied_adjustments_source_label(&self) -> Option<&str> {
         self.adjustment_clipboard
             .as_ref()
             .map(|clipboard| clipboard.source_label.as_str())
     }
 
-    pub(super) fn install_adjustment_clipboard(&mut self, edits: SidecarEditState, source_label: String) {
-        #[cfg(target_os = "android")]
-        drop(source_label);
+    pub(super) fn install_adjustment_clipboard(
+        &mut self,
+        edits: SidecarEditState,
+        source_label: String,
+    ) {
         self.adjustment_clipboard = Some(LibraryAdjustmentClipboard {
             edits,
             settings: self.adjustment_copy_settings,
-            #[cfg(not(target_os = "android"))]
             source_label,
         });
     }
@@ -223,12 +223,51 @@ impl AurawApp {
         }
     }
 
-    pub(super) fn desktop_library_edit_state(
+    fn library_asset_is_current(&self, asset: &crate::ui::library::LibraryAsset) -> bool {
+        #[cfg(not(target_os = "android"))]
+        {
+            asset
+                .desktop_path()
+                .is_some_and(|path| self.current_path.as_deref() == Some(path))
+                && self.loaded_raw.is_some()
+        }
+        #[cfg(target_os = "android")]
+        {
+            let Some(uri) = asset.android_uri() else {
+                return false;
+            };
+            matches!(
+                self.sidecar_target.as_ref(),
+                Some(crate::sidecar::SidecarTarget::Android {
+                    raw_uri: current_uri,
+                    display_name: current_name,
+                }) if current_uri == uri && current_name == &asset.display_name
+            ) && self.loaded_raw.is_some()
+        }
+    }
+
+    fn library_asset_edit_state(
         &mut self,
-        raw_path: &std::path::Path,
+        asset: &crate::ui::library::LibraryAsset,
     ) -> Result<SidecarEditState, String> {
-        let persisted = desktop_library_sidecar_edits(raw_path)?;
-        if self.current_path.as_deref() == Some(raw_path) && self.loaded_raw.is_some() {
+        #[cfg(not(target_os = "android"))]
+        let persisted = {
+            let path = asset
+                .desktop_path()
+                .ok_or_else(|| "Library asset is not available from desktop storage".to_owned())?;
+            desktop_library_sidecar_edits(path)?
+        };
+        #[cfg(target_os = "android")]
+        let persisted = {
+            let uri = asset
+                .android_uri()
+                .ok_or_else(|| "Library asset is not available from Android storage".to_owned())?;
+            crate::sidecar::load_android(&self.android_app, uri, &asset.display_name)
+                .map_err(|error| error.to_string())?
+                .map(|loaded| loaded.edits)
+        };
+
+        if self.library_asset_is_current(asset) {
             self.finish_mask_geometry_interaction();
             self.commit_edit_history_now();
             if persisted.is_none() && !self.can_undo_edit() {
@@ -239,80 +278,88 @@ impl AurawApp {
         Ok(persisted.unwrap_or_else(crate::sidecar::default_edit_state))
     }
 
-    pub(crate) fn library_adjustment_edit_count_paths(
+    fn save_library_asset_edit_state(
         &mut self,
-        raw_paths: &[PathBuf],
+        asset: &crate::ui::library::LibraryAsset,
+        edits: SidecarEditState,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "android"))]
+        {
+            let path = asset
+                .desktop_path()
+                .ok_or_else(|| "Library asset is not available from desktop storage".to_owned())?;
+            crate::sidecar::save_desktop(path, edits).map_err(|error| error.to_string())?;
+            crate::sidecar::invalidate_developed_thumbnail_cache(path)?;
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        {
+            let uri = asset
+                .android_uri()
+                .ok_or_else(|| "Library asset is not available from Android storage".to_owned())?;
+            crate::sidecar::save_android(&self.android_app, uri, &asset.display_name, edits)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    pub(crate) fn library_adjustment_edit_count(
+        &mut self,
+        assets: &[crate::ui::library::LibraryAsset],
     ) -> (usize, Vec<String>) {
         let mut edited = 0usize;
         let mut failures = Vec::new();
-        for raw_path in raw_paths {
-            match self.desktop_library_edit_state(raw_path) {
+        for asset in assets {
+            match self.library_asset_edit_state(asset) {
                 Ok(state) => {
                     if crate::sidecar::edit_state_has_adjustments(&state) {
                         edited += 1;
                     }
                 }
-                Err(error) => failures.push(format!("{}: {error}", raw_path.display())),
+                Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
             }
         }
         (edited, failures)
     }
 
-    pub(crate) fn copy_library_adjustments_from_path(
+    pub(crate) fn copy_library_adjustments(
         &mut self,
-        raw_path: &std::path::Path,
+        asset: &crate::ui::library::LibraryAsset,
     ) -> Result<(), String> {
-        let edits = self.desktop_library_edit_state(raw_path)?;
-        let label = raw_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| raw_path.display().to_string());
-        self.install_adjustment_clipboard(edits, label);
+        let edits = self.library_asset_edit_state(asset)?;
+        self.install_adjustment_clipboard(edits, asset.display_name.clone());
         Ok(())
     }
 
-    pub(crate) fn paste_library_adjustments_to_paths(
+    pub(crate) fn paste_library_adjustments(
         &mut self,
-        raw_paths: &[PathBuf],
+        assets: &[crate::ui::library::LibraryAsset],
         mode: AdjustmentPasteMode,
         frame: &eframe::Frame,
-    ) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<String>) {
+    ) -> (usize, Vec<crate::ui::library::LibraryAsset>, Vec<String>) {
         let Some(clipboard) = self.adjustment_clipboard.clone() else {
             return (
-                Vec::new(),
+                0,
                 Vec::new(),
                 vec!["Copy adjustments from an image first.".to_owned()],
             );
         };
-        let mut completed = Vec::new();
+        let mut completed = 0usize;
         let mut ai_refresh = Vec::new();
         let mut failures = Vec::new();
-        let current_path = self
-            .loaded_raw
-            .as_ref()
-            .and(self.current_path.as_ref())
-            .cloned();
 
         // Applying a copied camera profile to the loaded image starts an
-        // asynchronous RAW reload. Process every sidecar-only destination
-        // first so that reload cannot interrupt a multi-image paste halfway
-        // through the selection.
-        let ordered_paths = raw_paths
-            .iter()
-            .filter(|raw_path| current_path.as_deref() != Some(raw_path.as_path()))
-            .chain(
-                raw_paths
-                    .iter()
-                    .filter(|raw_path| current_path.as_deref() == Some(raw_path.as_path())),
-            );
+        // asynchronous reopen. Handle sidecar-only assets first so that reload
+        // cannot interrupt a multi-image paste halfway through the selection.
+        let mut ordered_assets = assets.to_vec();
+        ordered_assets.sort_by_key(|asset| self.library_asset_is_current(asset));
 
-        for raw_path in ordered_paths {
-            let result = if current_path.as_deref() == Some(raw_path.as_path()) {
+        for asset in &ordered_assets {
+            let result = if self.library_asset_is_current(asset) {
                 self.apply_adjustment_clipboard_to_current(&clipboard, mode, frame)
             } else {
                 (|| {
-                    let mut destination = desktop_library_sidecar_edits(raw_path)?
-                        .unwrap_or_else(crate::sidecar::default_edit_state);
+                    let mut destination = self.library_asset_edit_state(asset)?;
                     crate::sidecar::apply_copied_adjustments_with_mode(
                         &mut destination,
                         &clipboard.edits,
@@ -320,178 +367,24 @@ impl AurawApp {
                         mode,
                     );
                     let needs_ai_refresh = destination.ai_masks_need_update;
-                    crate::sidecar::save_desktop(raw_path, destination)
-                        .map_err(|error| error.to_string())?;
-                    #[cfg(not(target_os = "android"))]
-                    crate::sidecar::invalidate_developed_thumbnail_cache(raw_path)?;
-                    crate::cloud::sync_sidecar_if_cloud_cached(raw_path, true)?;
+                    self.save_library_asset_edit_state(asset, destination)?;
                     Ok(needs_ai_refresh)
                 })()
             };
 
             match result {
                 Ok(needs_ai_refresh) => {
-                    completed.push(raw_path.clone());
+                    completed += 1;
                     if needs_ai_refresh {
-                        ai_refresh.push(raw_path.clone());
+                        ai_refresh.push(asset.clone());
                     }
                 }
-                Err(error) => failures.push(format!("{}: {error}", raw_path.display())),
+                Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
             }
         }
         (completed, ai_refresh, failures)
     }
 
-    #[cfg(target_os = "android")]
-    pub(super) fn current_android_library_target_matches(&self, raw_uri: &str, display_name: &str) -> bool {
-        matches!(
-            self.sidecar_target.as_ref(),
-            Some(crate::sidecar::SidecarTarget::Android {
-                raw_uri: current_uri,
-                display_name: current_name,
-            }) if current_uri == raw_uri && current_name == display_name
-        ) && self.loaded_raw.is_some()
-    }
-
-    #[cfg(target_os = "android")]
-    pub(super) fn android_library_edit_state(
-        &mut self,
-        raw_uri: &str,
-        display_name: &str,
-    ) -> Result<SidecarEditState, String> {
-        let persisted = crate::sidecar::load_android(&self.android_app, raw_uri, display_name)
-            .map_err(|error| error.to_string())?
-            .map(|loaded| loaded.edits);
-        if self.current_android_library_target_matches(raw_uri, display_name) {
-            self.finish_mask_geometry_interaction();
-            self.commit_edit_history_now();
-            if persisted.is_none() && !self.can_undo_edit() {
-                return Ok(crate::sidecar::default_edit_state());
-            }
-            return Ok(self.capture_sidecar_edit_state());
-        }
-        Ok(persisted.unwrap_or_else(crate::sidecar::default_edit_state))
-    }
-
-    #[cfg(target_os = "android")]
-    pub(crate) fn library_adjustment_edit_count_android(
-        &mut self,
-        targets: &[(String, String)],
-    ) -> (usize, Vec<String>) {
-        let mut edited = 0usize;
-        let mut failures = Vec::new();
-        for (raw_uri, display_name) in targets {
-            match self.android_library_edit_state(raw_uri, display_name) {
-                Ok(state) => {
-                    if crate::sidecar::edit_state_has_adjustments(&state) {
-                        edited += 1;
-                    }
-                }
-                Err(error) => failures.push(format!("{display_name}: {error}")),
-            }
-        }
-        (edited, failures)
-    }
-
-    #[cfg(target_os = "android")]
-    pub(crate) fn copy_library_adjustments_from_android(
-        &mut self,
-        raw_uri: &str,
-        display_name: &str,
-    ) -> Result<(), String> {
-        let edits = self.android_library_edit_state(raw_uri, display_name)?;
-        self.install_adjustment_clipboard(edits, display_name.to_owned());
-        Ok(())
-    }
-
-    #[cfg(target_os = "android")]
-    pub(crate) fn paste_library_adjustments_to_android(
-        &mut self,
-        targets: &[(String, String)],
-        mode: AdjustmentPasteMode,
-        frame: &eframe::Frame,
-    ) -> AndroidAdjustmentPasteResult {
-        let Some(clipboard) = self.adjustment_clipboard.clone() else {
-            return (
-                Vec::new(),
-                Vec::new(),
-                vec!["Copy adjustments from an image first.".to_owned()],
-            );
-        };
-        let mut completed = Vec::new();
-        let mut ai_refresh = Vec::new();
-        let mut failures = Vec::new();
-        let current_target = self.loaded_raw.as_ref().and_then(|_| {
-            let crate::sidecar::SidecarTarget::Android {
-                raw_uri,
-                display_name,
-            } = self.sidecar_target.as_ref()?
-            else {
-                return None;
-            };
-            Some((raw_uri.clone(), display_name.clone()))
-        });
-
-        // As on desktop, leave the loaded image until last because applying a
-        // copied camera profile launches an asynchronous document reopen.
-        let ordered_targets = targets
-            .iter()
-            .filter(|target| current_target.as_ref() != Some(*target))
-            .chain(
-                targets
-                    .iter()
-                    .filter(|target| current_target.as_ref() == Some(*target)),
-            );
-
-        for (raw_uri, display_name) in ordered_targets {
-            let result = if current_target
-                .as_ref()
-                .is_some_and(|(current_uri, current_name)| {
-                    current_uri == raw_uri && current_name == display_name
-                })
-            {
-                self.apply_adjustment_clipboard_to_current(&clipboard, mode, frame)
-            } else {
-                (|| {
-                    let mut destination = crate::sidecar::load_android(
-                        &self.android_app,
-                        raw_uri,
-                        display_name,
-                    )
-                    .map_err(|error| error.to_string())?
-                    .map(|loaded| loaded.edits)
-                    .unwrap_or_else(crate::sidecar::default_edit_state);
-                    crate::sidecar::apply_copied_adjustments_with_mode(
-                        &mut destination,
-                        &clipboard.edits,
-                        clipboard.settings,
-                        mode,
-                    );
-                    let needs_ai_refresh = destination.ai_masks_need_update;
-                    crate::sidecar::save_android(
-                        &self.android_app,
-                        raw_uri,
-                        display_name,
-                        destination,
-                    )
-                    .map_err(|error| error.to_string())?;
-                    Ok(needs_ai_refresh)
-                })()
-            };
-
-            match result {
-                Ok(needs_ai_refresh) => {
-                    let target = (raw_uri.clone(), display_name.clone());
-                    completed.push(target.clone());
-                    if needs_ai_refresh {
-                        ai_refresh.push(target);
-                    }
-                }
-                Err(error) => failures.push(format!("{display_name}: {error}")),
-            }
-        }
-        (completed, ai_refresh, failures)
-    }
 }
 
 pub(super) fn desktop_library_sidecar_edits(

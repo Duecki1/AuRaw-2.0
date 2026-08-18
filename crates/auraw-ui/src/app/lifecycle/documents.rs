@@ -95,32 +95,6 @@ impl AurawApp {
         self.open_path_labeled(path, label, false, sidecar_target, frame, None);
     }
 
-    pub(crate) fn open_cloud_cached_asset(
-        &mut self,
-        cached: crate::cloud::CachedCloudAsset,
-        frame: &eframe::Frame,
-    ) {
-        let offline_reason = cached.offline_reason.clone();
-        self.active_tab = AppTab::Develop;
-        let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
-            raw_path: cached.raw_path.clone(),
-        };
-        self.open_path_labeled(
-            cached.raw_path,
-            cached.label,
-            false,
-            sidecar_target,
-            frame,
-            None,
-        );
-        if let Some(reason) = offline_reason {
-            self.notice = Some(format!(
-                "Opened the cached cloud RAW offline. Edits will sync when the server is reachable. {reason}"
-            ));
-            self.refresh_status();
-        }
-    }
-
     #[cfg(not(target_os = "android"))]
     pub(crate) fn reload_desktop_library_document_after_reset(
         &mut self,

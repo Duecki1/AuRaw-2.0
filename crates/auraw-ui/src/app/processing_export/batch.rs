@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(not(target_os = "android"))]
 use super::export::spawn_export_request;
 
 pub(in crate::app) fn batch_export_overall_fraction(
@@ -524,7 +525,7 @@ impl AurawApp {
     }
 
     #[cfg(target_os = "android")]
-    pub(in crate::app) fn start_next_library_export(&mut self, frame: &eframe::Frame) {
+    pub(in crate::app) fn start_next_library_export(&mut self, _frame: &eframe::Frame) {
         // Android's batch path must use the SAF document bridge. Once the user
         // enters Develop, do not replace that interactive document with the next
         // batch item. The current export may finish; remaining items resume when
@@ -562,55 +563,26 @@ impl AurawApp {
             };
 
             let display_name = job.target.display_name().to_owned();
-            match &job.target {
-                AndroidLibraryExportTarget::Local { uri, .. } => {
-                    match crate::android::open_library_document(
-                        &self.android_app,
-                        uri,
-                        &display_name,
-                    ) {
-                        Ok(()) => {
-                            self.android_batch_load_pending = true;
-                            self.picker_pending = true;
-                            self.notice = None;
-                            self.status = format!("Opening {display_name}…");
-                            self.active_tab = AppTab::Library;
-                            return;
-                        }
-                        Err(error) => {
-                            self.android_batch_load_pending = false;
-                            if let Some(batch) = self.library_batch_export.as_mut() {
-                                batch.failures.push(format!("{display_name}: {error}"));
-                                batch.completed += 1;
-                                batch.current = None;
-                            }
-                        }
-                    }
-                }
-                AndroidLibraryExportTarget::Cloud { path, .. } => {
+            match crate::android::open_library_document(
+                &self.android_app,
+                &job.target.uri,
+                &display_name,
+            ) {
+                Ok(()) => {
                     self.android_batch_load_pending = true;
-                    self.picker_pending = false;
+                    self.picker_pending = true;
                     self.notice = None;
                     self.status = format!("Opening {display_name}…");
                     self.active_tab = AppTab::Library;
-                    self.open_path_labeled(
-                        path.clone(),
-                        display_name.clone(),
-                        false,
-                        crate::sidecar::SidecarTarget::Desktop {
-                            raw_path: path.clone(),
-                        },
-                        frame,
-                        None,
-                    );
-                    if self.load_receiver.is_none() {
-                        self.android_batch_load_pending = false;
-                        let error = self.notice.clone().unwrap_or_else(|| {
-                            "The cloud RAW decode worker could not be started.".to_owned()
-                        });
-                        self.complete_android_library_batch_export_item(Err(error));
-                    }
                     return;
+                }
+                Err(error) => {
+                    self.android_batch_load_pending = false;
+                    if let Some(batch) = self.library_batch_export.as_mut() {
+                        batch.failures.push(format!("{display_name}: {error}"));
+                        batch.completed += 1;
+                        batch.current = None;
+                    }
                 }
             }
         }

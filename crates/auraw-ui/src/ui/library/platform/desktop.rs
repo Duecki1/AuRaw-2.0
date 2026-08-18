@@ -227,7 +227,6 @@ pub(super) fn apply_library_folder_ui_action(
                         mode: LibraryFolderClipboardMode::Copy,
                     });
                     app.library.image_clipboard = None;
-                    app.library.cloud_clipboard = None;
                     app.library.status = format!(
                         "Copied folder {}. Choose Paste Folder in a destination.",
                         path.display()
@@ -244,7 +243,6 @@ pub(super) fn apply_library_folder_ui_action(
                         mode: LibraryFolderClipboardMode::Cut,
                     });
                     app.library.image_clipboard = None;
-                    app.library.cloud_clipboard = None;
                     app.library.status = format!(
                         "Cut folder {}. Choose Paste Folder in a destination.",
                         path.display()

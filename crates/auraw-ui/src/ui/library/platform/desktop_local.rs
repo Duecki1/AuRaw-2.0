@@ -15,48 +15,19 @@ impl LibraryState {
 
     pub(crate) fn filmstrip_item(&self, index: usize) -> Option<DesktopFilmstripItem> {
         let entry = self.entries.get(index)?;
-        let (source, path, identity) = match &entry.info.source {
-            LibrarySource::File(path) => (
-                DesktopFilmstripSource::Local(path.clone()),
-                Some(path.clone()),
-                format!("local:{}", path.display()),
-            ),
-            LibrarySource::Cloud(asset) => {
-                let cached_path = self.cloud_cache_root.as_deref().and_then(|cache_root| {
-                    crate::cloud::cached_asset_path(&self.cloud_config, cache_root, asset)
-                });
-                (
-                    DesktopFilmstripSource::Cloud(asset.clone()),
-                    cached_path,
-                    format!("cloud:{}", asset.id),
-                )
-            }
-        };
+        let path = entry.asset.desktop_path()?.to_owned();
         Some(DesktopFilmstripItem {
-            source,
+            asset: entry.asset.clone(),
             path,
-            identity,
-            name: entry.info.name.clone(),
             texture: entry.texture.clone(),
             thumbnail_size: entry.thumbnail_size,
         })
     }
 
     pub(crate) fn filmstrip_index_for_path(&self, path: &Path) -> Option<usize> {
-        if let Some(index) = self
-            .entry_indices
-            .get(&LibrarySource::File(path.to_owned()))
+        self.entry_indices
+            .get(&LibraryAssetId::Desktop(path.to_owned()))
             .copied()
-        {
-            return Some(index);
-        }
-        let asset_id = crate::cloud::cached_asset_id_for_raw(path)?;
-        self.entries.iter().position(|entry| {
-            matches!(
-                &entry.info.source,
-                LibrarySource::Cloud(asset) if asset.id == asset_id
-            )
-        })
     }
 
     pub(crate) fn desktop_loading_thumbnail_for_path(
@@ -69,15 +40,11 @@ impl LibraryState {
         self.loading_thumbnail_for_index(index)
     }
 
-
     pub(in crate::ui::library) fn file_action_in_progress(&self) -> bool {
         self.file_action_receiver.is_some()
             || self.raw_import_receiver.is_some()
             || self.folder_operation_receiver.is_some()
-            || self.cloud_action_receiver.is_some()
-            || self.cloud_upload_receiver.is_some()
-            || self.cloud_open_receiver.is_some()
-            || self.image_paste_receiver.is_some()
+            || self.image_paste_in_progress()
     }
 
     pub(in crate::ui::library) fn start_folder_operation(
@@ -365,7 +332,6 @@ impl LibraryState {
     }
 
     pub(in crate::ui::library) fn open_folder_at(&mut self, root: PathBuf, folder: PathBuf, context: &egui::Context) {
-        self.view = LibraryView::Local;
         let folder_changed = self.folder.as_ref() != Some(&folder);
         let root_changed = self.root_folder.as_ref() != Some(&root);
         if root_changed {
@@ -375,7 +341,6 @@ impl LibraryState {
         }
         self.root_folder = Some(root.clone());
         self.location = Some(folder.display().to_string());
-        self.local_location = self.location.clone();
         self.folder = Some(folder.clone());
         self.folder_tree = Some(LibraryFolderNode::empty(root.clone()));
         self.expanded_folders.clear();
@@ -401,14 +366,12 @@ impl LibraryState {
             return false;
         };
         if !folder.starts_with(root)
-            || (self.view == LibraryView::Local && self.folder.as_ref() == Some(&folder))
+            || self.folder.as_ref() == Some(&folder)
         {
             return false;
         }
 
-        self.view = LibraryView::Local;
         self.location = Some(folder.display().to_string());
-        self.local_location = self.location.clone();
         self.folder = Some(folder);
         self.entries.clear();
         self.entry_indices.clear();

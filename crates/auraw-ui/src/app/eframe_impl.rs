@@ -313,7 +313,7 @@ impl eframe::App for AurawApp {
 
         #[cfg(not(target_os = "android"))]
         if self.active_tab == AppTab::Develop {
-            crate::ui::library::show_desktop_image_action_overlays(ui, self, frame);
+            crate::ui::library::show_library_action_overlays(ui, self, frame);
         }
 
         self.apply_pending_lens_correction(frame);
@@ -367,7 +367,6 @@ impl eframe::App for AurawApp {
         self.show_subject_dialogs(ui.ctx());
         self.show_inpainting_dialogs(ui.ctx());
         self.show_ai_denoise_dialogs(ui.ctx(), frame);
-        self.poll_cloud_sidecar_conflict_resolution(frame);
         self.show_sidecar_save_error_dialog(ui.ctx());
         self.show_background_task_detail_windows(ui.ctx());
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());
