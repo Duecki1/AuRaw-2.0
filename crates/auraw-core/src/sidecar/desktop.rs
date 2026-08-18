@@ -29,7 +29,7 @@ pub fn developed_thumbnail_path_for_raw(raw_path: &Path) -> PathBuf {
 }
 
 #[cfg(not(target_os = "android"))]
-fn developed_thumbnail_fingerprint_path_for_raw(raw_path: &Path) -> PathBuf {
+pub(super) fn developed_thumbnail_fingerprint_path_for_raw(raw_path: &Path) -> PathBuf {
     crate::thumbnail_cache::desktop_cache_path_for_raw(
         raw_path,
         DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX,
@@ -37,12 +37,12 @@ fn developed_thumbnail_fingerprint_path_for_raw(raw_path: &Path) -> PathBuf {
 }
 
 #[cfg(not(target_os = "android"))]
-fn legacy_developed_thumbnail_path_for_raw(raw_path: &Path) -> PathBuf {
+pub(super) fn legacy_developed_thumbnail_path_for_raw(raw_path: &Path) -> PathBuf {
     crate::thumbnail_cache::legacy_sibling_cache_path_for_raw(raw_path, DEVELOPED_THUMBNAIL_SUFFIX)
 }
 
 #[cfg(not(target_os = "android"))]
-fn legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path: &Path) -> PathBuf {
+pub(super) fn legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path: &Path) -> PathBuf {
     crate::thumbnail_cache::legacy_sibling_cache_path_for_raw(
         raw_path,
         DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX,
