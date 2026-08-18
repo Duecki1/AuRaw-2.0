@@ -224,6 +224,16 @@ impl AurawApp {
         self.mark_mask_adjustments_dirty();
     }
 
+    pub(crate) fn sync_selected_mask_tool(&mut self) {
+        self.masks.thumbnail_component_mask = None;
+        let kind = self.masks.stack.selected_component().map(|component| component.kind);
+        if let Some(kind) = kind {
+            self.select_mask_tool(kind);
+        } else {
+            self.masks.active_tool = None;
+        }
+    }
+
     pub(crate) fn activate_mask_tool(&mut self, kind: MaskKind) {
         self.finish_mask_geometry_interaction();
         self.masks.active_tool = (kind.is_available() && kind != MaskKind::Fullscreen).then_some(kind);
@@ -634,5 +644,59 @@ impl AurawApp {
         self.ai.masks_need_update = true;
         self.ui.notice = Some("AI-mask update canceled.".to_owned());
         self.egui_ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mask_state() -> MaskState {
+        MaskState {
+            stack: MaskStack::default(),
+            active_tool: None,
+            brush_mode: BrushMode::default(),
+            subject_refinement_active: false,
+            drag: None,
+            last_brush_point: None,
+            touch_gesture_backup: None,
+            interaction_dirty_layer: None,
+            interaction_last_upload: None,
+            interaction_has_uncommitted_change: false,
+            overlay_revision: 10,
+            overlay_texture: None,
+            overlay_texture_key: None,
+            overlay_blink: None,
+            thumbnail_revision: 0,
+            thumbnail_group_textures: Vec::new(),
+            thumbnail_component_mask: None,
+            thumbnail_component_textures: Vec::new(),
+            source_cache: None,
+            subject_cache: None,
+            dirty_layers: [false; MAX_LOCAL_MASKS],
+            detail_dirty_layers: [false; MAX_LOCAL_MASKS],
+            navigation_dirty_layers: [false; MAX_LOCAL_MASKS],
+        }
+    }
+
+    #[test]
+    fn geometry_invalidation_marks_every_preview_for_the_layer() {
+        let mut state = mask_state();
+        state.mark_geometry_dirty(3);
+        assert!(state.dirty_layers[3]);
+        assert!(state.detail_dirty_layers[3]);
+        assert!(state.navigation_dirty_layers[3]);
+        assert_eq!(state.overlay_revision, 11);
+        assert!(!state.dirty_layers[2]);
+    }
+
+    #[test]
+    fn full_invalidation_marks_all_mask_previews() {
+        let mut state = mask_state();
+        state.mark_all_layers_dirty();
+        assert!(state.dirty_layers.iter().all(|dirty| *dirty));
+        assert!(state.detail_dirty_layers.iter().all(|dirty| *dirty));
+        assert!(state.navigation_dirty_layers.iter().all(|dirty| *dirty));
+        assert_eq!(state.overlay_revision, 11);
     }
 }

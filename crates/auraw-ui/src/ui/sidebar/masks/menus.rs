@@ -74,7 +74,10 @@ impl Sidebar {
             ui.close();
         }
         ui.separator();
-        *enabled_changed |= ui.checkbox(&mut mask.enabled, "Enabled").changed();
+        let mut enabled = mask.enabled;
+        if ui.checkbox(&mut enabled, "Enabled").changed() {
+            *enabled_changed |= mask.common.set_enabled(enabled);
+        }
         if ui
             .add_enabled(can_add_group, egui::Button::new("Duplicate"))
             .clicked()
@@ -83,7 +86,7 @@ impl Sidebar {
             ui.close();
         }
         if ui.selectable_label(mask.invert, "Invert").clicked() {
-            mask.invert = !mask.invert;
+            mask.common.toggle_invert();
             *geometry_changed = true;
             ui.close();
         }
@@ -148,7 +151,10 @@ impl Sidebar {
             ui.close();
         }
         ui.separator();
-        *geometry_changed |= ui.checkbox(&mut component.enabled, "Enabled").changed();
+        let mut enabled = component.enabled;
+        if ui.checkbox(&mut enabled, "Enabled").changed() {
+            *geometry_changed |= component.common.set_enabled(enabled);
+        }
         if ui
             .add_enabled(can_add_component, egui::Button::new("Duplicate"))
             .clicked()
@@ -157,7 +163,7 @@ impl Sidebar {
             ui.close();
         }
         if ui.selectable_label(component.invert, "Invert").clicked() {
-            component.invert = !component.invert;
+            component.common.toggle_invert();
             *geometry_changed = true;
             ui.close();
         }
@@ -280,35 +286,25 @@ impl Sidebar {
             });
 
         if save {
-            let name = dialog.name.trim().to_owned();
-            let changed = match dialog.target {
-                MaskRenameTarget::Group(mask_index) => {
-                    app.masks.stack.masks.get_mut(mask_index).is_some_and(|mask| {
-                        if mask.name == name {
-                            false
-                        } else {
-                            mask.name = name.clone();
-                            true
-                        }
-                    })
-                }
+            let renamed = match dialog.target {
+                MaskRenameTarget::Group(mask_index) => app
+                    .masks
+                    .stack
+                    .masks
+                    .get_mut(mask_index)
+                    .is_some_and(|mask| mask.common.rename(dialog.name.trim())),
                 MaskRenameTarget::Component {
                     mask_index,
                     component_index,
-                } => app.masks.stack
+                } => app
+                    .masks
+                    .stack
                     .masks
                     .get_mut(mask_index)
                     .and_then(|mask| mask.components.get_mut(component_index))
-                    .is_some_and(|component| {
-                        if component.name == name {
-                            false
-                        } else {
-                            component.name = name.clone();
-                            true
-                        }
-                    }),
+                    .is_some_and(|component| component.common.rename(dialog.name.trim())),
             };
-            if changed {
+            if renamed {
                 app.note_mask_edit_changed();
             }
             ctx.data_mut(|data| data.remove::<MaskRenameDialog>(Self::mask_rename_dialog_id()));
@@ -320,57 +316,18 @@ impl Sidebar {
     }
 
     pub(super) fn duplicate_mask_group(app: &mut AurawApp, mask_index: usize, invert: bool) -> bool {
-        let Some(mask) = app.masks.stack.masks.get(mask_index).cloned() else {
-            return false;
-        };
-        Self::insert_mask_group_copy(app, mask_index, mask, invert)
+        Self::commit_mask_change(app, "Mask-group copy", None, false, |stack| {
+            stack.duplicate_mask(mask_index, invert)
+        })
     }
 
     pub(super) fn paste_mask_group(ctx: &egui::Context, app: &mut AurawApp, mask_index: usize) -> bool {
         let Some(mask) = Self::copied_mask_group(ctx) else {
             return false;
         };
-        Self::insert_mask_group_copy(app, mask_index, mask, false)
-    }
-
-    fn insert_mask_group_copy(
-        app: &mut AurawApp,
-        mask_index: usize,
-        mut mask: LocalMask,
-        invert: bool,
-    ) -> bool {
-        if app.masks.stack.masks.len() >= MAX_LOCAL_MASKS || mask_index >= app.masks.stack.masks.len() {
-            return false;
-        }
-        mask.name = Self::copied_mask_name(&app.masks.stack.masks, &mask.name);
-        if invert {
-            mask.invert = !mask.invert;
-            // "Duplicate & Invert" is used to build a complementary mask,
-            // not a second copy of the same local grade. Start the new mask
-            // with neutral adjustments so only its coverage is duplicated.
-            mask.adjustments.reset();
-        }
-        let insert_at = mask_index + 1;
-        let mut candidate = app.masks.stack.clone();
-        candidate.masks.insert(insert_at, mask);
-        candidate.selected_mask = Some(insert_at);
-        candidate.selected_component = Some(0);
-        if let Err(error) = crate::sidecar::preflight_mask_change(&candidate, &app.inpaint.strokes)
-        {
-            app.report_mask_persistence_limit("Mask-group copy", &error);
-            return false;
-        }
-        app.masks.stack = candidate;
-        app.masks.thumbnail_component_mask = None;
-        app.mark_all_mask_layers_dirty();
-        if let Some(kind) = app.masks.stack
-            .selected_component()
-            .map(|component| component.kind)
-        {
-            app.select_mask_tool(kind);
-        }
-        app.blink_selected_mask();
-        true
+        Self::commit_mask_change(app, "Mask-group copy", None, false, |stack| {
+            stack.insert_mask_copy(mask_index, mask, false)
+        })
     }
 
     pub(super) fn duplicate_mask_component(
@@ -379,15 +336,9 @@ impl Sidebar {
         component_index: usize,
         invert: bool,
     ) -> bool {
-        let Some(component) = app.masks.stack
-            .masks
-            .get(mask_index)
-            .and_then(|mask| mask.components.get(component_index))
-            .cloned()
-        else {
-            return false;
-        };
-        Self::insert_mask_component_copy(app, mask_index, component_index, component, invert)
+        Self::commit_mask_change(app, "Sub-mask copy", Some(mask_index), true, |stack| {
+            stack.duplicate_component(mask_index, component_index, invert)
+        })
     }
 
     pub(super) fn paste_mask_component(
@@ -399,80 +350,38 @@ impl Sidebar {
         let Some(component) = Self::copied_mask_component(ctx) else {
             return false;
         };
-        Self::insert_mask_component_copy(app, mask_index, component_index, component, false)
+        Self::commit_mask_change(app, "Sub-mask copy", Some(mask_index), true, |stack| {
+            stack.insert_component_copy(mask_index, component_index, component, false)
+        })
     }
 
-    fn insert_mask_component_copy(
+    fn commit_mask_change(
         app: &mut AurawApp,
-        mask_index: usize,
-        component_index: usize,
-        mut component: MaskComponent,
-        invert: bool,
+        action: &str,
+        dirty_layer: Option<usize>,
+        component_selection: bool,
+        edit: impl FnOnce(&mut crate::pipeline::MaskStack) -> bool,
     ) -> bool {
-        let Some(mask) = app.masks.stack.masks.get(mask_index) else {
-            return false;
-        };
-        if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len()
-        {
-            return false;
-        }
-        component.name = Self::copied_component_name(&mask.components, &component.name);
-        if invert {
-            component.invert = !component.invert;
-        }
-        let insert_at = component_index + 1;
         let mut candidate = app.masks.stack.clone();
-        candidate.masks[mask_index]
-            .components
-            .insert(insert_at, component);
-        candidate.selected_mask = Some(mask_index);
-        candidate.selected_component = Some(insert_at);
-        if let Err(error) = crate::sidecar::preflight_mask_change(&candidate, &app.inpaint.strokes)
-        {
-            app.report_mask_persistence_limit("Sub-mask copy", &error);
+        if !edit(&mut candidate) {
+            return false;
+        }
+        if let Err(error) = crate::sidecar::preflight_mask_change(&candidate, &app.inpaint.strokes) {
+            app.report_mask_persistence_limit(action, &error);
             return false;
         }
         app.masks.stack = candidate;
-        app.masks.thumbnail_component_mask = None;
-        app.mark_mask_geometry_dirty(mask_index);
-        if let Some(kind) = app.masks.stack
-            .selected_component()
-            .map(|component| component.kind)
-        {
-            app.select_mask_tool(kind);
+        if let Some(mask_index) = dirty_layer {
+            app.mark_mask_geometry_dirty(mask_index);
+        } else {
+            app.mark_all_mask_layers_dirty();
         }
-        app.blink_selected_component();
+        app.sync_selected_mask_tool();
+        if component_selection {
+            app.blink_selected_component();
+        } else {
+            app.blink_selected_mask();
+        }
         true
-    }
-
-    fn copied_mask_name(masks: &[LocalMask], base: &str) -> String {
-        for number in 1..=10_000usize {
-            let candidate = if number == 1 {
-                format!("{base} Copy")
-            } else {
-                format!("{base} Copy {number}")
-            };
-            if masks.iter().all(|mask| mask.name != candidate) {
-                return candidate;
-            }
-        }
-        format!("{base} Copy")
-    }
-
-    fn copied_component_name(components: &[MaskComponent], base: &str) -> String {
-        for number in 1..=10_000usize {
-            let candidate = if number == 1 {
-                format!("{base} Copy")
-            } else {
-                format!("{base} Copy {number}")
-            };
-            if components
-                .iter()
-                .all(|component| component.name != candidate)
-            {
-                return candidate;
-            }
-        }
-        format!("{base} Copy")
     }
 }
