@@ -7,6 +7,7 @@ use std::sync::Arc;
 mod effects;
 
 pub use effects::{
+    params as effect_params,
     BlurEffectSettings, EdgeGlowEffectSettings, FogEffectSettings, GlowEffectSettings,
     LensBlurEffectSettings, LightRaysEffectSettings, MaskEffect, MaskEffectCategory,
     MaskEffectSettings, MotionBlurEffectSettings, NeonEffectSettings, PixelateEffectSettings,
@@ -1765,20 +1766,22 @@ pub struct LocalAdjustments {
 
 impl Default for LocalAdjustments {
     fn default() -> Self {
+        use effect_params::adjustment;
+
         Self {
-            exposure: 0.0,
-            contrast: 0.0,
-            highlights: 0.0,
-            shadows: 0.0,
-            whites: 0.0,
-            blacks: 0.0,
-            temperature: 0.0,
-            tint: 0.0,
-            hue: 0.0,
-            saturation: 0.0,
-            texture: 0.0,
-            clarity: 0.0,
-            dehaze: 0.0,
+            exposure: adjustment::EXPOSURE.default,
+            contrast: adjustment::CONTRAST.default,
+            highlights: adjustment::HIGHLIGHTS.default,
+            shadows: adjustment::SHADOWS.default,
+            whites: adjustment::WHITES.default,
+            blacks: adjustment::BLACKS.default,
+            temperature: adjustment::TEMPERATURE.default,
+            tint: adjustment::TINT.default,
+            hue: adjustment::HUE.default,
+            saturation: adjustment::SATURATION.default,
+            texture: adjustment::TEXTURE.default,
+            clarity: adjustment::CLARITY.default,
+            dehaze: adjustment::DEHAZE.default,
             tone_curve: super::PointCurve::linear(),
             tone_curve_red: super::PointCurve::linear(),
             tone_curve_green: super::PointCurve::linear(),

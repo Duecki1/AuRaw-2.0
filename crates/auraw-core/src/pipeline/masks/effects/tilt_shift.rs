@@ -1,3 +1,5 @@
+use super::params::tilt_shift::*;
+
 /// Editable parameters for the non-destructive Tilt-Shift mask effect.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -19,26 +21,18 @@ pub struct TiltShiftEffectSettings {
 impl Default for TiltShiftEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 75.0,
-            radius: 16.0,
-            center: [50.0, 50.0],
-            angle: 0.0,
-            focus_width: 24.0,
-            feather: 18.0,
+            amount: AMOUNT.default,
+            radius: RADIUS.default,
+            center: [CENTER_X.default, CENTER_Y.default],
+            angle: ANGLE.default,
+            focus_width: FOCUS_WIDTH.default,
+            feather: FEATHER.default,
         }
     }
 }
 
 impl TiltShiftEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6 && self.radius > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }
