@@ -3,20 +3,17 @@ use crate::ai_masks::{
     ObjectInferenceCache, ObjectMaskEvent,
     ObjectMaskRequest, SubjectMaskEvent, SubjectMaskWorkerRequest, SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
 };
-use crate::inpainting::{
-    inpaint_patch_rect, spawn_inpaint, InpaintEvent, InpaintPatchRect, InpaintRequest,
-    PreparedInpaintSource, LAMA_EDGE, LAMA_MODEL_BYTES,
-};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
-    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, build_retouch_patch,
-    compose_inpaint_strokes, crop_raw, lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_export, BrushDab, BrushMode, CameraProfileMode, ExportEvent, ExportFormat,
+    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
+    lensfun_catalog, load_raw_file_with_profile_selection,
+    spawn_tiled_export, BrushMode, CameraProfileMode, ExportEvent, ExportFormat,
     ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
-    GpuParams, GpuProgramPrewarm, InpaintLayer, InpaintStroke, InpaintStrokeKind,
+    GpuParams, GpuProgramPrewarm,
     LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind,
-    MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
+    MaskRgbImage,
+    MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
     RawGpuProgramTemplate, SubjectRefinement, TiledExportJob, TileSpec, EXPORT_TILE_HALO,
     MAX_LOCAL_MASKS,
 };
@@ -455,10 +452,8 @@ struct LoadedPreview {
     pipeline: RawGpuPipeline,
     rendered_exposure: ExposureParams,
     rendered_masks: MaskStack,
-    inpaint_strokes: Vec<InpaintStroke>,
     ai_masks_need_update: bool,
     mask_source: Option<MaskRgbImage>,
-    inpaint_source: Option<MaskRgbImage>,
     lens_correction: LensCorrectionState,
     sidecar_target: crate::sidecar::SidecarTarget,
     sidecar_generation: u64,
@@ -758,7 +753,6 @@ struct PreparedExportSource {
     geometry: GeometryTransform,
     exposure: ExposureParams,
     masks: MaskStack,
-    inpaint: Option<InpaintLayer>,
     source_file_name: Option<String>,
     gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
@@ -788,7 +782,6 @@ pub(crate) enum ForegroundOperationKind {
     SubjectMask,
     ObjectMask,
     AiDenoise,
-    Inpaint,
     LensCorrection,
 }
 
@@ -836,7 +829,6 @@ impl ForegroundProgress {
 enum ForegroundOperationReceiver {
     Subject(mpsc::Receiver<SubjectMaskEvent>),
     Object(mpsc::Receiver<ObjectMaskEvent>),
-    Inpaint(mpsc::Receiver<InpaintEvent>),
     AiDenoise(mpsc::Receiver<crate::ai_denoise::AiDenoiseEvent>),
     LensCorrection(mpsc::Receiver<LensCorrectionEvent>),
 }
@@ -846,11 +838,6 @@ enum ForegroundOperationContext {
     Object {
         target: AiMaskTarget,
         inference_started: bool,
-    },
-    Inpaint {
-        dabs: Vec<BrushDab>,
-        revision: u64,
-        replace_index: Option<usize>,
     },
     AiDenoise,
     LensCorrection,
@@ -1092,30 +1079,45 @@ pub(crate) struct PersistenceState {
     pub(crate) developed_thumbnail_receiver: Option<mpsc::Receiver<DevelopedThumbnailEvent>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum UiInpaintTool {
+    #[default]
+    Remove,
+    Heal,
+    Clone,
+}
+
+impl UiInpaintTool {
+    pub(crate) const ALL: [Self; 3] = [Self::Remove, Self::Heal, Self::Clone];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Remove => "Remove",
+            Self::Heal => "Heal",
+            Self::Clone => "Clone",
+        }
+    }
+
+    pub(crate) const fn requires_source(self) -> bool {
+        matches!(self, Self::Heal | Self::Clone)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct UiInpaintStroke {
+    pub(crate) kind: UiInpaintTool,
+    pub(crate) dab_count: usize,
+}
+
 pub(crate) struct InpaintState {
     pub(crate) brush_size: f32,
-    pub(crate) tool: InpaintStrokeKind,
+    pub(crate) tool: UiInpaintTool,
     pub(crate) source_anchor: Option<[f32; 2]>,
-    pub(crate) source_offset: Option<[f32; 2]>,
     pub(crate) source_pick_active: bool,
-    pub(crate) stroke: Vec<crate::pipeline::BrushDab>,
-    pub(crate) strokes: Vec<InpaintStroke>,
-    pub(crate) last_brush_point: Option<[f32; 2]>,
-    pub(crate) layer: Option<InpaintLayer>,
-    pub(crate) texture: Option<egui::TextureHandle>,
-    pub(crate) texture_revision: u64,
-    pub(crate) texture_key: Option<u64>,
-    pub(crate) stroke_texture: Option<egui::TextureHandle>,
-    pub(crate) stroke_texture_key: Option<(usize, OverlayRasterKey)>,
+    pub(crate) active_dab_count: usize,
+    pub(crate) strokes: Vec<UiInpaintStroke>,
     pub(crate) hovered_stroke: Option<usize>,
     pub(crate) selected_stroke: Option<usize>,
-    pub(crate) focus_texture: Option<egui::TextureHandle>,
-    pub(crate) focus_texture_key: Option<(usize, u64, OverlayRasterKey, bool)>,
-    pub(crate) source_cache: Option<MaskRgbImage>,
-    pub(crate) pending_source: Option<PreparedInpaintSource>,
-    pub(crate) replace_index: Option<usize>,
-    pub(crate) revision: u64,
-    pub(crate) consent_open: bool,
 }
 
 #[cfg(target_os = "android")]
@@ -1175,9 +1177,6 @@ impl AurawApp {
         let develop_visible = self.ui.active_tab == AppTab::Develop;
         crate::ai_masks::set_model_cache_enabled(
             develop_visible && self.ui.sidebar_tab == SidebarTab::Masks,
-        );
-        crate::inpainting::set_model_cache_enabled(
-            develop_visible && self.ui.sidebar_tab == SidebarTab::Inpainting,
         );
     }
 
@@ -1334,7 +1333,7 @@ mod transactional_pipeline_tests {
     fn each_present_pipeline_failure_has_operation_context() {
         for failed in ["main", "detail", "navigation"] {
             let result = collect_pipeline_update_results(
-                "install inpaint layer",
+                "install mask atlas",
                 ["main", "detail", "navigation"]
                     .into_iter()
                     .map(|name| {
@@ -1349,7 +1348,7 @@ mod transactional_pipeline_tests {
             );
             let message = format!("{:#}", result.unwrap_err());
             assert!(message.contains(failed));
-            assert!(message.contains("install inpaint layer"));
+            assert!(message.contains("install mask atlas"));
         }
     }
 

@@ -29,7 +29,6 @@ fn main() {
         "view_transform.wgsl",
         "detail_capture.wgsl",
         "detail_scale_space.wgsl",
-        "inpaint_scene.wgsl",
         "pass1.wgsl",
         "pass2.wgsl",
         "pass3.wgsl",

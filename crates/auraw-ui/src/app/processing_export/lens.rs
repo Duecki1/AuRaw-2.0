@@ -311,19 +311,6 @@ impl AurawApp {
                 self.ui.notice = Some(error);
                 return;
             }
-            if let Err(error) = pipeline.update_inpaint_layer(
-                &render_state.queue,
-                self.inpaint.layer.as_ref(),
-                0,
-                0,
-                prepared.preview_raw.width,
-                prepared.preview_raw.height,
-            ) {
-                self.ui.notice = Some(format!(
-                    "Could not rebuild lens-corrected preview inpainting: {error:#}"
-                ));
-                return;
-            }
             pipeline.recompute(&render_state.queue, &render_state.device, &params);
 
             if !operation.accepts_result(self.persistence.sidecar_generation) {
@@ -348,7 +335,6 @@ impl AurawApp {
         self.masks.navigation_dirty_layers = [false; MAX_LOCAL_MASKS];
         self.develop.loaded_raw = Some(prepared.full_raw);
         self.develop.preview_raw = Some(prepared.preview_raw);
-        self.inpaint.source_cache = None;
         self.preview.zoom = 1.0;
         self.preview.center = [0.5, 0.5];
         self.preview.visible_uv = PreviewUvRect {

@@ -23,8 +23,8 @@ use std::{
 };
 
 /// Serializes AI inference while its ONNX session is being selected. Masking,
-/// inpainting, and denoise deliberately share this gate so switching tools
-/// cannot leave two large model sessions resident at the same time.
+/// masking and denoise deliberately share this gate so switching tools cannot
+/// leave two large model sessions resident at the same time.
 static INTERACTIVE_AI_MODEL_GATE: Mutex<()> = Mutex::new(());
 
 #[cfg(not(target_os = "android"))]

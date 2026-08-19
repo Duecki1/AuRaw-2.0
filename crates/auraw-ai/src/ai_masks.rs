@@ -235,7 +235,6 @@ fn prepare_model(active: AiMaskModel) -> Result<MutexGuard<'static, ()>> {
     unload_other_models_locked(active)?;
     #[cfg(target_os = "android")]
     let _ = active;
-    crate::inpainting::unload_model_locked()?;
     Ok(guard)
 }
 

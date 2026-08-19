@@ -27,9 +27,6 @@
 @group(0) @binding(29) var display_linear_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 @group(0) @binding(30) var glow_work_tex: texture_2d<f32>;
 @group(0) @binding(31) var glow_work_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
-// Baseline inpainting is stored as scene-linear Rec.2020 RGBA16F plus alpha and
-// inserted before all Develop adjustments, so both global and masked adjustments affect it.
-@group(0) @binding(32) var inpaint_tex: texture_2d<f32>;
 // Unlike the viewport-local atlas at binding 27, this compact atlas always
 // represents the complete image. Long-range Light Rays can therefore sample
 // identical normalized coordinates in fit preview, zoom crops, and export tiles.
@@ -173,19 +170,6 @@ fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     // identity matrix, so both source types meet at the same working boundary.
     var working = Color::cam_to_working(camera_rgb);
 
-    // LaMa is run on a neutral pre-adjustment rendition. Its generated output
-    // is converted to scene-linear Rec.2020 on the CPU immediately after
-    // inference and retained as RGBA16F, so no 8-bit sRGB round trip occurs here.
-    let replacement = textureLoad(inpaint_tex, Common::clamp_pos(pos), 0);
-    if replacement.a > 1e-6 {
-        let replacement_neutral = replacement.rgb;
-        let replacement_working = vec3<f32>(
-            dot(Common::camera_uniforms.inpaint_wb_0_field.xyz, replacement_neutral),
-            dot(Common::camera_uniforms.inpaint_wb_1_field.xyz, replacement_neutral),
-            dot(Common::camera_uniforms.inpaint_wb_2_field.xyz, replacement_neutral),
-        );
-        working = mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
-    }
 
     // Rendered TIFFs have no sensor-space white-balance model. Apply the same
     // Bradford scene adaptation used by local adjustments so Temperature/Tint

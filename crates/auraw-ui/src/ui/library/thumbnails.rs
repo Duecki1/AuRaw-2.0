@@ -585,8 +585,6 @@ pub(super) fn render_uncached_developed_thumbnail(
     }
 
     let mut masks = Arc::unwrap_or_clone(edits.masks);
-    let inpaint_strokes = Arc::unwrap_or_clone(edits.inpainting);
-    let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
     let initial_params =
         GpuParams::new(&edits.exposure, &masks, &preview_raw).with_vignette_geometry(geometry);
     let gpu = developed_thumbnail_gpu()?;
@@ -601,17 +599,6 @@ pub(super) fn render_uncached_developed_thumbnail(
         ProcessingQuality::Preview,
     )
     .map_err(|error| format!("could not prepare edited thumbnail rendering: {error:#}"))?;
-    pipeline
-        .update_inpaint_layer(
-            &gpu.queue,
-            composed_inpaint.as_ref(),
-            0,
-            0,
-            preview_raw.width,
-            preview_raw.height,
-        )
-        .map_err(|error| format!("could not apply thumbnail inpainting: {error:#}"))?;
-
     if masks_need_canonical_source(&masks) {
         let neutral_exposure = crate::pipeline::ExposureParams::scene_referred_default();
         let neutral_masks = MaskStack::default();

@@ -286,18 +286,6 @@ impl AurawApp {
             self.preview.quality_dirty = false;
             return;
         }
-        if let Err(error) = pipeline.update_inpaint_layer(
-            &render_state.queue,
-            self.inpaint.layer.as_ref(),
-            0,
-            0,
-            prepared.preview_raw.width,
-            prepared.preview_raw.height,
-        ) {
-            self.ui.notice = Some(format!("Could not rebuild preview inpainting: {error:#}"));
-            self.preview.quality_dirty = false;
-            return;
-        }
         pipeline.recompute(&render_state.queue, &render_state.device, &params);
         let previous = {
             let mut renderer = render_state.renderer.write();
@@ -333,7 +321,6 @@ impl AurawApp {
                     Some((prepared.quality, Arc::clone(preview_raw)));
             }
         }
-        self.inpaint.source_cache = None;
         self.develop.target_exposure = self.develop.exposure;
         self.preview.pending_stage = None;
         self.preview.detail_pending_stage = None;

@@ -1,7 +1,7 @@
 use crate::app::{AppTab, AurawApp};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::{
-    apply_lensfun_correction, build_proxy, compose_inpaint_strokes, is_supported_raw_path,
+    apply_lensfun_correction, build_proxy, is_supported_raw_path,
     lensfun_catalog, load_raw_display_dimensions, load_raw_file_with_profile_selection,
     load_raw_thumbnail, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry, MaskRgbImage,
     MaskStack, ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,

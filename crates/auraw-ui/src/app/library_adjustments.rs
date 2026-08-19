@@ -35,22 +35,17 @@ impl AurawApp {
         let pipeline_adjustments_changed =
             adjustments_changed || geometry_changed || camera_profile_category_changed;
         let masks_changed = clipboard.settings.masks || clipboard.settings.ai_masks || replacing;
-        let inpainting_changed = clipboard.settings.inpainting || replacing;
-        let inpainting_content_changed = inpainting_changed
-            && self.inpaint.strokes.as_slice() != merged.inpainting.as_slice();
         let lens_changed = (clipboard.settings.lens_correction || replacing)
             && (self.develop.lens_correction.enabled != merged.lens.enabled
                 || self.develop.lens_correction.selected_maker != merged.lens.maker
                 || self.develop.lens_correction.selected_model != merged.lens.model);
 
-        if masks_changed || inpainting_changed {
-            crate::sidecar::preflight_mask_change(&merged.masks, &merged.inpainting).map_err(
-                |error| {
-                    format!(
-                        "Paste was not applied because the resulting edit could not be saved: {error}"
-                    )
-                },
-            )?;
+        if masks_changed {
+            crate::sidecar::preflight_mask_change(&merged.masks).map_err(|error| {
+                format!(
+                    "Paste was not applied because the resulting edit could not be saved: {error}"
+                )
+            })?;
         }
 
         if adjustments_changed {
@@ -78,18 +73,6 @@ impl AurawApp {
             // explicit cross-image stale marker for pasted content-aware masks.
             self.ai.masks_need_update |= merged.ai_masks_need_update;
             self.mark_all_mask_layers_dirty();
-        }
-
-        if inpainting_changed {
-            self.inpaint.strokes = Arc::unwrap_or_clone(merged.inpainting);
-            self.rebuild_inpaint_layer();
-            self.inpaint.revision = self.inpaint.revision.wrapping_add(1);
-            self.note_inpainting_edit_changed();
-            if inpainting_content_changed {
-                self.note_inpainting_changed_for_ai_masks();
-            }
-            self.ai.masks_need_update |= merged.ai_masks_need_update;
-            self.queue_preview_processing(crate::pipeline::ProcessingStage::Tone);
         }
 
         if clipboard.settings.lens_correction || replacing {

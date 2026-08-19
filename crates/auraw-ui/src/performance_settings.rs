@@ -150,12 +150,11 @@ impl PerformanceSettings {
         let loaded_version = self.version;
         self.version = SETTINGS_VERSION;
         // Copy/paste categories were introduced with version 3. Version 4
-        // made inpainting and lens correction opt-in. Version 6 separates
+        // made lens correction opt-in. Version 6 separates
         // geometry, camera profiles, and AI masks from their former combined
         // categories. Preserve the user's old Masks choice for the new AI mask
         // category while applying the requested geometry/profile defaults.
         if loaded_version < 4 {
-            self.adjustment_copy_settings.inpainting = false;
             self.adjustment_copy_settings.lens_correction = false;
         }
         if loaded_version < 6 {
@@ -339,7 +338,6 @@ mod tests {
                 camera_profile: false,
                 masks: false,
                 ai_masks: true,
-                inpainting: true,
                 lens_correction: false,
             },
             #[cfg(not(target_os = "android"))]
@@ -408,7 +406,6 @@ mod tests {
         assert!(settings.adjustment_copy_settings.camera_profile);
         assert!(settings.adjustment_copy_settings.masks);
         assert!(settings.adjustment_copy_settings.ai_masks);
-        assert!(!settings.adjustment_copy_settings.inpainting);
         assert!(!settings.adjustment_copy_settings.lens_correction);
     }
 

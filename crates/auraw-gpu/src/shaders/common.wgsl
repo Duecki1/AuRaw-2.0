@@ -67,11 +67,6 @@ struct CameraUniforms {
     cam_to_srgb_0_field: vec4<f32>,
     cam_to_srgb_1_field: vec4<f32>,
     cam_to_srgb_2_field: vec4<f32>,
-    // Neutral scene-working -> current camera-WB scene-working transform used
-    // only for persisted/generated inpaint replacement pixels.
-    inpaint_wb_0_field: vec4<f32>,
-    inpaint_wb_1_field: vec4<f32>,
-    inpaint_wb_2_field: vec4<f32>,
     black_levels: vec4<f32>,
     white_levels: vec4<f32>,
     width: u32,

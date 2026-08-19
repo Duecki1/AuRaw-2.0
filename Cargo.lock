@@ -460,7 +460,6 @@ dependencies = [
  "anyhow",
  "base64",
  "bindgen",
- "flate2",
  "half",
  "image",
  "lcms2",
