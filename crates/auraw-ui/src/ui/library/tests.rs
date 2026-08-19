@@ -169,9 +169,7 @@ fn catalog_status_only_reports_exceptional_conditions() {
 }
 
 #[test]
-fn file_sizes_and_middle_elision_are_readable() {
-    assert_eq!(format_file_size(0), "0 B");
-    assert!(format_file_size(1_500_000).contains("MB"));
+fn middle_elision_is_readable() {
     let elided = elide_middle("0123456789abcdefghij", 11);
     assert!(elided.starts_with("01234"));
     assert!(elided.ends_with("ghij"));

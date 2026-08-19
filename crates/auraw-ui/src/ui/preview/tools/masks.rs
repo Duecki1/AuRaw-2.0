@@ -586,7 +586,6 @@ impl Preview {
             crate::pipeline::MaskEffect::Pixelate => !mask.effect_settings.pixelate.is_active(),
             crate::pipeline::MaskEffect::Fog => !mask.effect_settings.fog.is_active(),
             crate::pipeline::MaskEffect::Smoke => !mask.effect_settings.smoke.is_active(),
-            _ => true,
         };
         let accent = selected_component
             .map(mask_component_color)

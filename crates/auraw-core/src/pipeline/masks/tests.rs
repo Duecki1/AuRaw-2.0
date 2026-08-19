@@ -166,7 +166,6 @@ fn fullscreen_mask_is_immediately_initialized_and_covers_every_pixel() {
 fn mask_effect_picker_catalog_is_grouped_and_alphabetized() {
     assert_eq!(MaskEffect::ALL[0], MaskEffect::Adjustment);
     assert_eq!(MaskEffect::Adjustment.category(), None);
-    assert!(MaskEffect::Adjustment.is_implemented());
 
     for category in MaskEffectCategory::ALL {
         let labels: Vec<_> = MaskEffect::ALL
@@ -183,40 +182,7 @@ fn mask_effect_picker_catalog_is_grouped_and_alphabetized() {
         );
         assert!(labels.iter().all(|label| !label.is_empty()));
     }
-    assert!(MaskEffect::Glow.is_implemented());
-    assert!(MaskEffect::LightRays.is_implemented());
-    assert!(MaskEffect::Neon.is_implemented());
-    assert!(MaskEffect::Blur.is_implemented());
-    assert!(MaskEffect::LensBlur.is_implemented());
-    assert!(MaskEffect::MotionBlur.is_implemented());
-    assert!(MaskEffect::RadialBlur.is_implemented());
-    assert!(MaskEffect::TiltShift.is_implemented());
-    assert!(MaskEffect::EdgeGlow.is_implemented());
-    assert!(MaskEffect::Pixelate.is_implemented());
-    assert!(MaskEffect::Fog.is_implemented());
-    assert!(MaskEffect::Smoke.is_implemented());
-    assert!(MaskEffect::ALL
-        .iter()
-        .copied()
-        .filter(|effect| {
-            !matches!(
-                effect,
-                MaskEffect::Adjustment
-                    | MaskEffect::Glow
-                    | MaskEffect::LightRays
-                    | MaskEffect::Neon
-                    | MaskEffect::Blur
-                    | MaskEffect::LensBlur
-                    | MaskEffect::MotionBlur
-                    | MaskEffect::RadialBlur
-                    | MaskEffect::TiltShift
-                    | MaskEffect::EdgeGlow
-                    | MaskEffect::Pixelate
-                    | MaskEffect::Fog
-                    | MaskEffect::Smoke
-            )
-        })
-        .all(|effect| !effect.is_implemented()));
+    assert_eq!(MaskEffect::ALL.len(), 13);
 }
 
 #[test]

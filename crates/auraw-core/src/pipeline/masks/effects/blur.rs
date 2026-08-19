@@ -1,3 +1,5 @@
+use super::params::blur::*;
+
 /// Editable parameters for the non-destructive mask Blur effect.
 ///
 /// The developed image is sampled into a temporary GPU result and blended by
@@ -15,22 +17,14 @@ pub struct BlurEffectSettings {
 impl Default for BlurEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            radius: 8.0,
+            amount: AMOUNT.default,
+            radius: RADIUS.default,
         }
     }
 }
 
 impl BlurEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6 && self.radius > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

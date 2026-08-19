@@ -16,6 +16,10 @@ pub mod ai_denoise;
 pub mod ai_masks;
 pub mod execution_provider;
 pub mod inpainting;
+mod model_artifact;
+
+#[cfg(not(target_os = "android"))]
+pub use model_artifact::desktop_model_cache_root;
 
 #[cfg(not(target_os = "android"))]
 pub use execution_provider::set_ai_acceleration_enabled;

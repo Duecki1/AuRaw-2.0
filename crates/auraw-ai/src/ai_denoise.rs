@@ -6,6 +6,10 @@
 use crate::execution_provider::{
     create_session_with_fallback, lock_interactive_ai_model, FallbackSession, SessionOptions,
 };
+use crate::model_artifact::{
+    ensure_artifact, install_artifact_from_reader, verify_artifact, ArtifactSize, DownloadOptions,
+    ModelArtifact,
+};
 use anyhow::{Context, Result};
 use auraw_gpu::wgpu;
 use ort::value::Tensor;
@@ -18,7 +22,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, RwLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
@@ -37,6 +41,35 @@ const BAYER_MODEL_SHA256: &str = "da27509dab6a2915da67e988acd86cf71f9d5bbc8d1aa0
 const LINEAR_MODEL_BYTES: u64 = 31_053_823;
 const LINEAR_MODEL_SHA256: &str =
     "df957efadcc152c007d5d3b0917bdff9e41c0d4a0efe56584ef30b36393cd181";
+
+const RAWNIND_PACKAGE_ARTIFACT: ModelArtifact = ModelArtifact {
+    name: "RawNIND model package",
+    url: Some(RAWNIND_PACKAGE_URL),
+    sha256: RAWNIND_PACKAGE_SHA256,
+    size: ArtifactSize::Exact(RAWNIND_PACKAGE_BYTES),
+    progress_total: RAWNIND_PACKAGE_BYTES,
+};
+const BAYER_MODEL_ARTIFACT: ModelArtifact = ModelArtifact {
+    name: "RawNIND Bayer model",
+    url: None,
+    sha256: BAYER_MODEL_SHA256,
+    size: ArtifactSize::Exact(BAYER_MODEL_BYTES),
+    progress_total: BAYER_MODEL_BYTES,
+};
+const LINEAR_MODEL_ARTIFACT: ModelArtifact = ModelArtifact {
+    name: "RawNIND linear model",
+    url: None,
+    sha256: LINEAR_MODEL_SHA256,
+    size: ArtifactSize::Exact(LINEAR_MODEL_BYTES),
+    progress_total: LINEAR_MODEL_BYTES,
+};
+const RAWNIND_DOWNLOAD: DownloadOptions = DownloadOptions {
+    connect_timeout: Duration::from_secs(30),
+    response_timeout: Duration::from_secs(30),
+    body_timeout: Duration::from_secs(30 * 60),
+    attempts: 1,
+    resume: false,
+};
 const TILE_EDGE: usize = 512;
 const OVERLAP: usize = 64;
 const CORE_EDGE: usize = TILE_EDGE - 2 * OVERLAP;
@@ -65,19 +98,7 @@ pub enum AiDenoiseEvent {
 
 #[cfg(not(target_os = "android"))]
 pub fn model_cache_dir() -> PathBuf {
-    #[cfg(target_os = "android")]
-    {
-        // The caller substitutes the application-private root on Android.
-        std::env::temp_dir().join("auraw/models/rawdenoise-nind-1.0")
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let root = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-            .unwrap_or_else(std::env::temp_dir);
-        root.join("auraw/models/rawdenoise-nind-1.0")
-    }
+    crate::desktop_model_cache_root().join("rawdenoise-nind-1.0")
 }
 
 pub fn result_cache_path(root: &Path, source_identity: &str) -> PathBuf {
@@ -363,16 +384,10 @@ fn update_digest_cancelable(
 }
 
 pub fn models_are_verified(model_dir: &Path) -> bool {
-    verify_file(
-        &model_dir.join("model_bayer.onnx"),
-        BAYER_MODEL_BYTES,
-        BAYER_MODEL_SHA256,
-    )
-    .is_ok()
-        && verify_file(
+    verify_artifact(&model_dir.join("model_bayer.onnx"), BAYER_MODEL_ARTIFACT).is_ok()
+        && verify_artifact(
             &model_dir.join("model_linear.onnx"),
-            LINEAR_MODEL_BYTES,
-            LINEAR_MODEL_SHA256,
+            LINEAR_MODEL_ARTIFACT,
         )
         .is_ok()
 }
@@ -532,8 +547,8 @@ fn ensure_models(
 ) -> Result<()> {
     let bayer = model_dir.join("model_bayer.onnx");
     let linear = model_dir.join("model_linear.onnx");
-    if verify_file(&bayer, BAYER_MODEL_BYTES, BAYER_MODEL_SHA256).is_ok()
-        && verify_file(&linear, LINEAR_MODEL_BYTES, LINEAR_MODEL_SHA256).is_ok()
+    if verify_artifact(&bayer, BAYER_MODEL_ARTIFACT).is_ok()
+        && verify_artifact(&linear, LINEAR_MODEL_ARTIFACT).is_ok()
     {
         return Ok(());
     }
@@ -545,28 +560,29 @@ fn ensure_models(
                 .with_context(|| format!("remove invalid RawNIND model {}", path.display()))?;
         }
     }
+
     let package = model_dir.join("rawdenoise-nind.dtmodel");
-    if verify_file(&package, RAWNIND_PACKAGE_BYTES, RAWNIND_PACKAGE_SHA256).is_err() {
-        if package.exists() {
-            fs::remove_file(&package)
-                .with_context(|| format!("remove invalid RawNIND package {}", package.display()))?;
-        }
-        download_package(&package, events, cancellation)?;
-    }
+    ensure_artifact(
+        &package,
+        RAWNIND_PACKAGE_ARTIFACT,
+        RAWNIND_DOWNLOAD,
+        |downloaded, total| {
+            let _ = events.send(AiDenoiseEvent::DownloadProgress { downloaded, total });
+        },
+        || ensure_not_cancelled(cancellation),
+    )?;
     ensure_not_cancelled(cancellation)?;
     extract_model(
         &package,
         "rawdenoise-nind/model_bayer.onnx",
         &bayer,
-        BAYER_MODEL_BYTES,
-        BAYER_MODEL_SHA256,
+        BAYER_MODEL_ARTIFACT,
     )?;
     extract_model(
         &package,
         "rawdenoise-nind/model_linear.onnx",
         &linear,
-        LINEAR_MODEL_BYTES,
-        LINEAR_MODEL_SHA256,
+        LINEAR_MODEL_ARTIFACT,
     )?;
     if let Err(error) = fs::remove_file(&package) {
         log::warn!(
@@ -577,127 +593,13 @@ fn ensure_models(
     Ok(())
 }
 
-fn verify_file(path: &Path, expected_bytes: u64, expected_sha256: &str) -> Result<()> {
-    let metadata = fs::metadata(path).with_context(|| format!("read {}", path.display()))?;
-    anyhow::ensure!(
-        metadata.is_file(),
-        "{} is not a regular file",
-        path.display()
-    );
-    anyhow::ensure!(
-        metadata.len() == expected_bytes,
-        "{} has {} bytes, expected {expected_bytes}",
-        path.display(),
-        metadata.len()
-    );
-    let actual = sha256_file(path)?;
-    anyhow::ensure!(
-        actual == expected_sha256,
-        "{} SHA-256 mismatch",
-        path.display()
-    );
-    Ok(())
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut hasher = Sha256Context::new(&SHA256);
-    let mut buffer = [0u8; 256 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finish().as_ref()))
-}
-
-fn download_package(
-    path: &Path,
-    events: &mpsc::Sender<AiDenoiseEvent>,
-    cancellation: &AtomicBool,
-) -> Result<()> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_extension(format!("dtmodel.{}.{}.part", std::process::id(), nonce));
-    let result = (|| -> Result<()> {
-        let config = ureq::Agent::config_builder()
-            .https_only(true)
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
-            .build();
-        let agent: ureq::Agent = config.into();
-        let mut response = agent
-            .get(RAWNIND_PACKAGE_URL)
-            .call()
-            .context("download darktable RawNIND model package")?;
-        if let Some(length) = response.body().content_length() {
-            anyhow::ensure!(
-                length == RAWNIND_PACKAGE_BYTES,
-                "RawNIND server declared {length} bytes, expected {RAWNIND_PACKAGE_BYTES}"
-            );
-        }
-        let mut reader = response.body_mut().as_reader();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        let mut downloaded = 0u64;
-        let mut hasher = Sha256Context::new(&SHA256);
-        let mut buffer = [0u8; 256 * 1024];
-        loop {
-            ensure_not_cancelled(cancellation)?;
-            let read = reader.read(&mut buffer).context("read RawNIND download")?;
-            if read == 0 {
-                break;
-            }
-            downloaded = downloaded
-                .checked_add(read as u64)
-                .context("RawNIND download byte count overflow")?;
-            anyhow::ensure!(
-                downloaded <= RAWNIND_PACKAGE_BYTES,
-                "RawNIND download exceeded its pinned size"
-            );
-            hasher.update(&buffer[..read]);
-            file.write_all(&buffer[..read])
-                .context("write RawNIND package")?;
-            let _ = events.send(AiDenoiseEvent::DownloadProgress {
-                downloaded,
-                total: RAWNIND_PACKAGE_BYTES,
-            });
-        }
-        file.sync_all().context("flush RawNIND package")?;
-        anyhow::ensure!(
-            downloaded == RAWNIND_PACKAGE_BYTES,
-            "RawNIND package received {downloaded} bytes, expected {RAWNIND_PACKAGE_BYTES}"
-        );
-        anyhow::ensure!(
-            hex::encode(hasher.finish().as_ref()) == RAWNIND_PACKAGE_SHA256,
-            "RawNIND package SHA-256 mismatch"
-        );
-        ensure_not_cancelled(cancellation)?;
-        fs::rename(&temporary, path)
-            .with_context(|| format!("publish RawNIND package to {}", path.display()))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
 fn extract_model(
     package: &Path,
     member: &str,
     destination: &Path,
-    expected_bytes: u64,
-    expected_sha256: &str,
+    artifact: ModelArtifact,
 ) -> Result<()> {
-    if verify_file(destination, expected_bytes, expected_sha256).is_ok() {
+    if verify_artifact(destination, artifact).is_ok() {
         return Ok(());
     }
     let file = File::open(package).with_context(|| format!("open {}", package.display()))?;
@@ -705,37 +607,16 @@ fn extract_model(
     let mut source = archive
         .by_name(member)
         .with_context(|| format!("find {member} in RawNIND package"))?;
+    let ArtifactSize::Exact(expected_bytes) = artifact.size else {
+        anyhow::bail!("RawNIND archive members must have an exact pinned size");
+    };
     anyhow::ensure!(
         source.size() == expected_bytes,
         "{member} declares {} bytes, expected {expected_bytes}",
         source.size()
     );
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary =
-        destination.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
-    let result = (|| -> Result<()> {
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        let copied = std::io::copy(&mut source, &mut output).context("extract RawNIND ONNX")?;
-        anyhow::ensure!(
-            copied == expected_bytes,
-            "extracted {copied} bytes for {member}, expected {expected_bytes}"
-        );
-        output.sync_all().context("flush extracted RawNIND model")?;
-        verify_file(&temporary, expected_bytes, expected_sha256)?;
-        fs::rename(&temporary, destination)
-            .with_context(|| format!("publish {}", destination.display()))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    install_artifact_from_reader(destination, artifact, &mut source, || Ok(()))
+        .with_context(|| format!("extract {member} from RawNIND package"))
 }
 
 fn create_bayer_session(model_path: &Path) -> Result<FallbackSession> {

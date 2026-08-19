@@ -20,7 +20,6 @@ cargo check --workspace --all-targets
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo run -p auraw-ui --bin auraw --release
-cargo xtask check-all
 ```
 
 Android version pins live in root `[workspace.metadata]`.

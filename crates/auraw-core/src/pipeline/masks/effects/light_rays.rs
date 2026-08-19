@@ -1,3 +1,5 @@
+use super::params::light_rays::*;
+
 /// Editable parameters for the non-destructive mask Light Rays effect.
 ///
 /// Mask coverage acts as an emitter rather than a final compositing boundary.
@@ -32,29 +34,21 @@ pub struct LightRaysEffectSettings {
 impl Default for LightRaysEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            length: 100.0,
-            source: [50.0, 35.0],
-            spread: 10.0,
-            fade: 45.0,
-            ray_count: 32.0,
-            variation: 55.0,
-            softness: 40.0,
-            color: [1.0, 0.85, 0.62],
+            amount: AMOUNT.default,
+            length: LENGTH.default,
+            source: [SOURCE_X.default, SOURCE_Y.default],
+            spread: SPREAD.default,
+            fade: FADE.default,
+            ray_count: RAY_COUNT.default,
+            variation: VARIATION.default,
+            softness: SOFTNESS.default,
+            color: COLOR.default,
         }
     }
 }
 
 impl LightRaysEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6 && self.length > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

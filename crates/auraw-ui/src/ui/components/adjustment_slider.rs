@@ -49,8 +49,12 @@ pub enum SliderGradient {
     Brightness,
     /// Cool-to-warm white-balance meaning.
     Temperature,
-    /// Green-to-magenta white-balance meaning.
+    /// Green-to-magenta signed/local white-balance meaning.
     Tint,
+    /// Absolute camera tint ratio used by the global RAW white-balance control.
+    /// Increasing this ratio makes the rendered correction greener (the inverse
+    /// of the signed local Tint control). A ratio of 1.0 is visually neutral.
+    CameraTint { neutral_fraction: f32 },
     /// Desaturated-to-multi-hue treatment for whole-image saturation/vibrance.
     ///
     /// The negative half remains neutral while the positive half traverses a
@@ -207,20 +211,21 @@ where
 /// other adjustment slider. The only specialization is its visual track and
 /// explicit neutral reset value.
 pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&str>) -> bool {
+    let spec = crate::pipeline::effect_params::adjustment::HUE;
     adjustment_slider_impl(
         ui,
-        "Hue",
+        spec.label,
         value,
-        -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES..=crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
+        spec.range(),
         SliderOptions {
-            decimals: 1,
-            speed: 1.0,
+            decimals: spec.decimals,
+            speed: spec.step,
             hover_text,
-            explicit_reset_value: Some(0.0),
+            explicit_reset_value: Some(f64::from(spec.default)),
             accent: None,
             gradient: Some(SliderGradient::HueDegrees {
-                start: -crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
-                end: crate::pipeline::HUE_ROTATION_LIMIT_DEGREES,
+                start: spec.min,
+                end: spec.max,
             }),
         },
     )
@@ -671,6 +676,33 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
                 )
             }
         }
+        SliderGradient::CameraTint { neutral_fraction } => {
+            let neutral = neutral_fraction.clamp(0.0, 1.0);
+            if t <= neutral {
+                let u = if neutral <= f32::EPSILON {
+                    1.0
+                } else {
+                    t / neutral
+                };
+                lerp_color(
+                    egui::Color32::from_rgb(222, 84, 174),
+                    egui::Color32::from_gray(202),
+                    u,
+                )
+            } else {
+                let span = 1.0 - neutral;
+                let u = if span <= f32::EPSILON {
+                    1.0
+                } else {
+                    (t - neutral) / span
+                };
+                lerp_color(
+                    egui::Color32::from_gray(202),
+                    egui::Color32::from_rgb(76, 181, 112),
+                    u,
+                )
+            }
+        }
         SliderGradient::Colorfulness => {
             if t <= 0.5 {
                 // Negative saturation/vibrance moves toward monochrome. Keep
@@ -824,5 +856,22 @@ mod tests {
         let mid = gradient_color_at(gradient, 0.5);
         let high = gradient_color_at(gradient, 1.0);
         assert!(low.r() < mid.r() && mid.r() < high.r());
+    }
+
+    #[test]
+    fn camera_tint_gradient_reverses_local_tint_and_uses_requested_neutral() {
+        let neutral_fraction = 0.4;
+        let camera = SliderGradient::CameraTint { neutral_fraction };
+        let local = SliderGradient::Tint;
+
+        let camera_low = gradient_color_at(camera, 0.0);
+        let camera_neutral = gradient_color_at(camera, neutral_fraction);
+        let camera_high = gradient_color_at(camera, 1.0);
+        let local_low = gradient_color_at(local, 0.0);
+        let local_high = gradient_color_at(local, 1.0);
+
+        assert_eq!(camera_low, local_high);
+        assert_eq!(camera_high, local_low);
+        assert_eq!(camera_neutral, egui::Color32::from_gray(202));
     }
 }

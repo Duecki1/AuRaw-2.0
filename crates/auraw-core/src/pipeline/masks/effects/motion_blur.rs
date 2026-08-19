@@ -1,3 +1,5 @@
+use super::params::motion_blur::*;
+
 /// Editable parameters for the non-destructive Motion Blur mask effect.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -13,23 +15,15 @@ pub struct MotionBlurEffectSettings {
 impl Default for MotionBlurEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            distance: 32.0,
-            angle: 0.0,
+            amount: AMOUNT.default,
+            distance: DISTANCE.default,
+            angle: ANGLE.default,
         }
     }
 }
 
 impl MotionBlurEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6 && self.distance > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

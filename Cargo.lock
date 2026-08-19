@@ -438,6 +438,7 @@ dependencies = [
  "rayon",
  "ring",
  "serde",
+ "tempfile",
  "ureq",
  "zip",
 ]
@@ -4806,13 +4807,9 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 name = "xtask"
 version = "2.0.0"
 dependencies = [
- "hex",
  "image",
- "ring",
- "serde",
  "serde_json",
  "tempfile",
- "walkdir",
  "zip",
 ]
 

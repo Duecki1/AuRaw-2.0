@@ -1,3 +1,5 @@
+use super::params::neon::*;
+
 /// Editable Neon parameters. Values use UI-friendly units and are clamped
 /// again when packed for the GPU, keeping malformed sidecars away from shader
 /// math while preserving a fully non-destructive edit model.
@@ -21,26 +23,18 @@ pub struct NeonEffectSettings {
 impl Default for NeonEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            edge_width: 1.0,
-            detail: 10.0,
-            glow: 10.0,
-            background: 50.0,
-            color: [0.05, 0.85, 1.0],
+            amount: AMOUNT.default,
+            edge_width: EDGE_WIDTH.default,
+            detail: DETAIL.default,
+            glow: GLOW.default,
+            background: BACKGROUND.default,
+            color: COLOR.default,
         }
     }
 }
 
 impl NeonEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

@@ -1,5 +1,12 @@
 use super::*;
+#[cfg(not(target_os = "android"))]
+use super::desktop::{
+    developed_thumbnail_fingerprint_path_for_raw,
+    legacy_developed_thumbnail_fingerprint_path_for_raw, legacy_developed_thumbnail_path_for_raw,
+};
 use crate::pipeline::MaskKind;
+#[cfg(not(target_os = "android"))]
+use crate::pipeline::RawThumbnail;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn sample_edits() -> EditState {
@@ -302,25 +309,6 @@ fn sidecar_round_trip_preserves_edit_state() {
     let loaded = decode(&encoded).unwrap();
     assert_eq!(loaded.edits, edits);
     assert!(!loaded.migrated);
-}
-
-#[test]
-fn fullscreen_effect_mask_round_trips_through_the_sidecar() {
-    let mut edits = sample_edits();
-    let masks = Arc::make_mut(&mut edits.masks);
-    masks.add_mask(MaskKind::Fullscreen).unwrap();
-    masks.masks.last_mut().unwrap().effect = crate::pipeline::MaskEffect::Cartoon;
-
-    let encoded = encode(edits.clone()).unwrap();
-    let loaded = decode(&encoded).unwrap();
-    assert_eq!(loaded.edits, edits);
-    let fullscreen = loaded.edits.masks.masks.last().unwrap();
-    assert_eq!(fullscreen.components[0].kind, MaskKind::Fullscreen);
-    assert!(matches!(
-        fullscreen.components[0].geometry,
-        MaskGeometry::Fullscreen
-    ));
-    assert_eq!(fullscreen.effect, crate::pipeline::MaskEffect::Cartoon);
 }
 
 #[test]
@@ -674,6 +662,7 @@ fn malformed_current_mask_assets_are_rejected() {
     ));
 }
 
+#[cfg(not(target_os = "android"))]
 #[test]
 fn reset_all_adjustments_removes_sidecar_masks_and_thumbnail_caches() {
     let directory = temporary_directory("reset-all");
