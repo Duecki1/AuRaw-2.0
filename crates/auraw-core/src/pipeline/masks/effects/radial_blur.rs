@@ -1,3 +1,5 @@
+use super::params::radial_blur::*;
+
 /// Direction used by the Radial Blur gather around its center point.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum RadialBlurMode {
@@ -42,24 +44,16 @@ pub struct RadialBlurEffectSettings {
 impl Default for RadialBlurEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            strength: 36.0,
-            center: [50.0, 50.0],
+            amount: AMOUNT.default,
+            strength: STRENGTH.default,
+            center: [CENTER_X.default, CENTER_Y.default],
             mode: RadialBlurMode::Zoom,
         }
     }
 }
 
 impl RadialBlurEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6 && self.strength > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

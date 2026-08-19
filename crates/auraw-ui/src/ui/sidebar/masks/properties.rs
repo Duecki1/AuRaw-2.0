@@ -27,17 +27,10 @@ impl Sidebar {
                             if candidate.category() != Some(category) {
                                 continue;
                             }
-                            let implemented = candidate.is_implemented();
-                            let response = ui
-                                .add_enabled(
-                                    implemented,
-                                    egui::Button::selectable(
-                                        *effect == candidate,
-                                        candidate.label(),
-                                    ),
-                                )
-                                .on_disabled_hover_text("This effect is not implemented yet.");
-                            if response.clicked() {
+                            if ui
+                                .selectable_label(*effect == candidate, candidate.label())
+                                .clicked()
+                            {
                                 *effect = candidate;
                                 ui.close();
                             }
@@ -47,18 +40,6 @@ impl Sidebar {
             });
         });
         before != *effect
-    }
-
-    pub(super) fn show_mask_effect_placeholder(ui: &mut Ui, effect: MaskEffect) {
-        Self::adjustment_section(ui, effect.label(), true, false, |ui| {
-            ui.label(egui::RichText::new("Placeholder").strong());
-            ui.label(format!(
-                "{} is saved as this mask's type, but its image-processing controls are not implemented yet.",
-                effect.label()
-            ));
-            ui.add_space(3.0);
-            ui.weak("You can keep editing the mask coverage or switch back to Adjustment without losing its local adjustments.");
-        });
     }
 
     pub(super) fn show_mask_effect_settings(ui: &mut Ui, mask: &mut LocalMask) -> bool {
@@ -94,10 +75,7 @@ impl Sidebar {
             }
             MaskEffect::Fog => mask_effects::fog::show(ui, &mut mask.effect_settings.fog),
             MaskEffect::Smoke => mask_effects::smoke::show(ui, &mut mask.effect_settings.smoke),
-            _ => {
-                Self::show_mask_effect_placeholder(ui, mask.effect);
-                false
-            }
+            MaskEffect::Adjustment => false,
         }
     }
 

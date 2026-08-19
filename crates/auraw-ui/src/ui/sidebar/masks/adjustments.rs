@@ -1,5 +1,39 @@
 use super::*;
 
+fn local_param_slider(
+    ui: &mut Ui,
+    value: &mut f32,
+    spec: crate::pipeline::effect_params::FloatParamSpec,
+) -> bool {
+    adjustment_slider(
+        ui,
+        spec.label,
+        value,
+        spec.range(),
+        spec.decimals,
+        spec.step,
+        spec.tooltip,
+    )
+}
+
+fn local_gradient_param_slider(
+    ui: &mut Ui,
+    value: &mut f32,
+    spec: crate::pipeline::effect_params::FloatParamSpec,
+    gradient: SliderGradient,
+) -> bool {
+    gradient_adjustment_slider(
+        ui,
+        spec.label,
+        value,
+        spec.range(),
+        spec.decimals,
+        spec.step,
+        spec.tooltip,
+        gradient,
+    )
+}
+
 impl Sidebar {
     pub(super) fn prepare_content_mask(app: &mut AurawApp, frame: &eframe::Frame, kind: MaskKind) {
         match kind {
@@ -59,67 +93,45 @@ impl Sidebar {
         ui: &mut Ui,
         adjustment: &mut crate::pipeline::LocalAdjustments,
     ) -> (bool, bool) {
+        use crate::pipeline::effect_params::adjustment as params;
+
         let mut changed = false;
         let shadows_before = adjustment.shadows;
         let blacks_before = adjustment.blacks;
-        changed |= gradient_adjustment_slider(
+        changed |= local_gradient_param_slider(
             ui,
-            "Exposure",
             &mut adjustment.exposure,
-            -5.0..=5.0,
-            2,
-            0.05,
-            None,
+            params::EXPOSURE,
             SliderGradient::Brightness,
         );
-        changed |= gradient_adjustment_slider(
+        changed |= local_gradient_param_slider(
             ui,
-            "Contrast",
             &mut adjustment.contrast,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
+            params::CONTRAST,
             SliderGradient::Brightness,
         );
-        changed |= gradient_adjustment_slider(
+        changed |= local_gradient_param_slider(
             ui,
-            "Highlights",
             &mut adjustment.highlights,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
+            params::HIGHLIGHTS,
             SliderGradient::Brightness,
         );
-        changed |= gradient_adjustment_slider(
+        changed |= local_gradient_param_slider(
             ui,
-            "Shadows",
             &mut adjustment.shadows,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
+            params::SHADOWS,
             SliderGradient::Brightness,
         );
-        changed |= gradient_adjustment_slider(
+        changed |= local_gradient_param_slider(
             ui,
-            "Whites",
             &mut adjustment.whites,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
+            params::WHITES,
             SliderGradient::Brightness,
         );
-        changed |= gradient_adjustment_slider(
+        changed |= local_gradient_param_slider(
             ui,
-            "Blacks",
             &mut adjustment.blacks,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
+            params::BLACKS,
             SliderGradient::Brightness,
         );
         (
@@ -132,40 +144,26 @@ impl Sidebar {
         ui: &mut Ui,
         adjustment: &mut crate::pipeline::LocalAdjustments,
     ) -> bool {
+        use crate::pipeline::effect_params::adjustment as params;
+
         let mut changed = false;
-        changed |= gradient_adjustment_slider(
+        changed |= local_gradient_param_slider(
             ui,
-            "Temperature",
             &mut adjustment.temperature,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
+            params::TEMPERATURE,
             SliderGradient::Temperature,
         );
-        changed |= gradient_adjustment_slider(
+        changed |= local_gradient_param_slider(
             ui,
-            "Tint",
             &mut adjustment.tint,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
+            params::TINT,
             SliderGradient::Tint,
         );
-        changed |= hue_adjustment_slider(
+        changed |= hue_adjustment_slider(ui, &mut adjustment.hue, params::HUE.tooltip);
+        changed |= local_gradient_param_slider(
             ui,
-            &mut adjustment.hue,
-            Some("Rotates colors inside the mask around the perceptual color wheel."),
-        );
-        changed |= gradient_adjustment_slider(
-            ui,
-            "Saturation",
             &mut adjustment.saturation,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
+            params::SATURATION,
             SliderGradient::Colorfulness,
         );
         changed
@@ -175,34 +173,12 @@ impl Sidebar {
         ui: &mut Ui,
         adjustment: &mut crate::pipeline::LocalAdjustments,
     ) -> bool {
+        use crate::pipeline::effect_params::adjustment as params;
+
         let mut changed = false;
-        changed |= adjustment_slider(
-            ui,
-            "Texture",
-            &mut adjustment.texture,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
-        );
-        changed |= adjustment_slider(
-            ui,
-            "Clarity",
-            &mut adjustment.clarity,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
-        );
-        changed |= adjustment_slider(
-            ui,
-            "Dehaze",
-            &mut adjustment.dehaze,
-            -100.0..=100.0,
-            0,
-            1.0,
-            None,
-        );
+        changed |= local_param_slider(ui, &mut adjustment.texture, params::TEXTURE);
+        changed |= local_param_slider(ui, &mut adjustment.clarity, params::CLARITY);
+        changed |= local_param_slider(ui, &mut adjustment.dehaze, params::DEHAZE);
         changed
     }
 

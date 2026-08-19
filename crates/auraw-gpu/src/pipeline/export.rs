@@ -279,8 +279,7 @@ pub enum ExportEvent {
 ///
 /// Keeping the resources and processing state together makes the worker
 /// boundary explicit and avoids threading the same argument list through each
-/// output format. The legacy format-specific entry points below remain as
-/// compatibility wrappers.
+/// output format.
 pub struct TiledExportJob {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -493,20 +492,11 @@ where
         return ensure_export_not_cancelled(cancellation);
     }
 
-    let temporary = temporary_export_path(destination)?;
-    if let Err(error) = export(&temporary) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    if let Err(error) = ensure_export_not_cancelled(cancellation) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    if let Err(error) = publish_completed_export(&temporary, destination) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
+    with_temporary_export_path(destination, |temporary| {
+        export(temporary)?;
+        ensure_export_not_cancelled(cancellation)?;
+        publish_completed_export(temporary, destination)
+    })
 }
 
 fn ensure_export_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
@@ -580,9 +570,6 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         !request.bit_depth.is_float(),
         "PNG export supports 8-bit or 16-bit integer output; use TIFF for a float/linear master"
     );
-    if !request.geometry.is_identity() || request.raw.lens_geometry.is_some() {
-        return export_tiled_png_geometry(context, request);
-    }
     let file = open_export_destination(request.path)
         .with_context(|| format!("create export {}", request.path.display()))?;
     let mut info = png::Info::with_size(request.output_width, request.output_height);
@@ -626,19 +613,23 @@ fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> R
         ExportBitDepth::Sixteen => ExportRowFormat::Rgba16Be,
         ExportBitDepth::Float32Linear => unreachable!("float PNG rejected above"),
     };
-    render_tiled_output(context, request, &mut stream, row_format)?;
+    render_export_output(context, request, &mut stream, row_format)?;
     stream.finish().context("finish streaming PNG data")?;
     writer.finish().context("finish PNG file")?;
     Ok(())
 }
 
-fn render_tiled_output<W: Write>(
+fn render_export_output<W: Write>(
     context: ExportContext<'_>,
     request: ExportRequest<'_>,
     output: &mut W,
     row_format: ExportRowFormat,
 ) -> Result<()> {
     validate_export_dimensions(request.output_width, request.output_height)?;
+    if !request.geometry.is_identity() || request.raw.lens_geometry.is_some() {
+        return render_geometry_output(context, request, output, row_format);
+    }
+
     let output_transform = request.color.transform.as_ref();
     let mut resizer = LinearLightResizer::new_with_format(
         request.raw.width,
@@ -652,6 +643,72 @@ fn render_tiled_output<W: Write>(
     })?;
     resizer.finish(output_transform, output)?;
     Ok(())
+}
+
+fn render_geometry_output<W: Write>(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+    output: &mut W,
+    row_format: ExportRowFormat,
+) -> Result<()> {
+    with_temporary_export_path(request.path, |staged_linear| {
+        {
+            let linear_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(staged_linear)
+                .with_context(|| {
+                    format!("create geometry linear raster {}", staged_linear.display())
+                })?;
+            let mut linear_writer = BufWriter::new(linear_file);
+            stream_tiled_linear_rows(context, request, |_source_y, row| {
+                linear_writer
+                    .write_all(bytemuck::cast_slice(row))
+                    .context("write geometry linear source row")
+            })?;
+            linear_writer
+                .flush()
+                .context("flush geometry linear source raster")?;
+        }
+
+        let linear_file = fs::File::open(staged_linear)
+            .with_context(|| format!("open geometry linear raster {}", staged_linear.display()))?;
+        // SAFETY: the staged raster remains open and immutable for the mapping lifetime.
+        let mapped = unsafe { memmap2::MmapOptions::new().map(&linear_file) }
+            .with_context(|| format!("map geometry linear raster {}", staged_linear.display()))?;
+        let source = validate_linear_rgb_raster(&mapped, request.raw.width, request.raw.height)?;
+        let resampler = GeometryResampler::new_with_lens(
+            source,
+            request.raw.width,
+            request.raw.height,
+            request.geometry,
+            request.raw.lens_geometry.as_deref(),
+            request.output_width,
+            request.output_height,
+        )?;
+        let (geometry_width, geometry_height) = request
+            .geometry
+            .crop_pixel_dimensions(request.raw.width, request.raw.height);
+        let mut output_sharpen = FinalSizeOutputSharpen::new(
+            geometry_width,
+            geometry_height,
+            request.output_width,
+            request.output_height,
+        )
+        .with_passthrough(row_format == ExportRowFormat::RgbF32Le);
+        let output_transform = request.color.transform.as_ref();
+        for y in 0..request.output_height {
+            ensure_export_not_cancelled(context.cancellation)?;
+            output_sharpen.push_row(
+                resampler.output_row(y)?,
+                output_transform,
+                row_format,
+                output,
+            )?;
+        }
+        output_sharpen.finish(output_transform, row_format, output)?;
+        Ok(())
+    })
 }
 
 fn stream_tiled_linear_rows<F>(
@@ -946,18 +1003,13 @@ where
                     .finish(device)
                     .with_context(|| format!("read export tile {}", previous_index + 1))?;
                 stitch_linear_tile_into_band(&mut band, raw.width, band_y, previous_tile, &rgb)?;
-                completed_tiles += 1;
-                if !first_progress_logged {
-                    first_progress_logged = true;
-                    crate::diagnostics::record(format!(
-                        "First export tile completed after {:.3}s; pipelined GPU readback is active",
-                        export_started.elapsed().as_secs_f64()
-                    ));
-                }
-                let _ = events.send(ExportEvent::Progress {
-                    completed_tiles,
+                report_completed_export_tile(
+                    events,
+                    &mut completed_tiles,
                     total_tiles,
-                });
+                    &mut first_progress_logged,
+                    export_started,
+                );
             }
         }
 
@@ -966,18 +1018,13 @@ where
                 .finish(device)
                 .with_context(|| format!("read export tile {}", last_index + 1))?;
             stitch_linear_tile_into_band(&mut band, raw.width, band_y, last_tile, &rgb)?;
-            completed_tiles += 1;
-            if !first_progress_logged {
-                first_progress_logged = true;
-                crate::diagnostics::record(format!(
-                    "First export tile completed after {:.3}s; pipelined GPU readback is active",
-                    export_started.elapsed().as_secs_f64()
-                ));
-            }
-            let _ = events.send(ExportEvent::Progress {
-                completed_tiles,
+            report_completed_export_tile(
+                events,
+                &mut completed_tiles,
                 total_tiles,
-            });
+                &mut first_progress_logged,
+                export_started,
+            );
         }
 
         let source_row_values = checked_rgb_len(raw.width, 1)?;
@@ -997,237 +1044,29 @@ where
     Ok(())
 }
 
-fn export_tiled_png_geometry(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
-    let staged_linear = temporary_export_path(request.path)?;
-    let result = (|| -> Result<()> {
-        {
-            let linear_file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&staged_linear)
-                .with_context(|| {
-                    format!("create geometry linear raster {}", staged_linear.display())
-                })?;
-            let mut linear_writer = BufWriter::new(linear_file);
-            stream_tiled_linear_rows(context, request, |_source_y, row| {
-                linear_writer
-                    .write_all(bytemuck::cast_slice(row))
-                    .context("write geometry linear source row")
-            })?;
-            linear_writer
-                .flush()
-                .context("flush geometry linear source raster")?;
-        }
-
-        let linear_file = fs::File::open(&staged_linear)
-            .with_context(|| format!("open geometry linear raster {}", staged_linear.display()))?;
-        // SAFETY: the staged raster remains open and immutable for the mapping lifetime.
-        let mapped = unsafe { memmap2::MmapOptions::new().map(&linear_file) }
-            .with_context(|| format!("map geometry linear raster {}", staged_linear.display()))?;
-        let source = validate_linear_rgb_raster(&mapped, request.raw.width, request.raw.height)?;
-        let resampler = GeometryResampler::new_with_lens(
-            source,
-            request.raw.width,
-            request.raw.height,
-            request.geometry,
-            request.raw.lens_geometry.as_deref(),
-            request.output_width,
-            request.output_height,
-        )?;
-        let output_transform = request.color.transform.as_ref();
-
-        let file = open_export_destination(request.path)
-            .with_context(|| format!("create export {}", request.path.display()))?;
-        let mut info = png::Info::with_size(request.output_width, request.output_height);
-        info.color_type = png::ColorType::Rgba;
-        info.bit_depth = match request.bit_depth {
-            ExportBitDepth::Eight => png::BitDepth::Eight,
-            ExportBitDepth::Sixteen => png::BitDepth::Sixteen,
-            ExportBitDepth::Float32Linear => {
-                unreachable!("float PNG rejected before geometry export")
-            }
-        };
-        if let Some(profile) = request.color.embedded_icc.as_ref() {
-            info.icc_profile = Some(Cow::Owned(profile.clone()));
-        }
-        if request.keep_metadata {
-            info.exif_metadata = Some(Cow::Owned(build_exif_payload(
-                request.metadata,
-                request.output_width,
-                request.output_height,
-            )));
-        }
-        let mut encoder = png::Encoder::with_info(BufWriter::new(file), info)
-            .context("configure transformed PNG encoder")?;
-        if request.color.srgb {
-            encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-        }
-        if request.keep_metadata {
-            add_png_text_metadata(
-                &mut encoder,
-                request.metadata,
-                request.output_width,
-                request.output_height,
-            )?;
-        }
-        let mut writer = encoder
-            .write_header()
-            .with_context(|| format!("write PNG header for {}", request.path.display()))?;
-        let mut stream = writer
-            .stream_writer_with_size(64 * 1024)
-            .context("create transformed streaming PNG writer")?;
-        let (geometry_width, geometry_height) = request
-            .geometry
-            .crop_pixel_dimensions(request.raw.width, request.raw.height);
-        let mut output_sharpen = FinalSizeOutputSharpen::new(
-            geometry_width,
-            geometry_height,
-            request.output_width,
-            request.output_height,
-        );
-        let row_format = match request.bit_depth {
-            ExportBitDepth::Eight => ExportRowFormat::Rgba8,
-            ExportBitDepth::Sixteen => ExportRowFormat::Rgba16Be,
-            ExportBitDepth::Float32Linear => {
-                unreachable!("float PNG rejected before geometry export")
-            }
-        };
-        for y in 0..request.output_height {
-            let linear = resampler.output_row(y)?;
-            output_sharpen.push_row(linear, output_transform, row_format, &mut stream)?;
-        }
-        output_sharpen.finish(output_transform, row_format, &mut stream)?;
-        stream.finish().context("finish transformed PNG data")?;
-        writer.finish().context("finish transformed PNG file")?;
-        Ok(())
-    })();
-    let _ = fs::remove_file(&staged_linear);
-    if result.is_err() {
-        let _ = fs::remove_file(request.path);
+fn report_completed_export_tile(
+    events: &mpsc::Sender<ExportEvent>,
+    completed_tiles: &mut usize,
+    total_tiles: usize,
+    first_progress_logged: &mut bool,
+    export_started: Instant,
+) {
+    *completed_tiles += 1;
+    if !*first_progress_logged {
+        *first_progress_logged = true;
+        crate::diagnostics::record(format!(
+            "First export tile completed after {:.3}s; pipelined GPU readback is active",
+            export_started.elapsed().as_secs_f64()
+        ));
     }
-    result
-}
-
-fn export_tiled_jpeg_geometry(
-    context: ExportContext<'_>,
-    request: ExportRequest<'_>,
-    quality: u8,
-) -> Result<()> {
-    let quality = quality.clamp(1, 100);
-    let source_linear = temporary_export_path(request.path)?;
-    let transformed_rgb = temporary_export_path(request.path)?;
-    let result = (|| -> Result<()> {
-        {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&source_linear)
-                .with_context(|| {
-                    format!("create geometry linear raster {}", source_linear.display())
-                })?;
-            let mut writer = BufWriter::new(file);
-            stream_tiled_linear_rows(context, request, |_source_y, row| {
-                writer
-                    .write_all(bytemuck::cast_slice(row))
-                    .context("write geometry linear source row")
-            })?;
-            writer
-                .flush()
-                .context("flush geometry linear source raster")?;
-        }
-
-        let source_file = fs::File::open(&source_linear)
-            .with_context(|| format!("open geometry linear raster {}", source_linear.display()))?;
-        // SAFETY: the source raster remains open and immutable for the mapping lifetime.
-        let source_map = unsafe { memmap2::MmapOptions::new().map(&source_file) }
-            .with_context(|| format!("map geometry linear raster {}", source_linear.display()))?;
-        let source =
-            validate_linear_rgb_raster(&source_map, request.raw.width, request.raw.height)?;
-        let resampler = GeometryResampler::new_with_lens(
-            source,
-            request.raw.width,
-            request.raw.height,
-            request.geometry,
-            request.raw.lens_geometry.as_deref(),
-            request.output_width,
-            request.output_height,
-        )?;
-        let output_transform = request.color.transform.as_ref();
-        {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&transformed_rgb)
-                .with_context(|| {
-                    format!(
-                        "create transformed RGB raster {}",
-                        transformed_rgb.display()
-                    )
-                })?;
-            let mut writer = BufWriter::new(file);
-            let (geometry_width, geometry_height) = request
-                .geometry
-                .crop_pixel_dimensions(request.raw.width, request.raw.height);
-            let mut output_sharpen = FinalSizeOutputSharpen::new(
-                geometry_width,
-                geometry_height,
-                request.output_width,
-                request.output_height,
-            );
-            for y in 0..request.output_height {
-                let linear = resampler.output_row(y)?;
-                output_sharpen.push_row(
-                    linear,
-                    output_transform,
-                    ExportRowFormat::Rgb8,
-                    &mut writer,
-                )?;
-            }
-            output_sharpen.finish(output_transform, ExportRowFormat::Rgb8, &mut writer)?;
-            writer.flush().context("flush transformed RGB raster")?;
-        }
-        drop(source_map);
-        drop(source_file);
-
-        let transformed_file = fs::File::open(&transformed_rgb).with_context(|| {
-            format!("open transformed RGB raster {}", transformed_rgb.display())
-        })?;
-        // SAFETY: the transformed raster remains open and immutable for the mapping lifetime.
-        let transformed_map = unsafe { memmap2::MmapOptions::new().map(&transformed_file) }
-            .with_context(|| format!("map transformed RGB raster {}", transformed_rgb.display()))?;
-        validate_rgb_raster_len(
-            &transformed_map,
-            request.output_width,
-            request.output_height,
-        )?;
-
-        encode_jpeg_rgb(JpegEncodeRequest {
-            rgb: &transformed_map,
-            output_path: request.path,
-            width: request.output_width,
-            height: request.output_height,
-            quality,
-            keep_metadata: request.keep_metadata,
-            metadata: request.metadata,
-            icc_profile: request.color.embedded_icc.as_deref(),
-        })?;
-        drop(transformed_map);
-        drop(transformed_file);
-        Ok(())
-    })();
-    let _ = fs::remove_file(&source_linear);
-    let _ = fs::remove_file(&transformed_rgb);
-    if result.is_err() {
-        let _ = fs::remove_file(request.path);
-    }
-    result
+    let _ = events.send(ExportEvent::Progress {
+        completed_tiles: *completed_tiles,
+        total_tiles,
+    });
 }
 
 fn export_tiled_tiff(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
     validate_export_dimensions(request.output_width, request.output_height)?;
-    if !request.geometry.is_identity() || request.raw.lens_geometry.is_some() {
-        return export_tiled_tiff_geometry(context, request);
-    }
 
     let file = open_export_destination(request.path)
         .with_context(|| format!("create TIFF {}", request.path.display()))?;
@@ -1235,88 +1074,9 @@ fn export_tiled_tiff(context: ExportContext<'_>, request: ExportRequest<'_>) -> 
     let row_format = tiff_row_format(request.bit_depth);
     let profile = tiff_embedded_profile(request.color);
     write_tiff_header(&mut writer, request, row_format, &profile)?;
-    render_tiled_output(context, request, &mut writer, row_format)?;
+    render_export_output(context, request, &mut writer, row_format)?;
     writer.flush().context("flush TIFF export")?;
     Ok(())
-}
-
-fn export_tiled_tiff_geometry(
-    context: ExportContext<'_>,
-    request: ExportRequest<'_>,
-) -> Result<()> {
-    let staged_linear = temporary_export_path(request.path)?;
-    let result = (|| -> Result<()> {
-        {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&staged_linear)
-                .with_context(|| {
-                    format!("create geometry linear raster {}", staged_linear.display())
-                })?;
-            let mut writer = BufWriter::new(file);
-            stream_tiled_linear_rows(context, request, |_source_y, row| {
-                writer
-                    .write_all(bytemuck::cast_slice(row))
-                    .context("write TIFF geometry linear source row")
-            })?;
-            writer
-                .flush()
-                .context("flush TIFF geometry source raster")?;
-        }
-
-        let source_file = fs::File::open(&staged_linear)
-            .with_context(|| format!("open geometry linear raster {}", staged_linear.display()))?;
-        // SAFETY: the staged source remains immutable while mapped.
-        let source_map = unsafe { memmap2::MmapOptions::new().map(&source_file) }
-            .with_context(|| format!("map geometry linear raster {}", staged_linear.display()))?;
-        let source =
-            validate_linear_rgb_raster(&source_map, request.raw.width, request.raw.height)?;
-        let resampler = GeometryResampler::new_with_lens(
-            source,
-            request.raw.width,
-            request.raw.height,
-            request.geometry,
-            request.raw.lens_geometry.as_deref(),
-            request.output_width,
-            request.output_height,
-        )?;
-
-        let file = open_export_destination(request.path)
-            .with_context(|| format!("create TIFF {}", request.path.display()))?;
-        let mut writer = BufWriter::new(file);
-        let row_format = tiff_row_format(request.bit_depth);
-        let profile = tiff_embedded_profile(request.color);
-        write_tiff_header(&mut writer, request, row_format, &profile)?;
-
-        let (geometry_width, geometry_height) = request
-            .geometry
-            .crop_pixel_dimensions(request.raw.width, request.raw.height);
-        let mut output_sharpen = FinalSizeOutputSharpen::new(
-            geometry_width,
-            geometry_height,
-            request.output_width,
-            request.output_height,
-        )
-        .with_passthrough(request.bit_depth == ExportBitDepth::Float32Linear);
-        let output_transform = request.color.transform.as_ref();
-        for y in 0..request.output_height {
-            output_sharpen.push_row(
-                resampler.output_row(y)?,
-                output_transform,
-                row_format,
-                &mut writer,
-            )?;
-        }
-        output_sharpen.finish(output_transform, row_format, &mut writer)?;
-        writer.flush().context("flush transformed TIFF")?;
-        Ok(())
-    })();
-    let _ = fs::remove_file(&staged_linear);
-    if result.is_err() {
-        let _ = fs::remove_file(request.path);
-    }
-    result
 }
 
 fn tiff_row_format(bit_depth: ExportBitDepth) -> ExportRowFormat {
@@ -1997,40 +1757,29 @@ fn export_tiled_jpeg(
     request: ExportRequest<'_>,
     quality: u8,
 ) -> Result<()> {
-    if !request.geometry.is_identity() || request.raw.lens_geometry.is_some() {
-        return export_tiled_jpeg_geometry(context, request, quality);
-    }
     let quality = quality.clamp(1, 100);
-    let staged_rgb = temporary_export_path(request.path)?;
-    let encode_result = (|| -> Result<()> {
+    with_temporary_export_path(request.path, |staged_rgb| {
         // Render directly into a disk-backed RGB8 raster. This removes the old
         // full PNG encode -> PNG decode -> RGB staging round trip while keeping
-        // peak Android heap use bounded.
+        // peak Android heap use bounded. Geometry uses the same RGB staging
+        // destination after its shared linear resampling stage.
         {
             let rgb_file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&staged_rgb)
+                .open(staged_rgb)
                 .with_context(|| format!("create staged RGB raster {}", staged_rgb.display()))?;
             let mut rgb_writer = BufWriter::new(rgb_file);
-            render_tiled_output(context, request, &mut rgb_writer, ExportRowFormat::Rgb8)?;
+            render_export_output(context, request, &mut rgb_writer, ExportRowFormat::Rgb8)?;
             rgb_writer.flush().context("flush staged RGB raster")?;
         }
 
-        let rgb_file = fs::File::open(&staged_rgb)
+        let rgb_file = fs::File::open(staged_rgb)
             .with_context(|| format!("open staged RGB raster {}", staged_rgb.display()))?;
         // SAFETY: the file remains open and immutable for the lifetime of the
         // read-only mapping; it is deleted only after JPEG encoding completes.
         let mapped = unsafe { memmap2::MmapOptions::new().map(&rgb_file) }
             .with_context(|| format!("map staged RGB raster {}", staged_rgb.display()))?;
-        let expected = u64::from(request.output_width)
-            .checked_mul(u64::from(request.output_height))
-            .and_then(|pixels| pixels.checked_mul(3))
-            .context("staged RGB image size overflow")?;
-        anyhow::ensure!(
-            u64::try_from(mapped.len()).unwrap_or(u64::MAX) == expected,
-            "staged RGB raster length does not match its dimensions"
-        );
 
         encode_jpeg_rgb(JpegEncodeRequest {
             rgb: &mapped,
@@ -2045,12 +1794,7 @@ fn export_tiled_jpeg(
         drop(mapped);
         drop(rgb_file);
         Ok(())
-    })();
-    let _ = fs::remove_file(&staged_rgb);
-    if encode_result.is_err() {
-        let _ = fs::remove_file(request.path);
-    }
-    encode_result
+    })
 }
 
 struct JpegEncodeRequest<'a> {
@@ -2871,6 +2615,16 @@ fn temporary_export_path(destination: &Path) -> Result<PathBuf> {
         .unwrap_or_default()
         .as_nanos();
     Ok(parent.join(format!(".{name}.{}.{}.part", std::process::id(), nonce)))
+}
+
+fn with_temporary_export_path<T, F>(destination: &Path, action: F) -> Result<T>
+where
+    F: FnOnce(&Path) -> Result<T>,
+{
+    let temporary = temporary_export_path(destination)?;
+    let result = action(&temporary);
+    let _ = fs::remove_file(&temporary);
+    result
 }
 
 fn cleanup_stale_export_parts(parent: &Path, destination_name: &str) {

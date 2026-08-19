@@ -4,7 +4,7 @@ use super::{
     publish_completed_export, resolved_export_tile_spec, stitch_linear_tile_into_band,
     tiff_strip_layout, tile_mask_source_region, validate_export_dimensions, ExportFormat,
     ExportMetadata, ExportResizeMode, ExportRowFormat, ExportSettings, GeometryResampler,
-    JpegEncodeRequest, LinearLightResizer,
+    JpegEncodeRequest, LinearLightResizer, with_temporary_export_path,
     EXPORT_TILE_HALO, MAX_EXPORT_EDGE, TIFF_TARGET_STRIP_BYTES,
 };
 use crate::pipeline::{
@@ -142,6 +142,24 @@ fn jpeg_rows_omit_png_alpha_bytes() {
     assert_eq!(rgba.len(), 4);
     assert_eq!(rgb.len(), 3);
     assert_eq!(&rgba[..3], &rgb);
+}
+
+#[test]
+fn sixteen_bit_and_float_row_layouts_stay_format_specific() {
+    let transform = IccOutputTransform::srgb();
+    let row = [0.0, 0.18, 1.0];
+    let png16 = encode_srgb_row_with_format(&row, &transform, ExportRowFormat::Rgba16Be).unwrap();
+    let tiff16 = encode_srgb_row_with_format(&row, &transform, ExportRowFormat::Rgb16Le).unwrap();
+    let tiff_float =
+        encode_srgb_row_with_format(&row, &transform, ExportRowFormat::RgbF32Le).unwrap();
+
+    assert_eq!(png16.len(), 8);
+    assert_eq!(&png16[6..], &u16::MAX.to_be_bytes());
+    assert_eq!(tiff16.len(), 6);
+    assert_eq!(tiff_float.len(), 12);
+    assert_eq!(&tiff_float[0..4], &row[0].to_le_bytes());
+    assert_eq!(&tiff_float[4..8], &row[1].to_le_bytes());
+    assert_eq!(&tiff_float[8..12], &row[2].to_le_bytes());
 }
 
 #[test]
@@ -422,6 +440,32 @@ fn cancelled_export_removes_temporary_output_before_publication() {
 }
 
 #[test]
+fn successful_export_atomically_replaces_existing_destination() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "auraw-export-replace-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let destination = directory.join("photo.png");
+    std::fs::write(&destination, b"previous export").unwrap();
+    let cancellation = AtomicBool::new(false);
+
+    export_to_destination(&destination, &cancellation, |temporary| {
+        std::fs::write(temporary, b"new export")?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(std::fs::read(&destination).unwrap(), b"new export");
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn failed_export_publish_preserves_existing_destination() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -439,5 +483,28 @@ fn failed_export_publish_preserves_existing_destination() {
     assert!(publish_completed_export(&missing_temporary, &destination).is_err());
     assert_eq!(std::fs::read(&destination).unwrap(), b"previous export");
 
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn temporary_raster_helper_cleans_up_after_failure() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "auraw-export-stage-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let destination = directory.join("photo.png");
+
+    let result = with_temporary_export_path(&destination, |temporary| -> anyhow::Result<()> {
+        std::fs::write(temporary, b"partial staged raster")?;
+        anyhow::bail!("staging failed")
+    });
+
+    assert!(result.is_err());
+    assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
     std::fs::remove_dir_all(directory).unwrap();
 }

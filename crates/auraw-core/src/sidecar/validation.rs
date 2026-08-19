@@ -480,259 +480,247 @@ fn validate_local_adjustments(
 }
 
 fn validate_neon_effect(neon: &crate::pipeline::NeonEffectSettings) -> Result<(), SidecarError> {
-    finite(
-        "Neon mask effect",
+    use crate::pipeline::effect_params::neon;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::Neon,
         &[
-            neon.amount,
-            neon.edge_width,
-            neon.detail,
-            neon.glow,
-            neon.background,
-            neon.color[0],
-            neon.color[1],
-            neon.color[2],
+            (neon::AMOUNT, neon.amount),
+            (neon::EDGE_WIDTH, neon.edge_width),
+            (neon::DETAIL, neon.detail),
+            (neon::GLOW, neon.glow),
+            (neon::BACKGROUND, neon.background),
         ],
+        &neon.color,
     )?;
-    bounded("Neon amount", neon.amount, 0.0, 100.0)?;
-    bounded("Neon edge width", neon.edge_width, 0.5, 8.0)?;
-    bounded("Neon detail", neon.detail, 0.0, 100.0)?;
-    bounded("Neon glow", neon.glow, 0.0, 100.0)?;
-    bounded("Neon background", neon.background, 0.0, 100.0)?;
-    for channel in neon.color {
-        bounded("Neon color channel", channel, 0.0, 1.0)?;
-    }
-    Ok(())
+    validate_effect_color(crate::pipeline::MaskEffect::Neon, neon::COLOR, neon.color)
 }
 
 fn validate_blur_effect(blur: &crate::pipeline::BlurEffectSettings) -> Result<(), SidecarError> {
-    finite("Blur mask effect", &[blur.amount, blur.radius])?;
-    bounded("Blur amount", blur.amount, 0.0, 100.0)?;
-    bounded("Blur radius", blur.radius, 0.0, 16.0)
+    use crate::pipeline::effect_params::blur;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::Blur,
+        &[(blur::AMOUNT, blur.amount), (blur::RADIUS, blur.radius)],
+        &[],
+    )
 }
 
 fn validate_lens_blur_effect(
     lens_blur: &crate::pipeline::LensBlurEffectSettings,
 ) -> Result<(), SidecarError> {
-    finite(
-        "Lens Blur mask effect",
+    use crate::pipeline::effect_params::lens_blur;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::LensBlur,
         &[
-            lens_blur.amount,
-            lens_blur.radius,
-            lens_blur.blades,
-            lens_blur.rotation,
-            lens_blur.highlight_boost,
+            (lens_blur::AMOUNT, lens_blur.amount),
+            (lens_blur::RADIUS, lens_blur.radius),
+            (lens_blur::BLADES, lens_blur.blades),
+            (lens_blur::ROTATION, lens_blur.rotation),
+            (lens_blur::HIGHLIGHTS, lens_blur.highlight_boost),
         ],
-    )?;
-    bounded("Lens Blur amount", lens_blur.amount, 0.0, 100.0)?;
-    bounded("Lens Blur radius", lens_blur.radius, 0.0, 48.0)?;
-    bounded("Lens Blur blades", lens_blur.blades, 3.0, 12.0)?;
-    bounded("Lens Blur rotation", lens_blur.rotation, -180.0, 180.0)?;
-    bounded(
-        "Lens Blur highlight boost",
-        lens_blur.highlight_boost,
-        0.0,
-        100.0,
+        &[],
     )
 }
 
 fn validate_motion_blur_effect(
     motion_blur: &crate::pipeline::MotionBlurEffectSettings,
 ) -> Result<(), SidecarError> {
-    finite(
-        "Motion Blur mask effect",
-        &[motion_blur.amount, motion_blur.distance, motion_blur.angle],
-    )?;
-    bounded("Motion Blur amount", motion_blur.amount, 0.0, 100.0)?;
-    bounded("Motion Blur distance", motion_blur.distance, 0.0, 96.0)?;
-    bounded("Motion Blur angle", motion_blur.angle, -180.0, 180.0)
+    use crate::pipeline::effect_params::motion_blur;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::MotionBlur,
+        &[
+            (motion_blur::AMOUNT, motion_blur.amount),
+            (motion_blur::DISTANCE, motion_blur.distance),
+            (motion_blur::ANGLE, motion_blur.angle),
+        ],
+        &[],
+    )
 }
 
 fn validate_radial_blur_effect(
     radial_blur: &crate::pipeline::RadialBlurEffectSettings,
 ) -> Result<(), SidecarError> {
-    finite(
-        "Radial Blur mask effect",
+    use crate::pipeline::effect_params::radial_blur;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::RadialBlur,
         &[
-            radial_blur.amount,
-            radial_blur.strength,
-            radial_blur.center[0],
-            radial_blur.center[1],
+            (radial_blur::AMOUNT, radial_blur.amount),
+            (radial_blur::STRENGTH, radial_blur.strength),
+            (radial_blur::CENTER_X, radial_blur.center[0]),
+            (radial_blur::CENTER_Y, radial_blur.center[1]),
         ],
-    )?;
-    bounded("Radial Blur amount", radial_blur.amount, 0.0, 100.0)?;
-    bounded("Radial Blur strength", radial_blur.strength, 0.0, 96.0)?;
-    bounded("Radial Blur center X", radial_blur.center[0], -50.0, 150.0)?;
-    bounded("Radial Blur center Y", radial_blur.center[1], -50.0, 150.0)
+        &[],
+    )
 }
 
 fn validate_tilt_shift_effect(
     tilt_shift: &crate::pipeline::TiltShiftEffectSettings,
 ) -> Result<(), SidecarError> {
-    finite(
-        "Tilt-Shift mask effect",
+    use crate::pipeline::effect_params::tilt_shift;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::TiltShift,
         &[
-            tilt_shift.amount,
-            tilt_shift.radius,
-            tilt_shift.center[0],
-            tilt_shift.center[1],
-            tilt_shift.angle,
-            tilt_shift.focus_width,
-            tilt_shift.feather,
+            (tilt_shift::AMOUNT, tilt_shift.amount),
+            (tilt_shift::RADIUS, tilt_shift.radius),
+            (tilt_shift::CENTER_X, tilt_shift.center[0]),
+            (tilt_shift::CENTER_Y, tilt_shift.center[1]),
+            (tilt_shift::ANGLE, tilt_shift.angle),
+            (tilt_shift::FOCUS_WIDTH, tilt_shift.focus_width),
+            (tilt_shift::FEATHER, tilt_shift.feather),
         ],
-    )?;
-    bounded("Tilt-Shift amount", tilt_shift.amount, 0.0, 100.0)?;
-    bounded("Tilt-Shift radius", tilt_shift.radius, 0.0, 48.0)?;
-    bounded("Tilt-Shift center X", tilt_shift.center[0], -50.0, 150.0)?;
-    bounded("Tilt-Shift center Y", tilt_shift.center[1], -50.0, 150.0)?;
-    bounded("Tilt-Shift angle", tilt_shift.angle, -180.0, 180.0)?;
-    bounded("Tilt-Shift focus width", tilt_shift.focus_width, 0.0, 100.0)?;
-    bounded("Tilt-Shift feather", tilt_shift.feather, 0.1, 100.0)
+        &[],
+    )
 }
 
 fn validate_edge_glow_effect(
     edge_glow: &crate::pipeline::EdgeGlowEffectSettings,
 ) -> Result<(), SidecarError> {
-    finite(
-        "Edge Glow mask effect",
+    use crate::pipeline::effect_params::edge_glow;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::EdgeGlow,
         &[
-            edge_glow.amount,
-            edge_glow.edge_width,
-            edge_glow.detail,
-            edge_glow.glow,
-            edge_glow.color[0],
-            edge_glow.color[1],
-            edge_glow.color[2],
+            (edge_glow::AMOUNT, edge_glow.amount),
+            (edge_glow::EDGE_WIDTH, edge_glow.edge_width),
+            (edge_glow::DETAIL, edge_glow.detail),
+            (edge_glow::GLOW, edge_glow.glow),
         ],
+        &edge_glow.color,
     )?;
-    bounded("Edge Glow amount", edge_glow.amount, 0.0, 100.0)?;
-    bounded("Edge Glow edge width", edge_glow.edge_width, 0.5, 8.0)?;
-    bounded("Edge Glow detail", edge_glow.detail, 0.0, 100.0)?;
-    bounded("Edge Glow glow", edge_glow.glow, 0.0, 100.0)?;
-    for channel in edge_glow.color {
-        bounded("Edge Glow color channel", channel, 0.0, 1.0)?;
-    }
-    Ok(())
+    validate_effect_color(
+        crate::pipeline::MaskEffect::EdgeGlow,
+        edge_glow::COLOR,
+        edge_glow.color,
+    )
 }
 
 fn validate_pixelate_effect(
     pixelate: &crate::pipeline::PixelateEffectSettings,
 ) -> Result<(), SidecarError> {
-    finite(
-        "Pixelate mask effect",
-        &[pixelate.amount, pixelate.block_size],
-    )?;
-    bounded("Pixelate amount", pixelate.amount, 0.0, 100.0)?;
-    bounded("Pixelate block size", pixelate.block_size, 2.0, 32.0)
+    use crate::pipeline::effect_params::pixelate;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::Pixelate,
+        &[
+            (pixelate::AMOUNT, pixelate.amount),
+            (pixelate::BLOCK_SIZE, pixelate.block_size),
+        ],
+        &[],
+    )
 }
 
 fn validate_fog_effect(fog: &crate::pipeline::FogEffectSettings) -> Result<(), SidecarError> {
-    finite(
-        "Fog mask effect",
+    use crate::pipeline::effect_params::fog;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::Fog,
         &[
-            fog.amount,
-            fog.density,
-            fog.scale,
-            fog.softness,
-            fog.variation,
-            fog.seed,
-            fog.color[0],
-            fog.color[1],
-            fog.color[2],
+            (fog::AMOUNT, fog.amount),
+            (fog::DENSITY, fog.density),
+            (fog::SCALE, fog.scale),
+            (fog::SOFTNESS, fog.softness),
+            (fog::VARIATION, fog.variation),
+            (fog::SEED, fog.seed),
         ],
+        &fog.color,
     )?;
-    bounded("Fog amount", fog.amount, 0.0, 100.0)?;
-    bounded("Fog density", fog.density, 0.0, 100.0)?;
-    bounded("Fog scale", fog.scale, 1.0, 100.0)?;
-    bounded("Fog softness", fog.softness, 0.0, 100.0)?;
-    bounded("Fog variation", fog.variation, 0.0, 100.0)?;
-    bounded("Fog seed", fog.seed, 0.0, 1_000.0)?;
-    for channel in fog.color {
-        bounded("Fog color channel", channel, 0.0, 1.0)?;
-    }
-    Ok(())
+    validate_effect_color(crate::pipeline::MaskEffect::Fog, fog::COLOR, fog.color)
 }
 
 fn validate_smoke_effect(smoke: &crate::pipeline::SmokeEffectSettings) -> Result<(), SidecarError> {
-    finite(
-        "Smoke mask effect",
+    use crate::pipeline::effect_params::smoke;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::Smoke,
         &[
-            smoke.amount,
-            smoke.density,
-            smoke.scale,
-            smoke.turbulence,
-            smoke.softness,
-            smoke.angle,
-            smoke.seed,
-            smoke.color[0],
-            smoke.color[1],
-            smoke.color[2],
+            (smoke::AMOUNT, smoke.amount),
+            (smoke::DENSITY, smoke.density),
+            (smoke::SCALE, smoke.scale),
+            (smoke::TURBULENCE, smoke.turbulence),
+            (smoke::SOFTNESS, smoke.softness),
+            (smoke::ANGLE, smoke.angle),
+            (smoke::SEED, smoke.seed),
         ],
+        &smoke.color,
     )?;
-    bounded("Smoke amount", smoke.amount, 0.0, 100.0)?;
-    bounded("Smoke density", smoke.density, 0.0, 100.0)?;
-    bounded("Smoke scale", smoke.scale, 1.0, 100.0)?;
-    bounded("Smoke turbulence", smoke.turbulence, 0.0, 100.0)?;
-    bounded("Smoke softness", smoke.softness, 0.0, 100.0)?;
-    bounded("Smoke angle", smoke.angle, -180.0, 180.0)?;
-    bounded("Smoke seed", smoke.seed, 0.0, 1_000.0)?;
-    for channel in smoke.color {
-        bounded("Smoke color channel", channel, 0.0, 1.0)?;
-    }
-    Ok(())
+    validate_effect_color(crate::pipeline::MaskEffect::Smoke, smoke::COLOR, smoke.color)
 }
 
 fn validate_glow_effect(glow: &crate::pipeline::GlowEffectSettings) -> Result<(), SidecarError> {
-    finite(
-        "Glow mask effect",
+    use crate::pipeline::effect_params::glow;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::Glow,
         &[
-            glow.amount,
-            glow.radius,
-            glow.core,
-            glow.color[0],
-            glow.color[1],
-            glow.color[2],
+            (glow::AMOUNT, glow.amount),
+            (glow::RADIUS, glow.radius),
+            (glow::CORE, glow.core),
         ],
+        &glow.color,
     )?;
-    bounded("Glow amount", glow.amount, 0.0, 100.0)?;
-    bounded("Glow radius", glow.radius, 0.0, 100.0)?;
-    bounded("Glow core", glow.core, 0.0, 100.0)?;
-    for channel in glow.color {
-        bounded("Glow color channel", channel, 0.0, 1.0)?;
-    }
-    Ok(())
+    validate_effect_color(crate::pipeline::MaskEffect::Glow, glow::COLOR, glow.color)
 }
 
 fn validate_light_rays_effect(
     light_rays: &crate::pipeline::LightRaysEffectSettings,
 ) -> Result<(), SidecarError> {
-    finite(
-        "Light Rays mask effect",
+    use crate::pipeline::effect_params::light_rays;
+    validate_effect_params(
+        crate::pipeline::MaskEffect::LightRays,
         &[
-            light_rays.amount,
-            light_rays.length,
-            light_rays.source[0],
-            light_rays.source[1],
-            light_rays.spread,
-            light_rays.fade,
-            light_rays.ray_count,
-            light_rays.variation,
-            light_rays.softness,
-            light_rays.color[0],
-            light_rays.color[1],
-            light_rays.color[2],
+            (light_rays::AMOUNT, light_rays.amount),
+            (light_rays::LENGTH, light_rays.length),
+            (light_rays::SOURCE_X, light_rays.source[0]),
+            (light_rays::SOURCE_Y, light_rays.source[1]),
+            (light_rays::SPREAD, light_rays.spread),
+            (light_rays::FADE, light_rays.fade),
+            (light_rays::RAY_COUNT, light_rays.ray_count),
+            (light_rays::VARIATION, light_rays.variation),
+            (light_rays::SOFTNESS, light_rays.softness),
         ],
+        &light_rays.color,
     )?;
-    bounded("Light Rays amount", light_rays.amount, 0.0, 100.0)?;
-    bounded("Light Rays length", light_rays.length, 0.0, 200.0)?;
-    bounded("Light Rays source X", light_rays.source[0], -50.0, 150.0)?;
-    bounded("Light Rays source Y", light_rays.source[1], -50.0, 150.0)?;
-    bounded("Light Rays spread", light_rays.spread, 0.0, 45.0)?;
-    bounded("Light Rays fade", light_rays.fade, 0.0, 100.0)?;
-    bounded("Light Rays ray count", light_rays.ray_count, 4.0, 96.0)?;
-    bounded("Light Rays variation", light_rays.variation, 0.0, 100.0)?;
-    bounded("Light Rays softness", light_rays.softness, 0.0, 100.0)?;
-    for channel in light_rays.color {
-        bounded("Light Rays color channel", channel, 0.0, 1.0)?;
+    validate_effect_color(
+        crate::pipeline::MaskEffect::LightRays,
+        light_rays::COLOR,
+        light_rays.color,
+    )
+}
+
+fn validate_effect_params(
+    effect: crate::pipeline::MaskEffect,
+    params: &[(crate::pipeline::effect_params::FloatParamSpec, f32)],
+    extra_finite: &[f32],
+) -> Result<(), SidecarError> {
+    if params
+        .iter()
+        .map(|(_, value)| value)
+        .chain(extra_finite)
+        .all(|value| value.is_finite())
+    {
+        for (spec, value) in params {
+            bounded(
+                &format!("{} {}", effect.label(), spec.label),
+                *value,
+                spec.min,
+                spec.max,
+            )?;
+        }
+        Ok(())
+    } else {
+        invalid(&format!(
+            "{} mask effect contains a non-finite value",
+            effect.label()
+        ))
+    }
+}
+
+fn validate_effect_color(
+    effect: crate::pipeline::MaskEffect,
+    spec: crate::pipeline::effect_params::ColorParamSpec,
+    color: [f32; 3],
+) -> Result<(), SidecarError> {
+    for channel in color {
+        bounded(
+            &format!("{} {} channel", effect.label(), spec.label),
+            channel,
+            spec.min,
+            spec.max,
+        )?;
     }
     Ok(())
 }

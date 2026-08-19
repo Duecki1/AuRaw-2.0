@@ -1,3 +1,5 @@
+use super::params::smoke::*;
+
 /// Editable parameters for the non-destructive mask Smoke effect.
 ///
 /// Smoke is generated procedurally from full-image coordinates and blended
@@ -27,28 +29,20 @@ pub struct SmokeEffectSettings {
 impl Default for SmokeEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            density: 60.0,
-            scale: 55.0,
-            turbulence: 65.0,
-            softness: 55.0,
-            angle: -12.0,
-            seed: 0.0,
-            color: [0.32, 0.34, 0.37],
+            amount: AMOUNT.default,
+            density: DENSITY.default,
+            scale: SCALE.default,
+            turbulence: TURBULENCE.default,
+            softness: SOFTNESS.default,
+            angle: ANGLE.default,
+            seed: SEED.default,
+            color: COLOR.default,
         }
     }
 }
 
 impl SmokeEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6 && self.density > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

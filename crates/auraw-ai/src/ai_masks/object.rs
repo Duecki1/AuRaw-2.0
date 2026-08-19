@@ -16,6 +16,28 @@ const SAM21_MASK_INPUT_SIZE: u32 = 256;
 const SAM21_MAX_PROMPTS: usize = 32;
 pub(super) const SAM21_ENCODER_MAX_BYTES: u64 = 160_000_000;
 pub(super) const SAM21_DECODER_MAX_BYTES: u64 = 32_000_000;
+
+pub(super) const SAM21_ENCODER_ARTIFACT: ModelArtifact = ModelArtifact {
+    name: "SAM 2.1 encoder",
+    url: Some(SAM21_ENCODER_MODEL_URL),
+    sha256: SAM21_ENCODER_SHA256_HEX,
+    size: ArtifactSize::Max(SAM21_ENCODER_MAX_BYTES),
+    progress_total: 109_000_000,
+};
+pub(super) const SAM21_DECODER_ARTIFACT: ModelArtifact = ModelArtifact {
+    name: "SAM 2.1 decoder",
+    url: Some(SAM21_DECODER_MODEL_URL),
+    sha256: SAM21_DECODER_SHA256_HEX,
+    size: ArtifactSize::Max(SAM21_DECODER_MAX_BYTES),
+    progress_total: 16_500_000,
+};
+const SAM_DOWNLOAD: DownloadOptions = DownloadOptions {
+    connect_timeout: Duration::from_secs(45),
+    response_timeout: Duration::from_secs(60),
+    body_timeout: Duration::from_secs(30 * 60),
+    attempts: 5,
+    resume: true,
+};
 const MAX_OBJECT_MASK_PIXELS: u64 = 17_000_000;
 
 #[cfg(not(target_os = "android"))]
@@ -103,17 +125,13 @@ pub fn spawn_object_mask(
                 (|| {
                     ensure_sam_model(
                         &encoder_path,
-                        "SAM 2.1 encoder",
-                        SAM21_ENCODER_MODEL_URL,
-                        SAM21_ENCODER_SHA256_HEX,
+                        SAM21_ENCODER_ARTIFACT,
                         &worker_sender,
                         &cancellation,
                     )?;
                     ensure_sam_model(
                         &decoder_path,
-                        "SAM 2.1 decoder",
-                        SAM21_DECODER_MODEL_URL,
-                        SAM21_DECODER_SHA256_HEX,
+                        SAM21_DECODER_ARTIFACT,
                         &worker_sender,
                         &cancellation,
                     )?;
@@ -161,238 +179,23 @@ pub fn spawn_object_mask(
 
 fn ensure_sam_model(
     path: &Path,
-    label: &'static str,
-    url: &str,
-    expected_sha256: &str,
+    artifact: ModelArtifact,
     events: &mpsc::Sender<ObjectMaskEvent>,
     cancellation: &AtomicBool,
 ) -> Result<()> {
-    let max_bytes = sam_model_max_bytes(label);
-    if verify_sha256_hex(path, expected_sha256, max_bytes).is_ok() {
-        return Ok(());
-    }
-    if path.exists() {
-        log::warn!("discarding invalid {label} cache {}", path.display());
-        fs::remove_file(path)
-            .with_context(|| format!("remove invalid model {}", path.display()))?;
-    }
-    download_sam_model(path, label, url, expected_sha256, events, cancellation)?;
-    verify_sha256_hex(path, expected_sha256, max_bytes).with_context(|| format!("verify {label}"))
-}
-
-fn sam_model_max_bytes(label: &str) -> u64 {
-    if label.contains("encoder") {
-        SAM21_ENCODER_MAX_BYTES
-    } else {
-        SAM21_DECODER_MAX_BYTES
-    }
-}
-
-pub(super) fn verify_sha256_hex(path: &Path, expected: &str, max_bytes: u64) -> Result<()> {
-    let metadata = fs::metadata(path).with_context(|| format!("read {}", path.display()))?;
-    anyhow::ensure!(metadata.is_file(), "model cache is not a regular file");
-    anyhow::ensure!(
-        metadata.len() > 0 && metadata.len() <= max_bytes,
-        "model cache size {} is outside the allowed range 1..={max_bytes}",
-        metadata.len()
-    );
-    let actual = sha256_file_hex(path)?;
-    anyhow::ensure!(actual == expected, "model SHA-256 mismatch");
-    Ok(())
-}
-
-fn download_sam_model(
-    path: &Path,
-    label: &'static str,
-    url: &str,
-    expected_sha256: &str,
-    events: &mpsc::Sender<ObjectMaskEvent>,
-    cancellation: &AtomicBool,
-) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create model cache {}", parent.display()))?;
-    }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_extension(format!("onnx.{}.{}.part", std::process::id(), nonce));
-    let max_bytes = sam_model_max_bytes(label);
-    let fallback_total = if label.contains("encoder") {
-        109_000_000
-    } else {
-        16_500_000
-    };
-    const MAX_ATTEMPTS: usize = 5;
-
-    let result = (|| -> Result<()> {
-        let config = ureq::Agent::config_builder()
-            .https_only(true)
-            .timeout_connect(Some(Duration::from_secs(45)))
-            .timeout_recv_response(Some(Duration::from_secs(60)))
-            // Large Hugging Face/Xet model transfers can briefly stall or be
-            // throttled. Keep a generous end-to-end body allowance; transient
-            // disconnects are handled below by resuming the .part file.
-            .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
-            .build();
-        let agent: ureq::Agent = config.into();
-        let mut last_error: Option<anyhow::Error> = None;
-
-        for attempt in 0..MAX_ATTEMPTS {
-            ensure_ai_not_cancelled(cancellation)?;
-            let mut downloaded = fs::metadata(&temporary)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            if downloaded > max_bytes {
-                fs::remove_file(&temporary)
-                    .with_context(|| format!("remove oversized partial {label}"))?;
-                downloaded = 0;
-            }
-            if downloaded > 0
-                && sha256_file_hex(&temporary).ok().as_deref() == Some(expected_sha256)
-            {
-                ensure_ai_not_cancelled(cancellation)?;
-                fs::rename(&temporary, path)
-                    .with_context(|| format!("publish resumed {label} to {}", path.display()))?;
-                return Ok(());
-            }
-
-            if downloaded > 0 {
-                let _ = events.send(ObjectMaskEvent::DownloadProgress {
-                    label,
-                    downloaded,
-                    total: fallback_total.max(downloaded),
-                });
-            }
-
-            let response_result = if downloaded > 0 {
-                let range = format!("bytes={downloaded}-");
-                agent.get(url).header("Range", range.as_str()).call()
-            } else {
-                agent.get(url).call()
-            };
-
-            let mut response = match response_result {
-                Ok(response) => response,
-                Err(error) => {
-                    last_error = Some(anyhow::Error::new(error).context(format!(
-                        "download {label} (attempt {}/{MAX_ATTEMPTS})",
-                        attempt + 1
-                    )));
-                    if attempt + 1 < MAX_ATTEMPTS {
-                        std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-                        continue;
-                    }
-                    break;
-                }
-            };
-
-            // Hugging Face normally honors Range with 206. If a proxy/CDN
-            // ignores it and sends 200, restart this attempt from byte zero
-            // rather than appending a second full model to the partial file.
-            let resuming = downloaded > 0 && response.status().as_u16() == 206;
-            if downloaded > 0 && !resuming {
-                downloaded = 0;
-            }
-
-            let declared_remaining = response.body().content_length();
-            let total = match declared_remaining {
-                Some(length) if resuming => downloaded
-                    .checked_add(length)
-                    .context("model response length overflow")?,
-                Some(length) => length,
-                None => fallback_total.max(downloaded),
-            };
-            anyhow::ensure!(
-                total <= max_bytes,
-                "{label} response declares {total} bytes, above the {max_bytes}-byte limit"
-            );
-
-            let mut options = OpenOptions::new();
-            options.write(true).create(true);
-            if resuming {
-                options.append(true);
-            } else {
-                options.truncate(true);
-            }
-            let mut file = options.open(&temporary).with_context(|| {
-                format!("open partial {label} download {}", temporary.display())
-            })?;
-            let mut reader = response.body_mut().as_reader();
-            let mut buffer = [0u8; 256 * 1024];
-            let mut transfer_error: Option<anyhow::Error> = None;
-
-            loop {
-                ensure_ai_not_cancelled(cancellation)?;
-                let read = match reader.read(&mut buffer) {
-                    Ok(read) => read,
-                    Err(error) => {
-                        // Persist everything already received before retrying so
-                        // the next request can continue with an HTTP Range.
-                        let _ = file.sync_data();
-                        transfer_error = Some(anyhow::Error::new(error).context(format!(
-                            "read {label} (attempt {}/{MAX_ATTEMPTS})",
-                            attempt + 1
-                        )));
-                        break;
-                    }
-                };
-                if read == 0 {
-                    break;
-                }
-                downloaded = downloaded
-                    .checked_add(read as u64)
-                    .context("model download byte count overflow")?;
-                anyhow::ensure!(
-                    downloaded <= max_bytes,
-                    "{label} download exceeded the {max_bytes}-byte limit"
-                );
-                file.write_all(&buffer[..read])
-                    .with_context(|| format!("write {label}"))?;
-                let _ = events.send(ObjectMaskEvent::DownloadProgress {
-                    label,
-                    downloaded,
-                    total: total.max(downloaded),
-                });
-            }
-
-            if let Some(error) = transfer_error {
-                last_error = Some(error);
-                if attempt + 1 < MAX_ATTEMPTS {
-                    std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-                    continue;
-                }
-                break;
-            }
-
-            file.sync_all().with_context(|| format!("flush {label}"))?;
-            let actual =
-                sha256_file_hex(&temporary).with_context(|| format!("hash downloaded {label}"))?;
-            if actual == expected_sha256 {
-                ensure_ai_not_cancelled(cancellation)?;
-                fs::rename(&temporary, path)
-                    .with_context(|| format!("publish {label} to {}", path.display()))?;
-                return Ok(());
-            }
-
-            // A close-delimited CDN response can end early without a useful
-            // Content-Length. Treat a hash mismatch as resumable first; the
-            // byte cap and final SHA-256 pin still prevent accepting bad data.
-            last_error = Some(anyhow::anyhow!(
-                "{label} SHA-256 mismatch after receiving {downloaded} bytes"
-            ));
-            if attempt + 1 < MAX_ATTEMPTS {
-                std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("download {label} failed")))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    ensure_artifact(
+        path,
+        artifact,
+        SAM_DOWNLOAD,
+        |downloaded, total| {
+            let _ = events.send(ObjectMaskEvent::DownloadProgress {
+                label: artifact.name,
+                downloaded,
+                total,
+            });
+        },
+        || ensure_ai_not_cancelled(cancellation),
+    )
 }
 
 fn infer_object_mask(

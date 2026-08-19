@@ -1,3 +1,5 @@
+use super::params::lens_blur::*;
+
 /// Editable parameters for the non-destructive Lens Blur mask effect.
 ///
 /// The aperture-shaped gather is evaluated from the developed image on the
@@ -20,25 +22,17 @@ pub struct LensBlurEffectSettings {
 impl Default for LensBlurEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            radius: 12.0,
-            blades: 6.0,
-            rotation: 0.0,
-            highlight_boost: 0.0,
+            amount: AMOUNT.default,
+            radius: RADIUS.default,
+            blades: BLADES.default,
+            rotation: ROTATION.default,
+            highlight_boost: HIGHLIGHTS.default,
         }
     }
 }
 
 impl LensBlurEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6 && self.radius > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

@@ -1,3 +1,5 @@
+use super::params::glow::*;
+
 /// Editable parameters for the non-destructive mask Glow effect.
 ///
 /// The mask supplies emission only: its coverage defines the bright core and
@@ -19,24 +21,16 @@ pub struct GlowEffectSettings {
 impl Default for GlowEffectSettings {
     fn default() -> Self {
         Self {
-            amount: 50.0,
-            radius: 50.0,
-            core: 65.0,
-            color: [0.1, 0.65, 1.0],
+            amount: AMOUNT.default,
+            radius: RADIUS.default,
+            core: CORE.default,
+            color: COLOR.default,
         }
     }
 }
 
 impl GlowEffectSettings {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub fn is_active(&self) -> bool {
         self.amount.abs() > 1e-6
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
     }
 }

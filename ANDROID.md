@@ -9,8 +9,6 @@
 
 ```sh
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-eval "$(cargo xtask print-metadata --format shell)"
-export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$AURAW_ANDROID_NDK_VERSION"
 rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
 ```
