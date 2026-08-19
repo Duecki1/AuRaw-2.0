@@ -211,17 +211,6 @@ impl AurawApp {
                     full_frame,
                 );
             }
-            if let Err(error) = detail.pipeline.update_inpaint_layer(
-                &render_state.queue,
-                self.inpaint.layer.as_ref(),
-                virtual_origin_x,
-                virtual_origin_y,
-                virtual_full_width,
-                virtual_full_height,
-            ) {
-                self.ui.notice = Some(format!("Could not update zoomed inpainting: {error:#}"));
-                return;
-            }
             detail.pipeline.dispatch_stage(
                 &render_state.queue,
                 &render_state.device,
@@ -296,17 +285,6 @@ impl AurawApp {
         );
         if let Some(full_frame) = full_frame_tone_pipeline {
             pipeline.inherit_tone_statistics(&render_state.queue, &render_state.device, full_frame);
-        }
-        if let Err(error) = pipeline.update_inpaint_layer(
-            &render_state.queue,
-            self.inpaint.layer.as_ref(),
-            virtual_origin_x,
-            virtual_origin_y,
-            virtual_full_width,
-            virtual_full_height,
-        ) {
-            self.ui.notice = Some(format!("Could not update zoomed inpainting: {error:#}"));
-            return;
         }
         pipeline.dispatch_stage(
             &render_state.queue,

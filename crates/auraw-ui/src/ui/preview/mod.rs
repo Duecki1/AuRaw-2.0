@@ -5,8 +5,8 @@ use crate::app::{
     SidebarTab, StraightenDragState,
 };
 use crate::pipeline::{
-    rasterize_brush_dabs, rasterize_inpaint_dabs_binary, BrushDab, BrushMode, GeometryTransform,
-    InpaintStrokeKind, LensGeometryMap, MaskCombineMode, MaskGeometry, MaskKind, MaskRgbImage,
+    BrushDab, BrushMode, GeometryTransform, LensGeometryMap, MaskCombineMode, MaskGeometry,
+    MaskKind,
     ObjectStroke,
 };
 use crate::ui::mask_component_color;
@@ -99,7 +99,7 @@ impl Preview {
         // *start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);
         // *end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);
         // Every non-Crop Develop surface uses the same final geometry frame that
-        // export writes. Mask and inpainting interactions are inverse-mapped back
+        // export writes. Mask interactions are inverse-mapped back
         // into source coordinates below, so their tools remain accurate while the
         // pixels and overlays stay aligned with crop/rotation/flip/transform.
         let final_geometry_preview =
@@ -220,10 +220,7 @@ impl Preview {
                 app.develop_ui.crop_drag = None;
                 app.develop_ui.straighten_drag = None;
             } else if app.ui.sidebar_tab == SidebarTab::Inpainting {
-                app.inpaint.stroke.clear();
-                app.inpaint.last_brush_point = None;
-                app.inpaint.stroke_texture = None;
-                app.inpaint.stroke_texture_key = None;
+                app.inpaint.active_dab_count = 0;
             } else if white_balance_canvas {
                 app.develop_ui.white_balance_picker_drag = None;
             }
@@ -481,9 +478,7 @@ impl Preview {
                     &response,
                 );
             }
-            // Completed inpainting is part of the developed image and remains
-            // visible while switching between Develop tabs. The live stroke
-            // and cursor are shown only while the Inpainting tab is active.
+            // Retouch is UI-only; only its transient cursor/source-pick affordance is painted.
             Self::paint_inpaint_overlay(
                 ui,
                 app,

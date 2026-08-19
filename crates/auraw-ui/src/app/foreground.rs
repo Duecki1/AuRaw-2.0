@@ -39,7 +39,6 @@ impl ForegroundOperationKind {
             Self::ObjectMask => "Preparing object mask",
             Self::LandscapeMask => "Preparing landscape mask",
             Self::AiDenoise => "Applying AI denoise",
-            Self::Inpaint => "Running inpainting",
             Self::LensCorrection => "Applying lens correction",
         }
     }
@@ -145,7 +144,6 @@ impl AurawApp {
             Some(ForegroundOperationKind::ObjectMask) => self.poll_object_worker(),
             Some(ForegroundOperationKind::LandscapeMask) => self.poll_landscape_worker(),
             Some(ForegroundOperationKind::AiDenoise) => self.poll_ai_denoise_worker(),
-            Some(ForegroundOperationKind::Inpaint) => self.poll_inpaint_worker(),
             Some(ForegroundOperationKind::LensCorrection) => {
                 self.poll_lens_correction_worker(frame)
             }

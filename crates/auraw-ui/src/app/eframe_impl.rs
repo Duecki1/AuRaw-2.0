@@ -27,12 +27,6 @@ impl eframe::App for AurawApp {
             self.masks.thumbnail_group_textures.clear();
             self.masks.thumbnail_component_textures.clear();
             self.masks.thumbnail_component_mask = None;
-            self.inpaint.texture = None;
-            self.inpaint.texture_key = None;
-            self.inpaint.stroke_texture = None;
-            self.inpaint.stroke_texture_key = None;
-            self.inpaint.focus_texture = None;
-            self.inpaint.focus_texture_key = None;
             self.ui.notice = Some(
                 "GPU memory was exhausted. AuRaw cancelled the operation and released optional preview textures. Close other GPU-heavy apps or lower Preview Quality before retrying."
                     .to_owned(),
@@ -357,7 +351,6 @@ impl eframe::App for AurawApp {
             show_raw_drop_overlay(ui, self.library.folder());
         }
         self.show_subject_dialogs(ui.ctx());
-        self.show_inpainting_dialogs(ui.ctx());
         self.show_ai_denoise_dialogs(ui.ctx(), frame);
         self.show_sidecar_save_error_dialog(ui.ctx());
         self.show_foreground_operation_dialog(ui.ctx());
@@ -380,7 +373,6 @@ impl eframe::App for AurawApp {
 
     fn on_exit(&mut self) {
         crate::ai_masks::set_model_cache_enabled(false);
-        crate::inpainting::set_model_cache_enabled(false);
         #[cfg(target_os = "android")]
         if let Err(error) = crate::android::clear_background_task_notification(&self.android.android_app) {
             log::warn!("{error}");

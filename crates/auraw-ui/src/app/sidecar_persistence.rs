@@ -110,7 +110,6 @@ impl AurawApp {
             subject_refinement: (!masks.subject_refinement.is_empty())
                 .then(|| masks.subject_refinement.clone()),
             masks,
-            inpainting: Arc::new(self.inpaint.strokes.clone()),
             lens: SidecarLensEditState {
                 enabled: self.develop.lens_correction.enabled,
                 maker: self.develop.lens_correction.selected_maker.clone(),

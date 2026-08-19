@@ -2,7 +2,7 @@ use super::geometry::GeometryInverseMap;
 use super::{
     export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into, mask_atlas_edge,
     required_export_tile_halo, CfaKind, ExposureParams, GeometryTransform, GpuParams,
-    GpuProgramPrewarm, IccOutputTransform, InpaintLayer, LensGeometryMap, LoadedRaw, MaskStack,
+    GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack,
     ProcessingQuality, RawGpuPipeline, RawGpuProgramTemplate, TilePlan, TileSpec, EXPORT_TILE_HALO,
     MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
 };
@@ -287,7 +287,6 @@ pub struct TiledExportJob {
     pub geometry: GeometryTransform,
     pub exposure: ExposureParams,
     pub masks: MaskStack,
-    pub inpaint: Option<InpaintLayer>,
     pub path: PathBuf,
     pub tile_spec: TileSpec,
     pub settings: ExportSettings,
@@ -444,7 +443,6 @@ fn run_export_worker(
             raw: &job.raw,
             exposure: &job.exposure,
             masks: &job.masks,
-            inpaint: job.inpaint.as_ref(),
             path,
             tile_spec,
             output_width,
@@ -540,7 +538,6 @@ struct ExportRequest<'a> {
     raw: &'a LoadedRaw,
     exposure: &'a ExposureParams,
     masks: &'a MaskStack,
-    inpaint: Option<&'a InpaintLayer>,
     path: &'a Path,
     tile_spec: TileSpec,
     output_width: u32,
@@ -730,7 +727,6 @@ where
         raw,
         exposure,
         masks,
-        inpaint,
         path: _,
         tile_spec,
         output_width,
@@ -936,19 +932,6 @@ where
             tile_pipeline
                 .upload_raw_tile(queue, &tile_scratch)
                 .with_context(|| format!("upload export tile {}", global_index + 1))?;
-            tile_pipeline
-                .update_inpaint_layer(
-                    queue,
-                    inpaint,
-                    tile.global_origin_x,
-                    tile.global_origin_y,
-                    raw.width,
-                    raw.height,
-                )
-                .with_context(|| {
-                    format!("upload inpainting for export tile {}", global_index + 1)
-                })?;
-
             let mask_region = tile_mask_source_region(
                 masks,
                 tile.global_origin_x,

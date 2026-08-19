@@ -304,10 +304,6 @@ impl Settings {
                 .on_hover_text("Subject, background, object, landscape, luminance-range, and color-range components. Generated/source-dependent results are marked for regeneration on the destination image.")
                 .changed();
             changed |= ui
-                .checkbox(&mut settings.inpainting, "Inpainting")
-                .on_hover_text("Inpainting strokes and generated patch data.")
-                .changed();
-            changed |= ui
                 .checkbox(&mut settings.lens_correction, "Lens correction")
                 .on_hover_text("Lens correction enabled state and selected lens profile.")
                 .changed();
@@ -479,7 +475,7 @@ impl Settings {
                         "Use GPU acceleration when available",
                     )
                     .on_hover_text(
-                        "Allow AI masks, inpainting, and AI denoise to use a supported GPU execution provider. CPU fallback remains automatic.",
+                        "Allow AI masks and AI denoise to use a supported GPU execution provider. CPU fallback remains automatic.",
                     )
                     .changed()
                 {

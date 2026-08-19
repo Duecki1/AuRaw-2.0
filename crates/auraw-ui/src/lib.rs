@@ -33,9 +33,6 @@ pub mod ai_masks {
     pub use auraw_ai::ai_masks::*;
 }
 
-pub mod inpainting {
-    pub use auraw_ai::inpainting::*;
-}
 
 #[cfg(target_os = "android")]
 pub mod android {
