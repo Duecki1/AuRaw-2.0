@@ -286,7 +286,24 @@ impl AurawApp {
             self.preview.quality_dirty = false;
             return;
         }
-        pipeline.recompute(&render_state.queue, &render_state.device, &params);
+        if let Some(full_raw) = self.develop.loaded_raw.as_ref() {
+            if let Err(error) = pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                full_raw,
+                &self.develop.exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to rebuilt preview: {error:#}"));
+                self.preview.quality_dirty = false;
+                return;
+            }
+        } else {
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+        }
         let previous = {
             let mut renderer = render_state.renderer.write();
             let previous = self.take_preview_pipeline_and_release_textures(&mut renderer);

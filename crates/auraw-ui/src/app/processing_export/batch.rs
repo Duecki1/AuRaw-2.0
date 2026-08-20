@@ -248,6 +248,7 @@ fn prepare_desktop_library_export_item(
         Arc::clone(&original_raw)
     };
 
+    let remove = Arc::unwrap_or_clone(edits.remove);
     let mut masks = Arc::unwrap_or_clone(edits.masks);
     if needs_canonical_mask_source(&masks) {
         let source_raw = if raw.width.max(raw.height) <= 2048 {
@@ -309,6 +310,7 @@ fn prepare_desktop_library_export_item(
             geometry: edits.geometry.sanitized(),
             exposure: edits.exposure,
             masks,
+            remove,
             source_file_name,
             gpu_export_prewarm: None,
         },

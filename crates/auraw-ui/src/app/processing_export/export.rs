@@ -98,6 +98,7 @@ pub(in crate::app) fn spawn_export_item(
         geometry,
         exposure,
         masks,
+        remove,
         source_file_name,
         gpu_export_prewarm,
     } = source;
@@ -112,6 +113,7 @@ pub(in crate::app) fn spawn_export_item(
             geometry,
             exposure,
             masks,
+            remove,
             path,
             tile_spec: TileSpec::default(),
             settings,
@@ -300,6 +302,7 @@ impl AurawApp {
             || self.develop.preview_raw.is_none()
             || self.export.publish_pending
             || self.develop.load_receiver.is_some()
+            || self.inpaint.processing()
         {
             return None;
         }
@@ -323,6 +326,7 @@ impl AurawApp {
                 geometry: self.develop.geometry,
                 exposure: self.develop.exposure,
                 masks: self.masks.stack.clone(),
+                remove: self.inpaint.edits.as_ref().clone(),
                 source_file_name,
                 gpu_export_prewarm: self.export.gpu_prewarm.as_ref().map(Arc::clone),
             },

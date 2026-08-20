@@ -15,6 +15,7 @@ pub mod pipeline {
 pub mod ai_denoise;
 pub mod ai_masks;
 pub mod execution_provider;
+pub mod remove;
 mod model_artifact;
 
 #[cfg(not(target_os = "android"))]

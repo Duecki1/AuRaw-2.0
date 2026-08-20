@@ -33,6 +33,10 @@ pub mod ai_masks {
     pub use auraw_ai::ai_masks::*;
 }
 
+pub mod remove {
+    pub use auraw_ai::remove::*;
+}
+
 
 #[cfg(target_os = "android")]
 pub mod android {

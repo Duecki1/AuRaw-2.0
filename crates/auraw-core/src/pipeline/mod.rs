@@ -5,6 +5,7 @@ pub mod lensfun;
 pub mod masks;
 pub mod noise;
 pub mod processing;
+pub mod remove;
 pub mod raw_loader;
 pub mod sigmoid;
 mod tiff_loader;
@@ -48,6 +49,18 @@ pub use processing::{
     affected_stage, build_proxy, build_region_proxy, crop_raw, extract_padded_tile,
     extract_padded_tile_into, required_export_tile_halo, ExportTile, ProcessingStage, ProxySpec,
     TilePlan, TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO,
+};
+pub use remove::{
+    adaptive_remove_dilation, canonical_remove_scene_to_pipeline_scene,
+    composite_patch_into_linear_region, composite_remove_edits_into_linear_region,
+    display_linear_rec2020_to_model_srgb, model_srgb_to_display_linear_rec2020,
+    pipeline_scene_to_canonical_remove_scene, pipeline_scene_to_working_rec2020,
+    plan_remove_context_crops, rasterize_remove_brush, remove_model_srgb_to_canonical_scene,
+    remove_model_view_gain, remove_scene_to_model_srgb, remove_scene_white_balance,
+    working_rec2020_to_canonical_remove_scene, NativeRect, RemoveBrushPoint, RemoveBrushStroke,
+    RemoveContextCrop, RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, BIG_LAMA_INPUT_EDGE,
+    REMOVE_MAX_PATCHES_PER_STROKE,
+    REMOVE_MAX_POINTS_PER_STROKE, REMOVE_MAX_STROKES,
 };
 pub use raw_loader::{invalidate_dcp_profile_index, prewarm_dcp_profile_index};
 pub use raw_loader::{

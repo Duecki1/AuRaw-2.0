@@ -263,7 +263,19 @@ impl AurawApp {
             }
             let params = GpuParams::new(&self.develop.exposure, &self.masks.stack, &prepared.preview_raw)
                 .with_vignette_geometry(self.develop.geometry);
-            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            if let Err(error) = pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                &prepared.full_raw,
+                &self.develop.exposure,
+                [0.0, 0.0],
+                [prepared.full_raw.width as f32, prepared.full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to lens preview: {error:#}"));
+                return;
+            }
             if let Some(selection) = prepared.selection.clone() {
                 self.preview.lens_corrected_cache = Some((
                     selection,
@@ -311,7 +323,19 @@ impl AurawApp {
                 self.ui.notice = Some(error);
                 return;
             }
-            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            if let Err(error) = pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                &prepared.full_raw,
+                &self.develop.exposure,
+                [0.0, 0.0],
+                [prepared.full_raw.width as f32, prepared.full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to corrected preview: {error:#}"));
+                return;
+            }
 
             if !operation.accepts_result(self.persistence.sidecar_generation) {
                 return;

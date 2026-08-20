@@ -192,12 +192,20 @@ impl AurawApp {
                 self.ui.notice = Some(error);
                 return;
             }
-            detail.pipeline.dispatch_stage(
+            if let Err(error) = detail.pipeline.dispatch_stage_with_remove(
                 &render_state.queue,
                 &render_state.device,
                 &params,
                 ProcessingStage::Raw,
-            );
+                &self.inpaint.edits,
+                &full_raw,
+                &self.develop.target_exposure,
+                [x0 as f32, y0 as f32],
+                [crop_width as f32, crop_height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to zoomed preview: {error:#}"));
+                return;
+            }
             detail.pipeline.dispatch_stage(
                 &render_state.queue,
                 &render_state.device,
@@ -271,12 +279,20 @@ impl AurawApp {
             self.ui.notice = Some(error);
             return;
         }
-        pipeline.dispatch_stage(
+        if let Err(error) = pipeline.dispatch_stage_with_remove(
             &render_state.queue,
             &render_state.device,
             &params,
             ProcessingStage::Raw,
-        );
+            &self.inpaint.edits,
+            &full_raw,
+            &self.develop.target_exposure,
+            [x0 as f32, y0 as f32],
+            [crop_width as f32, crop_height as f32],
+        ) {
+            self.ui.notice = Some(format!("Could not apply Remove to zoomed preview: {error:#}"));
+            return;
+        }
         pipeline.dispatch_stage(
             &render_state.queue,
             &render_state.device,

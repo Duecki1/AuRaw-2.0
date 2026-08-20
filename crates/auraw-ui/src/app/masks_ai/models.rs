@@ -1,7 +1,7 @@
 use super::*;
 
 impl AurawApp {
-    fn ai_model_root(&self) -> PathBuf {
+    pub(in crate::app) fn ai_model_root(&self) -> PathBuf {
         #[cfg(not(target_os = "android"))]
         {
             auraw_ai::desktop_model_cache_root()
@@ -35,6 +35,10 @@ impl AurawApp {
     pub(in crate::app) fn landscape_model_path(&self) -> PathBuf {
         self.ai_model_root()
             .join("maskformer-swin-base-ade20k-int8.onnx")
+    }
+
+    pub(in crate::app) fn big_lama_model_path(&self) -> PathBuf {
+        self.ai_model_root().join(crate::remove::BIG_LAMA_MODEL_FILENAME)
     }
 
     #[cfg(not(target_os = "android"))]

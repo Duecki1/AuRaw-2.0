@@ -4,7 +4,9 @@ use super::desktop::{
     developed_thumbnail_fingerprint_path_for_raw,
     legacy_developed_thumbnail_fingerprint_path_for_raw, legacy_developed_thumbnail_path_for_raw,
 };
-use crate::pipeline::MaskKind;
+use crate::pipeline::{
+    MaskKind, NativeRect, RemoveBrushPoint, RemoveBrushStroke, RemovePatch, RemoveStroke,
+};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +27,7 @@ fn sample_edits() -> EditState {
             maker: "Test Optics".to_owned(),
             model: "35 mm f/2".to_owned(),
         },
+        remove: Arc::new(crate::pipeline::RemoveEditState::default()),
         ai_masks_need_update: false,
     }
 }
@@ -241,6 +244,10 @@ fn copied_adjustments_include_camera_profile_and_replace_clears_other_categories
     source.exposure.dehaze = 48.0;
 
     let mut destination = sample_edits();
+    Arc::make_mut(&mut destination.remove)
+        .strokes
+        .push(RemoveStroke::default());
+    let destination_remove = Arc::clone(&destination.remove);
 
     apply_copied_adjustments_with_mode(
         &mut destination,
@@ -263,6 +270,7 @@ fn copied_adjustments_include_camera_profile_and_replace_clears_other_categories
     );
     assert!(destination.masks.masks.is_empty());
     assert_eq!(destination.lens, LensEditState::default());
+    assert_eq!(destination.remove, destination_remove);
 }
 
 #[test]
@@ -296,6 +304,34 @@ fn sidecar_round_trip_preserves_edit_state() {
     let mut edits = sample_edits();
     edits.exposure.hue = 37.5;
     Arc::make_mut(&mut edits.masks).masks[0].adjustments.hue = -82.25;
+    Arc::make_mut(&mut edits.remove).strokes.push(RemoveStroke {
+        brush: RemoveBrushStroke {
+            points: vec![RemoveBrushPoint {
+                x: 1234.5,
+                y: 987.25,
+                radius: 42.0,
+            }],
+            dilation_radius: 3,
+        },
+        patches: vec![RemovePatch::new_scene(
+            NativeRect {
+                x: 1230,
+                y: 980,
+                width: 2,
+                height: 1,
+            },
+            vec![
+                half::f16::from_f32(0.25).to_bits(),
+                half::f16::from_f32(0.50).to_bits(),
+                half::f16::from_f32(0.75).to_bits(),
+                half::f16::from_f32(1.00).to_bits(),
+                half::f16::from_f32(0.10).to_bits(),
+                half::f16::from_f32(0.20).to_bits(),
+            ],
+            vec![255, 96],
+        )
+        .unwrap()],
+    });
     let encoded = encode(edits.clone()).unwrap();
     let loaded = decode(&encoded).unwrap();
     assert_eq!(loaded.edits, edits);

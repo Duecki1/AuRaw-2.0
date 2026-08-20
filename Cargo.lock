@@ -440,6 +440,7 @@ dependencies = [
  "serde",
  "tempfile",
  "ureq",
+ "wgpu",
  "zip",
 ]
 

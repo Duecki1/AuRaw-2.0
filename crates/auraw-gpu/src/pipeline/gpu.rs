@@ -3,8 +3,10 @@ use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     effect_params, export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind,
-    ExposureParams, GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw,
-    LocalMask, MaskEffect, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
+    canonical_remove_scene_to_pipeline_scene, model_srgb_to_display_linear_rec2020,
+    pipeline_scene_to_working_rec2020, working_rec2020_to_canonical_remove_scene, ExposureParams,
+    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, LocalMask, MaskEffect, MaskStack,
+    PointCurve, ProcessingStage, RawThumbnail, RemoveEditState, RemovePatch, RenderingIntent,
     SigmoidParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
@@ -47,6 +49,64 @@ const WORKGROUP_EDGE: u32 = 8;
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
 const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
+
+fn remove_patch_coverage(patch: &RemovePatch, x: f32, y: f32) -> u8 {
+    if patch.alpha.is_empty() || patch.bounds.width == 0 || patch.bounds.height == 0 {
+        return 0;
+    }
+    let px = x.round().clamp(0.0, patch.bounds.width.saturating_sub(1) as f32) as usize;
+    let py = y.round().clamp(0.0, patch.bounds.height.saturating_sub(1) as f32) as usize;
+    patch.alpha[py * patch.bounds.width as usize + px]
+}
+
+fn sample_remove_patch_scene(
+    patch: &RemovePatch,
+    x: f32,
+    y: f32,
+    raw: &LoadedRaw,
+    exposure: &ExposureParams,
+) -> [f32; 3] {
+    let width = patch.bounds.width as usize;
+    let height = patch.bounds.height as usize;
+    if width == 0 || height == 0 {
+        return [0.0; 3];
+    }
+    let x = x.clamp(0.0, width.saturating_sub(1) as f32);
+    let y = y.clamp(0.0, height.saturating_sub(1) as f32);
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let decode = |index: usize| {
+        if patch.rgb_scene16f.len() == width * height * 3 {
+            [
+                half::f16::from_bits(patch.rgb_scene16f[index * 3]).to_f32(),
+                half::f16::from_bits(patch.rgb_scene16f[index * 3 + 1]).to_f32(),
+                half::f16::from_bits(patch.rgb_scene16f[index * 3 + 2]).to_f32(),
+            ]
+        } else if patch.rgb_srgb16.len() == width * height * 3 {
+            let working = model_srgb_to_display_linear_rec2020([
+                patch.rgb_srgb16[index * 3] as f32 / 65_535.0,
+                patch.rgb_srgb16[index * 3 + 1] as f32 / 65_535.0,
+                patch.rgb_srgb16[index * 3 + 2] as f32 / 65_535.0,
+            ]);
+            working_rec2020_to_canonical_remove_scene(raw, exposure, working)
+        } else {
+            [0.0; 3]
+        }
+    };
+    let a = decode(y0 * width + x0);
+    let b = decode(y0 * width + x1);
+    let c = decode(y1 * width + x0);
+    let d = decode(y1 * width + x1);
+    std::array::from_fn(|channel| {
+        let top = a[channel] + (b[channel] - a[channel]) * tx;
+        let bottom = c[channel] + (d[channel] - c[channel]) * tx;
+        top + (bottom - top) * ty
+    })
+}
 
 fn dispatch_for_extent(width: u32, height: u32) -> [u32; 3] {
     [
@@ -1354,6 +1414,13 @@ impl GpuProgramPrewarm {
             .expect("GPU export prewarm result is present")
             .clone()
     }
+}
+
+/// A GPU-resident snapshot of the global tone-analysis anchors from a
+/// full-frame preview pipeline. Local context renders can inherit these
+/// anchors without reading them back to the CPU.
+pub struct ToneStatisticsSnapshot {
+    buffer: wgpu::Buffer,
 }
 
 pub struct RawGpuPipeline {
@@ -3945,6 +4012,108 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
+    /// Dispatches one ordinary processing stage and restores cached Remove
+    /// scene patches immediately after RAW reconstruction when necessary.
+    /// Output-only slider changes therefore never touch the Remove cache.
+    pub fn dispatch_stage_with_remove(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        stage: ProcessingStage,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        self.dispatch_stage(queue, device, params, stage);
+        if stage == ProcessingStage::Raw {
+            self.upload_remove_scene_patches(
+                queue,
+                edits,
+                source_raw,
+                exposure,
+                source_origin,
+                source_size,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn recompute_with_remove(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        for stage in [ProcessingStage::Raw, ProcessingStage::Tone, ProcessingStage::Output] {
+            self.dispatch_stage_with_remove(
+                queue,
+                device,
+                params,
+                stage,
+                edits,
+                source_raw,
+                exposure,
+                source_origin,
+                source_size,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Captures the current global tone anchors without a CPU readback.
+    pub fn snapshot_tone_statistics(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> ToneStatisticsSnapshot {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("auraw tone statistics snapshot"),
+            size: TONE_STATS_SIZE_BYTES,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw capture tone statistics"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &self.tone_stats_buffer,
+            0,
+            &buffer,
+            0,
+            TONE_STATS_SIZE_BYTES,
+        );
+        queue.submit(Some(encoder.finish()));
+        ToneStatisticsSnapshot { buffer }
+    }
+
+    /// Copies a saved full-frame tone snapshot into this crop/detail pipeline.
+    pub fn inherit_tone_statistics_snapshot(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        snapshot: &ToneStatisticsSnapshot,
+    ) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw inherit tone statistics snapshot"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &snapshot.buffer,
+            0,
+            &self.tone_stats_buffer,
+            0,
+            TONE_STATS_SIZE_BYTES,
+        );
+        queue.submit(Some(encoder.finish()));
+    }
+
     /// Copies the full-frame adaptive tone anchors into a crop/detail pipeline.
     /// Spatial guides remain crop-local, but global percentiles (including the
     /// Dehaze ambient-light anchor) must not change while the user pans or
@@ -3990,6 +4159,44 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
+    /// Export tone-analysis variant that restores Remove at the scene boundary
+    /// before the histogram/guide sees the tile. The histogram itself is still
+    /// accumulated exactly once per native core by the bounds in `params`.
+    pub fn accumulate_export_tone_tile_with_remove(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        self.dispatch_stage_with_remove(
+            queue,
+            device,
+            params,
+            ProcessingStage::Raw,
+            edits,
+            source_raw,
+            exposure,
+            source_origin,
+            source_size,
+        )?;
+        self.upload_params(queue, params);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw Remove-aware export tone tile"),
+        });
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_prepare_pass_index,
+            self.tone_prepare_pass_index + 1,
+        );
+        queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
     /// Reduces the histogram accumulated from every native-resolution core.
     pub fn finish_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -4025,6 +4232,46 @@ impl RawGpuPipeline {
         );
         self.encode_output_stage(&mut encoder, params);
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// Executes one full-resolution export tile with cached Remove patches
+    /// restored between RAW reconstruction and all tone/creative adjustments.
+    /// Big-LaMa is never called here; export consumes the same scene cache as
+    /// preview.
+    pub fn dispatch_export_tile_with_remove(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        self.dispatch_stage_with_remove(
+            queue,
+            device,
+            params,
+            ProcessingStage::Raw,
+            edits,
+            source_raw,
+            exposure,
+            source_origin,
+            source_size,
+        )?;
+        self.upload_params(queue, params);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw Remove-aware tiled export encoder"),
+        });
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_prepare_pass_index,
+            self.tone_reduce_pass_index,
+        );
+        self.encode_output_stage(&mut encoder, params);
+        queue.submit(Some(encoder.finish()));
+        Ok(())
     }
 
     /// Copies an RGBA8 output sub-rectangle to CPU memory. This method blocks
@@ -4109,6 +4356,174 @@ impl RawGpuPipeline {
                 label: "auraw display-linear export readback",
             },
         )
+    }
+
+    /// Reinstalls cached Remove patches at the source-scene boundary after a
+    /// RAW-stage refresh. Ordinary Develop slider changes only rerun Output, so
+    /// this upload is skipped entirely and the already patched scene texture is
+    /// reused. `source_origin`/`source_size` map this pipeline (full proxy, zoom
+    /// crop, or export tile) back into native source-image coordinates.
+    pub fn upload_remove_scene_patches(
+        &self,
+        queue: &wgpu::Queue,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        if edits.is_empty() || source_size[0] <= 0.0 || source_size[1] <= 0.0 {
+            return Ok(());
+        }
+        let scale_x = self.width as f32 / source_size[0];
+        let scale_y = self.height as f32 / source_size[1];
+        if !scale_x.is_finite() || !scale_y.is_finite() || scale_x <= 0.0 || scale_y <= 0.0 {
+            return Ok(());
+        }
+
+        for stroke in &edits.strokes {
+            for patch in &stroke.patches {
+                let left = (((patch.bounds.x as f32 - source_origin[0]) * scale_x).floor() as i64)
+                    .clamp(0, self.width as i64) as u32;
+                let top = (((patch.bounds.y as f32 - source_origin[1]) * scale_y).floor() as i64)
+                    .clamp(0, self.height as i64) as u32;
+                let right = (((patch.bounds.right() as f32 - source_origin[0]) * scale_x).ceil()
+                    as i64)
+                    .clamp(0, self.width as i64) as u32;
+                let bottom = (((patch.bounds.bottom() as f32 - source_origin[1]) * scale_y).ceil()
+                    as i64)
+                    .clamp(0, self.height as i64) as u32;
+                if right <= left || bottom <= top {
+                    continue;
+                }
+
+                for y in top..bottom {
+                    let native_y = source_origin[1] + (y as f32 + 0.5) / scale_y;
+                    let local_y = native_y - patch.bounds.y as f32 - 0.5;
+                    let mut x = left;
+                    while x < right {
+                        while x < right {
+                            let native_x = source_origin[0] + (x as f32 + 0.5) / scale_x;
+                            let local_x = native_x - patch.bounds.x as f32 - 0.5;
+                            if remove_patch_coverage(patch, local_x, local_y) != 0 {
+                                break;
+                            }
+                            x += 1;
+                        }
+                        if x >= right {
+                            break;
+                        }
+                        let run_start = x;
+                        let mut samples = Vec::new();
+                        while x < right {
+                            let native_x = source_origin[0] + (x as f32 + 0.5) / scale_x;
+                            let local_x = native_x - patch.bounds.x as f32 - 0.5;
+                            if remove_patch_coverage(patch, local_x, local_y) == 0 {
+                                break;
+                            }
+                            let canonical = sample_remove_patch_scene(
+                                patch,
+                                local_x,
+                                local_y,
+                                source_raw,
+                                exposure,
+                            );
+                            let source_scene = canonical_remove_scene_to_pipeline_scene(
+                                source_raw,
+                                exposure,
+                                canonical,
+                            );
+                            // Fitted/detail previews are commonly pre-demosaiced
+                            // Rec.2020 rasters even when the document source is a
+                            // sensor RAW. Native export tiles remain camera RGB.
+                            // Convert the canonical patch into the scene space
+                            // expected by this concrete pipeline before upload.
+                            let scene = if self.has_raster_scene {
+                                pipeline_scene_to_working_rec2020(source_raw, source_scene)
+                            } else {
+                                source_scene
+                            };
+                            samples.push(scene);
+                            x += 1;
+                        }
+                        if samples.is_empty() {
+                            continue;
+                        }
+                        let run_width = samples.len() as u32;
+                        match self.scene_format {
+                            wgpu::TextureFormat::Rgba16Float => {
+                                let mut rgba = Vec::<u16>::with_capacity(samples.len() * 4);
+                                for rgb in samples {
+                                    for value in rgb {
+                                        let finite = if value.is_finite() { value } else { 0.0 };
+                                        rgba.push(
+                                            half::f16::from_f32(
+                                                finite.clamp(-65_504.0, 65_504.0),
+                                            )
+                                            .to_bits(),
+                                        );
+                                    }
+                                    rgba.push(half::f16::ONE.to_bits());
+                                }
+                                queue.write_texture(
+                                    wgpu::TexelCopyTextureInfo {
+                                        texture: &self.scene_texture,
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d { x: run_start, y, z: 0 },
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    bytemuck::cast_slice(&rgba),
+                                    wgpu::TexelCopyBufferLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(run_width * 8),
+                                        rows_per_image: Some(1),
+                                    },
+                                    wgpu::Extent3d {
+                                        width: run_width,
+                                        height: 1,
+                                        depth_or_array_layers: 1,
+                                    },
+                                );
+                            }
+                            wgpu::TextureFormat::Rgba32Float => {
+                                let mut rgba = Vec::<f32>::with_capacity(samples.len() * 4);
+                                for rgb in samples {
+                                    rgba.extend(
+                                        rgb.map(|value| if value.is_finite() { value } else { 0.0 }),
+                                    );
+                                    rgba.push(1.0);
+                                }
+                                queue.write_texture(
+                                    wgpu::TexelCopyTextureInfo {
+                                        texture: &self.scene_texture,
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d { x: run_start, y, z: 0 },
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    bytemuck::cast_slice(&rgba),
+                                    wgpu::TexelCopyBufferLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(run_width * 16),
+                                        rows_per_image: Some(1),
+                                    },
+                                    wgpu::Extent3d {
+                                        width: run_width,
+                                        height: 1,
+                                        depth_or_array_layers: 1,
+                                    },
+                                );
+                            }
+                            format => {
+                                return Err(anyhow!(
+                                    "unsupported Remove scene format {format:?}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Reads the demosaiced scene as RGB32F after the raw stage.

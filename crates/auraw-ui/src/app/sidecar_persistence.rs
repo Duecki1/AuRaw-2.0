@@ -115,6 +115,7 @@ impl AurawApp {
                 maker: self.develop.lens_correction.selected_maker.clone(),
                 model: self.develop.lens_correction.selected_model.clone(),
             },
+            remove: self.committed_remove_state_for_persistence(),
             ai_masks_need_update: self.ai.masks_need_update,
         }
     }
