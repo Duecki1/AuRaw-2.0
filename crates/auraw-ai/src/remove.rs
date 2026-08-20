@@ -1,9 +1,9 @@
 use crate::execution_provider::{
     create_session_with_fallback, lock_interactive_ai_model, FallbackSession, SessionOptions,
 };
-use crate::model_artifact::{
-    ensure_artifact, verify_artifact, ArtifactSize, DownloadOptions, ModelArtifact,
-};
+use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
+use crate::model_install::ModelInstallSpec;
+use crate::ModelDownloadProgress;
 use crate::pipeline::{
     adaptive_remove_dilation, pipeline_scene_to_canonical_remove_scene, plan_remove_context_crops,
     rasterize_remove_brush, remove_model_srgb_to_canonical_scene, remove_model_view_gain,
@@ -30,6 +30,9 @@ pub const BIG_LAMA_MODEL_URL: &str =
 pub const BIG_LAMA_MODEL_SHA256_HEX: &str =
     "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6";
 pub const BIG_LAMA_MODEL_BYTES: u64 = 208_044_816;
+pub const BIG_LAMA_MODEL_LICENSE: &str = "Apache-2.0";
+pub const BIG_LAMA_MODEL_PROVENANCE: &str =
+    "Carve/LaMa-ONNX port of the original PyTorch big-lama inpainting model";
 
 static BIG_LAMA_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
 
@@ -39,6 +42,18 @@ const BIG_LAMA_ARTIFACT: ModelArtifact = ModelArtifact {
     sha256: BIG_LAMA_MODEL_SHA256_HEX,
     size: ArtifactSize::Exact(BIG_LAMA_MODEL_BYTES),
     progress_total: BIG_LAMA_MODEL_BYTES,
+};
+const BIG_LAMA_DOWNLOAD: DownloadOptions = DownloadOptions {
+    connect_timeout: Duration::from_secs(30),
+    response_timeout: Duration::from_secs(60),
+    body_timeout: Duration::from_secs(30 * 60),
+    attempts: 5,
+    resume: true,
+};
+const BIG_LAMA_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: BIG_LAMA_ARTIFACT,
+    download: BIG_LAMA_DOWNLOAD,
+    progress_label: "Big-LaMa Remove model",
 };
 
 #[derive(Clone)]
@@ -52,6 +67,7 @@ pub struct RemoveRequest {
     pub existing: RemoveEditState,
     pub brush: RemoveBrushStroke,
     pub model_path: PathBuf,
+    pub allow_download: bool,
     pub runtime_path: Option<PathBuf>,
     pub runtime_sha256: Option<String>,
     pub tone_statistics: Option<Arc<ToneStatisticsSnapshot>>,
@@ -61,13 +77,13 @@ pub struct RemoveRequest {
 
 #[derive(Debug)]
 pub enum RemoveEvent {
-    DownloadProgress { downloaded: u64, total: u64 },
+    DownloadProgress(ModelDownloadProgress),
     Processing { completed: usize, total: usize },
     Finished(Result<RemoveStroke, String>),
 }
 
 pub fn big_lama_model_is_verified(path: &Path) -> bool {
-    verify_artifact(path, BIG_LAMA_ARTIFACT).is_ok()
+    BIG_LAMA_INSTALL.is_installed(path)
 }
 
 pub fn spawn_remove(request: RemoveRequest) -> mpsc::Receiver<RemoveEvent> {
@@ -101,18 +117,11 @@ fn run_remove(request: RemoveRequest, events: &mpsc::Sender<RemoveEvent>) -> Res
         request.runtime_path.as_deref(),
         request.runtime_sha256.as_deref(),
     )?;
-    ensure_artifact(
+    BIG_LAMA_INSTALL.ensure_installed(
         &request.model_path,
-        BIG_LAMA_ARTIFACT,
-        DownloadOptions {
-            connect_timeout: Duration::from_secs(30),
-            response_timeout: Duration::from_secs(60),
-            body_timeout: Duration::from_secs(1_800),
-            attempts: 5,
-            resume: true,
-        },
-        |downloaded, total| {
-            let _ = events.send(RemoveEvent::DownloadProgress { downloaded, total });
+        request.allow_download,
+        |progress| {
+            let _ = events.send(RemoveEvent::DownloadProgress(progress));
         },
         || ensure_not_cancelled(&request.cancellation),
     )?;

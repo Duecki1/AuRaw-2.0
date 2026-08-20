@@ -472,8 +472,8 @@ impl AurawApp {
 
         if update_subject {
             let path = self.birefnet_model_path();
-            if path.is_file() {
-                self.start_subject_worker(path);
+            if crate::ai_masks::birefnet_model_is_verified(self.ai.birefnet_quality, &path) {
+                self.start_subject_worker(path, false);
             } else {
                 self.ai.subject_consent_open = true;
                 self.egui_ctx.request_repaint();
@@ -519,8 +519,9 @@ impl AurawApp {
             }
 
             let (encoder, decoder) = self.sam21_model_paths();
-            if encoder.is_file() && decoder.is_file() && self.vitmatte_model_path().is_file() {
-                self.start_object_worker(mask_index, component_index, encoder, decoder);
+            let vitmatte = self.vitmatte_model_path();
+            if crate::ai_masks::object_models_are_verified(&encoder, &decoder, &vitmatte) {
+                self.start_object_worker(mask_index, component_index, encoder, decoder, false);
             } else {
                 self.ai.object_pending_target = Some((mask_index, component_index));
                 self.ai.object_consent_open = true;

@@ -564,6 +564,7 @@ impl AurawApp {
             self.inpaint.edits = Arc::clone(&snapshot.remove);
             self.inpaint.active_points.clear();
             self.inpaint.pending_brush = None;
+            self.inpaint.model_consent_open = false;
             self.inpaint.receiver = None;
             self.inpaint.processing_label = None;
         }

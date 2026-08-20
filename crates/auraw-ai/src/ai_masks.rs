@@ -4,9 +4,9 @@ use crate::execution_provider::{
     create_session_with_fallback, lock_interactive_ai_model, CpuFallbackProfile, FallbackSession,
     SessionOptions,
 };
-use crate::model_artifact::{
-    ensure_artifact, verify_artifact, ArtifactSize, DownloadOptions, ModelArtifact,
-};
+use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
+use crate::model_install::ModelInstallSpec;
+use crate::ModelDownloadProgress;
 use crate::pipeline::{MaskImage};
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
@@ -72,13 +72,17 @@ pub struct BiRefNetModelSpec {
 }
 
 impl BiRefNetModelSpec {
-    fn artifact(self) -> ModelArtifact {
-        ModelArtifact {
-            name: self.checkpoint,
-            url: Some(self.url),
-            sha256: self.sha256_hex,
-            size: ArtifactSize::Exact(self.bytes),
-            progress_total: self.bytes,
+    fn install(self) -> ModelInstallSpec {
+        ModelInstallSpec {
+            artifact: ModelArtifact {
+                name: self.checkpoint,
+                url: Some(self.url),
+                sha256: self.sha256_hex,
+                size: ArtifactSize::Exact(self.bytes),
+                progress_total: self.bytes,
+            },
+            download: BIREFNET_DOWNLOAD,
+            progress_label: self.download_label,
         }
     }
 }
@@ -150,6 +154,11 @@ const VITMATTE_DOWNLOAD: DownloadOptions = DownloadOptions {
     body_timeout: Duration::from_secs(30 * 60),
     attempts: 5,
     resume: true,
+};
+const VITMATTE_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: VITMATTE_ARTIFACT,
+    download: VITMATTE_DOWNLOAD,
+    progress_label: "ViTMatte edge-refinement model",
 };
 
 const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
@@ -269,11 +278,7 @@ pub fn set_model_cache_enabled(enabled: bool) {
 
 #[derive(Debug)]
 pub enum SubjectMaskEvent {
-    DownloadProgress {
-        label: &'static str,
-        downloaded: u64,
-        total: u64,
-    },
+    DownloadProgress(ModelDownloadProgress),
     Inferencing,
     Finished(Result<SubjectMaskResult, String>),
 }
@@ -296,8 +301,541 @@ impl SubjectMaskResult {
     }
 }
 
-)
-        .collect()
+pub fn birefnet_model_is_verified(quality: BiRefNetQuality, path: &Path) -> bool {
+    quality.model().install().is_installed(path)
+}
+
+pub fn object_models_are_verified(encoder: &Path, decoder: &Path, vitmatte: &Path) -> bool {
+    object::SAM21_ENCODER_INSTALL.is_installed(encoder)
+        && object::SAM21_DECODER_INSTALL.is_installed(decoder)
+        && VITMATTE_INSTALL.is_installed(vitmatte)
+}
+
+pub struct SubjectMaskWorkerRequest {
+    pub quality: BiRefNetQuality,
+    pub model_path: PathBuf,
+    pub allow_download: bool,
+    pub runtime_path: Option<PathBuf>,
+    pub runtime_sha256: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+pub fn spawn_subject_mask(
+    request: SubjectMaskWorkerRequest,
+    cancellation: Arc<AtomicBool>,
+) -> mpsc::Receiver<SubjectMaskEvent> {
+    let SubjectMaskWorkerRequest {
+        quality,
+        model_path,
+        allow_download,
+        runtime_path,
+        runtime_sha256,
+        width,
+        height,
+        rgba,
+    } = request;
+    let (sender, receiver) = mpsc::channel();
+    let worker_sender = sender.clone();
+    let spawn = std::thread::Builder::new()
+        .name("auraw-onnx-subject".to_owned())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (|| {
+                    ensure_ai_not_cancelled(&cancellation)?;
+                    ensure_model(
+                        quality,
+                        &model_path,
+                        allow_download,
+                        &worker_sender,
+                        &cancellation,
+                    )?;
+                    ensure_ai_not_cancelled(&cancellation)?;
+                    let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
+                    infer_subject(
+                        &model_path,
+                        runtime_path.as_deref(),
+                        runtime_sha256.as_deref(),
+                        quality,
+                        width,
+                        height,
+                        rgba,
+                    )
+                })()
+            }))
+            .unwrap_or_else(|panic| {
+                let message = panic
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown ONNX Runtime failure");
+                Err(anyhow::anyhow!(
+                    "ONNX Runtime terminated inference: {message}"
+                ))
+            });
+            let _ = worker_sender.send(SubjectMaskEvent::Finished(
+                result.map_err(|error| format!("{error:#}")),
+            ));
+        });
+    if let Err(error) = spawn {
+        let _ = sender.send(SubjectMaskEvent::Finished(Err(format!(
+            "could not start BiRefNet worker: {error}"
+        ))));
+    }
+    receiver
+}
+
+fn ensure_model(
+    quality: BiRefNetQuality,
+    path: &Path,
+    allow_download: bool,
+    events: &mpsc::Sender<SubjectMaskEvent>,
+    cancellation: &AtomicBool,
+) -> Result<()> {
+    quality.model().install().ensure_installed(
+        path,
+        allow_download,
+        |progress| {
+            let _ = events.send(SubjectMaskEvent::DownloadProgress(progress));
+        },
+        || ensure_ai_not_cancelled(cancellation),
+    )
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn probe_runtime_subprocess(runtime_path: &Path, expected_sha256: &str) -> Result<()> {
+    let runtime_path = fs::canonicalize(runtime_path)
+        .with_context(|| format!("resolve selected ONNX Runtime {}", runtime_path.display()))?;
+    let cache = RUNTIME_PROBE_CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let cached = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("ONNX Runtime probe cache lock was poisoned"))?;
+        if let Some((cached_path, cached_sha256)) = cached.as_ref() {
+            if cached_path == &runtime_path && cached_sha256 == expected_sha256 {
+                return Ok(());
+            }
+        }
+    }
+
+    let executable =
+        std::env::current_exe().context("locate AuRaw executable for ONNX Runtime probe")?;
+    let status = std::process::Command::new(&executable)
+        .arg("--auraw-onnx-runtime-probe")
+        .arg(&runtime_path)
+        .arg(expected_sha256)
+        .status()
+        .with_context(|| {
+            format!(
+                "start isolated ONNX Runtime probe with {}",
+                executable.display()
+            )
+        })?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "the selected ONNX Runtime failed AuRaw's isolated compatibility probe ({status}). Use a matching native {} ONNX Runtime DLL; on Windows the standard CPU package is the safest choice",
+            std::env::consts::ARCH
+        ));
+    }
+    let mut cached = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("ONNX Runtime probe cache lock was poisoned"))?;
+    *cached = Some((runtime_path, expected_sha256.to_owned()));
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn run_runtime_probe_process(runtime_path: &Path, expected_sha256: &str) -> Result<()> {
+    initialize_runtime(Some(runtime_path), Some(expected_sha256))
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn initialize_runtime(
+    runtime_path: Option<&Path>,
+    expected_sha256: Option<&str>,
+) -> Result<()> {
+    let selected = runtime_path
+        .context("no ONNX Runtime library is selected; choose one in Settings and try again")?;
+    let expected_sha256 = expected_sha256
+        .context("the selected ONNX Runtime has no pinned SHA-256; select it again in Settings")?;
+    anyhow::ensure!(
+        expected_sha256.len() == 64
+            && expected_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "the selected ONNX Runtime SHA-256 pin is invalid"
+    );
+    let runtime_path = fs::canonicalize(selected)
+        .with_context(|| format!("resolve selected ONNX Runtime {}", selected.display()))?;
+    let metadata = fs::metadata(&runtime_path)
+        .with_context(|| format!("inspect selected ONNX Runtime {}", runtime_path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "selected ONNX Runtime is not a regular file"
+    );
+    anyhow::ensure!(
+        (1_000_000..=1_000_000_000).contains(&metadata.len()),
+        "selected ONNX Runtime has an implausible size of {} bytes",
+        metadata.len()
+    );
+    let (runtime_load_path, _verified_runtime_handle, actual_sha256) =
+        verified_runtime_load_path(&runtime_path)
+            .context("verify selected ONNX Runtime before loading")?;
+    anyhow::ensure!(
+        actual_sha256 == expected_sha256,
+        "selected ONNX Runtime changed after approval: expected SHA-256 {expected_sha256}, found {actual_sha256}; select it again only if you trust the replacement"
+    );
+    if let Some((loaded_path, loaded_sha256)) = DESKTOP_RUNTIME_IDENTITY.get() {
+        anyhow::ensure!(
+            loaded_path == &runtime_path && loaded_sha256 == &actual_sha256,
+            "a different ONNX Runtime is already active in this process; restart AuRaw before changing the pinned runtime"
+        );
+    }
+    let _init_guard = RUNTIME_INIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("ONNX Runtime initialization lock was poisoned"))?;
+    if RUNTIME_INITIALIZED.get().is_none() {
+        let builder = ort::init_from(&runtime_load_path).map_err(|error| {
+            anyhow::anyhow!(
+                "could not load ONNX Runtime from {}: {error}",
+                runtime_path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            builder.with_name("AuRaw").commit(),
+            "ONNX Runtime was already initialized before the selected pinned library could be committed"
+        );
+        DESKTOP_RUNTIME_IDENTITY
+            .set((runtime_path.clone(), actual_sha256.clone()))
+            .map_err(|_| anyhow::anyhow!("ONNX Runtime identity was initialized concurrently"))?;
+        RUNTIME_INITIALIZED
+            .set(())
+            .map_err(|_| anyhow::anyhow!("ONNX Runtime state was initialized concurrently"))?;
+    }
+    let (loaded_path, loaded_sha256) = DESKTOP_RUNTIME_IDENTITY
+        .get()
+        .context("ONNX Runtime initialized without a pinned desktop identity")?;
+    anyhow::ensure!(
+        loaded_path == &runtime_path && loaded_sha256 == &actual_sha256,
+        "a different ONNX Runtime is already active in this process; restart AuRaw before changing the pinned runtime"
+    );
+    Ok(())
+}
+
+/// Returns the verified runtime path and its SHA-256.
+///
+/// Do not load ONNX Runtime through `/proc/self/fd/<n>` on Linux. ONNX Runtime
+/// discovers dynamically-loaded execution-provider libraries relative to the
+/// path of `libonnxruntime.so`. A memfd path therefore makes it look for
+/// siblings such as `libonnxruntime_providers_shared.so` under `/proc/self/fd/`,
+/// which can never work. Load the canonical on-disk library instead so provider
+/// discovery stays anchored to the directory the user selected.
+#[cfg(target_os = "linux")]
+fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, String)> {
+    let actual_sha256 = sha256_file_hex(path).context("verify selected ONNX Runtime SHA-256")?;
+    Ok((path.to_path_buf(), None, actual_sha256))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, String)> {
+    let digest = sha256_file_hex(path).context("verify selected ONNX Runtime SHA-256")?;
+    Ok((path.to_path_buf(), None, digest))
+}
+
+#[cfg(target_os = "android")]
+pub fn initialize_runtime(
+    _runtime_path: Option<&Path>,
+    _expected_sha256: Option<&str>,
+) -> Result<()> {
+    if RUNTIME_INITIALIZED.get().is_some() {
+        return Ok(());
+    }
+    let _init_guard = RUNTIME_INIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("ONNX Runtime initialization lock was poisoned"))?;
+    if RUNTIME_INITIALIZED.get().is_none() {
+        anyhow::ensure!(
+            ort::init().with_name("AuRaw").commit(),
+            "ONNX Runtime was already initialized before AuRaw could configure it"
+        );
+        RUNTIME_INITIALIZED
+            .set(())
+            .map_err(|_| anyhow::anyhow!("ONNX Runtime state was initialized concurrently"))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn running_from_appimage() -> bool {
+    std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some()
+}
+
+#[cfg(not(target_os = "android"))]
+fn cache_object_ai_sessions() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // AppImages frequently use a user-selected external ONNX Runtime. Do
+        // not retain even the one active object-mask session between calls;
+        // each temporary session still gets the full GPU -> CPU fallback.
+        !running_from_appimage()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+fn infer_subject(
+    model_path: &Path,
+    runtime_path: Option<&Path>,
+    runtime_sha256: Option<&str>,
+    quality: BiRefNetQuality,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+) -> Result<SubjectMaskResult> {
+    const MAX_SUBJECT_MASK_PIXELS: u64 = 17_000_000;
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .context("subject-mask input dimensions overflow")?;
+    anyhow::ensure!(
+        pixels > 0 && pixels <= MAX_SUBJECT_MASK_PIXELS,
+        "subject-mask input {width}x{height} exceeds the {MAX_SUBJECT_MASK_PIXELS}-pixel limit"
+    );
+    let expected_bytes = pixels
+        .checked_mul(4)
+        .and_then(|value| usize::try_from(value).ok())
+        .context("subject-mask input byte count overflow")?;
+    anyhow::ensure!(
+        rgba.len() == expected_bytes,
+        "subject-mask RGBA buffer has {} bytes, expected {expected_bytes}",
+        rgba.len()
+    );
+    initialize_runtime(runtime_path, runtime_sha256)?;
+    let model = quality.model();
+    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
+        .context("invalid preview image for BiRefNet")?;
+    // BiRefNet's official inference preprocessing resizes directly to the
+    // checkpoint's native tensor shape. Letterboxing changes the image scale
+    // and introduces out-of-distribution black borders; it is particularly
+    // destructive for the portrait-shaped Lite-2K graph.
+    let resized = image::imageops::resize(
+        &image,
+        model.input_width,
+        model.input_height,
+        FilterType::Lanczos3,
+    );
+    let input = normalized_birefnet_input(&resized, model.input_width, model.input_height)?;
+    let input = Tensor::from_array((
+        [
+            1usize,
+            3,
+            model.input_height as usize,
+            model.input_width as usize,
+        ],
+        input,
+    ))
+    .context("create BiRefNet input tensor")?;
+
+    #[cfg(target_os = "android")]
+    let (output_width, output_height, logits) = {
+        let _model_guard = prepare_model(AiMaskModel::Subject)?;
+        // Mobile memory is more important than avoiding session startup. Drop
+        // all model weights and allocator state immediately after inference.
+        let mut session =
+            create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?;
+        run_subject_session(&mut session, input, model.input_width, model.input_height)?
+    };
+
+    #[cfg(not(target_os = "android"))]
+    let (output_width, output_height, logits) = {
+        let _model_guard = prepare_model(AiMaskModel::Subject)?;
+        let sessions = SESSION.get_or_init(|| Mutex::new(None));
+        let mut guard = sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("BiRefNet session lock was poisoned"))?;
+        if guard
+            .as_ref()
+            .is_none_or(|(cached_quality, _)| *cached_quality != quality)
+        {
+            // A quality change selects a different BiRefNet checkpoint. Drop
+            // the old tier before constructing the new session so even two
+            // variants of the same mask family never overlap in memory.
+            *guard = None;
+            let session =
+                create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?;
+            *guard = Some((quality, session));
+        }
+        let result = {
+            let (_, session) = guard.as_mut().ok_or_else(|| {
+                anyhow::anyhow!("BiRefNet session initialization produced no session")
+            })?;
+            run_subject_session(session, input, model.input_width, model.input_height)
+        };
+        if !model_cache_enabled() {
+            *guard = None;
+        }
+        result?
+    };
+
+    // BiRefNet is itself a high-resolution dichotomous segmentation model and
+    // its sigmoid output contains calibrated fractional coverage. Preserve it
+    // directly: forcing an independently trained composition matting model to
+    // replace every uncertain pixel caused semantic edge drift around hair,
+    // straw, fur, and similarly complex subject boundaries.
+    let mask = restore_birefnet_output(&logits, output_width, output_height, width, height)?;
+    Ok(SubjectMaskResult {
+        width,
+        height,
+        mask,
+    })
+}
+
+fn run_subject_session(
+    session: &mut FallbackSession,
+    input: Tensor<f32>,
+    input_width: u32,
+    input_height: u32,
+) -> Result<(u32, u32, Vec<f32>)> {
+    session.run_with_fallback("BiRefNet ONNX inference", |ort_session, _accelerated| {
+        let outputs = ort_session
+            .run(ort::inputs![&input])
+            .context("run BiRefNet ONNX inference")?;
+        let output = outputs
+            .values()
+            .next()
+            .context("BiRefNet returned no output tensors")?;
+        let (shape, logits) = output
+            .try_extract_tensor::<f32>()
+            .context("read BiRefNet output tensor")?;
+        let (output_width, output_height, output_elements) =
+            validate_birefnet_output_shape(shape, logits.len(), input_width, input_height)?;
+        anyhow::ensure!(
+            logits.iter().all(|value| value.is_finite()),
+            "BiRefNet output contains non-finite logits"
+        );
+        let mut owned_logits = Vec::new();
+        owned_logits
+            .try_reserve_exact(output_elements)
+            .context("reserve BiRefNet output logits")?;
+        owned_logits.extend_from_slice(logits);
+        Ok((output_width, output_height, owned_logits))
+    })
+}
+fn validate_birefnet_output_shape(
+    shape: &[i64],
+    logits_len: usize,
+    input_width: u32,
+    input_height: u32,
+) -> Result<(u32, u32, usize)> {
+    anyhow::ensure!(
+        shape.len() == 4 && shape[0] == 1 && shape[1] == 1,
+        "unexpected BiRefNet output shape {shape:?}; expected [1, 1, H, W]"
+    );
+    let output_height =
+        usize::try_from(shape[2]).context("BiRefNet output height is negative or too large")?;
+    let output_width =
+        usize::try_from(shape[3]).context("BiRefNet output width is negative or too large")?;
+    anyhow::ensure!(
+        output_width > 0 && output_height > 0,
+        "BiRefNet output dimensions must be positive: {shape:?}"
+    );
+    let output_elements = output_width
+        .checked_mul(output_height)
+        .context("BiRefNet output dimensions overflow")?;
+    anyhow::ensure!(
+        output_elements <= input_width as usize * input_height as usize * 4,
+        "BiRefNet output is implausibly large: {shape:?}"
+    );
+    anyhow::ensure!(
+        logits_len == output_elements,
+        "BiRefNet output shape {shape:?} describes {output_elements} values, but the tensor contains {logits_len}"
+    );
+    Ok((
+        u32::try_from(output_width).context("BiRefNet output width exceeds u32")?,
+        u32::try_from(output_height).context("BiRefNet output height exceeds u32")?,
+        output_elements,
+    ))
+}
+= request;
+    anyhow::ensure!(
+    );
+    let expected_bytes = pixels
+        .checked_mul(4)
+        .and_then(|value| usize::try_from(value).ok())
+    anyhow::ensure!(
+        rgba.len() == expected_bytes,
+        rgba.len()
+    );
+    initialize_runtime(runtime_path, runtime_sha256)?;
+    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
+    let resized = image::imageops::resize(
+        &image,
+        layout.resized_width,
+        layout.resized_height,
+        FilterType::Triangle,
+    );
+    let plane = layout.padded_width as usize * layout.padded_height as usize;
+    let mut values = vec![0.0f32; plane * 3];
+    for (x, y, pixel) in resized.enumerate_pixels() {
+        let index = y as usize * layout.padded_width as usize + x as usize;
+        for channel in 0..3usize {
+            values[channel * plane + index] =
+                (pixel[channel] as f32 / 255.0 - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
+        }
+    }
+    let input = Tensor::from_array((
+        [
+            1usize,
+            3,
+            layout.padded_height as usize,
+            layout.padded_width as usize,
+        ],
+        values,
+    ))
+
+    #[cfg(target_os = "android")]
+    let (output_width, output_height, probabilities) = {
+        let mut session =
+    };
+
+    #[cfg(not(target_os = "android"))]
+    let (output_width, output_height, probabilities) = {
+        let mut guard = sessions
+            .lock()
+        if guard.is_none() {
+            *guard = Some(create_session_with_fallback(
+                model_path,
+            )?);
+        }
+        let result = {
+            let session = guard.as_mut().ok_or_else(|| {
+            })?;
+        };
+        if !model_cache_enabled() {
+            *guard = None;
+        }
+        result?
+    };
+
+    let coarse_mask =
+        object::resize_probability_u8(&probabilities, output_width, output_height, width, height);
+    let mask = refine_mask_with_vitmatte(
+        vitmatte_path,
+        image.as_raw(),
+        width,
+        height,
+        &coarse_mask,
+        1.0,
+    )
+    anyhow::ensure!(
+        mask.len() == width as usize * height as usize,
+    );
+        width,
+        height,
+        mask,
+    })
 }
     );
     let queries =
@@ -391,17 +929,18 @@ fn restore_birefnet_output(
         .collect())
 }
 
-fn ensure_vitmatte_model<F>(path: &Path, cancellation: &AtomicBool, progress: F) -> Result<()>
+fn ensure_vitmatte_model<F>(
+    path: &Path,
+    allow_download: bool,
+    cancellation: &AtomicBool,
+    progress: F,
+) -> Result<()>
 where
-    F: FnMut(u64, u64),
+    F: FnMut(ModelDownloadProgress),
 {
-    ensure_artifact(
-        path,
-        VITMATTE_ARTIFACT,
-        VITMATTE_DOWNLOAD,
-        progress,
-        || ensure_ai_not_cancelled(cancellation),
-    )
+    VITMATTE_INSTALL.ensure_installed(path, allow_download, progress, || {
+        ensure_ai_not_cancelled(cancellation)
+    })
 }
 
 #[derive(Clone, Copy, Debug)]

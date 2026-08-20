@@ -319,7 +319,7 @@ impl eframe::App for AurawApp {
             || self.export.task.is_some()
             || self.export.publish_pending
             || self.preview.rebuild_receiver.is_some()
-            || self.inpaint.receiver.is_some()
+            || self.inpaint.processing()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
@@ -350,6 +350,7 @@ impl eframe::App for AurawApp {
             show_raw_drop_overlay(ui, self.library.folder());
         }
         self.show_subject_dialogs(ui.ctx());
+        self.show_remove_model_dialog(ui.ctx(), frame);
         self.show_ai_denoise_dialogs(ui.ctx(), frame);
         self.show_sidecar_save_error_dialog(ui.ctx());
         self.show_foreground_operation_dialog(ui.ctx());
