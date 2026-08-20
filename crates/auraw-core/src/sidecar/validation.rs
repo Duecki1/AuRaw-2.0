@@ -36,6 +36,52 @@ pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError>
         return invalid("lens name is unreasonably long");
     }
 
+    if edits.remove.strokes.len() > crate::pipeline::REMOVE_MAX_STROKES {
+        return invalid("sidecar contains too many Remove strokes");
+    }
+    for stroke in &edits.remove.strokes {
+        if stroke.brush.points.len() > crate::pipeline::REMOVE_MAX_POINTS_PER_STROKE {
+            return invalid("Remove stroke contains too many brush points");
+        }
+        if stroke.patches.len() > crate::pipeline::REMOVE_MAX_PATCHES_PER_STROKE {
+            return invalid("Remove stroke contains too many cached patches");
+        }
+        if stroke.brush.dilation_radius > 64 {
+            return invalid("Remove stroke dilation is unreasonably large");
+        }
+        for point in &stroke.brush.points {
+            finite("Remove brush point", &[point.x, point.y, point.radius])?;
+            bounded("Remove brush x", point.x, -1.0, 1_000_000.0)?;
+            bounded("Remove brush y", point.y, -1.0, 1_000_000.0)?;
+            bounded("Remove brush radius", point.radius, 0.0, 100_000.0)?;
+        }
+        for patch in &stroke.patches {
+            if patch.bounds.width == 0
+                || patch.bounds.height == 0
+                || patch.bounds.width > 32_768
+                || patch.bounds.height > 32_768
+            {
+                return invalid("Remove patch has invalid dimensions");
+            }
+            if patch.bounds.x.checked_add(patch.bounds.width).is_none()
+                || patch.bounds.y.checked_add(patch.bounds.height).is_none()
+            {
+                return invalid("Remove patch bounds overflow native coordinates");
+            }
+            let pixels = (patch.bounds.width as usize)
+                .checked_mul(patch.bounds.height as usize)
+                .ok_or_else(|| {
+                    SidecarError::Invalid("Remove patch dimensions overflow".to_owned())
+                })?;
+            let rgb_values = pixels.saturating_mul(3);
+            let has_scene = patch.rgb_scene16f.len() == rgb_values;
+            let has_legacy = patch.rgb_srgb16.len() == rgb_values;
+            if has_scene == has_legacy || patch.alpha.len() != pixels {
+                return invalid("Remove patch payload does not match its dimensions");
+            }
+        }
+    }
+
     let refinement = &stack.subject_refinement;
     finite(
         "subject refinement settings",

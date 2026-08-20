@@ -220,7 +220,8 @@ impl Preview {
                 app.develop_ui.crop_drag = None;
                 app.develop_ui.straighten_drag = None;
             } else if app.ui.sidebar_tab == SidebarTab::Inpainting {
-                app.inpaint.active_dab_count = 0;
+                app.inpaint.active_points.clear();
+                app.inpaint.last_brush_uv = None;
             } else if white_balance_canvas {
                 app.develop_ui.white_balance_picker_drag = None;
             }
@@ -478,7 +479,7 @@ impl Preview {
                     &response,
                 );
             }
-            // Retouch is UI-only; only its transient cursor/source-pick affordance is painted.
+            // Paint the native Remove brush/cursor above the cached repaired pixels.
             Self::paint_inpaint_overlay(
                 ui,
                 app,

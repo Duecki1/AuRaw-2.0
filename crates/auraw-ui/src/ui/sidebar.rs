@@ -1,6 +1,6 @@
 use crate::app::{
     AdjustmentSection, AurawApp, ColorGradeTab, HslMixerColor, MaskSection, SidebarTab,
-    ToneCurveTab, UiInpaintTool,
+    ToneCurveTab,
 };
 use crate::pipeline::{
     BrushMode, DemosaicMode, DenoiseQuality, ExportBitDepth, ExportColorProfile, ExportResizeMode,

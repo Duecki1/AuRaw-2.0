@@ -1,5 +1,5 @@
 use super::{needs_canonical_mask_source, AppTab, AurawApp, LensCorrectionState};
-use crate::pipeline::{ExposureParams, MaskGeometry, MaskStack};
+use crate::pipeline::{ExposureParams, MaskGeometry, MaskStack, ProcessingStage, RemoveEditState};
 use eframe::egui;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -94,6 +94,7 @@ struct EditSnapshot {
     masks: Arc<MaskStack>,
     mask_selection: MaskSelection,
     lens: LensEditState,
+    remove: Arc<RemoveEditState>,
 }
 
 impl EditSnapshot {
@@ -107,6 +108,7 @@ impl EditSnapshot {
             mask_selection: MaskSelection::capture(masks, &contents),
             masks: contents,
             lens: LensEditState::capture(lens),
+            remove: Arc::new(RemoveEditState::default()),
         }
     }
 
@@ -130,6 +132,7 @@ impl EditSnapshot {
             mask_selection: MaskSelection::capture(masks, &contents),
             masks: contents,
             lens: LensEditState::capture(lens),
+            remove: Arc::clone(&self.remove),
         }
     }
 
@@ -187,10 +190,12 @@ impl EditHistory {
         exposure: &ExposureParams,
         masks: &MaskStack,
         lens: &LensCorrectionState,
+        remove: &Arc<RemoveEditState>,
     ) {
         self.undo.clear();
         self.redo.clear();
         self.current = EditSnapshot::capture(exposure, masks, lens);
+        self.current.remove = Arc::clone(remove);
         self.interaction_pending = false;
         self.mask_interaction_pending = false;
         self.change_observed = false;
@@ -273,17 +278,35 @@ impl EditHistory {
             return;
         }
 
-        let next = self.current.capture_successor(
-            exposure,
-            masks,
-            lens,
-            mask_contents_match,
-        );
+        let next = self
+            .current
+            .capture_successor(exposure, masks, lens, mask_contents_match);
         let previous = std::mem::replace(&mut self.current, next);
         Self::push_bounded(&mut self.undo, previous);
         self.redo.clear();
         self.interaction_pending = false;
         self.mask_interaction_pending = false;
+        self.committed_revision = self.committed_revision.wrapping_add(1);
+    }
+
+    pub(super) fn commit_remove_state(
+        &mut self,
+        exposure: &ExposureParams,
+        masks: &MaskStack,
+        lens: &LensCorrectionState,
+        remove: &Arc<RemoveEditState>,
+    ) {
+        self.commit_current_state(exposure, masks, lens);
+        if Arc::ptr_eq(&self.current.remove, remove) {
+            return;
+        }
+        let mut next = self
+            .current
+            .capture_successor(exposure, masks, lens, true);
+        next.remove = Arc::clone(remove);
+        let previous = std::mem::replace(&mut self.current, next);
+        Self::push_bounded(&mut self.undo, previous);
+        self.redo.clear();
         self.committed_revision = self.committed_revision.wrapping_add(1);
     }
 
@@ -320,14 +343,15 @@ impl EditHistory {
         exposure: &ExposureParams,
         masks: &MaskStack,
         lens: &LensCorrectionState,
-    ) -> Option<(EditSnapshot, bool)> {
+    ) -> Option<(EditSnapshot, bool, bool)> {
         self.commit_current_state(exposure, masks, lens);
         let target = self.undo.pop_back()?;
         let masks_changed = !Arc::ptr_eq(&target.masks, &self.current.masks);
+        let remove_changed = !Arc::ptr_eq(&target.remove, &self.current.remove);
         let present = std::mem::replace(&mut self.current, target.clone());
         Self::push_bounded(&mut self.redo, present);
         self.committed_revision = self.committed_revision.wrapping_add(1);
-        Some((target, masks_changed))
+        Some((target, masks_changed, remove_changed))
     }
 
     fn redo(
@@ -335,14 +359,15 @@ impl EditHistory {
         exposure: &ExposureParams,
         masks: &MaskStack,
         lens: &LensCorrectionState,
-    ) -> Option<(EditSnapshot, bool)> {
+    ) -> Option<(EditSnapshot, bool, bool)> {
         self.commit_current_state(exposure, masks, lens);
         let target = self.redo.pop_back()?;
         let masks_changed = !Arc::ptr_eq(&target.masks, &self.current.masks);
+        let remove_changed = !Arc::ptr_eq(&target.remove, &self.current.remove);
         let present = std::mem::replace(&mut self.current, target.clone());
         Self::push_bounded(&mut self.undo, present);
         self.committed_revision = self.committed_revision.wrapping_add(1);
-        Some((target, masks_changed))
+        Some((target, masks_changed, remove_changed))
     }
 
     fn committed_revision(&self) -> u64 {
@@ -351,6 +376,10 @@ impl EditHistory {
 
     fn committed_masks(&self) -> Arc<MaskStack> {
         Arc::clone(&self.current.masks)
+    }
+
+    fn committed_remove(&self) -> Arc<RemoveEditState> {
+        Arc::clone(&self.current.remove)
     }
 }
 
@@ -362,6 +391,20 @@ impl AurawApp {
     pub(crate) fn note_edit_changed(&mut self) {
         self.persistence.history.note_change();
     }
+
+    pub(crate) fn note_remove_edit_changed(&mut self) {
+        self.persistence.history.commit_remove_state(
+            &self.develop.exposure,
+            &self.masks.stack,
+            &self.develop.lens_correction,
+            &self.inpaint.edits,
+        );
+        // Remove now lives at the source-scene boundary. Rebuild that scene
+        // once after a stroke/delete/clear; subsequent Develop adjustments
+        // reuse it and execute only their normal downstream stages.
+        self.queue_preview_processing(ProcessingStage::Raw);
+    }
+
 
     pub(crate) fn note_geometry_changed(&mut self) {
         self.develop.geometry = self.develop.geometry.sanitized();
@@ -377,7 +420,8 @@ impl AurawApp {
 
 
     pub(crate) fn edit_commit_revision(&self) -> u64 {
-        self.persistence.history
+        self.persistence
+            .history
             .committed_revision()
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             ^ self.develop.geometry_revision.rotate_left(17)
@@ -390,12 +434,17 @@ impl AurawApp {
         self.persistence.history.committed_masks()
     }
 
+    pub(crate) fn committed_remove_state_for_persistence(&self) -> Arc<RemoveEditState> {
+        self.persistence.history.committed_remove()
+    }
+
     pub(crate) fn reset_edit_history(&mut self) {
         self.persistence.lens_restore_masks = None;
         self.persistence.history.reset(
             &self.develop.exposure,
             &self.masks.stack,
             &self.develop.lens_correction,
+            &self.inpaint.edits,
         );
     }
 
@@ -449,8 +498,8 @@ impl AurawApp {
             &self.masks.stack,
             &self.develop.lens_correction,
         );
-        if let Some((snapshot, masks_changed)) = snapshot {
-            self.apply_edit_snapshot(snapshot, masks_changed);
+        if let Some((snapshot, masks_changed, remove_changed)) = snapshot {
+            self.apply_edit_snapshot(snapshot, masks_changed, remove_changed);
             self.ui.notice = Some("Undid edit.".to_owned());
         }
     }
@@ -462,8 +511,8 @@ impl AurawApp {
             &self.masks.stack,
             &self.develop.lens_correction,
         );
-        if let Some((snapshot, masks_changed)) = snapshot {
-            self.apply_edit_snapshot(snapshot, masks_changed);
+        if let Some((snapshot, masks_changed, remove_changed)) = snapshot {
+            self.apply_edit_snapshot(snapshot, masks_changed, remove_changed);
             self.ui.notice = Some("Redid edit.".to_owned());
         }
     }
@@ -493,6 +542,7 @@ impl AurawApp {
         &mut self,
         snapshot: EditSnapshot,
         masks_changed: bool,
+        remove_changed: bool,
     ) {
         let lens_changed = !snapshot.lens.matches(&self.develop.lens_correction);
         let ai_denoise_changed =
@@ -506,6 +556,16 @@ impl AurawApp {
             self.masks.stack = snapshot.materialize_masks();
         } else {
             snapshot.mask_selection.apply_to(&mut self.masks.stack);
+        }
+        if remove_changed {
+            if let Some(cancellation) = self.inpaint.cancellation.take() {
+                cancellation.store(true, std::sync::atomic::Ordering::Release);
+            }
+            self.inpaint.edits = Arc::clone(&snapshot.remove);
+            self.inpaint.active_points.clear();
+            self.inpaint.pending_brush = None;
+            self.inpaint.receiver = None;
+            self.inpaint.processing_label = None;
         }
         snapshot.lens.apply_to(&mut self.develop.lens_correction);
         self.rehydrate_restored_mask_state();
@@ -525,6 +585,9 @@ impl AurawApp {
                 self.mark_all_mask_layers_dirty();
             }
             self.mark_pipeline_dirty();
+            if remove_changed {
+                self.queue_preview_processing(ProcessingStage::Raw);
+            }
             if ai_denoise_changed && self.develop.exposure.ai_denoise_enabled {
                 self.preview.quality_dirty = true;
                 self.preview.detail = None;
@@ -607,7 +670,7 @@ impl AurawApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::MaskKind;
+    use crate::pipeline::{MaskKind, RemoveEditState, RemoveStroke};
 
     fn state() -> (ExposureParams, MaskStack, LensCorrectionState) {
         (
@@ -630,13 +693,13 @@ mod tests {
         history.observe(&exposure, &masks, &lens, true);
         history.observe(&exposure, &masks, &lens, false);
 
-        let (restored, masks_changed) = history.undo(&exposure, &masks, &lens).unwrap();
+        let (restored, masks_changed, _remove_changed) = history.undo(&exposure, &masks, &lens).unwrap();
         assert!(!masks_changed);
         assert_eq!(restored.exposure.exposure, 0.0);
         assert!(history.undo.is_empty());
 
         exposure = restored.exposure;
-        let (redone, masks_changed) = history.redo(&exposure, &masks, &lens).unwrap();
+        let (redone, masks_changed, _remove_changed) = history.redo(&exposure, &masks, &lens).unwrap();
         assert!(!masks_changed);
         assert_eq!(redone.exposure.exposure, 2.0);
     }
@@ -670,14 +733,14 @@ mod tests {
         history.note_mask_change();
         history.observe(&exposure, &masks, &lens, false);
 
-        let (restored, masks_changed) = history.undo(&exposure, &masks, &lens).unwrap();
+        let (restored, masks_changed, _remove_changed) = history.undo(&exposure, &masks, &lens).unwrap();
         assert!(masks_changed);
         let restored_masks = restored.materialize_masks();
         assert_eq!(restored_masks.masks.len(), 1);
         assert_eq!(restored_masks.selected_mask, Some(0));
         assert_eq!(restored_masks.selected_component, Some(0));
 
-        let (redone, masks_changed) = history.redo(&exposure, &restored_masks, &lens).unwrap();
+        let (redone, masks_changed, _remove_changed) = history.redo(&exposure, &restored_masks, &lens).unwrap();
         assert!(masks_changed);
         let redone_masks = redone.materialize_masks();
         assert_eq!(redone_masks.masks.len(), 2);
@@ -701,22 +764,22 @@ mod tests {
         history.observe(&exposure, &masks, &lens, true);
         history.observe(&exposure, &masks, &lens, false);
 
-        let (first_undo, masks_changed) = history.undo(&exposure, &masks, &lens).unwrap();
+        let (first_undo, masks_changed, _remove_changed) = history.undo(&exposure, &masks, &lens).unwrap();
         assert!(masks_changed);
         let first_masks = first_undo.materialize_masks();
         assert_eq!(first_masks.masks[0].opacity, 0.8);
 
-        let (second_undo, masks_changed) = history.undo(&exposure, &first_masks, &lens).unwrap();
+        let (second_undo, masks_changed, _remove_changed) = history.undo(&exposure, &first_masks, &lens).unwrap();
         assert!(masks_changed);
         assert_eq!(second_undo.materialize_masks().masks[0].opacity, 1.0);
 
-        let (first_redo, masks_changed) = history
+        let (first_redo, masks_changed, _remove_changed) = history
             .redo(&exposure, &second_undo.materialize_masks(), &lens)
             .unwrap();
         assert!(masks_changed);
         assert_eq!(first_redo.materialize_masks().masks[0].opacity, 0.8);
 
-        let (second_redo, masks_changed) = history
+        let (second_redo, masks_changed, _remove_changed) = history
             .redo(&exposure, &first_redo.materialize_masks(), &lens)
             .unwrap();
         assert!(masks_changed);
@@ -743,7 +806,7 @@ mod tests {
             &history.committed_masks(),
             &history.current.masks
         ));
-        let (_, masks_changed) = history.undo(&exposure, &masks, &lens).unwrap();
+        let (_, masks_changed, _remove_changed) = history.undo(&exposure, &masks, &lens).unwrap();
         assert!(!masks_changed);
     }
 
@@ -782,14 +845,14 @@ mod tests {
         history.note_mask_change();
         history.observe(&exposure, &masks, &lens, false);
 
-        let (restored, masks_changed) = history.undo(&exposure, &masks, &lens).unwrap();
+        let (restored, masks_changed, _remove_changed) = history.undo(&exposure, &masks, &lens).unwrap();
         assert!(masks_changed);
         assert!(restored.masks.masks.is_empty());
         assert!(!restored.lens.enabled);
 
         masks = restored.materialize_masks();
         restored.lens.apply_to(&mut lens);
-        let (redone, masks_changed) = history.redo(&exposure, &masks, &lens).unwrap();
+        let (redone, masks_changed, _remove_changed) = history.redo(&exposure, &masks, &lens).unwrap();
         assert!(masks_changed);
         assert_eq!(redone.masks.masks.len(), 1);
         assert!(redone.lens.enabled);
@@ -805,7 +868,7 @@ mod tests {
         exposure.exposure = 1.0;
         history.note_change();
         history.observe(&exposure, &masks, &lens, false);
-        let (restored, _) = history.undo(&exposure, &masks, &lens).unwrap();
+        let (restored, _, _) = history.undo(&exposure, &masks, &lens).unwrap();
         exposure = restored.exposure;
         assert!(history.can_redo(&exposure, &masks, &lens));
 
@@ -851,5 +914,29 @@ mod tests {
 
         history.observe(&exposure, &masks, &lens, false);
         assert_eq!(history.committed_revision(), 1);
+    }
+
+    #[test]
+    fn remove_strokes_are_discrete_undoable_history_steps() {
+        let (exposure, masks, lens) = state();
+        let mut remove = Arc::new(RemoveEditState::default());
+        let mut history = EditHistory::new(&exposure, &masks, &lens);
+        history.reset(&exposure, &masks, &lens, &remove);
+
+        Arc::make_mut(&mut remove).strokes.push(RemoveStroke::default());
+        history.commit_remove_state(&exposure, &masks, &lens, &remove);
+        assert_eq!(history.committed_remove().strokes.len(), 1);
+
+        let (undone, masks_changed, remove_changed) =
+            history.undo(&exposure, &masks, &lens).unwrap();
+        assert!(!masks_changed);
+        assert!(remove_changed);
+        assert!(undone.remove.strokes.is_empty());
+
+        let (redone, masks_changed, remove_changed) =
+            history.redo(&exposure, &masks, &lens).unwrap();
+        assert!(!masks_changed);
+        assert!(remove_changed);
+        assert_eq!(redone.remove.strokes.len(), 1);
     }
 }

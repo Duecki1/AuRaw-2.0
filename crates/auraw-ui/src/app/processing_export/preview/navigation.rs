@@ -98,7 +98,19 @@ impl AurawApp {
                 self.ui.notice = Some(error);
                 return;
             }
-            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            if let Err(error) = pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                &full_raw,
+                &self.develop.target_exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to navigation preview: {error:#}"));
+                return;
+            }
             let mut renderer = render_state.renderer.write();
             pipeline.register_egui_texture(&render_state.device, &mut renderer);
             drop(renderer);
@@ -165,12 +177,21 @@ impl AurawApp {
             ProcessingStage::Output => &[ProcessingStage::Output][..],
         };
         for stage in stages {
-            preview.pipeline.dispatch_stage(
+            if let Err(error) = preview.pipeline.dispatch_stage_with_remove(
                 &render_state.queue,
                 &render_state.device,
                 &params,
                 *stage,
-            );
+                &self.inpaint.edits,
+                &full_raw,
+                &self.develop.target_exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to navigation preview: {error:#}"));
+                self.preview.navigation_pending_stage = None;
+                return;
+            }
         }
         self.preview.navigation_pending_stage = None;
         self.egui_ctx.request_repaint();

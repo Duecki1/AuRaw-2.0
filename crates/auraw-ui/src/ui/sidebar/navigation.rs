@@ -29,7 +29,7 @@ impl Sidebar {
                 SidebarTab::Adjustments => "Edit",
                 SidebarTab::Crop => "Crop & Straighten",
                 SidebarTab::Masks => "Masking",
-                SidebarTab::Inpainting => "Retouch",
+                SidebarTab::Inpainting => "Remove",
                 SidebarTab::Export => "Export",
             },
         );
@@ -116,8 +116,8 @@ impl Sidebar {
                 (
                     SidebarTab::Inpainting,
                     regular::BANDAIDS,
-                    "Heal",
-                    "Remove, heal, and clone",
+                    "Remove",
+                    "Remove unwanted objects",
                 ),
                 (SidebarTab::Export, regular::EXPORT, "Export", "Export"),
             ] {
@@ -343,7 +343,7 @@ impl Sidebar {
                 (
                     SidebarTab::Inpainting,
                     UiIcon::Heal,
-                    "Remove, heal, and clone",
+                    "Remove unwanted objects",
                 ),
                 (SidebarTab::Export, UiIcon::Export, "Export"),
             ] {
@@ -429,8 +429,8 @@ impl Sidebar {
                 (
                     SidebarTab::Inpainting,
                     regular::BANDAIDS,
-                    "Heal",
-                    "Remove, heal, and clone",
+                    "Remove",
+                    "Remove unwanted objects",
                 ),
                 (SidebarTab::Export, regular::EXPORT, "Export", "Export"),
             ] {

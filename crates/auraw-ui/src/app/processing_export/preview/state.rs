@@ -103,17 +103,48 @@ impl AurawApp {
         } else {
             &self.masks.stack
         };
-        if let (Some(raw), Some(pipeline)) = (&self.develop.preview_raw, &self.preview.gpu_pipeline) {
+        if let (Some(raw), Some(pipeline), Some(full_raw)) = (
+            &self.develop.preview_raw,
+            &self.preview.gpu_pipeline,
+            &self.develop.loaded_raw,
+        ) {
             let params = GpuParams::new(exposure, masks, raw)
                 .with_vignette_geometry(self.develop.geometry);
-            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            if self.preview.original_requested {
+                pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            } else if let Err(error) = pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                full_raw,
+                exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to preview: {error:#}"));
+            }
         }
-        if let Some(navigation) = self.preview.navigation.as_ref() {
+        if let (Some(navigation), Some(full_raw)) = (
+            self.preview.navigation.as_ref(),
+            self.develop.loaded_raw.as_ref(),
+        ) {
             let params = GpuParams::new(exposure, masks, &navigation.raw)
                 .with_vignette_geometry(self.develop.geometry);
-            navigation
-                .pipeline
-                .recompute(&render_state.queue, &render_state.device, &params);
+            if self.preview.original_requested {
+                navigation.pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            } else if let Err(error) = navigation.pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                full_raw,
+                exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to navigation preview: {error:#}"));
+            }
         }
         if let Some(detail) = self.preview.detail
             .as_ref()
@@ -142,9 +173,22 @@ impl AurawApp {
                     mask_region_texture_extent(mask_region, detail.pipeline.mask_atlas_edge()),
                 );
             }
-            detail
-                .pipeline
-                .recompute(&render_state.queue, &render_state.device, &params);
+            if self.preview.original_requested {
+                detail.pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            } else if let Some(full_raw) = self.develop.loaded_raw.as_ref() {
+                if let Err(error) = detail.pipeline.recompute_with_remove(
+                    &render_state.queue,
+                    &render_state.device,
+                    &params,
+                    &self.inpaint.edits,
+                    full_raw,
+                    exposure,
+                    [detail.source_origin[0] as f32, detail.source_origin[1] as f32],
+                    [detail.source_size[0] as f32, detail.source_size[1] as f32],
+                ) {
+                    self.ui.notice = Some(format!("Could not apply Remove to zoomed preview: {error:#}"));
+                }
+            }
         }
         self.preview.original_rendered_state = Some(requested_state);
         self.egui_ctx.request_repaint();

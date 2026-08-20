@@ -14,9 +14,11 @@ use crate::pipeline::{
     LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind,
     MaskRgbImage,
     MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
-    RawGpuProgramTemplate, SubjectRefinement, TiledExportJob, TileSpec, EXPORT_TILE_HALO,
+    RawGpuProgramTemplate, RemoveBrushPoint, RemoveBrushStroke, RemoveEditState,
+    SubjectRefinement, TiledExportJob, TileSpec, EXPORT_TILE_HALO,
     MAX_LOCAL_MASKS,
 };
+use crate::remove::{spawn_remove, RemoveEvent, RemoveRequest};
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
     LensEditState as SidecarLensEditState,
@@ -35,6 +37,7 @@ use eframe::{egui, wgpu};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -452,6 +455,7 @@ struct LoadedPreview {
     pipeline: RawGpuPipeline,
     rendered_exposure: ExposureParams,
     rendered_masks: MaskStack,
+    remove: RemoveEditState,
     ai_masks_need_update: bool,
     mask_source: Option<MaskRgbImage>,
     lens_correction: LensCorrectionState,
@@ -753,6 +757,7 @@ struct PreparedExportSource {
     geometry: GeometryTransform,
     exposure: ExposureParams,
     masks: MaskStack,
+    remove: RemoveEditState,
     source_file_name: Option<String>,
     gpu_export_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
@@ -1079,43 +1084,15 @@ pub(crate) struct PersistenceState {
     pub(crate) developed_thumbnail_receiver: Option<mpsc::Receiver<DevelopedThumbnailEvent>>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum UiInpaintTool {
-    #[default]
-    Remove,
-    Heal,
-    Clone,
-}
-
-impl UiInpaintTool {
-    pub(crate) const ALL: [Self; 3] = [Self::Remove, Self::Heal, Self::Clone];
-
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Remove => "Remove",
-            Self::Heal => "Heal",
-            Self::Clone => "Clone",
-        }
-    }
-
-    pub(crate) const fn requires_source(self) -> bool {
-        matches!(self, Self::Heal | Self::Clone)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct UiInpaintStroke {
-    pub(crate) kind: UiInpaintTool,
-    pub(crate) dab_count: usize,
-}
-
 pub(crate) struct InpaintState {
     pub(crate) brush_size: f32,
-    pub(crate) tool: UiInpaintTool,
-    pub(crate) source_anchor: Option<[f32; 2]>,
-    pub(crate) source_pick_active: bool,
-    pub(crate) active_dab_count: usize,
-    pub(crate) strokes: Vec<UiInpaintStroke>,
+    pub(crate) edits: Arc<RemoveEditState>,
+    pub(crate) active_points: Vec<RemoveBrushPoint>,
+    pub(crate) last_brush_uv: Option<[f32; 2]>,
+    pub(crate) pending_brush: Option<RemoveBrushStroke>,
+    pub(crate) receiver: Option<mpsc::Receiver<RemoveEvent>>,
+    pub(crate) cancellation: Option<Arc<AtomicBool>>,
+    pub(crate) processing_label: Option<String>,
     pub(crate) hovered_stroke: Option<usize>,
     pub(crate) selected_stroke: Option<usize>,
 }

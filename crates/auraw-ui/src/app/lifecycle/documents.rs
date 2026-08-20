@@ -439,6 +439,7 @@ impl AurawApp {
                     let (
                         mut rendered_exposure,
                         mut rendered_masks,
+                        remove_edits,
                         saved_lens,
                         pasted_ai_masks_need_update,
                         mut sidecar_warning,
@@ -449,6 +450,7 @@ impl AurawApp {
                         (
                             edits.exposure,
                             Arc::unwrap_or_clone(edits.masks),
+                            Arc::unwrap_or_clone(edits.remove),
                             Some(edits.lens),
                             edits.ai_masks_need_update,
                             None,
@@ -467,6 +469,7 @@ impl AurawApp {
                                 (
                                     loaded.edits.exposure,
                                     Arc::unwrap_or_clone(loaded.edits.masks),
+                                    Arc::unwrap_or_clone(loaded.edits.remove),
                                     Some(loaded.edits.lens),
                                     loaded.edits.ai_masks_need_update,
                                     warning,
@@ -478,6 +481,7 @@ impl AurawApp {
                             Ok(None) => (
                                 initial_exposure,
                                 MaskStack::default(),
+                                RemoveEditState::default(),
                                 None,
                                 false,
                                 None,
@@ -488,6 +492,7 @@ impl AurawApp {
                             Err(error) => (
                                 initial_exposure,
                                 MaskStack::default(),
+                                RemoveEditState::default(),
                                 None,
                                 false,
                                 Some(format!(
@@ -816,7 +821,20 @@ impl AurawApp {
                         .write_output_transform(&queue, &display_output_transform)
                         .map_err(|error| format!("display ICC LUT upload failed: {error:#}"))?;
                     let first_render_started = Instant::now();
-                    pipeline.recompute(&queue, &device, &params);
+                    pipeline
+                        .recompute_with_remove(
+                            &queue,
+                            &device,
+                            &params,
+                            &remove_edits,
+                            &full_raw,
+                            &rendered_exposure,
+                            [0.0, 0.0],
+                            [full_raw.width as f32, full_raw.height as f32],
+                        )
+                        .map_err(|error| {
+                            format!("initial Remove scene integration failed: {error:#}")
+                        })?;
                     crate::diagnostics::record(format!(
                         "Initial GPU preview dispatch submitted in {:.3}s",
                         first_render_started.elapsed().as_secs_f64()
@@ -837,6 +855,7 @@ impl AurawApp {
                         pipeline,
                         rendered_exposure,
                         rendered_masks,
+                        remove: remove_edits,
                         ai_masks_need_update: pasted_ai_masks_need_update,
                         mask_source,
                         lens_correction,
@@ -974,7 +993,7 @@ impl AurawApp {
                 self.develop_ui.straighten_drag = None;
                 self.develop.geometry_revision = 0;
                 self.masks.stack = loaded.rendered_masks;
-                self.reset_inpainting_state();
+                self.install_remove_edits(Arc::new(loaded.remove));
                 self.ai.masks_need_update = loaded.ai_masks_need_update;
                 self.rehydrate_restored_mask_state();
                 self.ai.masks_need_update |= loaded.ai_masks_need_update;

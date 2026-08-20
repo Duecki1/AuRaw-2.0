@@ -174,6 +174,7 @@ impl ExportHarness<'_> {
                 geometry: GeometryTransform::default(),
                 exposure,
                 masks: MaskStack::default(),
+                remove: auraw_cli::pipeline::RemoveEditState::default(),
                 path: output.to_owned(),
                 tile_spec: TileSpec::default(),
                 settings: self.settings.clone(),

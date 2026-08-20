@@ -301,6 +301,7 @@ impl eframe::App for AurawApp {
             crate::ui::library::show_library_action_overlays(ui, self, frame);
         }
 
+        self.advance_remove_worker(frame);
         self.apply_pending_lens_correction(frame);
         self.apply_pending_preview_quality(frame);
         self.sync_original_preview(frame);
@@ -318,6 +319,7 @@ impl eframe::App for AurawApp {
             || self.export.task.is_some()
             || self.export.publish_pending
             || self.preview.rebuild_receiver.is_some()
+            || self.inpaint.receiver.is_some()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }

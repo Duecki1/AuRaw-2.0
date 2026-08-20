@@ -1,7 +1,7 @@
 use crate::file_ops::{replace_file, sync_parent_directory};
 use crate::pipeline::{
     ExposureParams, GeometryTransform, MaskGeometry, MaskImage, MaskKind, MaskStack,
-    SubjectRefinement, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    SubjectRefinement, RemoveEditState, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 11;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 13;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0006;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
@@ -122,10 +122,17 @@ pub struct EditState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_refinement: Option<SubjectRefinement>,
     pub lens: LensEditState,
+    /// Cached non-destructive Big-LaMa Remove strokes in native source coordinates.
+    #[serde(default, skip_serializing_if = "arc_remove_is_empty")]
+    pub remove: Arc<RemoveEditState>,
     /// Persisted because copied content-aware masks belong to the source image
     /// until they are explicitly regenerated on the destination image.
     #[serde(default)]
     pub ai_masks_need_update: bool,
+}
+
+fn arc_remove_is_empty(remove: &Arc<RemoveEditState>) -> bool {
+    remove.is_empty()
 }
 
 pub fn default_edit_state() -> EditState {
@@ -136,6 +143,7 @@ pub fn default_edit_state() -> EditState {
         masks: Arc::new(MaskStack::default()),
         subject_refinement: None,
         lens: LensEditState::default(),
+        remove: Arc::new(RemoveEditState::default()),
         ai_masks_need_update: false,
     }
 }
@@ -227,6 +235,7 @@ pub fn edit_state_has_adjustments(edits: &EditState) -> bool {
         || edits.masks != default.masks
         || edits.subject_refinement != default.subject_refinement
         || edits.lens != default.lens
+        || edits.remove != default.remove
 }
 
 /// Merge a copied edit snapshot into an existing destination according to the
@@ -252,7 +261,13 @@ pub fn apply_copied_adjustments_with_mode(
     mode: AdjustmentPasteMode,
 ) {
     if mode == AdjustmentPasteMode::Replace {
+        // Remove patches belong to this exact source image and are not a
+        // portable adjustment category. Replacing copied develop settings
+        // must therefore leave the destination's non-destructive Remove
+        // history intact.
+        let remove = Arc::clone(&destination.remove);
         *destination = default_edit_state();
+        destination.remove = remove;
     }
     if settings.adjustments {
         destination.exposure = source.exposure;
@@ -692,7 +707,9 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     // schema 8 adds the defaulted mask-effect selector; schema 9 adds the
     // Fullscreen mask geometry; schema 10 adds non-destructive settings for
     // implemented mask effects; schema 11 adds procedural Fog and Smoke mask
-    // effects. Serde defaults keep every earlier sidecar backward-compatible.
+    // effects; schema 12 adds cached Big-LaMa Remove strokes; schema 13 moves
+    // new Remove patch pixels to the source-scene boundary. Serde defaults keep
+    // every earlier sidecar backward-compatible.
     if original_schema >= 5 {
         restore_mask_assets(
             &mut document.edits,
