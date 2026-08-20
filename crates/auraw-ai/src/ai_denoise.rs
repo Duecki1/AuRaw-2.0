@@ -3,9 +3,8 @@
 //! The downloaded `.dtmodel` package is the published darktable-ai 5.6 release
 //! asset. AuRaw pins both the archive and extracted ONNX graphs by SHA-256.
 
-use crate::execution_provider::{
-    create_session_with_fallback, lock_interactive_ai_model, FallbackSession, SessionOptions,
-};
+use crate::execution_provider::{FallbackSession, SessionOptions};
+use crate::model_runtime::{acquire_model_session, AiModel, ModelRetention};
 use crate::model_artifact::{
     ensure_artifact, install_artifact_from_reader, verify_artifact, ArtifactSize, DownloadOptions,
     ModelArtifact,
@@ -619,12 +618,6 @@ fn extract_model(
         .with_context(|| format!("extract {member} from RawNIND package"))
 }
 
-fn create_bayer_session(model_path: &Path) -> Result<FallbackSession> {
-    // CoreML/CUDA/ROCm failures, including activation overflow detected by the
-    // output validation below, are recovered through the same Tier-2 CPU path.
-    create_session_with_fallback(model_path, SessionOptions::new("RawNIND Bayer"))
-}
-
 fn run_model_tile(
     session: &mut FallbackSession,
     channels: usize,
@@ -689,9 +682,12 @@ fn infer_bayer(
     // full image is highlight-reconstructed and demosaicked only once, after
     // all tiles have been blended, and those stages remain responsive to edits.
     let mut normalized_cfa = vec![0.0f32; output_elements];
-    let model_guard = lock_interactive_ai_model();
-    crate::ai_masks::unload_all_models_locked()?;
-    let mut session = create_bayer_session(model_path)?;
+    let mut session = acquire_model_session(
+        AiModel::RawNindBayer,
+        model_path,
+        SessionOptions::new("RawNIND Bayer"),
+        ModelRetention::OneShot,
+    )?;
     let model_white_balance = raw.rawnind_daylight_white_balance();
     for tile_y in 0..tiles_y {
         for tile_x in 0..tiles_x {
@@ -810,10 +806,9 @@ fn infer_bayer(
             });
         }
     }
-    // RawNIND is intentionally not cached. Release its weights and execution-
-    // provider allocations before the CPU-only edge/highlight reconstruction.
+    // RawNIND is one-shot in the common runtime manager, so its weights and
+    // execution-provider allocations are released before this CPU-only work.
     drop(session);
-    drop(model_guard);
 
     fill_bayer_crop_edges(
         &mut normalized_cfa,
@@ -966,10 +961,12 @@ fn infer_linear(
         .and_then(|elements| usize::try_from(elements).ok())
         .context("RawNIND linear output dimensions overflow")?;
     let mut stored = vec![0u16; output_elements];
-    let model_guard = lock_interactive_ai_model();
-    crate::ai_masks::unload_all_models_locked()?;
-    let mut session =
-        create_session_with_fallback(model_path, SessionOptions::new("RawNIND linear"))?;
+    let mut session = acquire_model_session(
+        AiModel::RawNindLinear,
+        model_path,
+        SessionOptions::new("RawNIND linear"),
+        ModelRetention::OneShot,
+    )?;
     let mut neutral = ExposureParams::scene_referred_default();
     neutral.ai_denoise_enabled = false;
     neutral.luminance_denoise = 0.0;
@@ -1088,10 +1085,9 @@ fn infer_linear(
             });
         }
     }
-    // The remaining Rec.2020-to-camera conversion is CPU-only and does not
-    // need the large RawNIND session to remain resident.
+    // The one-shot RawNIND session is gone before the remaining CPU-only
+    // Rec.2020-to-camera conversion.
     drop(session);
-    drop(model_guard);
 
     for pixel in stored.chunks_exact_mut(3) {
         let rec2020 = [
@@ -1370,12 +1366,12 @@ fn inverse3(matrix: Matrix3) -> Option<Matrix3> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bayer_rggb_origin, create_bayer_session, inverse3, load_result_cache, match_gain_tile,
-        mul3, reflect_index, remosaic_bayer_pixels, result_cache_path, run_model_tile,
-        save_result_cache, seam_weight, spawn_rawnind_denoise, AiDenoiseEvent, CORE_EDGE,
-        SRGB_TO_REC2020, TILE_EDGE,
+        bayer_rggb_origin, inverse3, load_result_cache, match_gain_tile, mul3, reflect_index,
+        remosaic_bayer_pixels, result_cache_path, run_model_tile, save_result_cache, seam_weight,
+        spawn_rawnind_denoise, AiDenoiseEvent, CORE_EDGE, SRGB_TO_REC2020, TILE_EDGE,
     };
-    use crate::execution_provider::{create_session_with_fallback, SessionOptions};
+    use crate::execution_provider::SessionOptions;
+    use crate::model_runtime::{acquire_model_session, AiModel, ModelRetention};
     use crate::pipeline::{
         build_proxy, AiDenoisedImage, CameraProfile, CfaKind, CompactPixelMap, ExposureParams,
         GpuParams, LoadedRaw, MaskStack, NoiseProfile, ProcessingQuality, ProxySpec,
@@ -1648,7 +1644,13 @@ mod tests {
         );
         let sha = crate::ai_masks::sha256_file_hex(&runtime).unwrap();
         crate::ai_masks::initialize_runtime(Some(&runtime), Some(&sha)).unwrap();
-        let mut session = create_bayer_session(&model_dir.join("model_bayer.onnx")).unwrap();
+        let mut session = acquire_model_session(
+            AiModel::RawNindBayer,
+            model_dir.join("model_bayer.onnx"),
+            SessionOptions::new("RawNIND Bayer"),
+            ModelRetention::OneShot,
+        )
+        .unwrap();
         let mut output =
             run_model_tile(&mut session, 4, vec![0.1; 4 * TILE_EDGE * TILE_EDGE], 1024).unwrap();
         match_gain_tile(&vec![0.1; 4 * TILE_EDGE * TILE_EDGE], &mut output).unwrap();
@@ -1668,9 +1670,11 @@ mod tests {
         );
         let sha = crate::ai_masks::sha256_file_hex(&runtime).unwrap();
         crate::ai_masks::initialize_runtime(Some(&runtime), Some(&sha)).unwrap();
-        let mut session = create_session_with_fallback(
+        let mut session = acquire_model_session(
+            AiModel::RawNindLinear,
             model_dir.join("model_linear.onnx"),
             SessionOptions::new("RawNIND linear"),
+            ModelRetention::OneShot,
         )
         .unwrap();
         let input = vec![0.1; 3 * TILE_EDGE * TILE_EDGE];

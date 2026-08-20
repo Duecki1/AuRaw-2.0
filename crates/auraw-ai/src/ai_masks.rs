@@ -1,8 +1,6 @@
-#[cfg(not(target_os = "android"))]
-use crate::execution_provider::try_lock_interactive_ai_model;
-use crate::execution_provider::{
-    create_session_with_fallback, lock_interactive_ai_model, CpuFallbackProfile, FallbackSession,
-    SessionOptions,
+use crate::execution_provider::{CpuFallbackProfile, FallbackSession, SessionOptions};
+use crate::model_runtime::{
+    with_model_session, AiModel, AiRuntimeContext, ModelRetention,
 };
 use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
 use crate::model_install::ModelInstallSpec;
@@ -18,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex, MutexGuard, OnceLock,
+        mpsc, Arc, Mutex, OnceLock,
     },
     time::Duration,
 };
@@ -177,103 +175,36 @@ const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 #[cfg(not(target_os = "android"))]
-static SESSION: OnceLock<Mutex<Option<(BiRefNetQuality, FallbackSession)>>> = OnceLock::new();
-#[cfg(not(target_os = "android"))]
-static VITMATTE_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
+static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
 static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
-#[cfg(not(target_os = "android"))]
-static AI_MASK_MODEL_CACHE_ENABLED: AtomicBool = AtomicBool::new(false);
 #[cfg(not(target_os = "android"))]
 type RuntimeProbeResult = (PathBuf, String);
 #[cfg(not(target_os = "android"))]
 static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLock::new();
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AiMaskModel {
-    Subject,
-    VitMatte,
-    SamEncoder,
-    SamDecoder,
+fn subject_model_id(quality: BiRefNetQuality) -> AiModel {
+    match quality {
+        BiRefNetQuality::Low => AiModel::BiRefNetLow,
+        BiRefNetQuality::Medium => AiModel::BiRefNetMedium,
+        BiRefNetQuality::High => AiModel::BiRefNetHigh,
+    }
 }
 
-#[cfg(not(target_os = "android"))]
-fn clear_cached_session<T>(cache: &OnceLock<Mutex<Option<T>>>, label: &str) -> Result<()> {
-    let Some(cache) = cache.get() else {
-        return Ok(());
-    };
-    let mut session = cache
-        .lock()
-        .map_err(|_| anyhow::anyhow!("{label} session lock was poisoned"))?;
-    *session = None;
-    Ok(())
-}
-
-pub(crate) fn unload_all_models_locked() -> Result<()> {
-    #[cfg(not(target_os = "android"))]
-    {
-        clear_cached_session(&SESSION, "BiRefNet")?;
-        clear_cached_session(&VITMATTE_SESSION, "ViTMatte")?;
-        clear_cached_session(&object::SAM_ENCODER_SESSION, "SAM encoder")?;
-        clear_cached_session(&object::SAM_DECODER_SESSION, "SAM decoder")?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "android"))]
-fn unload_other_models_locked(active: AiMaskModel) -> Result<()> {
-    if active != AiMaskModel::Subject {
-        clear_cached_session(&SESSION, "BiRefNet")?;
-    }
-    }
-    if active != AiMaskModel::VitMatte {
-        clear_cached_session(&VITMATTE_SESSION, "ViTMatte")?;
-    }
-    if active != AiMaskModel::SamEncoder {
-        clear_cached_session(&object::SAM_ENCODER_SESSION, "SAM encoder")?;
-    }
-    if active != AiMaskModel::SamDecoder {
-        clear_cached_session(&object::SAM_DECODER_SESSION, "SAM decoder")?;
-    }
-    Ok(())
-}
-
-fn prepare_model(active: AiMaskModel) -> Result<MutexGuard<'static, ()>> {
-    let guard = lock_interactive_ai_model();
-    #[cfg(not(target_os = "android"))]
-    unload_other_models_locked(active)?;
+fn mask_model_retention(cache_supported: bool) -> ModelRetention {
     #[cfg(target_os = "android")]
-    let _ = active;
-    Ok(guard)
-}
-
-#[cfg(not(target_os = "android"))]
-fn model_cache_enabled() -> bool {
-    AI_MASK_MODEL_CACHE_ENABLED.load(Ordering::Acquire)
-}
-
-/// Keep at most the active mask model cached while the Masking tab is visible.
-/// Disabling the cache never waits on an in-flight native inference; that
-/// inference observes the flag before releasing the shared model gate and drops
-/// its session then.
-pub fn set_model_cache_enabled(enabled: bool) {
+    {
+        let _ = cache_supported;
+        ModelRetention::OneShot
+    }
     #[cfg(not(target_os = "android"))]
     {
-        AI_MASK_MODEL_CACHE_ENABLED.store(enabled, Ordering::Release);
-        if !enabled {
-            // Retry on every policy synchronization. This closes the narrow
-            // race where inference checked the flag just before the UI left the
-            // tab, while the UI's first non-blocking gate attempt still saw the
-            // inference as active.
-            if let Some(_guard) = try_lock_interactive_ai_model() {
-                if let Err(error) = unload_all_models_locked() {
-                    log::warn!("could not unload cached AI-mask models: {error:#}");
-                }
-            }
+        if cache_supported {
+            ModelRetention::Interactive(AiRuntimeContext::Masks)
+        } else {
+            ModelRetention::OneShot
         }
     }
-    #[cfg(target_os = "android")]
-    let _ = enabled;
 }
 
 #[derive(Debug)]
@@ -571,16 +502,19 @@ fn running_from_appimage() -> bool {
     std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some()
 }
 
-#[cfg(not(target_os = "android"))]
 fn cache_object_ai_sessions() -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "android")]
+    {
+        false
+    }
+    #[cfg(all(not(target_os = "android"), target_os = "linux"))]
     {
         // AppImages frequently use a user-selected external ONNX Runtime. Do
-        // not retain even the one active object-mask session between calls;
-        // each temporary session still gets the full GPU -> CPU fallback.
+        // not retain object-mask/matting sessions between calls; each temporary
+        // session still gets the full GPU -> CPU fallback.
         !running_from_appimage()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "android"), not(target_os = "linux")))]
     {
         true
     }
@@ -638,46 +572,13 @@ fn infer_subject(
     ))
     .context("create BiRefNet input tensor")?;
 
-    #[cfg(target_os = "android")]
-    let (output_width, output_height, logits) = {
-        let _model_guard = prepare_model(AiMaskModel::Subject)?;
-        // Mobile memory is more important than avoiding session startup. Drop
-        // all model weights and allocator state immediately after inference.
-        let mut session =
-            create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?;
-        run_subject_session(&mut session, input, model.input_width, model.input_height)?
-    };
-
-    #[cfg(not(target_os = "android"))]
-    let (output_width, output_height, logits) = {
-        let _model_guard = prepare_model(AiMaskModel::Subject)?;
-        let sessions = SESSION.get_or_init(|| Mutex::new(None));
-        let mut guard = sessions
-            .lock()
-            .map_err(|_| anyhow::anyhow!("BiRefNet session lock was poisoned"))?;
-        if guard
-            .as_ref()
-            .is_none_or(|(cached_quality, _)| *cached_quality != quality)
-        {
-            // A quality change selects a different BiRefNet checkpoint. Drop
-            // the old tier before constructing the new session so even two
-            // variants of the same mask family never overlap in memory.
-            *guard = None;
-            let session =
-                create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?;
-            *guard = Some((quality, session));
-        }
-        let result = {
-            let (_, session) = guard.as_mut().ok_or_else(|| {
-                anyhow::anyhow!("BiRefNet session initialization produced no session")
-            })?;
-            run_subject_session(session, input, model.input_width, model.input_height)
-        };
-        if !model_cache_enabled() {
-            *guard = None;
-        }
-        result?
-    };
+    let (output_width, output_height, logits) = with_model_session(
+        subject_model_id(quality),
+        model_path,
+        SessionOptions::new("BiRefNet"),
+        mask_model_retention(true),
+        |session| run_subject_session(session, input, model.input_width, model.input_height),
+    )?;
 
     // BiRefNet is itself a high-resolution dichotomous segmentation model and
     // its sigmoid output contains calibrated fractional coverage. Preserve it
@@ -795,29 +696,10 @@ fn validate_birefnet_output_shape(
         values,
     ))
 
-    #[cfg(target_os = "android")]
-    let (output_width, output_height, probabilities) = {
-        let mut session =
-    };
-
-    #[cfg(not(target_os = "android"))]
-    let (output_width, output_height, probabilities) = {
-        let mut guard = sessions
-            .lock()
-        if guard.is_none() {
-            *guard = Some(create_session_with_fallback(
-                model_path,
-            )?);
-        }
-        let result = {
-            let session = guard.as_mut().ok_or_else(|| {
-            })?;
-        };
-        if !model_cache_enabled() {
-            *guard = None;
-        }
-        result?
-    };
+    let (output_width, output_height, probabilities) = with_model_session(
+        model_path,
+        mask_model_retention(true),
+    )?;
 
     let coarse_mask =
         object::resize_probability_u8(&probabilities, output_width, output_height, width, height);
@@ -1143,43 +1025,13 @@ fn refine_mask_with_vitmatte(
     ))
     .context("create ViTMatte input tensor")?;
 
-    #[cfg(target_os = "android")]
-    let (output_width, output_height, alpha) = {
-        let _model_guard = prepare_model(AiMaskModel::VitMatte)?;
-        let mut session =
-            create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
-        run_vitmatte_session(&mut session, input)?
-    };
-    #[cfg(not(target_os = "android"))]
-    let (output_width, output_height, alpha) = {
-        let _model_guard = prepare_model(AiMaskModel::VitMatte)?;
-        if model_cache_enabled() && cache_object_ai_sessions() {
-            let sessions = VITMATTE_SESSION.get_or_init(|| Mutex::new(None));
-            let mut session = sessions
-                .lock()
-                .map_err(|_| anyhow::anyhow!("ViTMatte session lock was poisoned"))?;
-            if session.is_none() {
-                *session = Some(create_session_with_fallback(
-                    model_path,
-                    SessionOptions::new("ViTMatte"),
-                )?);
-            }
-            let result = run_vitmatte_session(
-                session
-                    .as_mut()
-                    .context("ViTMatte session initialization produced no session")?,
-                input,
-            );
-            if !model_cache_enabled() {
-                *session = None;
-            }
-            result?
-        } else {
-            let mut session =
-                create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
-            run_vitmatte_session(&mut session, input)?
-        }
-    };
+    let (output_width, output_height, alpha) = with_model_session(
+        AiModel::ViTMatte,
+        model_path,
+        SessionOptions::new("ViTMatte"),
+        mask_model_retention(cache_object_ai_sessions()),
+        |session| run_vitmatte_session(session, input),
+    )?;
 
     let alpha_image =
         ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, alpha)

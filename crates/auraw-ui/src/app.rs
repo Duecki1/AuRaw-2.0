@@ -1151,11 +1151,43 @@ fn collect_pipeline_update_results(
 }
 
 impl AurawApp {
-    pub(crate) fn sync_ai_model_cache_policy(&self) {
-        let develop_visible = self.ui.active_tab == AppTab::Develop;
-        crate::ai_masks::set_model_cache_enabled(
-            develop_visible && self.ui.sidebar_tab == SidebarTab::Masks,
-        );
+    pub(crate) fn sync_ai_model_runtime_context(&mut self) {
+        let context = if self.ui.active_tab == AppTab::Develop {
+            match self.ui.sidebar_tab {
+                SidebarTab::Masks => Some(auraw_ai::AiRuntimeContext::Masks),
+                SidebarTab::Inpainting => Some(auraw_ai::AiRuntimeContext::Remove),
+                SidebarTab::Adjustments | SidebarTab::Crop | SidebarTab::Export => None,
+            }
+        } else {
+            None
+        };
+        auraw_ai::set_active_ai_context(context);
+
+        // Leaving Remove cooperatively stops a pending multi-crop job. The
+        // runtime manager itself never waits here; an in-flight ONNX call keeps
+        // its session until it returns, then observes the context change and
+        // drops it at that safe point.
+        if context != Some(auraw_ai::AiRuntimeContext::Remove)
+            && self.inpaint.cancellation.is_some()
+        {
+            self.cancel_remove_processing();
+        }
+
+        // Ordinary interactive mask jobs use the existing foreground
+        // cancellation token when their UI context disappears. Library batch
+        // refresh is deliberately exempt because it is a non-interactive job.
+        if context != Some(auraw_ai::AiRuntimeContext::Masks)
+            && self.ai.library_mask_refresh.is_none()
+            && matches!(
+                self.foreground_operation_kind(),
+                Some(
+                    ForegroundOperationKind::SubjectMask
+                        | ForegroundOperationKind::ObjectMask
+                )
+            )
+        {
+            self.cancel_foreground_operation();
+        }
     }
 
     pub(crate) fn activate_tab(&mut self, tab: AppTab) {
@@ -1177,7 +1209,7 @@ impl AurawApp {
             self.ui.thumbnail_cache_size_receiver = None;
         }
         self.ui.active_tab = tab;
-        self.sync_ai_model_cache_policy();
+        self.sync_ai_model_runtime_context();
         #[cfg(target_os = "android")]
         crate::android::set_back_navigation_active(tab != AppTab::Library);
     }

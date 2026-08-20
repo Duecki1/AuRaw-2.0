@@ -294,7 +294,7 @@ impl eframe::App for AurawApp {
         // borrowing other app state. Reconcile the model policy once per frame
         // as well as in the ordinary tab handlers so every way of leaving an AI
         // tool promptly releases its cached session.
-        self.sync_ai_model_cache_policy();
+        self.sync_ai_model_runtime_context();
 
         #[cfg(not(target_os = "android"))]
         if self.ui.active_tab == AppTab::Develop {
@@ -372,7 +372,7 @@ impl eframe::App for AurawApp {
     }
 
     fn on_exit(&mut self) {
-        crate::ai_masks::set_model_cache_enabled(false);
+        auraw_ai::set_active_ai_context(None);
         #[cfg(target_os = "android")]
         if let Err(error) = crate::android::clear_background_task_notification(&self.android.android_app) {
             log::warn!("{error}");
