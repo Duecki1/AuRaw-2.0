@@ -1,3 +1,4 @@
+use super::brush::{sample_brush_stroke, STANDARD_BRUSH_MINIMUM_SPACING_FRACTION};
 use super::super::*;
 
 impl Preview {
@@ -35,77 +36,42 @@ impl Preview {
             let Some(pointer) = pointer else {
                 return;
             };
-            let source_uv = final_geometry_screen_to_native_source(
+            let Some(stroke) = sample_brush_stroke(
                 image_rect,
                 app.develop.geometry,
                 lens_geometry.as_deref(),
                 source_width,
                 source_height,
                 pointer,
-            );
-            let Some(uv) = editable_source_uv(source_uv) else {
-                app.inpaint.last_brush_uv = None;
-                return;
-            };
-            let dab_size = zoom_scaled_brush_size(
                 app.inpaint.brush_size,
                 app.preview.zoom,
                 app.preferences.image_relative_brush_size,
-            );
-            let radius_native = dab_size * source_width.min(source_height).max(1) as f32;
-            let radius_screen = geometry_brush_radius_screen(
-                image_rect,
-                app.develop.geometry,
-                lens_geometry.as_deref(),
-                source_width,
-                source_height,
-                uv,
-                dab_size,
-            );
-            let spacing_px = (radius_screen * 0.22).clamp(0.85, 24.0);
-            let first = app.inpaint.last_brush_uv.is_none();
-            let previous = app.inpaint.last_brush_uv.unwrap_or(uv);
-            let previous_screen = final_geometry_native_source_to_screen(
-                image_rect,
-                app.develop.geometry,
-                lens_geometry.as_deref(),
-                source_width,
-                source_height,
-                previous,
-            );
-            let distance_px = pointer.distance(previous_screen);
+                &mut app.inpaint.last_brush_uv,
+                STANDARD_BRUSH_MINIMUM_SPACING_FRACTION,
+            ) else {
+                return;
+            };
+            // Share only interaction sampling with Local Mask Brush. Remove
+            // stores native center/radius points and keeps its hard binary
+            // rasterizer; no feather, opacity, or flow state crosses this boundary.
+            let radius_native =
+                stroke.dab_size * source_width.min(source_height).max(1) as f32;
             let mut changed = false;
-            if first {
-                if app.inpaint.active_points.len() < crate::pipeline::REMOVE_MAX_POINTS_PER_STROKE {
-                    app.inpaint.active_points.push(crate::pipeline::RemoveBrushPoint {
-                        x: uv[0] * source_width as f32,
-                        y: uv[1] * source_height as f32,
-                        radius: radius_native,
-                    });
-                    changed = true;
+            for &sample_uv in &stroke.samples {
+                if app.inpaint.active_points.len()
+                    >= crate::pipeline::REMOVE_MAX_POINTS_PER_STROKE
+                {
+                    break;
                 }
-            } else if distance_px >= spacing_px * 0.80 {
-                let dx = uv[0] - previous[0];
-                let dy = uv[1] - previous[1];
-                let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
-                for step in 1..=steps {
-                    if app.inpaint.active_points.len()
-                        >= crate::pipeline::REMOVE_MAX_POINTS_PER_STROKE
-                    {
-                        break;
-                    }
-                    let t = step as f32 / steps as f32;
-                    let sample_uv = [previous[0] + dx * t, previous[1] + dy * t];
-                    app.inpaint.active_points.push(crate::pipeline::RemoveBrushPoint {
-                        x: sample_uv[0] * source_width as f32,
-                        y: sample_uv[1] * source_height as f32,
-                        radius: radius_native,
-                    });
-                    changed = true;
-                }
+                app.inpaint.active_points.push(crate::pipeline::RemoveBrushPoint {
+                    x: sample_uv[0] * source_width as f32,
+                    y: sample_uv[1] * source_height as f32,
+                    radius: radius_native,
+                });
+                changed = true;
             }
             if changed {
-                app.inpaint.last_brush_uv = Some(uv);
+                app.inpaint.last_brush_uv = Some(stroke.uv);
                 ui.ctx().request_repaint();
             }
             return;

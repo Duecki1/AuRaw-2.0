@@ -1100,6 +1100,7 @@ pub(crate) struct InpaintState {
     pub(crate) active_points: Vec<RemoveBrushPoint>,
     pub(crate) last_brush_uv: Option<[f32; 2]>,
     pub(crate) pending_brush: Option<RemoveBrushStroke>,
+    pub(crate) model_consent_open: bool,
     pub(crate) receiver: Option<mpsc::Receiver<RemoveEvent>>,
     pub(crate) cancellation: Option<Arc<AtomicBool>>,
     pub(crate) processing_label: Option<String>,

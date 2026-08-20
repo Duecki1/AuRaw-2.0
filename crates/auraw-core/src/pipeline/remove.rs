@@ -774,6 +774,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remove_brush_raster_is_hard_binary_before_dilation() {
+        let brush = RemoveBrushStroke {
+            points: vec![RemoveBrushPoint {
+                x: 32.0,
+                y: 24.0,
+                radius: 7.5,
+            }],
+            dilation_radius: 0,
+        };
+        let mask = rasterize_remove_brush(64, 48, &brush).unwrap();
+        assert!(mask.pixels.iter().all(|value| *value == 0 || *value == 255));
+        assert!(mask.pixels.iter().any(|value| *value == 255));
+        assert!(mask.pixels.iter().any(|value| *value == 0));
+    }
+
+    #[test]
     fn small_mask_gets_three_x_context_square() {
         let brush = RemoveBrushStroke {
             points: vec![RemoveBrushPoint {

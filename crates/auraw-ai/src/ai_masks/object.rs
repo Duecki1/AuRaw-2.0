@@ -38,6 +38,16 @@ const SAM_DOWNLOAD: DownloadOptions = DownloadOptions {
     attempts: 5,
     resume: true,
 };
+pub(super) const SAM21_ENCODER_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: SAM21_ENCODER_ARTIFACT,
+    download: SAM_DOWNLOAD,
+    progress_label: "SAM 2.1 encoder",
+};
+pub(super) const SAM21_DECODER_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: SAM21_DECODER_ARTIFACT,
+    download: SAM_DOWNLOAD,
+    progress_label: "SAM 2.1 decoder",
+};
 const MAX_OBJECT_MASK_PIXELS: u64 = 17_000_000;
 
 #[cfg(not(target_os = "android"))]
@@ -96,11 +106,7 @@ pub struct ObjectMaskResult {
 
 #[derive(Debug)]
 pub enum ObjectMaskEvent {
-    DownloadProgress {
-        label: &'static str,
-        downloaded: u64,
-        total: u64,
-    },
+    DownloadProgress(ModelDownloadProgress),
     Inferencing {
         decoder_only: bool,
     },
@@ -111,6 +117,7 @@ pub fn spawn_object_mask(
     encoder_path: PathBuf,
     decoder_path: PathBuf,
     vitmatte_path: PathBuf,
+    allow_download: bool,
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
     request: ObjectMaskRequest,
@@ -125,23 +132,26 @@ pub fn spawn_object_mask(
                 (|| {
                     ensure_sam_model(
                         &encoder_path,
-                        SAM21_ENCODER_ARTIFACT,
+                        SAM21_ENCODER_INSTALL,
+                        allow_download,
                         &worker_sender,
                         &cancellation,
                     )?;
                     ensure_sam_model(
                         &decoder_path,
-                        SAM21_DECODER_ARTIFACT,
+                        SAM21_DECODER_INSTALL,
+                        allow_download,
                         &worker_sender,
                         &cancellation,
                     )?;
-                    ensure_vitmatte_model(&vitmatte_path, &cancellation, |downloaded, total| {
-                        let _ = worker_sender.send(ObjectMaskEvent::DownloadProgress {
-                            label: "ViTMatte edge-refinement model",
-                            downloaded,
-                            total,
-                        });
-                    })?;
+                    ensure_vitmatte_model(
+                        &vitmatte_path,
+                        allow_download,
+                        &cancellation,
+                        |progress| {
+                            let _ = worker_sender.send(ObjectMaskEvent::DownloadProgress(progress));
+                        },
+                    )?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let decoder_only = request.cache.is_some();
                     let _ = worker_sender.send(ObjectMaskEvent::Inferencing { decoder_only });
@@ -179,20 +189,16 @@ pub fn spawn_object_mask(
 
 fn ensure_sam_model(
     path: &Path,
-    artifact: ModelArtifact,
+    install: ModelInstallSpec,
+    allow_download: bool,
     events: &mpsc::Sender<ObjectMaskEvent>,
     cancellation: &AtomicBool,
 ) -> Result<()> {
-    ensure_artifact(
+    install.ensure_installed(
         path,
-        artifact,
-        SAM_DOWNLOAD,
-        |downloaded, total| {
-            let _ = events.send(ObjectMaskEvent::DownloadProgress {
-                label: artifact.name,
-                downloaded,
-                total,
-            });
+        allow_download,
+        |progress| {
+            let _ = events.send(ObjectMaskEvent::DownloadProgress(progress));
         },
         || ensure_ai_not_cancelled(cancellation),
     )

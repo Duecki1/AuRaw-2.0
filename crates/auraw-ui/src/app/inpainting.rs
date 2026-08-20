@@ -9,6 +9,7 @@ impl InpaintState {
         self.active_points.clear();
         self.last_brush_uv = None;
         self.pending_brush = None;
+        self.model_consent_open = false;
         self.receiver = None;
         self.processing_label = None;
         self.hovered_stroke = None;
@@ -16,7 +17,7 @@ impl InpaintState {
     }
 
     pub(crate) fn processing(&self) -> bool {
-        self.receiver.is_some()
+        self.receiver.is_some() || self.model_consent_open
     }
 }
 
@@ -31,6 +32,7 @@ impl AurawApp {
         }
         self.inpaint.receiver = None;
         self.inpaint.pending_brush = None;
+        self.inpaint.model_consent_open = false;
         self.inpaint.active_points.clear();
         self.inpaint.last_brush_uv = None;
         self.inpaint.processing_label = None;
@@ -45,6 +47,7 @@ impl AurawApp {
         }
         self.inpaint.receiver = None;
         self.inpaint.pending_brush = None;
+        self.inpaint.model_consent_open = false;
         self.inpaint.processing_label = None;
         self.inpaint.active_points.clear();
         self.inpaint.last_brush_uv = None;
@@ -79,6 +82,7 @@ impl AurawApp {
         frame: &eframe::Frame,
         existing: RemoveEditState,
         brush: RemoveBrushStroke,
+        allow_download: bool,
     ) -> bool {
         let Some(raw) = self.develop.loaded_raw.as_ref().cloned() else {
             self.ui.notice = Some("Open a RAW image before using Remove.".to_owned());
@@ -99,6 +103,7 @@ impl AurawApp {
             existing,
             brush: brush.clone(),
             model_path: self.big_lama_model_path(),
+            allow_download,
             runtime_path: self.ai.runtime_path.clone(),
             runtime_sha256: self.ai.runtime_sha256.clone(),
             tone_statistics: None,
@@ -117,8 +122,91 @@ impl AurawApp {
         if self.inpaint.processing() || brush.points.is_empty() {
             return;
         }
-        let existing = self.inpaint.edits.as_ref().clone();
-        let _ = self.start_remove_request(frame, existing, brush);
+        #[cfg(not(target_os = "android"))]
+        if !self.validate_onnx_runtime_for_ai() {
+            return;
+        }
+        let model_path = self.big_lama_model_path();
+        if crate::remove::big_lama_model_is_verified(&model_path) {
+            let existing = self.inpaint.edits.as_ref().clone();
+            let _ = self.start_remove_request(frame, existing, brush, false);
+        } else {
+            self.inpaint.pending_brush = Some(brush);
+            self.inpaint.model_consent_open = true;
+            self.egui_ctx.request_repaint();
+        }
+    }
+
+    pub(crate) fn show_remove_model_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        if !self.inpaint.model_consent_open {
+            return;
+        }
+        crate::ui::responsive_popup(
+            egui::Window::new("Download Remove model?"),
+            ctx,
+            520.0,
+        )
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("Remove uses the Big-LaMa Places2 ONNX inpainting model for local context repair.");
+            ui.label(format!(
+                concat!(
+                    "The first use downloads about {:.0} MB and stores the verified ONNX ",
+                    "file in AuRaw's shared model cache."
+                ),
+                crate::remove::BIG_LAMA_MODEL_BYTES as f64 / 1_000_000.0
+            ));
+            ui.label(format!(
+                "Model license: {}. Provenance: {}.",
+                crate::remove::BIG_LAMA_MODEL_LICENSE,
+                crate::remove::BIG_LAMA_MODEL_PROVENANCE
+            ));
+            ui.label("Inference is local. No photograph or Remove stroke is uploaded.");
+            ui.label(concat!(
+                "When you continue, your device connects directly to Hugging Face. Hugging Face ",
+                "receives connection data such as your IP address and request time under its privacy ",
+                "policy. AuRaw sends no account identifier or telemetry."
+            ));
+            ui.label(format!(
+                "AuRaw accepts only the pinned model after exact size and SHA-256 verification ({}).",
+                &crate::remove::BIG_LAMA_MODEL_SHA256_HEX[..12]
+            ));
+            ui.horizontal_wrapped(|ui| {
+                ui.hyperlink_to("Hugging Face privacy policy", "https://huggingface.co/privacy");
+                ui.separator();
+                ui.hyperlink_to("Big-LaMa ONNX model card", "https://huggingface.co/Carve/LaMa-ONNX");
+            });
+            #[cfg(not(target_os = "android"))]
+            if self.ai.runtime_path.is_none() {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Select a trusted local ONNX Runtime library in Settings before continuing.",
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Consent, download and continue").clicked()
+                    && self.ai_runtime_ready()
+                {
+                    self.inpaint.model_consent_open = false;
+                    if let Some(brush) = self.inpaint.pending_brush.take() {
+                        let existing = self.inpaint.edits.as_ref().clone();
+                        let _ = self.start_remove_request(frame, existing, brush, true);
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    self.inpaint.model_consent_open = false;
+                    self.inpaint.pending_brush = None;
+                    self.inpaint.last_brush_uv = None;
+                }
+            });
+        });
     }
 
     pub(crate) fn advance_remove_worker(&mut self, _frame: &eframe::Frame) {
@@ -136,14 +224,15 @@ impl AurawApp {
         }
         for event in events {
             match event {
-                RemoveEvent::DownloadProgress { downloaded, total } => {
-                    let fraction = if total == 0 {
+                RemoveEvent::DownloadProgress(progress) => {
+                    let fraction = if progress.total == 0 {
                         0.0
                     } else {
-                        downloaded as f64 / total as f64
+                        progress.downloaded as f64 / progress.total as f64
                     };
                     self.inpaint.processing_label = Some(format!(
-                        "Downloading Big-LaMa… {:.0}%",
+                        "Downloading {}… {:.0}%",
+                        progress.label,
                         (fraction * 100.0).clamp(0.0, 100.0)
                     ));
                 }
@@ -157,7 +246,7 @@ impl AurawApp {
                 RemoveEvent::Finished(result) => {
                     self.inpaint.receiver = None;
                     self.inpaint.cancellation = None;
-                    self.inpaint.pending_brush = None;
+                    let pending_brush = self.inpaint.pending_brush.take();
                     self.inpaint.processing_label = None;
                     match result {
                         Ok(stroke) => {
@@ -171,7 +260,14 @@ impl AurawApp {
                             self.ui.notice = Some("Remove applied.".to_owned());
                         }
                         Err(error) => {
-                            if !error.contains("cancelled") {
+                            if error.contains("consent to its download again") {
+                                self.inpaint.pending_brush = pending_brush;
+                                self.inpaint.model_consent_open = true;
+                                self.ui.notice = Some(
+                                    "Big-LaMa needs to be installed or re-verified before Remove can continue."
+                                        .to_owned(),
+                                );
+                            } else if !error.contains("cancelled") {
                                 self.ui.notice = Some(format!("Remove failed: {error}"));
                                 crate::diagnostics::record(format!("Big-LaMa Remove failed: {error}"));
                                 log::error!("Big-LaMa Remove failed: {error}");

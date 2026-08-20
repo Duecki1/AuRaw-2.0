@@ -4,9 +4,9 @@ use crate::execution_provider::{
     create_session_with_fallback, lock_interactive_ai_model, CpuFallbackProfile, FallbackSession,
     SessionOptions,
 };
-use crate::model_artifact::{
-    ensure_artifact, verify_artifact, ArtifactSize, DownloadOptions, ModelArtifact,
-};
+use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
+use crate::model_install::ModelInstallSpec;
+use crate::ModelDownloadProgress;
 use crate::pipeline::{LandscapeCategory, MaskImage};
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
@@ -72,13 +72,17 @@ pub struct BiRefNetModelSpec {
 }
 
 impl BiRefNetModelSpec {
-    fn artifact(self) -> ModelArtifact {
-        ModelArtifact {
-            name: self.checkpoint,
-            url: Some(self.url),
-            sha256: self.sha256_hex,
-            size: ArtifactSize::Exact(self.bytes),
-            progress_total: self.bytes,
+    fn install(self) -> ModelInstallSpec {
+        ModelInstallSpec {
+            artifact: ModelArtifact {
+                name: self.checkpoint,
+                url: Some(self.url),
+                sha256: self.sha256_hex,
+                size: ArtifactSize::Exact(self.bytes),
+                progress_total: self.bytes,
+            },
+            download: BIREFNET_DOWNLOAD,
+            progress_label: self.download_label,
         }
     }
 }
@@ -155,6 +159,11 @@ const LANDSCAPE_DOWNLOAD: DownloadOptions = DownloadOptions {
     attempts: 1,
     resume: false,
 };
+const LANDSCAPE_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: LANDSCAPE_ARTIFACT,
+    download: LANDSCAPE_DOWNLOAD,
+    progress_label: "MaskFormer landscape model",
+};
 
 const VITMATTE_ARTIFACT: ModelArtifact = ModelArtifact {
     name: "ViTMatte model",
@@ -169,6 +178,11 @@ const VITMATTE_DOWNLOAD: DownloadOptions = DownloadOptions {
     body_timeout: Duration::from_secs(30 * 60),
     attempts: 5,
     resume: true,
+};
+const VITMATTE_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: VITMATTE_ARTIFACT,
+    download: VITMATTE_DOWNLOAD,
+    progress_label: "ViTMatte edge-refinement model",
 };
 
 const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
@@ -308,11 +322,7 @@ pub fn set_model_cache_enabled(enabled: bool) {
 
 #[derive(Debug)]
 pub enum SubjectMaskEvent {
-    DownloadProgress {
-        label: &'static str,
-        downloaded: u64,
-        total: u64,
-    },
+    DownloadProgress(ModelDownloadProgress),
     Inferencing,
     Finished(Result<SubjectMaskResult, String>),
 }
@@ -337,11 +347,7 @@ impl SubjectMaskResult {
 
 #[derive(Debug)]
 pub enum LandscapeMaskEvent {
-    DownloadProgress {
-        label: &'static str,
-        downloaded: u64,
-        total: u64,
-    },
+    DownloadProgress(ModelDownloadProgress),
     Inferencing,
     Finished(Result<LandscapeMaskResult, String>),
 }
@@ -402,33 +408,20 @@ pub fn spawn_landscape_mask(
                         &model_path,
                         allow_download,
                         &cancellation,
-                        |downloaded, total| {
-                            let _ = worker_sender.send(LandscapeMaskEvent::DownloadProgress {
-                                label: "MaskFormer landscape model",
-                                downloaded,
-                                total,
-                            });
+                        |progress| {
+                            let _ = worker_sender
+                                .send(LandscapeMaskEvent::DownloadProgress(progress));
                         },
                     )?;
-                    if allow_download {
-                        ensure_vitmatte_model(
-                            &vitmatte_path,
-                            &cancellation,
-                            |downloaded, total| {
-                                let _ = worker_sender.send(
-                                    LandscapeMaskEvent::DownloadProgress {
-                                        label: "ViTMatte edge-refinement model",
-                                        downloaded,
-                                        total,
-                                    },
-                                );
-                            },
-                        )?;
-                    } else {
-                        verify_artifact(&vitmatte_path, VITMATTE_ARTIFACT).context(
-                            "the pinned ViTMatte landscape refiner is unavailable or invalid; consent to its download again",
-                        )?;
-                    }
+                    ensure_vitmatte_model(
+                        &vitmatte_path,
+                        allow_download,
+                        &cancellation,
+                        |progress| {
+                            let _ = worker_sender
+                                .send(LandscapeMaskEvent::DownloadProgress(progress));
+                        },
+                    )?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(LandscapeMaskEvent::Inferencing);
                     infer_landscape(LandscapeInferenceRequest {
@@ -468,46 +461,38 @@ fn ensure_landscape_model<F>(
     path: &Path,
     allow_download: bool,
     cancellation: &AtomicBool,
-    mut progress: F,
+    progress: F,
 ) -> Result<()>
 where
-    F: FnMut(u64, u64),
+    F: FnMut(ModelDownloadProgress),
 {
-    if !allow_download {
-        return verify_artifact(path, LANDSCAPE_ARTIFACT).map_err(|error| {
-            anyhow::anyhow!(
-                "the pinned MaskFormer model is unavailable or invalid ({error:#}); consent to its download again"
-            )
-        });
-    }
-    ensure_artifact(
-        path,
-        LANDSCAPE_ARTIFACT,
-        LANDSCAPE_DOWNLOAD,
-        &mut progress,
-        || ensure_ai_not_cancelled(cancellation),
-    )
+    LANDSCAPE_INSTALL.ensure_installed(path, allow_download, progress, || {
+        ensure_ai_not_cancelled(cancellation)
+    })
 }
 
 pub fn landscape_model_is_verified(path: &Path) -> bool {
-    verify_artifact(path, LANDSCAPE_ARTIFACT).is_ok()
+    LANDSCAPE_INSTALL.is_installed(path)
 }
 
 pub fn vitmatte_model_is_verified(path: &Path) -> bool {
-    verify_artifact(path, VITMATTE_ARTIFACT).is_ok()
+    VITMATTE_INSTALL.is_installed(path)
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
+pub fn birefnet_model_is_verified(quality: BiRefNetQuality, path: &Path) -> bool {
+    quality.model().install().is_installed(path)
+}
+
 pub fn object_models_are_verified(encoder: &Path, decoder: &Path, vitmatte: &Path) -> bool {
-    verify_artifact(encoder, object::SAM21_ENCODER_ARTIFACT).is_ok()
-        && verify_artifact(decoder, object::SAM21_DECODER_ARTIFACT).is_ok()
-        && verify_artifact(vitmatte, VITMATTE_ARTIFACT).is_ok()
+    object::SAM21_ENCODER_INSTALL.is_installed(encoder)
+        && object::SAM21_DECODER_INSTALL.is_installed(decoder)
+        && VITMATTE_INSTALL.is_installed(vitmatte)
 }
 
 pub struct SubjectMaskWorkerRequest {
     pub quality: BiRefNetQuality,
     pub model_path: PathBuf,
+    pub allow_download: bool,
     pub runtime_path: Option<PathBuf>,
     pub runtime_sha256: Option<String>,
     pub width: u32,
@@ -522,6 +507,7 @@ pub fn spawn_subject_mask(
     let SubjectMaskWorkerRequest {
         quality,
         model_path,
+        allow_download,
         runtime_path,
         runtime_sha256,
         width,
@@ -536,7 +522,13 @@ pub fn spawn_subject_mask(
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| {
                     ensure_ai_not_cancelled(&cancellation)?;
-                    ensure_model(quality, &model_path, &worker_sender, &cancellation)?;
+                    ensure_model(
+                        quality,
+                        &model_path,
+                        allow_download,
+                        &worker_sender,
+                        &cancellation,
+                    )?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
                     infer_subject(
@@ -575,20 +567,15 @@ pub fn spawn_subject_mask(
 fn ensure_model(
     quality: BiRefNetQuality,
     path: &Path,
+    allow_download: bool,
     events: &mpsc::Sender<SubjectMaskEvent>,
     cancellation: &AtomicBool,
 ) -> Result<()> {
-    let model = quality.model();
-    ensure_artifact(
+    quality.model().install().ensure_installed(
         path,
-        model.artifact(),
-        BIREFNET_DOWNLOAD,
-        |downloaded, total| {
-            let _ = events.send(SubjectMaskEvent::DownloadProgress {
-                label: model.download_label,
-                downloaded,
-                total,
-            });
+        allow_download,
+        |progress| {
+            let _ = events.send(SubjectMaskEvent::DownloadProgress(progress));
         },
         || ensure_ai_not_cancelled(cancellation),
     )
@@ -1383,17 +1370,18 @@ fn restore_birefnet_output(
         .collect())
 }
 
-fn ensure_vitmatte_model<F>(path: &Path, cancellation: &AtomicBool, progress: F) -> Result<()>
+fn ensure_vitmatte_model<F>(
+    path: &Path,
+    allow_download: bool,
+    cancellation: &AtomicBool,
+    progress: F,
+) -> Result<()>
 where
-    F: FnMut(u64, u64),
+    F: FnMut(ModelDownloadProgress),
 {
-    ensure_artifact(
-        path,
-        VITMATTE_ARTIFACT,
-        VITMATTE_DOWNLOAD,
-        progress,
-        || ensure_ai_not_cancelled(cancellation),
-    )
+    VITMATTE_INSTALL.ensure_installed(path, allow_download, progress, || {
+        ensure_ai_not_cancelled(cancellation)
+    })
 }
 
 #[derive(Clone, Copy, Debug)]

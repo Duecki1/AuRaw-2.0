@@ -53,7 +53,7 @@ impl AurawApp {
                             && self.ai_runtime_ready()
                         {
                             self.ai.subject_consent_open = false;
-                            self.start_subject_worker(self.birefnet_model_path());
+                            self.start_subject_worker(self.birefnet_model_path(), true);
                         }
                         if ui.button("Cancel").clicked() {
                             self.ai.subject_consent_open = false;
@@ -188,7 +188,7 @@ impl AurawApp {
                             self.ai.object_consent_open = false;
                             if let Some((mask_index, component_index)) = self.ai.object_pending_target.take() {
                                 let (encoder, decoder) = self.sam21_model_paths();
-                                self.start_object_worker(mask_index, component_index, encoder, decoder);
+                                self.start_object_worker(mask_index, component_index, encoder, decoder, true);
                             }
                         }
                         if ui.button("Cancel").clicked() {

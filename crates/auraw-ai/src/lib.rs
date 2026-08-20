@@ -17,6 +17,8 @@ pub mod ai_masks;
 pub mod execution_provider;
 pub mod remove;
 mod model_artifact;
+mod model_install;
+pub use model_install::ModelDownloadProgress;
 
 #[cfg(not(target_os = "android"))]
 pub use model_artifact::desktop_model_cache_root;
