@@ -1,5 +1,6 @@
-use crate::execution_provider::{
-    create_session_with_fallback, lock_interactive_ai_model, FallbackSession, SessionOptions,
+use crate::execution_provider::SessionOptions;
+use crate::model_runtime::{
+    with_model_session, AiModel, AiRuntimeContext, ModelRetention,
 };
 use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
 use crate::model_install::ModelInstallSpec;
@@ -19,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc,
     },
     time::Duration,
 };
@@ -33,8 +34,6 @@ pub const BIG_LAMA_MODEL_BYTES: u64 = 208_044_816;
 pub const BIG_LAMA_MODEL_LICENSE: &str = "Apache-2.0";
 pub const BIG_LAMA_MODEL_PROVENANCE: &str =
     "Carve/LaMa-ONNX port of the original PyTorch big-lama inpainting model";
-
-static BIG_LAMA_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
 
 const BIG_LAMA_ARTIFACT: ModelArtifact = ModelArtifact {
     name: "Big-LaMa Places2 ONNX",
@@ -272,49 +271,45 @@ fn infer_crop(
     ))
     .context("create Big-LaMa mask tensor")?;
 
-    let _interactive_guard = lock_interactive_ai_model();
-    let sessions = BIG_LAMA_SESSION.get_or_init(|| Mutex::new(None));
-    let mut guard = sessions
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Big-LaMa session lock was poisoned"))?;
-    if guard.is_none() {
-        *guard = Some(create_session_with_fallback(
-            model_path,
-            SessionOptions::new("Big-LaMa Remove"),
-        )?);
-    }
-    let session = guard.as_mut().context("Big-LaMa session is unavailable")?;
-    let output_values = session.run_with_fallback(
-        "Big-LaMa Remove ONNX inference",
-        |ort_session, _accelerated| {
-            let outputs = ort_session
-                .run(ort::inputs![&image_tensor, &mask_tensor])
-                .context("run Big-LaMa ONNX inference")?;
-            let output = outputs
-                .values()
-                .next()
-                .context("Big-LaMa returned no output tensor")?;
-            let (shape, values) = output
-                .try_extract_tensor::<f32>()
-                .context("read Big-LaMa output tensor")?;
-            anyhow::ensure!(
-                shape.as_ref()
-                    == [
-                        1,
-                        3,
-                        BIG_LAMA_INPUT_EDGE as i64,
-                        BIG_LAMA_INPUT_EDGE as i64,
-                    ],
-                "unexpected Big-LaMa output shape {shape:?}"
-            );
-            anyhow::ensure!(
-                values.len() == plane * 3 && values.iter().all(|value| value.is_finite()),
-                "Big-LaMa output tensor is invalid"
-            );
-            Ok(values.to_vec())
+    let output_values = with_model_session(
+        AiModel::BigLama,
+        model_path,
+        SessionOptions::new("Big-LaMa Remove"),
+        ModelRetention::Interactive(AiRuntimeContext::Remove),
+        |session| {
+            session.run_with_fallback(
+                "Big-LaMa Remove ONNX inference",
+                |ort_session, _accelerated| {
+                    let outputs = ort_session
+                        .run(ort::inputs![&image_tensor, &mask_tensor])
+                        .context("run Big-LaMa ONNX inference")?;
+                    let output = outputs
+                        .values()
+                        .next()
+                        .context("Big-LaMa returned no output tensor")?;
+                    let (shape, values) = output
+                        .try_extract_tensor::<f32>()
+                        .context("read Big-LaMa output tensor")?;
+                    anyhow::ensure!(
+                        shape.as_ref()
+                            == [
+                                1,
+                                3,
+                                BIG_LAMA_INPUT_EDGE as i64,
+                                BIG_LAMA_INPUT_EDGE as i64,
+                            ],
+                        "unexpected Big-LaMa output shape {shape:?}"
+                    );
+                    anyhow::ensure!(
+                        values.len() == plane * 3
+                            && values.iter().all(|value| value.is_finite()),
+                        "Big-LaMa output tensor is invalid"
+                    );
+                    Ok(values.to_vec())
+                },
+            )
         },
     )?;
-    drop(guard);
 
     let mut output_interleaved = vec![0.0f32; plane * 3];
     for index in 0..plane {

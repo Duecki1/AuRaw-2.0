@@ -465,7 +465,7 @@ impl Sidebar {
             app.develop_ui.white_balance_picker_drag = None;
         }
         if app.ui.sidebar_tab != previous {
-            app.sync_ai_model_cache_policy();
+            app.sync_ai_model_runtime_context();
         }
     }
 

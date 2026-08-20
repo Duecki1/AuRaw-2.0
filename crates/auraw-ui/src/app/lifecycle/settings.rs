@@ -33,7 +33,7 @@ impl AurawApp {
         auraw_ai::set_ai_acceleration_enabled(enabled);
         // Settings is outside Develop, so these calls unload any idle cached
         // sessions without waiting for a native inference that is winding down.
-        self.sync_ai_model_cache_policy();
+        self.sync_ai_model_runtime_context();
         self.persist_performance_settings();
         self.ui.notice = Some(if enabled {
             "AI GPU acceleration enabled. New AI model sessions will use it when available."
