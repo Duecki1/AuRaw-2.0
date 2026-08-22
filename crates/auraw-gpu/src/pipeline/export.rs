@@ -27,10 +27,6 @@ pub enum ExportFormat {
     Tiff,
 }
 
-/// Renders one native source crop at AuRaw's source-scene boundary. Existing
-/// Remove strokes are restored into that scene before readback, so a new
-/// Big-LaMa stroke sees the results of earlier strokes without baking any
-/// downstream Develop adjustment into its cache.
 pub fn render_remove_scene_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
     anyhow::ensure!(
         job.crop.width > 0 && job.crop.height > 0,
@@ -371,11 +367,6 @@ pub enum ExportEvent {
     Finished(Result<PathBuf, String>),
 }
 
-/// Owns one high-quality tiled export operation.
-///
-/// Keeping the resources and processing state together makes the worker
-/// boundary explicit and avoids threading the same argument list through each
-/// output format.
 pub struct TiledExportJob {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -392,9 +383,6 @@ pub struct TiledExportJob {
     pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
 
-/// One synchronous native-resolution developed crop render. Call this from a
-/// worker thread; it performs GPU readback and therefore intentionally blocks
-/// only that worker, never the egui event loop.
 pub struct DevelopedCropJob {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -508,11 +496,6 @@ pub fn render_developed_linear_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
         job.raw.width,
         job.raw.height,
     )?;
-    // Keep spatial work crop-local, but inherit the already-computed global
-    // tone anchors from the main preview when available. This follows the same
-    // Raw -> Tone -> inherit -> Output sequence as AuRaw's detail preview and
-    // prevents a local Remove context crop from solving a different exposure
-    // or dehaze anchor than the surrounding photograph.
     pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
     pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Tone);
     if let Some(tone_statistics) = job.tone_statistics.as_deref() {
@@ -549,9 +532,6 @@ impl ExportFormat {
     }
 }
 
-/// Runs an export on a worker thread. The source mosaic remains at native
-/// dimensions; the format-specific encoders share the same tiled linear render
-/// and publication/cancellation path.
 pub fn spawn_tiled_export(
     format: ExportFormat,
     job: TiledExportJob,
@@ -706,10 +686,6 @@ fn resolved_export_tile_spec(
     } else {
         tile_spec.halo.max(required_halo)
     };
-    // Do not enlarge the caller's tile. Android deliberately requests a 768 px
-    // core so full-resolution mask atlases and the tile pipeline fit together
-    // inside the mobile GPU budget. Promoting common edits to 1024 px made
-    // masked exports exceed that budget before the first tile was rendered.
     bounded_tile_spec(tile_spec, source_width)
 }
 
@@ -904,7 +880,6 @@ fn render_geometry_output<W: Write>(
 
         let linear_file = fs::File::open(staged_linear)
             .with_context(|| format!("open geometry linear raster {}", staged_linear.display()))?;
-        // SAFETY: the staged raster remains open and immutable for the mapping lifetime.
         let mapped = unsafe { memmap2::MmapOptions::new().map(&linear_file) }
             .with_context(|| format!("map geometry linear raster {}", staged_linear.display()))?;
         let source = validate_linear_rgb_raster(&mapped, request.raw.width, request.raw.height)?;
@@ -979,9 +954,6 @@ where
         "AI denoise is enabled but its full-resolution RawNIND result is not ready"
     );
     validate_export_dimensions(output_width, output_height)?;
-    // darktable's opposed chrominance is a whole-image measurement. Populate
-    // the source cache before padded tiles clone it so tile boundaries cannot
-    // change the reconstruction offset.
     if exposure.highlight_method == crate::pipeline::HighlightReconstructionMethod::InpaintOpposed
         || (raw.cfa_kind == CfaKind::XTrans
             && exposure.highlight_method == crate::pipeline::HighlightReconstructionMethod::Lch)
@@ -1096,7 +1068,6 @@ where
         .update_light_rays_mask_layers(queue, masks, raw.width, raw.height)
         .context("upload full-image Light Rays emission masks")?;
 
-    // Count each native source pixel once; exclude halo pixels from tone statistics.
     let tone_analysis_started = Instant::now();
     let mut tone_scratch = first_raw.clone();
     tile_pipeline.begin_export_tone_analysis(queue, device);
@@ -1144,7 +1115,6 @@ where
         plan.tile_count()
     ));
 
-    // Reuse one padded RAW allocation; queue uploads copy data before reuse.
     let mut tile_scratch = first_raw.clone();
 
     let total_tiles = plan.tile_count();
@@ -1235,8 +1205,6 @@ where
                 )
                 .with_context(|| format!("queue export tile readback {}", global_index + 1))?;
 
-            // Queue the next readback before consuming the previous one so GPU work
-            // overlaps CPU stitching, resizing, and encoding.
             let previous = pending_readback.replace((tile, global_index, readback));
             if let Some((previous_tile, previous_index, previous_readback)) = previous {
                 let rgb = previous_readback
@@ -1381,9 +1349,6 @@ fn tiff_ascii_entry(tag: u16, value: &str) -> Result<TiffEntry> {
     })
 }
 
-/// Chooses classic TIFF strips around 1 MiB. Keeping strips bounded improves
-/// decoder locality and error recovery while preserving AuRaw's row-streamed,
-/// constant-memory export path. The final strip is allowed to be shorter.
 fn tiff_strip_layout(width: u32, height: u32, bits_per_sample: u16) -> Result<(u32, Vec<u32>)> {
     anyhow::ensure!(width > 0 && height > 0, "TIFF dimensions must be non-zero");
     anyhow::ensure!(
@@ -1445,9 +1410,6 @@ fn write_tiff_header<W: Write>(
         .checked_mul(u64::from(request.output_height))
         .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
         .context("TIFF pixel byte count overflow")?;
-    // AuRaw's export dimension budget currently keeps even 32-bit RGB below
-    // classic TIFF's 4 GiB address space. Keep this explicit so a future budget
-    // increase fails safely instead of silently wrapping offsets.
     anyhow::ensure!(
         pixel_bytes <= u64::from(u32::MAX),
         "TIFF pixel data exceeds classic TIFF's 4 GiB limit"
@@ -1585,8 +1547,6 @@ fn write_tiff_header<W: Write>(
     let mut external_offsets = Vec::with_capacity(entries.len());
     for entry in &entries {
         if entry.data.len() > 4 {
-            // LONG/RATIONAL payloads benefit from natural 4-byte alignment and
-            // all TIFF readers accept this stricter form of the 2-byte baseline.
             cursor = cursor
                 .checked_add(3)
                 .map(|value| value & !3)
@@ -1921,10 +1881,6 @@ impl<'a> GeometryResampler<'a> {
 }
 
 fn geometry_filter_axes(jacobian: [[f32; 2]; 2]) -> GeometryFilterAxes {
-    // J columns are destination-pixel X/Y steps expressed in source space.
-    // C = J*J^T describes the source-space footprint. Clamp singular values
-    // below one source pixel so upscales reconstruct rather than sharpen into
-    // sub-pixel impulses; downscales widen the EWA footprint for anti-aliasing.
     let jx = jacobian[0];
     let jy = jacobian[1];
     let c00 = jx[0] * jx[0] + jy[0] * jy[0];
@@ -1999,10 +1955,6 @@ fn export_tiled_jpeg(
 ) -> Result<()> {
     let quality = quality.clamp(1, 100);
     with_temporary_export_path(request.path, |staged_rgb| {
-        // Render directly into a disk-backed RGB8 raster. This removes the old
-        // full PNG encode -> PNG decode -> RGB staging round trip while keeping
-        // peak Android heap use bounded. Geometry uses the same RGB staging
-        // destination after its shared linear resampling stage.
         {
             let rgb_file = OpenOptions::new()
                 .write(true)
@@ -2016,8 +1968,6 @@ fn export_tiled_jpeg(
 
         let rgb_file = fs::File::open(staged_rgb)
             .with_context(|| format!("open staged RGB raster {}", staged_rgb.display()))?;
-        // SAFETY: the file remains open and immutable for the lifetime of the
-        // read-only mapping; it is deleted only after JPEG encoding completes.
         let mapped = unsafe { memmap2::MmapOptions::new().map(&rgb_file) }
             .with_context(|| format!("map staged RGB raster {}", staged_rgb.display()))?;
 
@@ -2067,8 +2017,6 @@ fn encode_jpeg_rgb(request: JpegEncodeRequest<'_>) -> Result<()> {
     let mut writer = BufWriter::with_capacity(256 * 1024, file);
     let encode_started = Instant::now();
     let mut encoder = jpeg_encoder::Encoder::new(&mut writer, quality.clamp(1, 100));
-    // Preserve the previous encoder's 4:4:4 output. The faster encoder still
-    // uses its AVX2 path when available without lowering chroma resolution.
     encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_1_1);
     if let Some(profile) = icc_profile {
         encoder
@@ -2106,14 +2054,6 @@ struct OutputSampleWeight {
     weight: f32,
 }
 
-// Stage 3: output detail.
-//
-// Capture sharpening restores sensor/acutance detail and creative scale-space
-// shapes Texture/Clarity before the view transform. Delivery sharpening belongs
-// here, after resize/geometry, so its radius is exactly one final-output pixel.
-// Keeping it out of the adjustment shader modules prevents previews and
-// pre-resize exports
-// from using creative presence as a substitute for final-size crispness.
 struct FinalSizeOutputSharpen {
     width: u32,
     strength: f32,
@@ -2131,8 +2071,6 @@ impl FinalSizeOutputSharpen {
         let upscale = (output_width as f32 / source_width.max(1) as f32)
             .max(output_height as f32 / source_height.max(1) as f32)
             .max(1.0);
-        // Lanczos/EWA downsampling benefits from a little more final acutance;
-        // upscales get less to avoid emphasizing interpolation texture.
         let downsample_boost = (downsample.log2() / 3.0).clamp(0.0, 1.0);
         let upscale_reduction = ((upscale - 1.0) / 2.0).clamp(0.0, 1.0);
         let strength = (0.44 + 0.22 * downsample_boost) * (1.0 - 0.28 * upscale_reduction);
@@ -2245,8 +2183,6 @@ fn output_sharpen_linear_row(
         let d = rec2020_luminance(&bottom[center_start..center_start + 3]);
         let center_ev = c.log2();
 
-        // Edge-aware cross blur. Large luminance jumps contribute less, which
-        // keeps output sharpening from building bright/dark rims across edges.
         let mut weighted = c * 4.0;
         let mut weight_sum = 4.0;
         for neighbour in [l, r, u, d] {
@@ -2258,9 +2194,6 @@ fn output_sharpen_linear_row(
         let base = (weighted / weight_sum.max(1e-6)).max(1e-8);
         let detail_ev = center_ev - base.log2();
 
-        // Flat-field/shadow thresholding suppresses noise; real edges get a
-        // smooth selection boost. This stage is deliberately modest because it
-        // follows capture and creative detail rather than replacing them.
         let shadow = (1.0 - ((center_ev + 7.5) / 4.5).clamp(0.0, 1.0)).clamp(0.0, 1.0);
         let threshold = 0.0065 + 0.012 * shadow;
         let thresholded = detail_ev.signum() * (detail_ev.abs() - threshold).max(0.0);
@@ -2272,8 +2205,6 @@ fn output_sharpen_linear_row(
         let delta_ev = (thresholded * strength * edge_select).clamp(-0.16, 0.18);
         let proposed = c * 2.0f32.powf(delta_ev);
 
-        // Constrain overshoot to the local final-size neighbourhood. A 1.5%
-        // allowance retains crispness without visible light/dark halos.
         let local_min = c.min(l).min(r).min(u).min(d);
         let local_max = c.max(l).max(r).max(u).max(d);
         let target_luma = proposed.clamp(local_min * 0.985, local_max * 1.015);
@@ -2404,9 +2335,6 @@ impl LinearLightResizer {
                     *destination += *value * contribution.weight;
                 }
             }
-            // Contributions for a source row are ordered by output index. Do
-            // not flush a later row until its contribution from this source
-            // has actually been accumulated.
             self.write_ready_rows_through(
                 source_y,
                 contribution.output_index,
@@ -2551,8 +2479,6 @@ fn build_lanczos_contributions(source: u32, output: u32) -> Result<Vec<Vec<Sampl
     let support = 3.0 * filter_scale;
     for destination in 0..output {
         let center = (destination as f64 + 0.5) * scale - 0.5;
-        // Truncate to real source samples and renormalize. Iterating virtual
-        // clamped taps can be O(source^2) for extreme reductions.
         let first = ((center - support).floor() as i64 + 1).max(0);
         let last = ((center + support).ceil() as i64 - 1).min(i64::from(source) - 1);
         anyhow::ensure!(first <= last, "resize kernel contains no source samples");
@@ -2751,10 +2677,6 @@ fn checked_rgb_len(width: u32, height: u32) -> Result<usize> {
 
 fn validate_tile_spec(spec: TileSpec) -> Result<()> {
     let maximum_core = 1024;
-    // The focus-blur gather can add 144 pixels of support to the pre-existing
-    // worst-case creative chain. Ordinary edits still resolve to a much
-    // smaller dynamic halo; this ceiling only keeps fully stacked effects
-    // correct instead of rejecting them before GPU resource admission.
     let maximum_halo = 768;
     let scale = if cfg!(target_os = "android") { 8 } else { 4 };
     anyhow::ensure!(

@@ -153,10 +153,6 @@ impl Preview {
                         constrain_crop_aspect(app, crop, drag.handle)
                     };
                 }
-                // Do not merely clip the crop overlay against the rotated
-                // image. Clamp the actual crop rectangle to the last valid drag
-                // position so all four white crop corners remain over source
-                // pixels and the exported frame contains no pasteboard.
                 crop = app.develop.geometry.constrain_crop_drag_to_transformed_source(
                     drag.crop,
                     crop,
@@ -165,9 +161,6 @@ impl Preview {
                 );
                 if crop != app.develop.geometry.crop {
                     app.develop.geometry.crop = crop;
-                    // A manual crop becomes the new user intent. Future
-                    // straighten changes may auto-fit from this rectangle, but
-                    // must never expand beyond it.
                     app.develop_ui.crop_constraint_reference = Some(crop);
                     app.note_geometry_changed();
                 }
@@ -188,10 +181,6 @@ impl Preview {
         source_width: u32,
         source_height: u32,
     ) {
-        // Shade only real image pixels below, but allow the crop border stroke
-        // and handles to paint into the surrounding pasteboard. Clipping the
-        // painter to visible_rect cut off half of every edge handle whenever
-        // the crop touched an image boundary.
         let painter = ui.painter_at(overlay_clip_rect);
         let crop_rect =
             crop_preview_screen_rect(image_rect, app.develop.geometry, source_width, source_height);
@@ -199,11 +188,6 @@ impl Preview {
         if visible_crop.width() <= 0.0 || visible_crop.height() <= 0.0 {
             return;
         }
-        // Keep the crop mask on top of real image pixels only. Fine rotation
-        // and keystone can expose pasteboard inside the Crop workspace; shading
-        // that pasteboard makes the overlay look as if it extends beyond the
-        // photograph. Clip each outside-crop band against the transformed full-
-        // image quadrilateral instead.
         let image_polygon =
             crop_workspace_image_polygon(image_rect, app.develop.geometry, source_width, source_height);
         let shade = Color32::from_black_alpha(150);

@@ -1,7 +1,3 @@
-//! Mask effect catalog and persistent, non-destructive effect parameters.
-//!
-//! The catalog lives here because every effect participates in selection and
-//! serialization. Implementations with dedicated settings live in submodules.
 
 mod blur;
 mod edge_glow;
@@ -34,10 +30,6 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
-/// The operation driven by a mask group's combined coverage.
-///
-/// `MaskKind` describes how coverage is created (brush, gradient, subject,
-/// and so on); `MaskEffect` describes what that coverage does to the image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum MaskEffect {
     #[default]
@@ -107,8 +99,6 @@ impl MaskEffect {
         matches!(self, Self::Adjustment)
     }
 
-    /// Stable identifier packed into the GPU mask record. Zero is reserved for
-    /// the existing Adjustment path so older shader feature bits remain valid.
     pub const fn shader_id(self) -> u32 {
         match self {
             Self::Adjustment => 0,
@@ -137,8 +127,6 @@ pub enum MaskEffectCategory {
 }
 
 impl MaskEffectCategory {
-    /// Categories and their effects are intentionally alphabetized for the
-    /// two-level picker.
     pub const ALL: [Self; 4] = [
         Self::BlurAndFocus,
         Self::GlowAndLight,
@@ -156,8 +144,6 @@ impl MaskEffectCategory {
     }
 }
 
-/// Settings for every implemented effect. Each field stays independent so a
-/// type switch is reversible and never resets another effect's edit state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MaskEffectSettings {
     #[serde(default, skip_serializing_if = "is_default")]

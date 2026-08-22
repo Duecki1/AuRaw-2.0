@@ -1,9 +1,6 @@
 use eframe::egui;
 use std::sync::mpsc;
 
-/// Spawns a one-shot UI-owned worker and wakes egui after the result is ready.
-///
-/// This helper is for small picker/settings operations that return one value.
 pub(crate) fn spawn_ui_worker<T, F>(context: &egui::Context, work: F) -> mpsc::Receiver<T>
 where
     T: Send + 'static,
@@ -19,8 +16,6 @@ where
     receiver
 }
 
-/// Drains all currently available worker events, optionally stopping after a
-/// terminal event. The boolean reports whether the producer disconnected.
 pub(crate) fn drain_worker_events<T>(
     receiver: Option<&mpsc::Receiver<T>>,
     is_terminal: impl Fn(&T) -> bool,

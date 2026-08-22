@@ -3,7 +3,6 @@ use eframe::egui::{
     Vec2,
 };
 
-/// Layout dimensions.
 const DESKTOP_CONTROL_HEIGHT: f32 = 30.0;
 const ANDROID_CONTROL_HEIGHT: f32 = 40.0;
 pub const CONTROL_HEIGHT: f32 = platform_control_height(cfg!(target_os = "android"));
@@ -17,8 +16,77 @@ pub const TOOL_RAIL_ICON_EDGE: f32 = 40.0;
 pub const CARD_GAP: f32 = 10.0;
 pub const PANEL_TITLE_HEIGHT: f32 = 42.0;
 pub const PANEL_TITLE_TEXT_SIZE: f32 = 18.0;
+#[cfg(any(target_os = "android", test))]
 pub const FLOATING_ACTION_EDGE: f32 = platform_floating_action_edge(cfg!(target_os = "android"));
+#[cfg(any(target_os = "android", test))]
 pub const FLOATING_ACTION_MARGIN: f32 = 12.0;
+
+pub const ACCENT: Color32 = Color32::from_rgb(62, 142, 247);
+pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(115, 181, 255);
+pub const HYPERLINK: Color32 = Color32::from_rgb(99, 170, 255);
+pub const BORDER: Color32 = Color32::from_rgb(58, 62, 69);
+pub const SURFACE_PANEL: Color32 = Color32::from_rgb(24, 26, 29);
+pub const SURFACE_WINDOW: Color32 = Color32::from_rgb(29, 31, 35);
+pub const SURFACE_FAINT: Color32 = Color32::from_rgb(31, 34, 38);
+pub const SURFACE_EXTREME: Color32 = Color32::from_rgb(16, 18, 21);
+pub const SURFACE_WIDGET_INACTIVE: Color32 = Color32::from_rgb(39, 42, 47);
+pub const WIDGET_INACTIVE_STROKE: Color32 = Color32::from_rgb(63, 68, 76);
+pub const SURFACE_WIDGET_HOVERED: Color32 = Color32::from_rgb(51, 55, 62);
+pub const WIDGET_HOVERED_STROKE: Color32 = Color32::from_rgb(86, 94, 105);
+pub const SURFACE_WIDGET_OPEN: Color32 = Color32::from_rgb(48, 52, 59);
+pub const WIDGET_OPEN_STROKE: Color32 = Color32::from_rgb(82, 89, 100);
+pub const CANVAS_BACKDROP: Color32 = Color32::from_rgb(15, 16, 18);
+pub const THUMBNAIL_BACKDROP: Color32 = Color32::from_rgb(17, 18, 20);
+pub const STATUS_WARNING: Color32 = Color32::from_rgb(244, 142, 48);
+pub const MASK_ADD: Color32 = Color32::from_rgb(78, 163, 255);
+pub const MASK_SUBTRACT: Color32 = Color32::from_rgb(255, 105, 105);
+pub const DROP_TARGET: Color32 = Color32::from_rgb(225, 62, 62);
+pub fn inpaint_stroke_highlight() -> Color32 {
+    Color32::from_rgba_unmultiplied(255, 96, 78, 62)
+}
+
+pub fn inpaint_stroke_active() -> Color32 {
+    Color32::from_rgba_unmultiplied(255, 120, 84, 84)
+}
+pub const CHANNEL_RED: Color32 = Color32::from_rgb(238, 84, 84);
+pub const CHANNEL_GREEN: Color32 = Color32::from_rgb(92, 210, 116);
+pub const CHANNEL_BLUE: Color32 = Color32::from_rgb(88, 150, 245);
+
+pub const MASK_COMPONENT_COLORS: [Color32; 8] = [
+    MASK_ADD,
+    Color32::from_rgb(255, 116, 102),
+    Color32::from_rgb(83, 211, 146),
+    Color32::from_rgb(242, 192, 75),
+    Color32::from_rgb(183, 124, 255),
+    Color32::from_rgb(63, 207, 220),
+    Color32::from_rgb(255, 133, 196),
+    Color32::from_rgb(180, 205, 88),
+];
+
+pub const HSL_CHANNELS: [(&str, Color32); 8] = [
+    ("Red", Color32::from_rgb(232, 76, 82)),
+    ("Orange", Color32::from_rgb(238, 137, 48)),
+    ("Yellow", Color32::from_rgb(224, 193, 57)),
+    ("Green", Color32::from_rgb(75, 184, 101)),
+    ("Aqua", Color32::from_rgb(52, 184, 184)),
+    ("Blue", Color32::from_rgb(73, 130, 232)),
+    ("Purple", Color32::from_rgb(153, 94, 218)),
+    ("Magenta", Color32::from_rgb(219, 79, 163)),
+];
+
+pub const BRIGHTNESS_SHADOW: Color32 = Color32::from_gray(18);
+pub const BRIGHTNESS_MID: Color32 = Color32::from_gray(118);
+pub const BRIGHTNESS_HIGHLIGHT: Color32 = Color32::from_gray(245);
+pub const TEMPERATURE_COOL: Color32 = Color32::from_rgb(72, 128, 235);
+pub const TEMPERATURE_NEUTRAL: Color32 = Color32::from_gray(208);
+pub const TEMPERATURE_WARM: Color32 = Color32::from_rgb(244, 157, 62);
+pub const TINT_GREEN: Color32 = Color32::from_rgb(76, 181, 112);
+pub const TINT_NEUTRAL: Color32 = Color32::from_gray(202);
+pub const TINT_MAGENTA: Color32 = Color32::from_rgb(222, 84, 174);
+pub const COLORFULNESS_SHADOW: Color32 = Color32::from_gray(92);
+pub const COLORFULNESS_MID: Color32 = Color32::from_gray(178);
+pub const LUMINANCE_BLACK: Color32 = Color32::from_rgb(10, 10, 10);
+pub const LUMINANCE_WHITE: Color32 = Color32::from_rgb(246, 246, 246);
 
 const fn platform_control_height(android: bool) -> f32 {
     if android {
@@ -28,6 +96,7 @@ const fn platform_control_height(android: bool) -> f32 {
     }
 }
 
+#[cfg(any(target_os = "android", test))]
 const fn platform_floating_action_edge(android: bool) -> f32 {
     if android {
         52.0
@@ -44,18 +113,12 @@ pub fn tool_rail_icon_size() -> Vec2 {
     Vec2::splat(TOOL_RAIL_ICON_EDGE)
 }
 
-/// Apply the common rhythm used by top bars and panel headers.
 pub fn prepare_toolbar(ui: &mut Ui) {
     ui.set_min_height(TOOLBAR_HEIGHT);
-    // Keep the local style and explicit helper sizes in lockstep even when a
-    // caller installs a temporary style before constructing a toolbar.
     ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
 }
 
-/// Allocate a full-width row with a stable cross-axis center before adding any
-/// of its children. This prevents a compact label added first from establishing
-/// a different visual center than a trailing icon button.
 pub fn toolbar_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     let size = egui::vec2(ui.available_width().max(1.0), TOOLBAR_HEIGHT);
     ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
@@ -64,7 +127,6 @@ pub fn toolbar_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> I
     })
 }
 
-/// A borderless panel title with a stable vertical center and a flush divider.
 pub fn panel_title(ui: &mut Ui, title: impl Into<RichText>) -> InnerResponse<Response> {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -90,7 +152,6 @@ pub fn toolbar_frame(ui: &Ui) -> Frame {
         ))
 }
 
-/// A quiet, bordered surface for related settings and export controls.
 pub fn card_frame(ui: &Ui) -> Frame {
     Frame::new()
         .fill(ui.visuals().faint_bg_color)
@@ -102,9 +163,6 @@ pub fn card_frame(ui: &Ui) -> Frame {
         ))
 }
 
-/// Show a full-width card using the same surface treatment as Settings and
-/// Export. Editor tools should use this instead of open-coded `Frame`s so the
-/// padding, border, and background remain consistent as the theme evolves.
 pub fn content_card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     card_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -112,7 +170,6 @@ pub fn content_card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> 
     })
 }
 
-/// A content card with the standard compact section title.
 pub fn section_card<R>(
     ui: &mut Ui,
     title: impl Into<RichText>,
@@ -146,7 +203,6 @@ pub fn toolbar_button(ui: &mut Ui, label: impl Into<egui::WidgetText>, width: f3
     ui.add_sized([width, CONTROL_HEIGHT], egui::Button::new(label.into()))
 }
 
-/// A full-width, left-aligned selectable row for navigation trees and lists.
 pub fn navigation_row(
     ui: &mut Ui,
     label: impl Into<egui::WidgetText>,
@@ -162,8 +218,6 @@ pub fn navigation_row(
     )
 }
 
-/// Lay out related Settings actions with the same control height and wrapping
-/// rhythm on both desktop and narrow mobile panels.
 pub fn action_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
@@ -172,15 +226,14 @@ pub fn action_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> In
     })
 }
 
-/// Place a compact floating action inside the same inset used by AuRaw cards.
+#[cfg(any(target_os = "android", test))]
 pub fn floating_action_rect(bounds: egui::Rect) -> egui::Rect {
     let size = Vec2::splat(FLOATING_ACTION_EDGE);
     let inset = Vec2::splat(FLOATING_ACTION_MARGIN);
     egui::Rect::from_min_size(bounds.right_bottom() - inset - size, size)
 }
 
-/// A floating action that reuses the active button colors, stroke, and corner
-/// radius instead of introducing a separate circular Material-style control.
+#[cfg(target_os = "android")]
 pub fn floating_action_button(
     ui: &mut Ui,
     rect: egui::Rect,
@@ -207,9 +260,6 @@ pub fn floating_action_button(
     .on_hover_text(tooltip)
 }
 
-/// A consistent form row: descriptive label on the left, fixed-width control
-/// on the right. This avoids egui's default trailing ComboBox labels, which are
-/// difficult to scan when several settings are stacked vertically.
 pub fn form_combo(
     ui: &mut Ui,
     label: impl Into<egui::WidgetText>,
@@ -237,37 +287,36 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 
     let mut visuals = egui::Visuals::dark();
-    let accent = Color32::from_rgb(62, 142, 247);
-    let border = Color32::from_rgb(58, 62, 69);
+    let accent = ACCENT;
+    let border = BORDER;
 
-    visuals.panel_fill = Color32::from_rgb(24, 26, 29);
-    visuals.window_fill = Color32::from_rgb(29, 31, 35);
-    visuals.faint_bg_color = Color32::from_rgb(31, 34, 38);
-    visuals.extreme_bg_color = Color32::from_rgb(16, 18, 21);
+    visuals.panel_fill = SURFACE_PANEL;
+    visuals.window_fill = SURFACE_WINDOW;
+    visuals.faint_bg_color = SURFACE_FAINT;
+    visuals.extreme_bg_color = SURFACE_EXTREME;
     visuals.selection.bg_fill = accent;
     visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-    visuals.hyperlink_color = Color32::from_rgb(99, 170, 255);
+    visuals.hyperlink_color = HYPERLINK;
     visuals.window_stroke = Stroke::new(1.0, border);
     visuals.window_corner_radius = 7.0.into();
     visuals.menu_corner_radius = 6.0.into();
 
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
     visuals.widgets.noninteractive.corner_radius = 5.0.into();
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(39, 42, 47);
-    visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(39, 42, 47);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(63, 68, 76));
+    visuals.widgets.inactive.bg_fill = SURFACE_WIDGET_INACTIVE;
+    visuals.widgets.inactive.weak_bg_fill = SURFACE_WIDGET_INACTIVE;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, WIDGET_INACTIVE_STROKE);
     visuals.widgets.inactive.corner_radius = 5.0.into();
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(51, 55, 62);
-    visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(51, 55, 62);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(86, 94, 105));
+    visuals.widgets.hovered.bg_fill = SURFACE_WIDGET_HOVERED;
+    visuals.widgets.hovered.weak_bg_fill = SURFACE_WIDGET_HOVERED;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, WIDGET_HOVERED_STROKE);
     visuals.widgets.hovered.corner_radius = 5.0.into();
     visuals.widgets.active.bg_fill = accent;
     visuals.widgets.active.weak_bg_fill = accent;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(115, 181, 255));
-    visuals.widgets.active.corner_radius = 5.0.into();
-    visuals.widgets.open.bg_fill = Color32::from_rgb(48, 52, 59);
-    visuals.widgets.open.weak_bg_fill = Color32::from_rgb(48, 52, 59);
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, Color32::from_rgb(82, 89, 100));
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT_BRIGHT);
+    visuals.widgets.open.bg_fill = SURFACE_WIDGET_OPEN;
+    visuals.widgets.open.weak_bg_fill = SURFACE_WIDGET_OPEN;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0, WIDGET_OPEN_STROKE);
     visuals.widgets.open.corner_radius = 5.0.into();
     ctx.set_visuals(visuals);
 

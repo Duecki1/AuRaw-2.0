@@ -1,4 +1,3 @@
-//! Desktop sidecar paths and developed-thumbnail cache lifecycle.
 
 use super::SIDECAR_SUFFIX;
 #[cfg(not(target_os = "android"))]
@@ -13,16 +12,12 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Appends rather than replaces the RAW extension: `photo.CR3` becomes
-/// `photo.CR3.auraw`. Building from `OsString` preserves non-UTF-8 paths.
 pub fn sidecar_path_for_raw(raw_path: &Path) -> PathBuf {
     let mut path: OsString = raw_path.as_os_str().to_owned();
     path.push(SIDECAR_SUFFIX);
     PathBuf::from(path)
 }
 
-/// Places the developed preview in AuRaw's private per-user cache rather than
-/// creating hidden files beside the user's RAW library.
 #[cfg(not(target_os = "android"))]
 pub fn developed_thumbnail_path_for_raw(raw_path: &Path) -> PathBuf {
     crate::thumbnail_cache::desktop_cache_path_for_raw(raw_path, DEVELOPED_THUMBNAIL_SUFFIX)
@@ -49,9 +44,6 @@ pub(super) fn legacy_developed_thumbnail_fingerprint_path_for_raw(raw_path: &Pat
     )
 }
 
-/// Returns a stable fingerprint of the current edit sidecar. Thumbnail workers
-/// compare this before and after GPU readback so an older render can never
-/// overwrite the cache for a newer save.
 #[cfg(not(target_os = "android"))]
 pub fn desktop_sidecar_fingerprint(raw_path: &Path) -> Result<Option<u64>, String> {
     let path = sidecar_path_for_raw(raw_path);
@@ -68,8 +60,6 @@ pub fn desktop_sidecar_fingerprint(raw_path: &Path) -> Result<Option<u64>, Strin
         }
     };
 
-    // FNV-1a is deliberately simple and deterministic. This is an invalidation
-    // token, not a cryptographic integrity check.
     let mut fingerprint = 0xcbf2_9ce4_8422_2325u64;
     for byte in bytes {
         fingerprint ^= u64::from(byte);
@@ -78,10 +68,6 @@ pub fn desktop_sidecar_fingerprint(raw_path: &Path) -> Result<Option<u64>, Strin
     Ok(Some(fingerprint))
 }
 
-/// Loads a developed thumbnail only when it is newer than the RAW and its
-/// stored sidecar fingerprint exactly matches the current edit file. Missing or
-/// stale caches are regenerated from the RAW plus its sidecar by the library
-/// thumbnail worker before any unedited embedded preview is considered.
 #[cfg(not(target_os = "android"))]
 pub fn load_developed_thumbnail_cache(
     raw_path: &Path,
@@ -155,9 +141,6 @@ pub fn developed_thumbnail_cache_is_fresh(raw_path: &Path) -> Result<bool, Strin
         return Ok(false);
     }
 
-    // Hash the sidecar only after the cheap existence and timestamp checks.
-    // Missing/stale caches therefore never pay to read a potentially large
-    // sidecar containing raster masks.
     let cached_fingerprint = match fs::read_to_string(&fingerprint_path) {
         Ok(value) => match u64::from_str_radix(value.trim(), 16) {
             Ok(value) => value,
@@ -184,8 +167,6 @@ pub fn developed_thumbnail_cache_is_fresh(raw_path: &Path) -> Result<bool, Strin
     Ok(fresh)
 }
 
-/// Atomically stores a GPU-rendered thumbnail, but only if the sidecar still
-/// has the fingerprint that was current when the render began.
 #[cfg(not(target_os = "android"))]
 pub fn save_developed_thumbnail_cache(
     raw_path: &Path,
@@ -227,9 +208,6 @@ pub fn save_developed_thumbnail_cache(
     Ok(cache_path)
 }
 
-/// Copies a valid developed preview to a RAW whose sidecar has already been
-/// copied. The destination gets its own cache key and fingerprint, so later
-/// edits to either RAW invalidate only that RAW's preview.
 #[cfg(not(target_os = "android"))]
 pub fn copy_developed_thumbnail_cache(
     source_raw: &Path,

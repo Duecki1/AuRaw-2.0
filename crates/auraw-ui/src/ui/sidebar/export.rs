@@ -204,16 +204,9 @@ pub(crate) fn export_settings_controls(
 
 impl Sidebar {
     fn show_export(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        // Sidebar::show already reserves the scrollbar gutter. Use the actual
-        // remaining width directly so this column follows sidebar resizing
-        // without another inset or a fixed pixel width.
         let content_width = ui.available_width().max(1.0);
         let column_width = content_width;
 
-        // Export sizing is defined after non-destructive crop/orientation.
-        // Using the full RAW dimensions here made the sidebar disagree with the
-        // exporter (and could label a crop as a resize). Keep UI validation and
-        // displayed dimensions on the same geometry contract as export.rs.
         let source_dimensions = app.develop.loaded_raw
             .as_ref()
             .map(|raw| app.develop.geometry.crop_pixel_dimensions(raw.width, raw.height));
@@ -229,9 +222,6 @@ impl Sidebar {
             egui::vec2(column_width, 0.0),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                // This child UI is the single source of truth for horizontal
-                // sizing. Cards, progress, and actions all receive precisely
-                // the same available width.
                 ui.set_min_width(column_width);
                 ui.set_max_width(column_width);
                 export_settings_controls(

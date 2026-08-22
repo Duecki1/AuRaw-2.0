@@ -169,7 +169,6 @@ pub(super) fn show_ai_mask_refresh_progress(
     (minimize, cancel)
 }
 
-
 #[cfg(target_os = "android")]
 pub(super) fn show_android_library_folder_dialog(ui: &mut Ui, app: &mut AurawApp) {
     let mut close = false;

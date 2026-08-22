@@ -267,8 +267,6 @@ fn read_matrix_4x4(
     for row in 0..planes {
         out[row][..planes].copy_from_slice(&values[row * planes..row * planes + planes]);
     }
-    // Preserve an unused fourth plane when a normal three-channel profile is
-    // expanded into the fixed-size internal representation.
     if planes == 3 {
         out[3][3] = 1.0;
     }

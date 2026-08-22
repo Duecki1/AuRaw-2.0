@@ -1,6 +1,3 @@
-// Matrix-shaper ICC parsing is shared by TIFF input color management and the
-// Android display-profile fallback. Desktop LUT profiles can additionally fall
-// through to LCMS2 when they cannot be represented as a matrix + per-channel TRC.
 #![cfg_attr(test, allow(dead_code))]
 
 use super::*;
@@ -15,7 +12,6 @@ enum TransferCurve {
 
 impl TransferCurve {
     #[cfg(any(target_os = "android", test))]
-    /// ICC TRCs encode device -> PCS. Output conversion needs the inverse.
     fn inverse(&self, linear: f32) -> f32 {
         let target = linear.clamp(0.0, 1.0);
         match self {
@@ -124,9 +120,6 @@ impl MatrixShaperProfile {
     }
 
     fn parse_input(bytes: &[u8]) -> Result<Self> {
-        // RGB working-space profiles sometimes carry optional A2B/B2A tables in
-        // addition to authoritative matrix/TRC tags. For TIFF source conversion
-        // the matrix/TRC representation is sufficient and keeps Android native.
         Self::parse_impl(bytes, false)
     }
 
@@ -678,7 +671,6 @@ mod tests {
 
     #[test]
     fn input_matrix_profile_round_trips_linear_rec2020() {
-        // Rec.2020 D65 colorants adapted into the ICC D50 PCS.
         let device_to_pcs = [
             [0.673_515_44, 0.165_697_22, 0.125_083_01],
             [0.279_059_02, 0.675_318_06, 0.045_622_99],
@@ -816,7 +808,7 @@ fn windows_display_profile_path(
     }
 
     let [x, y] = screen_point.unwrap_or([0, 0]);
-    let monitor = unsafe { MonitorFromPoint(Point { x, y }, 2) }; // MONITOR_DEFAULTTONEAREST
+    let monitor = unsafe { MonitorFromPoint(Point { x, y }, 2) };
     if monitor.is_null() {
         return Ok(None);
     }

@@ -195,85 +195,17 @@ impl Sidebar {
         adjustment: &mut crate::pipeline::LocalAdjustments,
         selected_tab: &mut ToneCurveTab,
     ) -> bool {
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            let spacing = ui.spacing().item_spacing.x;
-            let segment_width =
-                ((ui.available_width() - crate::ui::theme::TOOLBAR_ICON_EDGE - spacing * 4.0)
-                    / 4.0)
-                    .max(32.0);
-            for (tab, label, color) in [
-                (ToneCurveTab::Rgb, "RGB", egui::Color32::WHITE),
-                (ToneCurveTab::Red, "R", egui::Color32::from_rgb(238, 84, 84)),
-                (
-                    ToneCurveTab::Green,
-                    "G",
-                    egui::Color32::from_rgb(92, 210, 116),
-                ),
-                (
-                    ToneCurveTab::Blue,
-                    "B",
-                    egui::Color32::from_rgb(88, 150, 245),
-                ),
-            ] {
-                if crate::ui::theme::segmented_button(
-                    ui,
-                    egui::RichText::new(label).color(color),
-                    *selected_tab == tab,
-                    segment_width,
-                )
-                .clicked()
-                {
-                    *selected_tab = tab;
-                }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::ui::icons::phosphor_icon_button(
-                    ui,
-                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                    crate::ui::theme::toolbar_icon_size(),
-                    "Reset the selected tone curve",
-                )
-                .clicked()
-                {
-                    match *selected_tab {
-                        ToneCurveTab::Rgb => adjustment.tone_curve.reset(),
-                        ToneCurveTab::Red => adjustment.tone_curve_red.reset(),
-                        ToneCurveTab::Green => adjustment.tone_curve_green.reset(),
-                        ToneCurveTab::Blue => adjustment.tone_curve_blue.reset(),
-                    }
-                    changed = true;
-                }
-            });
-        });
-        let (curve, color, description) = match *selected_tab {
-            ToneCurveTab::Rgb => (
-                &mut adjustment.tone_curve,
-                egui::Color32::WHITE,
-                "Composite luminance curve",
-            ),
-            ToneCurveTab::Red => (
-                &mut adjustment.tone_curve_red,
-                egui::Color32::from_rgb(238, 84, 84),
-                "Red channel curve",
-            ),
-            ToneCurveTab::Green => (
-                &mut adjustment.tone_curve_green,
-                egui::Color32::from_rgb(92, 210, 116),
-                "Green channel curve",
-            ),
-            ToneCurveTab::Blue => (
-                &mut adjustment.tone_curve_blue,
-                egui::Color32::from_rgb(88, 150, 245),
-                "Blue channel curve",
-            ),
-        };
-        ui.label(
-            egui::RichText::new(description)
-                .size(11.5)
-                .color(ui.visuals().weak_text_color()),
+        let changed = tone_curve_channel_editor(
+            ui,
+            ToneCurveChannels {
+                rgb: &mut adjustment.tone_curve,
+                red: &mut adjustment.tone_curve_red,
+                green: &mut adjustment.tone_curve_green,
+                blue: &mut adjustment.tone_curve_blue,
+            },
+            selected_tab,
+            32.0,
         );
-        changed |= tone_curve_editor(ui, curve, color);
         if changed {
             adjustment.sanitize_tone_curves();
         }

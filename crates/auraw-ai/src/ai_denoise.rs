@@ -1,7 +1,3 @@
-//! RawNIND UtNet2 model acquisition and tiled RAW inference.
-//!
-//! The downloaded `.dtmodel` package is the published darktable-ai 5.6 release
-//! asset. AuRaw pins both the archive and extracted ONNX graphs by SHA-256.
 
 use crate::execution_provider::{FallbackSession, SessionOptions};
 use crate::model_runtime::{acquire_model_session, AiModel, ModelRetention};
@@ -105,9 +101,6 @@ pub fn result_cache_path(root: &Path, source_identity: &str) -> PathBuf {
     root.join(format!("{}.auraw-ai.zip", hex::encode(digest.as_ref())))
 }
 
-/// Loads a source- and process-validated derived RawNIND scene. A missing file
-/// is an ordinary cache miss; malformed or stale files return an error so the
-/// caller can discard them and regenerate from the original RAW.
 pub fn load_result_cache(path: &Path, raw: &LoadedRaw) -> Result<Option<AiDenoisedImage>> {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -677,10 +670,6 @@ fn infer_bayer(
         .checked_mul(u64::from(raw.height))
         .and_then(|elements| usize::try_from(elements).ok())
         .context("RawNIND Bayer output dimensions overflow")?;
-    // Accumulate one denoised value per photosite. Keeping the model result as
-    // CFA until the interactive/export pipeline is the crucial contract: the
-    // full image is highlight-reconstructed and demosaicked only once, after
-    // all tiles have been blended, and those stages remain responsive to edits.
     let mut normalized_cfa = vec![0.0f32; output_elements];
     let mut session = acquire_model_session(
         AiModel::RawNindBayer,
@@ -806,8 +795,6 @@ fn infer_bayer(
             });
         }
     }
-    // RawNIND is one-shot in the common runtime manager, so its weights and
-    // execution-provider allocations are released before this CPU-only work.
     drop(session);
 
     fill_bayer_crop_edges(
@@ -819,12 +806,6 @@ fn infer_bayer(
         packed_width * 2,
         packed_height * 2,
     );
-    // RawNIND can regress a saturated photosite slightly below one. If that
-    // value replaced the sensor code verbatim, the downstream highlight stage
-    // would lose the fact that the channel clipped and could reveal a false
-    // pink/magenta model ratio when Exposure is reduced. Retain the original
-    // high-SNR shoulder, with a smooth neighbourhood guard around actual
-    // clipping. Noise reduction is preserved throughout shadows and midtones.
     const CLIP_THRESHOLD: f32 = 0.98;
     const HIGH_SNR_SHOULDER_START: f32 = 0.72;
     const CLIP_CORE_RADIUS: u8 = 4;
@@ -895,12 +876,6 @@ fn infer_bayer(
     AiDenoisedImage::new_bayer_cfa(raw.width, raw.height, stored)
 }
 
-/// RawNIND's Bayer graph produces three-channel camera RGB, but darktable's
-/// production path deliberately does not inject those channels directly into
-/// the scene. It selects the channel belonging to each CFA site, remosaics the
-/// result and runs the ordinary demosaic stage. Besides preserving the normal
-/// RAW pipeline contract, that step prevents small independent RGB edge
-/// offsets in the neural output from becoming visible colour fringes.
 #[cfg(test)]
 fn remosaic_bayer_pixels(
     model_rgb: &[f32],
@@ -1085,8 +1060,6 @@ fn infer_linear(
             });
         }
     }
-    // The one-shot RawNIND session is gone before the remaining CPU-only
-    // Rec.2020-to-camera conversion.
     drop(session);
 
     for pixel in stored.chunks_exact_mut(3) {
@@ -1185,8 +1158,6 @@ fn seam_ramp(distance: usize, overlap: usize) -> f32 {
     (distance as f32 + 0.5) / (2 * overlap) as f32
 }
 
-/// Weight for one axis of darktable's RawNIND overlap blend. Neighboring
-/// ramps sum to exactly one throughout the 2*overlap-wide seam.
 fn seam_weight(
     coordinate: usize,
     core_start: usize,
@@ -1453,7 +1424,6 @@ mod tests {
                 samples += 2;
             }
         }
-        // `samples` counts the two nearby gradients per seam gradient.
         let seam_mean = seam / (samples.max(1) as f64 * 0.5);
         let nearby_mean = nearby / samples.max(1) as f64;
         seam_mean / nearby_mean.max(1e-12)
@@ -1493,9 +1463,9 @@ mod tests {
     #[test]
     fn bayer_remosaic_selects_only_the_channel_at_each_rggb_site() {
         let model_rgb = [
-            0.1, 0.2, 0.3, 0.4, // R plane
-            0.5, 0.6, 0.7, 0.8, // G plane
-            0.9, 1.0, 0.4, 0.2, // B plane
+            0.1, 0.2, 0.3, 0.4,
+            0.5, 0.6, 0.7, 0.8,
+            0.9, 1.0, 0.4, 0.2,
         ];
         let (mosaic, cfa) = remosaic_bayer_pixels(&model_rgb, 2, [1.0; 3]).unwrap();
         let expected = [0.1f32, 0.6, 0.7, 0.2].map(|value| (value * 65_535.0).round() as u16);
@@ -1506,9 +1476,9 @@ mod tests {
     #[test]
     fn bayer_remosaic_reverses_model_daylight_white_balance() {
         let model_rgb = [
-            0.8, 0.8, 0.8, 0.8, // R plane
-            0.6, 0.6, 0.6, 0.6, // G plane
-            0.4, 0.4, 0.4, 0.4, // B plane
+            0.8, 0.8, 0.8, 0.8,
+            0.6, 0.6, 0.6, 0.6,
+            0.4, 0.4, 0.4, 0.4,
         ];
         let (mosaic, _) = remosaic_bayer_pixels(&model_rgb, 2, [2.0, 1.0, 4.0]).unwrap();
         let expected = [0.4f32, 0.6, 0.6, 0.1].map(|value| (value * 65_535.0).round() as u16);
@@ -1627,10 +1597,6 @@ mod tests {
         );
     }
 
-    /// Opt-in contract check for the pinned published graph. CI does not carry
-    /// native ONNX Runtime or optional model downloads, so maintainers can run:
-    /// `AURAW_RAWNIND_MODEL_DIR=... AURAW_ONNX_RUNTIME=... cargo test
-    /// raw_nind_published_bayer_graph_contract -- --ignored`.
     #[test]
     #[ignore]
     fn raw_nind_published_bayer_graph_contract() {

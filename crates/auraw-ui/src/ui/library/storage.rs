@@ -1,7 +1,5 @@
 use super::*;
 
-/// Convert shared Library assets to the platform-native adjustment target at the
-/// storage boundary. UI/action code above this module never branches on paths vs URIs.
 #[cfg(not(target_os = "android"))]
 pub(super) fn desktop_paths(assets: &[LibraryAsset]) -> Vec<PathBuf> {
     assets
@@ -21,7 +19,6 @@ pub(super) fn android_targets(assets: &[LibraryAsset]) -> Vec<(String, String)> 
         })
         .collect()
 }
-
 
 pub(super) fn reset_asset_adjustments(
     app: &mut AurawApp,
@@ -257,7 +254,6 @@ pub(super) fn preserve_imported_thumbnail(
     #[cfg(not(target_os = "android"))]
     {
         let _ = (asset, imported);
-        // Desktop copy_raw_bundle_to_folder already preserves the developed cache.
         Ok(())
     }
     #[cfg(target_os = "android")]

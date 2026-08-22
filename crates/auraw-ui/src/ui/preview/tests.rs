@@ -35,9 +35,6 @@ mod preview_overlay_tests {
         assert_eq!(region.source_y, 1598);
         assert_eq!(region.source_width, 604);
         assert_eq!(region.source_height, 804);
-        // The visible crop contains only 600x800 native pixels, so zooming it
-        // to a larger viewport must retain those native samples rather than
-        // rasterizing the entire 6000px frame into a 512px overlay.
         assert_eq!(region.texture_width, 604);
         assert_eq!(region.texture_height, 804);
     }

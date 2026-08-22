@@ -169,8 +169,6 @@ impl AurawApp {
         }
 
         let Some(render_state) = frame.wgpu_render_state() else {
-            // No GPU state exists to update yet; committing the logical profile is
-            // safe because each later pipeline install applies it before visibility.
             self.preferences.display_output_transform = transform;
             self.preferences.display_profile_label = label;
             self.preferences.display_profile_source = source;
@@ -203,9 +201,6 @@ impl AurawApp {
             ));
         }
         if let Err(error) = collect_pipeline_update_results("install display ICC LUT", updates) {
-            // Some buffers may already have received the new LUT, but no output
-            // dispatch occurs before this point. Restore the previous transform on
-            // every present pipeline and leave the logical profile/revision dirty.
             let mut rollbacks = Vec::new();
             if let Some(pipeline) = self.preview.gpu_pipeline.as_ref() {
                 rollbacks.push((
@@ -241,7 +236,6 @@ impl AurawApp {
             return;
         }
 
-        // Commit logical metadata only after every present pipeline accepted the LUT.
         self.preferences.display_output_transform = transform;
         self.preferences.display_profile_label = label;
         self.preferences.display_profile_source = source;

@@ -41,9 +41,6 @@ pub(super) fn linear_rotation_handle_geometry(
         midpoint_uv,
     );
 
-    // Use the local tangent of the *warped* gradient axis. The old code used
-    // the straight chord between transformed endpoints, which points in the
-    // wrong direction under nonlinear lens correction.
     let tangent_a_uv = [
         start[0] + (end[0] - start[0]) * 0.48,
         start[1] + (end[1] - start[1]) * 0.48,
@@ -539,12 +536,6 @@ pub(super) fn final_geometry_screen_to_source(
 }
 
 pub(super) fn editable_source_uv(uv: [f32; 2]) -> Option<[f32; 2]> {
-    // Geometry export samples from the full source image after defining the crop
-    // as an output frame. A rotated/sheared crop therefore often contains valid
-    // pixels whose source coordinates lie outside `geometry.crop`. Treat only
-    // coordinates outside the source image as pasteboard. The small tolerance
-    // absorbs inverse-transform floating-point noise at the exact image border,
-    // then clamps stored brush/color coordinates back into the canonical range.
     const EDGE_EPSILON: f32 = 1e-4;
     if !uv[0].is_finite()
         || !uv[1].is_finite()
@@ -973,9 +964,6 @@ pub(super) fn normalize_degrees(mut degrees: f32) -> f32 {
 }
 
 pub(super) fn nearest_straight_axis_degrees(angle: f32) -> f32 {
-    // Pick the nearest horizontal or vertical axis. Drawing left-to-right or
-    // right-to-left therefore produces the same correction, as does either
-    // direction along a vertical edge.
     (angle / 90.0).round() * 90.0
 }
 
@@ -1088,10 +1076,6 @@ pub(super) fn crop_rect_segments(rect: Rect) -> [(Pos2, Pos2); 4] {
 }
 
 pub(super) fn liang_barsky_clip_test(p: f32, q: f32, t0: &mut f32, t1: &mut f32) -> bool {
-    // Screen/source round-trips at crop boundaries can differ by a few ULPs as
-    // zoom changes. Treat nearly parallel segments and boundary coordinates
-    // with a normalized-source tolerance so an edge does not flicker between
-    // accepted and rejected at isolated zoom levels.
     const CLIP_EPSILON: f32 = 1.0e-5;
     if p.abs() <= CLIP_EPSILON {
         return q >= -CLIP_EPSILON;
@@ -1229,10 +1213,6 @@ pub(super) fn is_crop_corner(handle: CropHandle) -> bool {
     )
 }
 
-/// Constrains a corner drag to the selected aspect ratio while keeping the
-/// diagonally opposite corner fixed. The anchor comes from the crop at drag
-/// start, so clamping at an image boundary can never make the opposite corner
-/// wander under the pointer.
 pub(super) fn constrain_crop_corner_aspect(
     app: &AurawApp,
     original_crop: [f32; 4],
@@ -1257,9 +1237,6 @@ pub(super) fn constrain_crop_corner_aspect(
     let desired_width = (pointer[0] - anchor_x).abs();
     let desired_height = (pointer[1] - anchor_y).abs();
 
-    // Orthogonally project the pointer distance onto width/height pairs that
-    // satisfy width / height == normalized_ratio. This makes diagonal, mostly
-    // horizontal, and mostly vertical drags all feel continuous.
     let inv_ratio = 1.0 / normalized_ratio;
     let projected_width =
         (desired_width + desired_height * inv_ratio) / (1.0 + inv_ratio * inv_ratio);
@@ -1411,4 +1388,3 @@ pub(super) fn normalized_to_screen(rect: Rect, point: [f32; 2]) -> Pos2 {
         rect.top() + point[1] * rect.height(),
     )
 }
-

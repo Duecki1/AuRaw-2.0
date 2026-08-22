@@ -478,7 +478,6 @@ fn cropped_ai_mask_keeps_full_frame_feather_width() {
     }
 
     let full = stack.rasterize_layer(0, 128, 128, 128, 128);
-    // Partial-raster callers retain the shaping halo around the viewport.
     let cropped = stack.cropped_for_region(24, 24, 80, 80, 128, 128);
     let crop = cropped.rasterize_layer(0, 80, 80, 80, 80);
     for y in 0..80 {
@@ -713,8 +712,6 @@ fn shared_subject_refinement_updates_subject_and_background_as_exact_inverses() 
     let subject_after_subtract = stack.rasterize_layer(0, 32, 32, 32, 32);
     assert!(subject_after_subtract[16 * 32 + 16] < subject[16 * 32 + 16]);
 
-    // Replacing the raw BiRefNet result (for example after a quality-tier
-    // switch) must not consume or clear the shared refinement history.
     let regenerated = MaskImage::new(32, 32, vec![64; 32 * 32]).unwrap();
     for mask in &mut stack.masks {
         if let MaskGeometry::Ai { mask: target, .. } = &mut mask.components[0].geometry {

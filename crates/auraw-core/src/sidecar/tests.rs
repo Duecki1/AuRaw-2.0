@@ -64,8 +64,6 @@ fn copied_adjustments_respect_category_settings_and_mark_ai_masks_stale() {
 
     assert_eq!(destination.exposure, original_exposure);
     assert_eq!(destination.lens, original_lens);
-    // Merge mode preserves the destination's manual radial mask while
-    // replacing only the selected AI category.
     assert_eq!(destination.masks.masks.len(), 2);
     assert_eq!(
         destination.masks.masks[1].components[0].kind,
@@ -79,9 +77,6 @@ fn copied_uncached_ai_masks_are_still_marked_stale() {
     let mut source = default_edit_state();
     let mut source_masks = MaskStack::default();
     source_masks.add_mask(MaskKind::Subject);
-    // A generated bitmap is a cache. Pasted AI masks may not include one,
-    // but their semantic component still has to be regenerated for the
-    // destination image.
     assert!(matches!(
         &source_masks.masks[0].components[0].geometry,
         MaskGeometry::Ai { mask: None, .. }

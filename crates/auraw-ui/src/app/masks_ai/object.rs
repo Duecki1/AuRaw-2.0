@@ -28,8 +28,6 @@ impl AurawApp {
             return false;
         }
 
-        // The captured target snapshot and cancellation token make any in-flight
-        // result stale without requiring a feature-specific generation counter.
         if self.foreground_operation_is(ForegroundOperationKind::ObjectMask) {
             self.cancel_foreground_operation();
         }

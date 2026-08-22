@@ -58,11 +58,11 @@ impl Sidebar {
     }
 
     pub(super) fn submask_drop_placeholder(ui: &mut Ui) -> egui::Response {
-        use eframe::egui::{Align2, Color32, FontId, Stroke, StrokeKind};
+        use eframe::egui::{Align2, FontId, Stroke, StrokeKind};
 
         let (rect, response) =
             ui.allocate_exact_size(MaskCardSize::Submask.card_size(), egui::Sense::hover());
-        let red = Color32::from_rgb(225, 62, 62);
+        let red = crate::ui::theme::DROP_TARGET;
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 5.0, red.gamma_multiply(0.18));
         painter.rect_stroke(rect, 5.0, Stroke::new(2.0, red), StrokeKind::Inside);

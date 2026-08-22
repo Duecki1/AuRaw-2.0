@@ -1,4 +1,3 @@
-//! Output color-profile resolution and built-in matrix-shaper ICC generation.
 
 use super::super::RenderingIntent;
 use super::*;

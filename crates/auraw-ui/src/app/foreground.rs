@@ -6,9 +6,6 @@ fn try_install_foreground_operation(
     mut operation: ForegroundOperation,
 ) -> bool {
     if slot.is_some() {
-        // Every worker receives this token before it is spawned. If a future
-        // call site ever loses the UI-thread precheck, fail closed rather than
-        // letting an untracked second foreground worker keep running.
         operation.cancel();
         return false;
     }

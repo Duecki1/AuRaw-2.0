@@ -7,9 +7,6 @@ impl Sidebar {
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((1, 1));
 
-        // Match the compact action row used by the other Develop tabs. Touch
-        // friendliness is handled by egui's platform spacing and by the larger
-        // invisible crop handles in the preview, not by oversized visible widgets.
         crate::ui::theme::toolbar_row(ui, |ui| {
             ui.strong("Crop geometry");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -149,16 +146,10 @@ impl Sidebar {
                 || (app.develop.geometry.horizontal_transform - before.horizontal_transform).abs() > 1e-6
                 || (app.develop.geometry.vertical_transform - before.vertical_transform).abs() > 1e-6;
         if containment_transform_changed {
-            // Re-fit from the user's unconstrained crop rather than repeatedly
-            // shrinking the already-fitted result. This makes the white crop
-            // rectangle expand again when straighten/keystone is reduced.
             if let Some(reference) = app.develop_ui.crop_constraint_reference {
                 app.develop.geometry.crop = reference;
             }
         }
-        // Keep the crop rectangle itself inside the usable transformed image.
-        // Fine rotation and keystone otherwise expose pasteboard at the crop
-        // corners even though the overlay can be visually clipped there.
         app.develop.geometry
             .fit_crop_inside_transformed_source(source_dimensions.0, source_dimensions.1);
         if app.develop.geometry != before {

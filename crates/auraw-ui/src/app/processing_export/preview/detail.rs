@@ -1,9 +1,6 @@
 use super::*;
 
 impl AurawApp {
-    /// Schedules the high-density source crop. The base preview stays visible
-    /// while the CPU reduces the RAW region, so interaction never waits for a
-    /// sensor-sized proxy build.
     pub(in crate::app) fn advance_preview_detail(&mut self, _frame: &eframe::Frame) {
         let idle_delay = zoom_detail_idle_delay();
         if self.preview.zoom <= DETAIL_ZOOM_START {
@@ -12,8 +9,6 @@ impl AurawApp {
                     self.retire_egui_texture(texture_id);
                 }
             }
-            // Dropping the receiver invalidates an in-flight CPU result. The
-            // worker owns its inputs and can safely finish in the background.
             self.preview.detail_rebuild_receiver = None;
             self.preview.motion_at = None;
             self.preview.detail_pending_stage = None;
@@ -169,8 +164,6 @@ impl AurawApp {
         } = prepared;
         let [x0, y0] = source_origin;
         let [crop_width, crop_height] = source_size;
-        // Keep mask atlases in full-image coordinates to avoid double-applying
-        // crop offsets when a tile becomes the display texture.
         let virtual_full_width = ((detail_raw.width as f64 * full_raw.width as f64
             / crop_width.max(1) as f64)
             .round() as u32)

@@ -270,7 +270,6 @@ impl AurawApp {
             auraw_gpu::install_uncaptured_gpu_error_handler(&render_state.device);
         }
         crate::android::install_context(&cc.egui_ctx);
-        // Share AuRaw's palette, typography, icon font, and widget styling with
         crate::ui::theme::install(&cc.egui_ctx);
         match crate::android::device_diagnostics(&android_app) {
             Ok(info) => crate::diagnostics::set_device_info(info),

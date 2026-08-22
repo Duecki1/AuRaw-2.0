@@ -16,7 +16,6 @@ pub(in crate::app) fn aligned_detail_axis(
         ((max_uv.clamp(0.0, 1.0) * extent as f32).ceil() as u32).clamp(visible_start + 1, extent);
     let visible_len = visible_end - visible_start;
 
-    // Preserve spatial context around detail crops to prevent visible edge seams.
     let visible_detail_pixels =
         (viewport_pixels.max(1) as f32 * detail_pixel_scale.max(0.1)).max(1.0);
     let support_padding =
@@ -87,9 +86,6 @@ pub(in crate::app) fn navigation_mask_edge() -> u32 {
 }
 
 pub(in crate::app) fn detail_mask_edge() -> u32 {
-    // This atlas covers only the zoomed source region (plus the exact shaping
-    // halo), so it can match the viewport at much higher density without the
-    // enormous 32-layer allocation a full-frame 4K atlas would require.
     if cfg!(target_os = "android") { 1024 } else { 2048 }
 }
 
@@ -141,15 +137,9 @@ pub(in crate::app) fn mask_region_texture_extent(region: [u32; 4], max_edge: u32
     ]
 }
 
-/// Start a detailed crop for every real zoom level above fit. The previous
-/// 1.01 cutoff excluded an exact 101% zoom and, together with the former
-/// proxy-texel shortcut, kept the tiny navigation image visible until much deeper
-/// zoom levels.
 pub(super) const DETAIL_ZOOM_START: f32 = 1.0005;
 
 pub(in crate::app) fn zoom_detail_idle_delay() -> Duration {
-    // Wait only long enough to coalesce wheel/pinch events. A full second made
-    // the navigation proxy look like the final preview after zooming stopped.
     Duration::from_millis(if cfg!(target_os = "android") { 220 } else { 140 })
 }
 

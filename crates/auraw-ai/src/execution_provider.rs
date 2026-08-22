@@ -1,7 +1,3 @@
-//! ONNX Runtime execution-provider selection with automatic CPU fallback.
-//!
-//! All provider probing and recovery lives in `auraw-ai`; UI crates only need
-//! the lightweight diagnostics exposed by this module.
 
 use anyhow::{Context, Result};
 use ort::{
@@ -26,15 +22,8 @@ static AI_GPU_MEMORY_QUARANTINED: AtomicBool = AtomicBool::new(false);
 #[cfg(not(target_os = "android"))]
 static AI_GPU_MEMORY_FAILURE: AtomicBool = AtomicBool::new(false);
 
-/// Controls whether newly created desktop AI sessions may use GPU execution
-/// providers. Android keeps its platform defaults and does not expose this
-/// preference.
 #[cfg(not(target_os = "android"))]
 pub fn set_ai_acceleration_enabled(enabled: bool) {
-    // An explicit Settings change is the user's deliberate retry after an
-    // earlier memory failure. Merely polling the failure signal must not clear
-    // this quarantine; otherwise a second AI request could reach the renderer
-    // before the UI has made the failure visible.
     if enabled {
         AI_GPU_MEMORY_QUARANTINED.store(false, Ordering::Release);
         AI_GPU_MEMORY_FAILURE.store(false, Ordering::Release);
@@ -63,12 +52,6 @@ pub fn ai_acceleration_enabled() -> bool {
     }
 }
 
-/// Returns and clears an accelerated-ONNX memory failure.
-///
-/// A native execution provider shares VRAM with AuRaw's wgpu renderer but
-/// cannot report through wgpu error scopes. The UI consumes this edge-triggered
-/// signal before its next frame, cancels the AI operation, and releases
-/// optional render resources before egui submits more GPU work.
 #[cfg(not(target_os = "android"))]
 pub fn take_ai_gpu_memory_failure() -> bool {
     AI_GPU_MEMORY_FAILURE.swap(false, Ordering::AcqRel)
@@ -109,7 +92,6 @@ fn is_gpu_memory_failure(error: &anyhow::Error) -> bool {
             || message.contains("bfc_arena"))
 }
 
-/// Model storage used when a session must be rebuilt after a runtime EP failure.
 #[derive(Clone)]
 pub enum ModelSource {
     Path(PathBuf),
@@ -161,18 +143,13 @@ impl ModelSource {
     }
 }
 
-/// CPU settings used only if an accelerated session cannot be used.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CpuFallbackProfile {
     #[default]
     Default,
-    /// SAM 2.1's Hiera encoder has shown numerical instability with graph/layout
-    /// fusions in some third-party Windows CPU runtimes. GPU sessions use normal
-    /// optimizations; only the CPU recovery session uses these conservative flags.
     WindowsSamEncoder,
 }
 
-/// Options shared by initial session construction and any Tier-2 CPU rebuild.
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
     pub model_name: &'static str,
@@ -225,10 +202,6 @@ fn publish_status(model_name: &str, active_provider: &str, degraded: bool) {
     }
 }
 
-/// Returns the most recently observed backend for each logical AI model.
-///
-/// This is intentionally UI-agnostic. `auraw-ui` may render or copy the values
-/// into Settings > Diagnostics without importing ONNX Runtime itself.
 pub fn active_execution_providers() -> Vec<ExecutionProviderStatus> {
     provider_statuses()
         .lock()
@@ -242,13 +215,6 @@ struct ProviderCandidate {
     force_sequential: bool,
 }
 
-/// Adds an EP only when the selected ONNX Runtime actually advertises it.
-///
-/// `ort` features compile the Rust registration glue; they do *not* guarantee
-/// that a user-selected native runtime was built with the matching provider.
-/// Probing `GetAvailableProviders` first prevents AuRaw from asking, for
-/// example, a CUDA-only runtime to dlopen ROCm/TensorRT provider libraries that
-/// are not part of that distribution.
 fn push_if_runtime_available<E>(
     providers: &mut Vec<ProviderCandidate>,
     unavailable: &mut Vec<String>,
@@ -283,9 +249,6 @@ fn preferred_execution_providers() -> (Vec<ProviderCandidate>, Vec<String>) {
 
     #[cfg(target_os = "windows")]
     {
-        // DirectML is the widest-coverage Windows GPU path. Prefer CUDA next,
-        // with TensorRT last because it has stricter external dependencies and
-        // can have a much larger engine-build cost.
         push_if_runtime_available(
             &mut providers,
             &mut unavailable,
@@ -367,9 +330,6 @@ fn preferred_execution_providers() -> (Vec<ProviderCandidate>, Vec<String>) {
 }
 
 fn configure_common_builder(mut builder: SessionBuilder) -> Result<SessionBuilder> {
-    // Dynamic AI tensors can otherwise cause ORT to retain large shape-specific
-    // allocations. Keeping the memory pattern disabled matches AuRaw's existing
-    // mobile/CPU safety behavior and makes GPU -> CPU recovery less bursty.
     builder = builder
         .with_memory_pattern(false)
         .map_err(|error| anyhow::anyhow!("disable ONNX Runtime memory pattern: {error}"))?;
@@ -448,9 +408,6 @@ fn create_accelerated_session(
     commit_model(&mut builder, source)
 }
 
-/// A session that remembers how to reconstruct itself on CPU after a runtime
-/// accelerator failure. The wrapper remains `Send`/`Sync` whenever `ort::Session`
-/// does; inference still requires `&mut self`, matching ORT's thread-safety model.
 pub struct FallbackSession {
     session: Session,
     source: ModelSource,
@@ -461,7 +418,6 @@ pub struct FallbackSession {
 }
 
 impl FallbackSession {
-    /// Human-readable provider used by Settings > Diagnostics and logs.
     pub const fn active_execution_provider(&self) -> &'static str {
         self.active_provider
     }
@@ -474,10 +430,6 @@ impl FallbackSession {
         self.degraded
     }
 
-    /// Executes inference and transparently retries once on CPU if the current
-    /// accelerated session fails. The closure receives whether the current
-    /// attempt uses an accelerator and must be retryable; keep input tensors
-    /// available for a possible second CPU invocation.
     pub fn run_with_fallback<T, F>(&mut self, operation: &str, mut run: F) -> Result<T>
     where
         F: FnMut(&mut Session, bool) -> Result<T>,
@@ -535,9 +487,6 @@ impl FallbackSession {
     }
 }
 
-/// Creates an ONNX Runtime session using the target-specific accelerator
-/// priority list, then falls back to CPU if provider setup or model compilation
-/// fails. Runtime inference failures are handled by [`FallbackSession::run_with_fallback`].
 pub fn create_session_with_fallback(
     model: impl Into<ModelSource>,
     options: SessionOptions,

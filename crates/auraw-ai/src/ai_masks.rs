@@ -61,9 +61,6 @@ pub struct BiRefNetModelSpec {
     pub bytes: u64,
     pub sha256_hex: &'static str,
     pub cache_filename: &'static str,
-    /// ONNX tensors are NCHW. Lite-2K's pinned graph declares H=2560,
-    /// W=1440, matching the official checkpoint despite its conventional
-    /// "2560 x 1440" resolution label.
     pub input_width: u32,
     pub input_height: u32,
     pub explanation: &'static str,
@@ -96,10 +93,6 @@ impl BiRefNetQuality {
         }
     }
 
-    /// Medium and High BiRefNet have fixed 2K-class transformer inputs. Their
-    /// activation peaks can consume several GiB, which is unsafe beside the
-    /// interactive wgpu renderer even when the model itself fits in VRAM.
-    /// Keep them on CPU; Low remains available for GPU acceleration.
     pub const fn requires_cpu_to_protect_interactive_gpu(self) -> bool {
         matches!(self, Self::Medium | Self::High)
     }
@@ -174,8 +167,6 @@ const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
     attempts: 1,
     resume: false,
 };
-// probabilities are normally sparse; keeping them sparse avoids evaluating all
-// 150 classes for every query and pixel while preserving semantic argmaxes.
 const VITMATTE_MAX_EDGE_ANDROID: u32 = 1024;
 const VITMATTE_SIZE_DIVISOR: u32 = 32;
 
@@ -212,31 +203,6 @@ fn mask_model_retention(cache_supported: bool) -> ModelRetention {
         } else {
             ModelRetention::OneShot
         }
-    }
-}
-
-#[derive(Debug)]
-pub enum SubjectMaskEvent {
-    DownloadProgress(ModelDownloadProgress),
-    Inferencing,
-    Finished(Result<SubjectMaskResult, String>),
-}
-
-#[derive(Debug)]
-pub struct SubjectMaskResult {
-    pub width: u32,
-    pub height: u32,
-    pub mask: Vec<u8>,
-}
-
-impl SubjectMaskResult {
-    /// Converts BiRefNet output into the raw shared subject-probability image.
-    /// Subject refinement deliberately stays outside inference: `MaskStack`
-    /// composites its persisted delta at atlas raster time, so regenerating or
-    /// switching quality tiers can replace this raw probability map without
-    /// destroying the user's refinement history.
-    pub fn into_probability_mask(self) -> Option<MaskImage> {
-        MaskImage::new(self.width, self.height, self.mask)
     }
 }
 
@@ -462,14 +428,6 @@ pub fn initialize_runtime(
     Ok(())
 }
 
-/// Returns the verified runtime path and its SHA-256.
-///
-/// Do not load ONNX Runtime through `/proc/self/fd/<n>` on Linux. ONNX Runtime
-/// discovers dynamically-loaded execution-provider libraries relative to the
-/// path of `libonnxruntime.so`. A memfd path therefore makes it look for
-/// siblings such as `libonnxruntime_providers_shared.so` under `/proc/self/fd/`,
-/// which can never work. Load the canonical on-disk library instead so provider
-/// discovery stays anchored to the directory the user selected.
 #[cfg(target_os = "linux")]
 fn verified_runtime_load_path(path: &Path) -> Result<(PathBuf, Option<File>, String)> {
     let actual_sha256 = sha256_file_hex(path).context("verify selected ONNX Runtime SHA-256")?;
@@ -517,9 +475,6 @@ fn cache_object_ai_sessions() -> bool {
     }
     #[cfg(all(not(target_os = "android"), target_os = "linux"))]
     {
-        // AppImages frequently use a user-selected external ONNX Runtime. Do
-        // not retain object-mask/matting sessions between calls; each temporary
-        // session still gets the full GPU -> CPU fallback.
         !running_from_appimage()
     }
     #[cfg(all(not(target_os = "android"), not(target_os = "linux")))]
@@ -558,10 +513,6 @@ fn infer_subject(
     let model = quality.model();
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
         .context("invalid preview image for BiRefNet")?;
-    // BiRefNet's official inference preprocessing resizes directly to the
-    // checkpoint's native tensor shape. Letterboxing changes the image scale
-    // and introduces out-of-distribution black borders; it is particularly
-    // destructive for the portrait-shaped Lite-2K graph.
     let resized = image::imageops::resize(
         &image,
         model.input_width,
@@ -593,11 +544,6 @@ fn infer_subject(
         |session| run_subject_session(session, input, model.input_width, model.input_height),
     )?;
 
-    // BiRefNet is itself a high-resolution dichotomous segmentation model and
-    // its sigmoid output contains calibrated fractional coverage. Preserve it
-    // directly: forcing an independently trained composition matting model to
-    // replace every uncertain pixel caused semantic edge drift around hair,
-    // straw, fur, and similarly complex subject boundaries.
     let mask = restore_birefnet_output(&logits, output_width, output_height, width, height)?;
     Ok(SubjectMaskResult {
         width,
@@ -891,11 +837,6 @@ fn build_vitmatte_trimap(mask: &[u8], width: usize, height: usize) -> Vec<u8> {
             let index = y * width + x;
             let value = mask[index];
             let foreground = value >= 128;
-            // Do not classify every soft SAM probability as an unknown matte
-            // pixel. That made textured object interiors (glass, fabric, fur)
-            // entirely "unknown" and let ViTMatte punch speckled alpha holes
-            // through otherwise solid selections. Only the actual binary edge
-            // and a narrow ambiguous band around 0.5 become unknown.
             let mut boundary = (96..=160).contains(&value);
             if !boundary {
                 let min_y = y.saturating_sub(1);
@@ -1018,8 +959,6 @@ fn refine_mask_with_vitmatte(
     let plane = usize::try_from(u64::from(padded_width) * u64::from(padded_height))
         .context("ViTMatte padded dimensions overflow")?;
     let mut input = vec![0.0f32; plane * 4];
-    // This ONNX conversion was published with mean/std = 0.5 and trimap
-    // rescaling by 1/255, so RGB maps to [-1, 1] and trimap to {0,.5,1}.
     for y in 0..model_height as usize {
         for x in 0..model_width as usize {
             let source_index = y * model_width as usize + x;
@@ -1241,9 +1180,6 @@ mod tests {
         let set_probability = |logits: &mut [f32], query, class, probability: f32| {
         };
 
-        // Sky has the strongest individual semantic score. Two different
-        // architecture classes have a larger combined score, which must not
-        // let the much broader Architecture group steal the pixel.
         set_probability(&mut class_logits, 0, 2, 0.9);
         set_probability(&mut class_logits, 0, 12, 0.1);
         set_probability(&mut class_logits, 1, 0, 0.6);

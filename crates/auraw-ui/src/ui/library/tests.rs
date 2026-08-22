@@ -303,8 +303,6 @@ fn decoded_preview_does_not_change_reserved_gallery_geometry() {
     let (before, before_height) =
         justified_thumbnail_layout(std::slice::from_ref(&entry), 900.0, 140.0, 6.0);
 
-    // Embedded previews can have a slightly different crop/aspect. Loading
-    // those pixels must not invalidate geometry reserved from RAW metadata.
     entry.thumbnail_size = Some([1600, 1200]);
     let (after, after_height) =
         justified_thumbnail_layout(std::slice::from_ref(&entry), 900.0, 140.0, 6.0);
@@ -320,8 +318,6 @@ fn opening_a_library_folder_records_it_before_async_scanning() {
     let context = eframe::egui::Context::default();
     let mut library = LibraryState::new(&context);
 
-    // The asynchronous scanner can fail later, but the selected location is
-    // visible to the UI immediately.
     library.open_folder(root.clone(), &context);
 
     assert_eq!(library.folder(), Some(root.as_path()));
@@ -884,7 +880,6 @@ fn shared_clipboard_flow_copies_and_moves_raw_sidecar_bundles() {
 
     fs::remove_dir_all(root).unwrap();
 }
-
 
 #[cfg(not(target_os = "android"))]
 #[test]

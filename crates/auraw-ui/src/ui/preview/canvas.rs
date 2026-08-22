@@ -98,14 +98,6 @@ pub(super) fn paint_textured_combined_geometry_mesh(
         return;
     }
 
-    // Egui meshes linearly interpolate UVs inside each triangle. A modest grid
-    // therefore turns Lensfun's smooth nonlinear map into a GPU texture warp
-    // without first resampling the preview pixels on the CPU/CFA.
-    // Keep the display warp close to the exact map used by vector overlays and
-    // inverse pointer mapping. A fixed 32x32 mesh can span ~200 source pixels
-    // per cell on high-resolution RAWs, visibly separating mask handles from
-    // their coverage near strongly distorted edges. Bound each cell to roughly
-    // 96 source pixels while keeping vertex count predictable.
     let span_u = (source_uv[2] - source_uv[0]).abs().max(1e-6);
     let span_v = (source_uv[3] - source_uv[1]).abs().max(1e-6);
     let grid_x = ((source_width.max(1) as f32 * span_u / 96.0).ceil() as usize).clamp(16, 96);
@@ -269,4 +261,3 @@ pub(super) fn paint_crop_workspace_texture(
         true,
     );
 }
-

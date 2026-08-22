@@ -1,4 +1,3 @@
-//! AuRaw's wgpu compute pipeline, shader compilation, and GPU export engine.
 
 pub use egui;
 pub use egui_wgpu;

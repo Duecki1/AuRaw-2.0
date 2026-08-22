@@ -74,18 +74,12 @@ impl Preview {
             pointer.is_some() && response.is_pointer_button_down_on() && primary_is_down;
         if !primary_down {
             if primary_is_down {
-                // Leaving the preview while still dragging must not connect the
-                // last valid dab to a later re-entry point through hidden space.
                 if subject_refining || matches!(kind, MaskKind::Brush | MaskKind::Object) {
                     app.masks.last_brush_point = None;
                 }
                 return;
             }
 
-            // A transformed object stroke may legitimately cross pasteboard,
-            // which clears `last_brush_point` to prevent a shortcut chord when
-            // the pointer re-enters. On the actual release frame, detect
-            // completion from the unrefined prompt strokes themselves.
             let object_stroke_finished = primary_released
                 && !subject_refining
                 && kind == MaskKind::Object
@@ -412,8 +406,6 @@ impl Preview {
                     },
                     MaskKind::Object,
                 ) => {
-                    // Object strokes use the same transformed sampling engine,
-                    // but retain their existing slightly denser 0.75 threshold.
                     let Some(sampled) = brush_samples.as_ref() else {
                         return;
                     };
@@ -492,9 +484,6 @@ impl Preview {
             return;
         };
         let selected_component = app.masks.stack.selected_component;
-        // Keep coverage visible when the selected type has no active rendered
-        // result. Effect settings are independent from retained Adjustment
-        // values, so switching types remains fully reversible.
         let neutral = match mask.effect {
             crate::pipeline::MaskEffect::Adjustment => mask.adjustments.is_neutral(),
             crate::pipeline::MaskEffect::Blur => !mask.effect_settings.blur.is_active(),
@@ -516,13 +505,10 @@ impl Preview {
         };
         let accent = selected_component
             .map(mask_component_color)
-            .unwrap_or(Color32::from_rgb(78, 163, 255));
-        let subtract = Color32::from_rgb(255, 105, 105);
+            .unwrap_or(crate::ui::theme::MASK_ADD);
+        let subtract = crate::ui::theme::MASK_SUBTRACT;
         let painter = ui.painter_at(overlay_rect);
 
-        // An untouched mask remains visible after its selection flashes. Once
-        // local adjustments exist, selection still flashes for orientation but
-        // the overlay returns to hidden so it cannot obscure the edit.
         let steady_target: Option<Option<usize>> = neutral.then_some(None);
         let mut coverage_target = steady_target;
         if let Some((started, blink)) = app.masks.overlay_blink {
@@ -559,9 +545,6 @@ impl Preview {
                     .components
                     .get(index)
                     .is_some_and(|component| {
-                        // Object-mask prompt strokes must remain visible while
-                        // drawing even when the group already has adjustments: the
-                        // painted prompt is exactly what the AI model will see.
                         component.kind == MaskKind::Object
                             || (app.masks.subject_refinement_active
                                 && matches!(
@@ -696,12 +679,6 @@ impl Preview {
                     feather,
                     initialized: true,
                 } => {
-                    // Linear masks are defined in native source-pixel space.
-                    // Drawing their guides as straight *screen-space* lines is
-                    // only valid for a similarity transform. Perspective shear
-                    // and especially nonlinear Lensfun distortion turn both the
-                    // axis and equal-t transition lines into warped curves. Keep
-                    // the overlay derived from the exact rasterizer geometry.
                     let axis = linear_axis_geometry_screen_points(
                         image_rect,
                         app.develop.geometry,

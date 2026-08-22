@@ -1,8 +1,3 @@
-//! Central ownership and lifecycle policy for AuRaw ONNX Runtime sessions.
-//!
-//! Model installation is deliberately separate (`model_artifact` / `model_install`).
-//! This module owns only in-memory ONNX sessions and guarantees that AuRaw keeps
-//! at most one large AI model resident at a time.
 
 use crate::execution_provider::{
     ai_acceleration_enabled, create_session_with_fallback, FallbackSession, ModelSource,
@@ -175,12 +170,6 @@ fn try_reconcile<S>(
     }
 }
 
-/// Tells the runtime which interactive AI tool is currently visible.
-///
-/// This call never waits for inference. If the manager is idle, a session that
-/// no longer belongs to the active context is dropped immediately. If inference
-/// currently owns the manager lock, the atomic context change is observed when
-/// that inference releases the session, and the stale model is dropped then.
 pub fn set_active_ai_context(context: Option<AiRuntimeContext>) {
     ACTIVE_CONTEXT.store(encode_context(context), Ordering::Release);
     let _ = try_reconcile(
@@ -191,8 +180,6 @@ pub fn set_active_ai_context(context: Option<AiRuntimeContext>) {
     );
 }
 
-/// Invalidates the currently loaded session after execution-provider policy
-/// changes. This is non-blocking for the same reason as [`set_active_ai_context`].
 pub(crate) fn invalidate_for_provider_change() {
     let generation = PROVIDER_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let _ = try_reconcile(
@@ -203,11 +190,6 @@ pub(crate) fn invalidate_for_provider_change() {
     );
 }
 
-/// A lease on AuRaw's sole resident ONNX session.
-///
-/// The runtime lock is held while the caller uses the session, so another model
-/// cannot replace it underneath an active inference. Dropping the lease applies
-/// any pending context/provider invalidation before releasing the lock.
 pub(crate) struct ModelSessionGuard {
     runtime: Option<MutexGuard<'static, RuntimeSlot<FallbackSession>>>,
 }
@@ -252,10 +234,6 @@ impl Drop for ModelSessionGuard {
         );
         drop(guard);
 
-        // Close the narrow race where the UI publishes a context/provider
-        // change after the reconciliation read but before this inference lease
-        // releases the mutex. Once the mutex is free, either this retry or the
-        // UI's own non-blocking reconciliation observes the new policy.
         let _ = try_reconcile(
             runtime(),
             active_context(),
@@ -265,13 +243,6 @@ impl Drop for ModelSessionGuard {
     }
 }
 
-/// Acquires AuRaw's sole resident ONNX model session.
-///
-/// Requesting another model drops the old session before constructing the new
-/// one. A same-model request reuses the existing session when provider policy is
-/// unchanged. The returned lease keeps the session safe for the duration of the
-/// caller's inference. One-shot sessions are dropped when the lease is released;
-/// interactive sessions remain only while their UI context is active.
 pub(crate) fn acquire_model_session(
     model: AiModel,
     source: impl Into<ModelSource>,
@@ -294,7 +265,6 @@ pub(crate) fn acquire_model_session(
     })
 }
 
-/// Runs model-specific inference against AuRaw's sole resident ONNX session.
 pub(crate) fn with_model_session<T>(
     model: AiModel,
     source: impl Into<ModelSource>,

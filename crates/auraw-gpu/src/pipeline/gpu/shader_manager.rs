@@ -32,13 +32,11 @@ const SHADER_XTRANS_MARKESTEIJN_ACCUMULATE: &str =
     include_str!("../../shaders/xtrans/markesteijn_accumulate.wgsl");
 
 fn creative_effects_source() -> String {
-    // Effects
     format!(
         "{SHADER_CREATIVE_EFFECTS}\n{SHADER_MASK_EFFECTS_SHARED}\n{SHADER_MASK_LENS_BLUR}\n{SHADER_MASK_MOTION_BLUR}\n{SHADER_MASK_RADIAL_BLUR}\n{SHADER_MASK_TILT_SHIFT}\n{SHADER_MASK_BLUR}\n{SHADER_MASK_EDGE_GLOW}\n{SHADER_MASK_GLOW}\n{SHADER_MASK_NEON}\n{SHADER_MASK_PIXELATE}\n{SHADER_MASK_LIGHT_RAYS}\n{SHADER_MASK_ATMOSPHERE}"
     )
 }
 
-/// WGSL module registry.
 pub(super) struct ShaderManager {
     composer: Composer,
 }
@@ -46,7 +44,6 @@ pub(super) struct ShaderManager {
 impl ShaderManager {
     pub(super) fn new(work_format: wgpu::TextureFormat) -> Result<Self> {
         let mut manager = Self {
-            // Validation
             composer: Composer::default(),
         };
 

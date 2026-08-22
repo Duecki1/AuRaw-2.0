@@ -157,8 +157,6 @@ impl Sidebar {
         let size = card_size.card_size();
         let image_edge = card_size.image_edge();
         let thumbnail_sense = if cfg!(target_os = "android") {
-            // A drag anywhere on a card belongs to the enclosing strip on
-            // touch devices. Desktop retains drag-to-reorder for submasks.
             egui::Sense::click()
         } else {
             egui::Sense::click_and_drag()
@@ -181,8 +179,6 @@ impl Sidebar {
         painter.rect_filled(rect, 5.0, fill);
         painter.rect_stroke(rect, 5.0, stroke, StrokeKind::Inside);
 
-        // The thumbnail well is always square. The texture itself contains a
-        // centered, letterboxed rendering at the RAW image's aspect ratio.
         let image_rect = egui::Rect::from_min_size(
             egui::pos2(rect.center().x - image_edge * 0.5, rect.min.y + 5.0),
             egui::vec2(image_edge, image_edge),
