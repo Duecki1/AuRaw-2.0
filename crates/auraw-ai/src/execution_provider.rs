@@ -21,12 +21,24 @@ use std::{
 
 #[cfg(not(target_os = "android"))]
 static AI_ACCELERATION_ENABLED: AtomicBool = AtomicBool::new(true);
+#[cfg(not(target_os = "android"))]
+static AI_GPU_MEMORY_QUARANTINED: AtomicBool = AtomicBool::new(false);
+#[cfg(not(target_os = "android"))]
+static AI_GPU_MEMORY_FAILURE: AtomicBool = AtomicBool::new(false);
 
 /// Controls whether newly created desktop AI sessions may use GPU execution
 /// providers. Android keeps its platform defaults and does not expose this
 /// preference.
 #[cfg(not(target_os = "android"))]
 pub fn set_ai_acceleration_enabled(enabled: bool) {
+    // An explicit Settings change is the user's deliberate retry after an
+    // earlier memory failure. Merely polling the failure signal must not clear
+    // this quarantine; otherwise a second AI request could reach the renderer
+    // before the UI has made the failure visible.
+    if enabled {
+        AI_GPU_MEMORY_QUARANTINED.store(false, Ordering::Release);
+        AI_GPU_MEMORY_FAILURE.store(false, Ordering::Release);
+    }
     if AI_ACCELERATION_ENABLED.swap(enabled, Ordering::AcqRel) != enabled {
         if let Ok(mut statuses) = provider_statuses().lock() {
             statuses.clear();
@@ -43,11 +55,58 @@ pub fn ai_acceleration_enabled() -> bool {
     #[cfg(not(target_os = "android"))]
     {
         AI_ACCELERATION_ENABLED.load(Ordering::Acquire)
+            && !AI_GPU_MEMORY_QUARANTINED.load(Ordering::Acquire)
     }
     #[cfg(target_os = "android")]
     {
         true
     }
+}
+
+/// Returns and clears an accelerated-ONNX memory failure.
+///
+/// A native execution provider shares VRAM with AuRaw's wgpu renderer but
+/// cannot report through wgpu error scopes. The UI consumes this edge-triggered
+/// signal before its next frame, cancels the AI operation, and releases
+/// optional render resources before egui submits more GPU work.
+#[cfg(not(target_os = "android"))]
+pub fn take_ai_gpu_memory_failure() -> bool {
+    AI_GPU_MEMORY_FAILURE.swap(false, Ordering::AcqRel)
+}
+
+#[cfg(target_os = "android")]
+pub fn take_ai_gpu_memory_failure() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "android"))]
+fn quarantine_ai_gpu_after_memory_failure(operation: &str, provider: &str, error: &anyhow::Error) {
+    AI_GPU_MEMORY_QUARANTINED.store(true, Ordering::Release);
+    AI_GPU_MEMORY_FAILURE.store(true, Ordering::Release);
+    let message = format!(
+        "AI {operation} exhausted {provider} GPU memory; cancelled the AI job and disabled GPU AI until it is explicitly re-enabled"
+    );
+    log::error!("{message}: {error:#}");
+    auraw_core::diagnostics::record(message);
+}
+
+#[cfg(target_os = "android")]
+fn quarantine_ai_gpu_after_memory_failure(
+    _operation: &str,
+    _provider: &str,
+    _error: &anyhow::Error,
+) {
+}
+
+fn is_gpu_memory_failure(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    (message.contains("out of memory") || message.contains("failed to allocate memory"))
+        && (message.contains("cuda")
+            || message.contains("directml")
+            || message.contains("tensorrt")
+            || message.contains("rocm")
+            || message.contains("gpu")
+            || message.contains("bfc_arena"))
 }
 
 /// Model storage used when a session must be rebuilt after a runtime EP failure.
@@ -427,6 +486,16 @@ impl FallbackSession {
             Ok(value) => Ok(value),
             Err(accelerated_error) if self.accelerated => {
                 let failed_provider = self.active_provider;
+                if is_gpu_memory_failure(&accelerated_error) {
+                    quarantine_ai_gpu_after_memory_failure(
+                        operation,
+                        failed_provider,
+                        &accelerated_error,
+                    );
+                    return Err(accelerated_error.context(format!(
+                        "{operation} exceeded the GPU memory safety budget; the AI job was stopped before CPU fallback"
+                    )));
+                }
                 log::warn!(
                     "{operation} failed on {failed_provider}; rebuilding {} on CPU: {accelerated_error:#}",
                     self.options.model_name
@@ -575,11 +644,20 @@ pub fn create_session_with_fallback(
 
 #[cfg(test)]
 mod tests {
-    use super::FallbackSession;
+    use super::{is_gpu_memory_failure, FallbackSession};
 
     #[test]
     fn fallback_session_preserves_thread_traits() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<FallbackSession>();
+    }
+
+    #[test]
+    fn gpu_allocation_failures_are_quarantined_instead_of_retried() {
+        let error = anyhow::anyhow!(
+            "BFCArena::AllocateRawInternal failed to allocate memory on CUDA GPU"
+        );
+        assert!(is_gpu_memory_failure(&error));
+        assert!(!is_gpu_memory_failure(&anyhow::anyhow!("invalid tensor shape")));
     }
 }
