@@ -92,6 +92,17 @@ impl AurawApp {
             self.ui.notice = Some("GPU rendering is unavailable for Remove.".to_owned());
             return false;
         };
+        // Android ships its ONNX Runtime with the application, so AiState does
+        // not retain a user-selected runtime there. Keep this in sync with the
+        // other AI workers, which pass no runtime override on Android.
+        #[cfg(not(target_os = "android"))]
+        let runtime_path = self.ai.runtime_path.clone();
+        #[cfg(not(target_os = "android"))]
+        let runtime_sha256 = self.ai.runtime_sha256.clone();
+        #[cfg(target_os = "android")]
+        let runtime_path = None;
+        #[cfg(target_os = "android")]
+        let runtime_sha256 = None;
         let cancellation = Arc::new(AtomicBool::new(false));
         let request = RemoveRequest {
             device: render_state.device.clone(),
@@ -104,8 +115,8 @@ impl AurawApp {
             brush: brush.clone(),
             model_path: self.big_lama_model_path(),
             allow_download,
-            runtime_path: self.ai.runtime_path.clone(),
-            runtime_sha256: self.ai.runtime_sha256.clone(),
+            runtime_path,
+            runtime_sha256,
             tone_statistics: None,
             program_prewarm: self.export.gpu_prewarm.clone(),
             cancellation: Arc::clone(&cancellation),
