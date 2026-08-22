@@ -2,10 +2,10 @@ use super::{
     bounded_tile_spec, build_exif_payload, build_lanczos_contributions, built_in_srgb_icc,
     encode_jpeg_rgb, encode_srgb_row, encode_srgb_row_with_format, export_to_destination,
     publish_completed_export, resolved_export_tile_spec, stitch_linear_tile_into_band,
-    tiff_strip_layout, tile_mask_source_region, validate_export_dimensions, ExportFormat,
-    ExportMetadata, ExportResizeMode, ExportRowFormat, ExportSettings, GeometryResampler,
-    JpegEncodeRequest, LinearLightResizer, with_temporary_export_path,
-    EXPORT_TILE_HALO, MAX_EXPORT_EDGE, TIFF_TARGET_STRIP_BYTES,
+    tiff_strip_layout, tile_mask_source_region, validate_export_dimensions,
+    with_temporary_export_path, ExportFormat, ExportMetadata, ExportResizeMode, ExportRowFormat,
+    ExportSettings, GeometryResampler, JpegEncodeRequest, LinearLightResizer, EXPORT_TILE_HALO,
+    MAX_EXPORT_EDGE, TIFF_TARGET_STRIP_BYTES,
 };
 use crate::pipeline::{
     ExportTile, ExposureParams, GeometryTransform, IccOutputTransform, MaskStack, TileSpec,
@@ -55,8 +55,7 @@ fn resizing_does_not_enlarge_by_default() {
 
 #[test]
 fn export_mask_region_covers_the_padded_tile_and_clamps_to_source() {
-    let region =
-        tile_mask_source_region(&MaskStack::default(), -256, 744, 1536, 1536, 6000, 4000);
+    let region = tile_mask_source_region(&MaskStack::default(), -256, 744, 1536, 1536, 6000, 4000);
     assert_eq!(region, [0, 742, 1282, 1540]);
 }
 
@@ -136,9 +135,8 @@ fn exif_payload_contains_source_camera_lens_and_exposure_metadata() {
 fn jpeg_rows_omit_png_alpha_bytes() {
     let transform = crate::pipeline::IccOutputTransform::srgb();
     let rgba = encode_srgb_row(&[0.18, 0.18, 0.18], &transform).unwrap();
-    let rgb =
-        encode_srgb_row_with_format(&[0.18, 0.18, 0.18], &transform, ExportRowFormat::Rgb8)
-            .unwrap();
+    let rgb = encode_srgb_row_with_format(&[0.18, 0.18, 0.18], &transform, ExportRowFormat::Rgb8)
+        .unwrap();
     assert_eq!(rgba.len(), 4);
     assert_eq!(rgb.len(), 3);
     assert_eq!(&rgba[..3], &rgb);
@@ -256,8 +254,7 @@ fn tile_rows_land_at_their_band_offset() {
         global_origin_x: -47,
         global_origin_y: -46,
     };
-    stitch_linear_tile_into_band(&mut band, 4, 2, tile, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-        .unwrap();
+    stitch_linear_tile_into_band(&mut band, 4, 2, tile, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
     assert_eq!(&band[3..9], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 }
 
@@ -297,8 +294,7 @@ fn geometry_resampler_identity_is_exact_in_linear_space() {
 #[test]
 fn geometry_resampler_quarter_turn_preserves_exact_pixels() {
     let source = [
-        1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 5.0, 5.0, 5.0, 6.0, 6.0,
-        6.0,
+        1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 5.0, 5.0, 5.0, 6.0, 6.0, 6.0,
     ];
     let geometry = GeometryTransform {
         quarter_turns: 1,
@@ -306,8 +302,7 @@ fn geometry_resampler_quarter_turn_preserves_exact_pixels() {
     };
     let resampler = GeometryResampler::new(&source, 3, 2, geometry, 2, 3).unwrap();
     let expected = [
-        4.0, 4.0, 4.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 2.0, 2.0, 2.0, 6.0, 6.0, 6.0, 3.0, 3.0,
-        3.0,
+        4.0, 4.0, 4.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 2.0, 2.0, 2.0, 6.0, 6.0, 6.0, 3.0, 3.0, 3.0,
     ];
     let mut output = Vec::new();
     for y in 0..3 {
@@ -492,10 +487,8 @@ fn temporary_raster_helper_cleans_up_after_failure() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "auraw-export-stage-{}-{nonce}",
-        std::process::id()
-    ));
+    let directory =
+        std::env::temp_dir().join(format!("auraw-export-stage-{}-{nonce}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let destination = directory.join("photo.png");
 
