@@ -192,12 +192,20 @@ impl AurawApp {
                 self.ui.notice = Some(error);
                 return;
             }
-            detail.pipeline.dispatch_stage(
+            if let Err(error) = detail.pipeline.dispatch_stage_with_remove(
                 &render_state.queue,
                 &render_state.device,
                 &params,
                 ProcessingStage::Raw,
-            );
+                &self.inpaint.edits,
+                &full_raw,
+                &self.develop.target_exposure,
+                [x0 as f32, y0 as f32],
+                [crop_width as f32, crop_height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to zoomed preview: {error:#}"));
+                return;
+            }
             detail.pipeline.dispatch_stage(
                 &render_state.queue,
                 &render_state.device,
@@ -210,17 +218,6 @@ impl AurawApp {
                     &render_state.device,
                     full_frame,
                 );
-            }
-            if let Err(error) = detail.pipeline.update_inpaint_layer(
-                &render_state.queue,
-                self.inpaint.layer.as_ref(),
-                virtual_origin_x,
-                virtual_origin_y,
-                virtual_full_width,
-                virtual_full_height,
-            ) {
-                self.ui.notice = Some(format!("Could not update zoomed inpainting: {error:#}"));
-                return;
             }
             detail.pipeline.dispatch_stage(
                 &render_state.queue,
@@ -282,12 +279,20 @@ impl AurawApp {
             self.ui.notice = Some(error);
             return;
         }
-        pipeline.dispatch_stage(
+        if let Err(error) = pipeline.dispatch_stage_with_remove(
             &render_state.queue,
             &render_state.device,
             &params,
             ProcessingStage::Raw,
-        );
+            &self.inpaint.edits,
+            &full_raw,
+            &self.develop.target_exposure,
+            [x0 as f32, y0 as f32],
+            [crop_width as f32, crop_height as f32],
+        ) {
+            self.ui.notice = Some(format!("Could not apply Remove to zoomed preview: {error:#}"));
+            return;
+        }
         pipeline.dispatch_stage(
             &render_state.queue,
             &render_state.device,
@@ -296,17 +301,6 @@ impl AurawApp {
         );
         if let Some(full_frame) = full_frame_tone_pipeline {
             pipeline.inherit_tone_statistics(&render_state.queue, &render_state.device, full_frame);
-        }
-        if let Err(error) = pipeline.update_inpaint_layer(
-            &render_state.queue,
-            self.inpaint.layer.as_ref(),
-            virtual_origin_x,
-            virtual_origin_y,
-            virtual_full_width,
-            virtual_full_height,
-        ) {
-            self.ui.notice = Some(format!("Could not update zoomed inpainting: {error:#}"));
-            return;
         }
         pipeline.dispatch_stage(
             &render_state.queue,

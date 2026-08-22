@@ -89,7 +89,7 @@ impl GpuBudgetReservation {
     pub(super) fn acquire(plan: &GpuResourcePlan, limit: u64) -> Result<Self> {
         // Validate one pipeline's complete persistent + temporary peak, but only
         // reserve its persistent allocation in the process-wide total. Charging
-        // every live preview for its mutually exclusive readback/inpainting peak
+        // every live preview for its mutually exclusive readback peak
         // made the main, navigation, and detail previews exceed the budget before
         // zoom could create its first crop.
         validate_gpu_resource_plan(plan, limit)?;
@@ -309,12 +309,6 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
     );
     push_entry(
         &mut entries,
-        "inpaint texture",
-        GpuResourceResidency::Persistent,
-        full(wgpu::TextureFormat::Rgba16Float)?,
-    );
-    push_entry(
-        &mut entries,
         "camera/output profile buffer",
         GpuResourceResidency::Persistent,
         aligned_buffer_bytes(input.profile_buffer_bytes)?,
@@ -348,37 +342,8 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
         aligned_buffer_bytes(TONE_STATS_SIZE_BYTES)?,
     );
 
-    // On-demand scene conversion/inpainting creates one full-resolution RGBA32F
-    // work texture. Its readback may coexist until mapping completes, so both are
-    // included in the transient peak. RGBA32F readback is chunked to 64 MiB.
-    let full_scene_conversion = full(wgpu::TextureFormat::Rgba32Float)?;
-    let model_scene_conversion = texture_allocation_bytes(
-        crate::LAMA_EDGE,
-        crate::LAMA_EDGE,
-        1,
-        1,
-        wgpu::TextureFormat::Rgba32Float,
-    )?;
-    let transient_work = full_scene_conversion.max(model_scene_conversion);
-    push_entry(
-        &mut entries,
-        "scene/inpaint conversion texture",
-        GpuResourceResidency::Transient,
-        transient_work,
-    );
-    push_entry(
-        &mut entries,
-        "on-demand conversion parameters",
-        GpuResourceResidency::Transient,
-        aligned_buffer_bytes(
-            u64::try_from(std::mem::size_of::<InpaintResizeParams>())
-                .map_err(|_| anyhow!("inpaint resize parameter size does not fit in u64"))?,
-        )?,
-    );
-    let rgba32_full_copy = aligned_copy_buffer_bytes(input.width, input.height, 16)?;
-    let rgba32_model_copy = aligned_copy_buffer_bytes(crate::LAMA_EDGE, crate::LAMA_EDGE, 16)?;
-    let rgba32_readback = rgba32_full_copy
-        .max(rgba32_model_copy)
+    // Full-resolution scene/display readback is chunked to keep transient memory bounded.
+    let rgba32_readback = aligned_copy_buffer_bytes(input.width, input.height, 16)?
         .min(MAX_RGBA32_READBACK_CHUNK_BYTES);
     let rgba8_readback = aligned_copy_buffer_bytes(input.width, input.height, 4)?;
     let readback_peak = rgba32_readback.max(rgba8_readback);
@@ -389,19 +354,7 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
         readback_peak,
     );
 
-    // The constructor currently uploads one zeroed RGBA16F inpaint image. Raw
-    // compact-map expansion also retains two bounded 8 MiB thread-local scratch
-    // vectors. Host peak is reported separately from the GPU admission total.
-    let inpaint_upload = u64::from(input.width)
-        .checked_mul(u64::from(input.height))
-        .and_then(|value| value.checked_mul(8))
-        .ok_or_else(|| anyhow!("inpaint upload byte calculation overflows"))?;
-    push_entry(
-        &mut entries,
-        "zero inpaint upload",
-        GpuResourceResidency::HostPeak,
-        inpaint_upload,
-    );
+    // Raw compact-map expansion retains bounded thread-local scratch vectors.
     let upload_scratch_bytes = u64::try_from(MAX_UPLOAD_SCRATCH_BYTES)
         .map_err(|_| anyhow!("upload scratch size does not fit in u64"))?;
     push_entry(
@@ -458,17 +411,11 @@ pub(super) fn validate_gpu_resource_plan(plan: &GpuResourcePlan, limit: u64) -> 
             .iter()
             .find(|entry| entry.name == "local-mask atlas")
             .map_or(0, |entry| entry.bytes);
-        let inpaint = plan
-            .entries
-            .iter()
-            .find(|entry| entry.name == "inpaint texture")
-            .map_or(0, |entry| entry.bytes);
         return Err(anyhow!(
-            "GPU resource plan requires {:.1} MiB including a {:.1} MiB safety margin (mask atlas {:.1} MiB, inpaint {:.1} MiB), above the {:.1} MiB budget; reduce proxy size or mask-atlas capacity, or use tiled export",
+            "GPU resource plan requires {:.1} MiB including a {:.1} MiB safety margin (mask atlas {:.1} MiB), above the {:.1} MiB budget; reduce proxy size or mask-atlas capacity, or use tiled export",
             plan.admitted_gpu_bytes as f64 / (1024.0 * 1024.0),
             plan.safety_margin_bytes as f64 / (1024.0 * 1024.0),
             mask as f64 / (1024.0 * 1024.0),
-            inpaint as f64 / (1024.0 * 1024.0),
             limit as f64 / (1024.0 * 1024.0),
         ));
     }
@@ -1415,32 +1362,7 @@ mod resource_plan_tests {
         );
     }
 
-    #[test]
-    fn plan_includes_mask_atlas_and_full_resolution_inpaint() {
-        let plan = build_gpu_resource_plan(input()).unwrap();
-        assert_eq!(entry_bytes(&plan, "local-mask atlas"), 256 * 256 * 4 * 2);
-        assert_eq!(
-            entry_bytes(&plan, "Light Rays emission atlas"),
-            u64::from(LIGHT_RAYS_MASK_ATLAS_EDGE) * u64::from(LIGHT_RAYS_MASK_ATLAS_EDGE) * 4 * 2
-        );
-        assert_eq!(entry_bytes(&plan, "inpaint texture"), 640 * 480 * 8);
-    }
 
-    #[test]
-    fn plan_includes_fixed_size_inpaint_model_resources_for_small_pipelines() {
-        let mut small = input();
-        small.width = 64;
-        small.height = 64;
-        let plan = build_gpu_resource_plan(small).unwrap();
-        assert_eq!(
-            entry_bytes(&plan, "scene/inpaint conversion texture"),
-            u64::from(crate::LAMA_EDGE) * u64::from(crate::LAMA_EDGE) * 16
-        );
-        assert_eq!(
-            entry_bytes(&plan, "readback buffer peak"),
-            u64::from(crate::LAMA_EDGE) * 16 * u64::from(crate::LAMA_EDGE)
-        );
-    }
 
     #[test]
     fn resource_plan_rejects_arithmetic_overflow() {
@@ -1543,14 +1465,11 @@ mod resource_plan_tests {
             "tone guide B",
             "local-mask atlas",
             "Light Rays emission atlas",
-            "inpaint texture",
             "camera/output profile buffer",
             "stage uniform buffers",
             "local-mask data buffer",
             "tone histogram buffer",
             "tone statistics buffer",
-            "scene/inpaint conversion texture",
-            "on-demand conversion parameters",
             "readback buffer peak",
         ] {
             assert!(

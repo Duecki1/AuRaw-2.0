@@ -88,8 +88,9 @@ impl AurawApp {
         }
 
         let (encoder, decoder) = self.sam21_model_paths();
-        if encoder.is_file() && decoder.is_file() && self.vitmatte_model_path().is_file() {
-            self.start_object_worker(mask_index, component_index, encoder, decoder);
+        let vitmatte = self.vitmatte_model_path();
+        if crate::ai_masks::object_models_are_verified(&encoder, &decoder, &vitmatte) {
+            self.start_object_worker(mask_index, component_index, encoder, decoder, false);
         } else {
             self.ai.object_pending_target = Some((mask_index, component_index));
             self.ai.object_consent_open = true;
@@ -102,6 +103,7 @@ impl AurawApp {
         component_index: usize,
         encoder_path: PathBuf,
         decoder_path: PathBuf,
+        allow_download: bool,
     ) {
         if self.foreground_operation_active() {
             if self.foreground_operation_is(ForegroundOperationKind::ObjectMask) {
@@ -175,14 +177,17 @@ impl AurawApp {
         let runtime_sha256 = None;
 
         let vitmatte_path = self.vitmatte_model_path();
-        let needs_download = !encoder_path.is_file()
-            || !decoder_path.is_file()
-            || !vitmatte_path.is_file();
+        let needs_download = !crate::ai_masks::object_models_are_verified(
+            &encoder_path,
+            &decoder_path,
+            &vitmatte_path,
+        );
         let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let receiver = spawn_object_mask(
             encoder_path,
             decoder_path,
             vitmatte_path,
+            allow_download,
             runtime_path,
             runtime_sha256,
             request,
@@ -225,21 +230,17 @@ impl AurawApp {
         let mut finished = None;
         for event in events {
             match event {
-                ObjectMaskEvent::DownloadProgress {
-                    label,
-                    downloaded,
-                    total,
-                } => {
+                ObjectMaskEvent::DownloadProgress(progress) => {
                     operation.progress = ForegroundProgress::units(
-                        downloaded,
-                        total,
+                        progress.downloaded,
+                        progress.total,
                         Some("bytes".to_owned()),
-                        format!("Downloading {label}"),
+                        format!("Downloading {}", progress.label),
                     )
                     .with_detail(format!(
                         "{:.1} / {:.1} MB",
-                        downloaded as f64 / 1_000_000.0,
-                        total as f64 / 1_000_000.0
+                        progress.downloaded as f64 / 1_000_000.0,
+                        progress.total as f64 / 1_000_000.0
                     ));
                 }
                 ObjectMaskEvent::Inferencing { decoder_only } => {
@@ -342,8 +343,7 @@ impl AurawApp {
             if cancelled {
                 self.cancel_ai_mask_update();
             } else if let Some((mask_index, component_index)) = self.ai.object_pending_target.take() {
-                let (encoder, decoder) = self.sam21_model_paths();
-                self.start_object_worker(mask_index, component_index, encoder, decoder);
+                self.request_object_mask(mask_index, component_index);
             } else if updating_all {
                 self.ai.mask_update_failed |= !succeeded;
                 if !succeeded {
@@ -356,8 +356,7 @@ impl AurawApp {
             }
         } else if cancelled || stale {
             if let Some((mask_index, component_index)) = self.ai.object_pending_target.take() {
-                let (encoder, decoder) = self.sam21_model_paths();
-                self.start_object_worker(mask_index, component_index, encoder, decoder);
+                self.request_object_mask(mask_index, component_index);
             }
         } else if !succeeded {
             let message = error_message.unwrap_or_else(|| {

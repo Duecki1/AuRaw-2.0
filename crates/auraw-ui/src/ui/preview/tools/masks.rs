@@ -1,3 +1,7 @@
+use super::brush::{
+    sample_brush_stroke, BrushStrokeSamples, OBJECT_BRUSH_MINIMUM_SPACING_FRACTION,
+    STANDARD_BRUSH_MINIMUM_SPACING_FRACTION,
+};
 use super::super::*;
 
 impl Preview {
@@ -111,89 +115,90 @@ impl Preview {
         if ui.input(|input| input.any_touches()) {
             app.begin_mask_touch_gesture(mask_index, component_index);
         }
-        let source_uv = final_geometry_screen_to_native_source(
-            image_rect,
-            app.develop.geometry,
-            lens_geometry.as_deref(),
-            source_width,
-            source_height,
-            pointer,
-        );
-        let uv = if geometry_can_leave_image {
-            source_uv
-        } else if let Some(uv) = editable_source_uv(source_uv) {
-            uv
+        let brush_tool_size = if subject_refining {
+            Some(app.masks.stack.subject_refinement.size)
         } else {
-            // Brush/object strokes must be discontinuous across transformed
-            // pasteboard. Otherwise a stroke that leaves and re-enters the image
-            // gets interpolated through an area the user could not actually draw.
-            if subject_refining || matches!(kind, MaskKind::Brush | MaskKind::Object) {
-                app.masks.last_brush_point = None;
+            app.masks.stack
+                .masks
+                .get(mask_index)
+                .and_then(|mask| mask.components.get(component_index))
+                .and_then(|component| match (&component.geometry, kind) {
+                    (MaskGeometry::Brush { size, .. }, MaskKind::Brush) => Some(*size),
+                    (MaskGeometry::Object { brush_size, .. }, MaskKind::Object) => {
+                        Some(*brush_size)
+                    }
+                    _ => None,
+                })
+        };
+        let brush_samples: Option<BrushStrokeSamples> = if let Some(tool_size) = brush_tool_size {
+            let sampled = sample_brush_stroke(
+                image_rect,
+                app.develop.geometry,
+                lens_geometry.as_deref(),
+                source_width,
+                source_height,
+                pointer,
+                tool_size,
+                app.preview.zoom,
+                app.preferences.image_relative_brush_size,
+                &mut app.masks.last_brush_point,
+                if kind == MaskKind::Object {
+                    OBJECT_BRUSH_MINIMUM_SPACING_FRACTION
+                } else {
+                    STANDARD_BRUSH_MINIMUM_SPACING_FRACTION
+                },
+            );
+            if sampled.is_none() {
+                return;
             }
-            return;
+            sampled
+        } else {
+            None
+        };
+        let uv = if let Some(stroke) = brush_samples.as_ref() {
+            stroke.uv
+        } else {
+            let source_uv = final_geometry_screen_to_native_source(
+                image_rect,
+                app.develop.geometry,
+                lens_geometry.as_deref(),
+                source_width,
+                source_height,
+                pointer,
+            );
+            if geometry_can_leave_image {
+                source_uv
+            } else if let Some(uv) = editable_source_uv(source_uv) {
+                uv
+            } else {
+                return;
+            }
         };
 
         if subject_refining {
+            let Some(stroke) = brush_samples.as_ref() else {
+                return;
+            };
             let refinement = &mut app.masks.stack.subject_refinement;
             let opacity = app.masks.brush_mode.dab_opacity(true, refinement.flow);
-            let first_dab = app.masks.last_brush_point.is_none();
-            let previous = app.masks.last_brush_point.unwrap_or(uv);
-            let dx = uv[0] - previous[0];
-            let dy = uv[1] - previous[1];
-            let previous_screen = final_geometry_native_source_to_screen(
-                image_rect,
-                app.develop.geometry,
-                lens_geometry.as_deref(),
-                source_width,
-                source_height,
-                previous,
-            );
-            let distance_px = pointer.distance(previous_screen);
-            let dab_size = zoom_scaled_brush_size(
-                refinement.size,
-                app.preview.zoom,
-                app.preferences.image_relative_brush_size,
-            );
-            let radius_px = geometry_brush_radius_screen(
-                image_rect,
-                app.develop.geometry,
-                lens_geometry.as_deref(),
-                source_width,
-                source_height,
-                uv,
-                dab_size,
-            );
-            let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
             let mut changed = false;
-            if first_dab {
-                if refinement.dabs.len() < 65_536 {
-                    refinement.stroke_starts.push(refinement.dabs.len());
-                    refinement.dabs.push(BrushDab {
-                        center: uv,
-                        opacity,
-                        size: dab_size,
-                        feather: refinement.feather,
-                    });
-                    changed = true;
+            if stroke.first && !stroke.samples.is_empty() && refinement.dabs.len() < 65_536 {
+                refinement.stroke_starts.push(refinement.dabs.len());
+            }
+            for &center in &stroke.samples {
+                if refinement.dabs.len() >= 65_536 {
+                    break;
                 }
-            } else if distance_px >= spacing_px * 0.80 {
-                let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
-                for step in 1..=steps {
-                    if refinement.dabs.len() >= 65_536 {
-                        break;
-                    }
-                    let t = step as f32 / steps as f32;
-                    refinement.dabs.push(BrushDab {
-                        center: [previous[0] + dx * t, previous[1] + dy * t],
-                        opacity,
-                        size: dab_size,
-                        feather: refinement.feather,
-                    });
-                    changed = true;
-                }
+                refinement.dabs.push(BrushDab {
+                    center,
+                    opacity,
+                    size: stroke.dab_size,
+                    feather: refinement.feather,
+                });
+                changed = true;
             }
             if changed {
-                app.masks.last_brush_point = Some(uv);
+                app.masks.last_brush_point = Some(stroke.uv);
                 app.note_subject_refinement_interaction();
                 ui.ctx().request_repaint();
             }
@@ -238,7 +243,6 @@ impl Preview {
             match (&mut component.geometry, kind) {
                 (
                     MaskGeometry::Brush {
-                        size,
                         feather,
                         opacity_enabled,
                         opacity: brush_opacity,
@@ -249,73 +253,26 @@ impl Preview {
                     MaskKind::Brush,
                 ) => {
                     let opacity = app.masks.brush_mode.dab_opacity(*opacity_enabled, *brush_opacity);
-                    let first_dab = app.masks.last_brush_point.is_none();
-                    let previous = app.masks.last_brush_point.unwrap_or(uv);
-                    let dx = uv[0] - previous[0];
-                    let dy = uv[1] - previous[1];
-                    // Measure spacing in the transformed preview so brush density
-                    // remains stable after crop, rotate, flip, and perspective.
-                    let previous_screen = final_geometry_native_source_to_screen(
-                        image_rect,
-                        app.develop.geometry,
-                        lens_geometry.as_deref(),
-                        source_width,
-                        source_height,
-                        previous,
-                    );
-                    let distance_px = pointer.distance(previous_screen);
-                    let dab_size = zoom_scaled_brush_size(
-                        *size,
-                        app.preview.zoom,
-                        app.preferences.image_relative_brush_size,
-                    );
-                    let radius_px = geometry_brush_radius_screen(
-                        image_rect,
-                        app.develop.geometry,
-                        lens_geometry.as_deref(),
-                        source_width,
-                        source_height,
-                        uv,
-                        dab_size,
-                    );
-                    let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
-
-                    // Pointer-down frames with no movement used to append a
-                    // duplicate dab indefinitely. That made long touch holds
-                    // and slow strokes progressively more expensive without
-                    // changing a single mask pixel.
-                    if first_dab {
-                        if dabs.len() < 8192 {
-                            stroke_starts.push(dabs.len());
-                            dabs.push(BrushDab {
-                                center: uv,
-                                opacity,
-                                size: dab_size,
-                                feather: *feather,
-                            });
-                            changed = true;
+                    let Some(stroke) = brush_samples.as_ref() else {
+                        return;
+                    };
+                    if stroke.first && !stroke.samples.is_empty() && dabs.len() < 8192 {
+                        stroke_starts.push(dabs.len());
+                    }
+                    for &center in &stroke.samples {
+                        if dabs.len() >= 8192 {
+                            break;
                         }
-                    } else if distance_px >= spacing_px * 0.80 {
-                        let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
-                        for step in 1..=steps {
-                            if dabs.len() >= 8192 {
-                                break;
-                            }
-                            let t = step as f32 / steps as f32;
-                            dabs.push(BrushDab {
-                                center: [previous[0] + dx * t, previous[1] + dy * t],
-                                opacity,
-                                size: dab_size,
-                                feather: *feather,
-                            });
-                            changed = true;
-                        }
+                        dabs.push(BrushDab {
+                            center,
+                            opacity,
+                            size: stroke.dab_size,
+                            feather: *feather,
+                        });
+                        changed = true;
                     }
                     if changed {
-                        // Keep the last emitted point, not merely the last
-                        // pointer sample, so sub-spacing motion accumulates
-                        // instead of disappearing between frames.
-                        app.masks.last_brush_point = Some(uv);
+                        app.masks.last_brush_point = Some(stroke.uv);
                     }
                 }
                 (
@@ -450,67 +407,37 @@ impl Preview {
                 },
                 (
                     MaskGeometry::Object {
-                        brush_size,
                         strokes,
                         ..
                     },
                     MaskKind::Object,
                 ) => {
-                    // Object strokes always start a new positive selection. A
-                    // refined mask was cleared above on the first pointer-down.
-                    let positive = true;
-                    let first_point = app.masks.last_brush_point.is_none();
-                    let previous = app.masks.last_brush_point.unwrap_or(uv);
-                    let dx = uv[0] - previous[0];
-                    let dy = uv[1] - previous[1];
-                    let previous_screen = final_geometry_native_source_to_screen(
-                        image_rect,
-                        app.develop.geometry,
-                        lens_geometry.as_deref(),
-                        source_width,
-                        source_height,
-                        previous,
-                    );
-                    let distance_px = pointer.distance(previous_screen);
-                    let stroke_brush_size = zoom_scaled_brush_size(
-                        *brush_size,
-                        app.preview.zoom,
-                        app.preferences.image_relative_brush_size,
-                    );
-                    let radius_px = geometry_brush_radius_screen(
-                        image_rect,
-                        app.develop.geometry,
-                        lens_geometry.as_deref(),
-                        source_width,
-                        source_height,
-                        uv,
-                        stroke_brush_size,
-                    );
-                    let spacing_px = (radius_px * 0.22).clamp(0.85, 24.0);
-                    if first_point {
-                        strokes.push(ObjectStroke {
-                            points: vec![uv],
-                            positive,
-                            brush_size: stroke_brush_size,
-                        });
-                        changed = true;
-                    } else if distance_px >= spacing_px * 0.75 {
-                        if let Some(stroke) = strokes.last_mut() {
-                            let steps = (distance_px / spacing_px).ceil().max(1.0) as usize;
-                            for step in 1..=steps {
-                                if stroke.points.len() >= 8192 {
-                                    break;
-                                }
-                                let t = step as f32 / steps as f32;
-                                stroke
-                                    .points
-                                    .push([previous[0] + dx * t, previous[1] + dy * t]);
-                            }
+                    // Object strokes use the same transformed sampling engine,
+                    // but retain their existing slightly denser 0.75 threshold.
+                    let Some(sampled) = brush_samples.as_ref() else {
+                        return;
+                    };
+                    if sampled.first {
+                        if let Some(&first) = sampled.samples.first() {
+                            strokes.push(ObjectStroke {
+                                points: vec![first],
+                                positive: true,
+                                brush_size: sampled.dab_size,
+                            });
                             changed = true;
                         }
+                    } else if let Some(stroke) = strokes.last_mut() {
+                        let before = stroke.points.len();
+                        for &point in &sampled.samples {
+                            if stroke.points.len() >= 8192 {
+                                break;
+                            }
+                            stroke.points.push(point);
+                        }
+                        changed |= stroke.points.len() != before;
                     }
                     if changed {
-                        app.masks.last_brush_point = Some(uv);
+                        app.masks.last_brush_point = Some(sampled.uv);
                     }
                 }
                 (

@@ -17,7 +17,6 @@ struct ToneHistogram {
 @group(0) @binding(16) var<storage, read_write> tone_stats_out: ToneCommon::ToneStats;
 @group(0) @binding(17) var tone_guide_read: texture_2d<f32>;
 @group(0) @binding(18) var tone_guide_write: texture_storage_2d<r32float, write>;
-@group(0) @binding(32) var tone_inpaint_tex: texture_2d<f32>;
 
 fn tone_raster_ca_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
     let local_extent = vec2<f32>(
@@ -81,19 +80,6 @@ fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     // scene semantics across profiles. User Exposure is reintroduced
     // analytically by tonemap.wgsl.
     var working = Color::cam_to_working(camera_rgb);
-    // Tone masks and histogram anchors must analyze the same inpainted scene
-    // that the adjustment graph renders. Reading the original scene here made
-    // erased objects reappear as tonal silhouettes when Highlights/Shadows or
-    // related adaptive controls were moved.
-    let replacement = textureLoad(tone_inpaint_tex, Common::clamp_pos(pos), 0);
-    if replacement.a > 1e-6 {
-        let replacement_working = vec3<f32>(
-            dot(Common::camera_uniforms.inpaint_wb_0_field.xyz, replacement.rgb),
-            dot(Common::camera_uniforms.inpaint_wb_1_field.xyz, replacement.rgb),
-            dot(Common::camera_uniforms.inpaint_wb_2_field.xyz, replacement.rgb),
-        );
-        working = mix(working, replacement_working, clamp(replacement.a, 0.0, 1.0));
-    }
     if Common::camera_uniforms._pad_0_field > 0.5 {
         working = BasicAdjustments::apply_temperature_tint_values(
             working,

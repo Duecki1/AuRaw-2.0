@@ -144,21 +144,17 @@ impl AurawApp {
         let mut finished = None;
         for event in events {
             match event {
-                LandscapeMaskEvent::DownloadProgress {
-                    label,
-                    downloaded,
-                    total,
-                } => {
+                LandscapeMaskEvent::DownloadProgress(progress) => {
                     operation.progress = ForegroundProgress::units(
-                        downloaded,
-                        total,
+                        progress.downloaded,
+                        progress.total,
                         Some("bytes".to_owned()),
-                        format!("Downloading {label}"),
+                        format!("Downloading {}", progress.label),
                     )
                     .with_detail(format!(
                         "{:.1} / {:.1} MB",
-                        downloaded as f64 / 1_000_000.0,
-                        total as f64 / 1_000_000.0
+                        progress.downloaded as f64 / 1_000_000.0,
+                        progress.total as f64 / 1_000_000.0
                     ));
                 }
                 LandscapeMaskEvent::Inferencing => {

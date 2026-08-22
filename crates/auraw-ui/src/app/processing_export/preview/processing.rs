@@ -135,18 +135,6 @@ impl AurawApp {
         }
 
         if stage == ProcessingStage::Output {
-            if let Err(error) = detail.pipeline.update_inpaint_layer(
-                &render_state.queue,
-                self.inpaint.layer.as_ref(),
-                virtual_origin[0],
-                virtual_origin[1],
-                virtual_full_size[0],
-                virtual_full_size[1],
-            ) {
-                self.ui.notice = Some(format!("Could not update zoomed inpainting: {error:#}"));
-                self.preview.detail_pending_stage = None;
-                return;
-            }
             if let Some(full_frame) = full_frame_tone_pipeline {
                 detail.pipeline.inherit_tone_statistics(
                     &render_state.queue,
@@ -155,9 +143,21 @@ impl AurawApp {
                 );
             }
         }
-        detail
-            .pipeline
-            .dispatch_stage(&render_state.queue, &render_state.device, &params, stage);
+        if let Err(error) = detail.pipeline.dispatch_stage_with_remove(
+            &render_state.queue,
+            &render_state.device,
+            &params,
+            stage,
+            &self.inpaint.edits,
+            full_raw,
+            &self.develop.target_exposure,
+            [detail.source_origin[0] as f32, detail.source_origin[1] as f32],
+            [detail.source_size[0] as f32, detail.source_size[1] as f32],
+        ) {
+            self.ui.notice = Some(format!("Could not apply Remove to zoomed preview: {error:#}"));
+            self.preview.detail_pending_stage = None;
+            return;
+        }
         self.preview.detail_pending_stage = match stage {
             ProcessingStage::Raw => Some(ProcessingStage::Tone),
             ProcessingStage::Tone => Some(ProcessingStage::Output),
@@ -219,22 +219,27 @@ impl AurawApp {
             }
         }
 
-        if stage == ProcessingStage::Output {
-            if let Err(error) = pipeline.update_inpaint_layer(
-                &render_state.queue,
-                self.inpaint.layer.as_ref(),
-                0,
-                0,
-                raw.width,
-                raw.height,
-            ) {
-                self.ui.notice = Some(format!("Could not update preview inpainting: {error:#}"));
-                return;
-            }
-        }
         let params = GpuParams::new(&self.develop.target_exposure, &self.masks.stack, raw)
             .with_vignette_geometry(self.develop.geometry);
-        pipeline.dispatch_stage(&render_state.queue, &render_state.device, &params, stage);
+        let Some(full_raw) = self.develop.loaded_raw.as_ref() else {
+            self.preview.pending_stage = None;
+            return;
+        };
+        if let Err(error) = pipeline.dispatch_stage_with_remove(
+            &render_state.queue,
+            &render_state.device,
+            &params,
+            stage,
+            &self.inpaint.edits,
+            full_raw,
+            &self.develop.target_exposure,
+            [0.0, 0.0],
+            [full_raw.width as f32, full_raw.height as f32],
+        ) {
+            self.ui.notice = Some(format!("Could not apply Remove to preview: {error:#}"));
+            self.preview.pending_stage = None;
+            return;
+        }
         self.preview.pending_stage = match stage {
             ProcessingStage::Raw => Some(ProcessingStage::Tone),
             ProcessingStage::Tone => Some(ProcessingStage::Output),

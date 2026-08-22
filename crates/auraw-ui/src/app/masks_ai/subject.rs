@@ -34,14 +34,14 @@ impl AurawApp {
             return;
         }
         let path = self.birefnet_model_path();
-        if path.is_file() {
-            self.start_subject_worker(path);
+        if crate::ai_masks::birefnet_model_is_verified(self.ai.birefnet_quality, &path) {
+            self.start_subject_worker(path, false);
         } else {
             self.ai.subject_consent_open = true;
         }
     }
 
-    pub(in crate::app) fn start_subject_worker(&mut self, model_path: PathBuf) {
+    pub(in crate::app) fn start_subject_worker(&mut self, model_path: PathBuf, allow_download: bool) {
         if self.foreground_operation_active() {
             return;
         }
@@ -58,12 +58,16 @@ impl AurawApp {
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
 
-        let model_present = model_path.is_file();
+        let model_present = crate::ai_masks::birefnet_model_is_verified(
+            self.ai.birefnet_quality,
+            &model_path,
+        );
         let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let receiver = spawn_subject_mask(
             SubjectMaskWorkerRequest {
                 quality: self.ai.birefnet_quality,
                 model_path,
+                allow_download,
                 runtime_path,
                 runtime_sha256,
                 width: source.width,
@@ -130,21 +134,17 @@ impl AurawApp {
         let mut finished = None;
         for event in events {
             match event {
-                SubjectMaskEvent::DownloadProgress {
-                    label,
-                    downloaded,
-                    total,
-                } => {
+                SubjectMaskEvent::DownloadProgress(progress) => {
                     operation.progress = ForegroundProgress::units(
-                        downloaded,
-                        total,
+                        progress.downloaded,
+                        progress.total,
                         Some("bytes".to_owned()),
-                        format!("Downloading {label}"),
+                        format!("Downloading {}", progress.label),
                     )
                     .with_detail(format!(
                         "{:.1} / {:.1} MB",
-                        downloaded as f64 / 1_000_000.0,
-                        total as f64 / 1_000_000.0
+                        progress.downloaded as f64 / 1_000_000.0,
+                        progress.total as f64 / 1_000_000.0
                     ));
                 }
                 SubjectMaskEvent::Inferencing => {

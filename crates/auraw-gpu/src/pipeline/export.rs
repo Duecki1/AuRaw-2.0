@@ -2,8 +2,9 @@ use super::geometry::GeometryInverseMap;
 use super::{
     export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into, mask_atlas_edge,
     required_export_tile_halo, CfaKind, ExposureParams, GeometryTransform, GpuParams,
-    GpuProgramPrewarm, IccOutputTransform, InpaintLayer, LensGeometryMap, LoadedRaw, MaskStack,
-    ProcessingQuality, RawGpuPipeline, RawGpuProgramTemplate, TilePlan, TileSpec, EXPORT_TILE_HALO,
+    GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack,
+    NativeRect, ProcessingQuality, ProcessingStage, RawGpuPipeline, RawGpuProgramTemplate,
+    RemoveEditState, TilePlan, TileSpec, ToneStatisticsSnapshot, EXPORT_TILE_HALO,
     MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
 };
 use crate::file_ops::replace_file;
@@ -24,6 +25,101 @@ pub enum ExportFormat {
     Png,
     Jpeg,
     Tiff,
+}
+
+/// Renders one native source crop at AuRaw's source-scene boundary. Existing
+/// Remove strokes are restored into that scene before readback, so a new
+/// Big-LaMa stroke sees the results of earlier strokes without baking any
+/// downstream Develop adjustment into its cache.
+pub fn render_remove_scene_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        job.crop.width > 0 && job.crop.height > 0,
+        "Remove crop is empty"
+    );
+    anyhow::ensure!(
+        job.crop.right() <= job.raw.width && job.crop.bottom() <= job.raw.height,
+        "Remove crop lies outside the native source image"
+    );
+    let empty_masks = MaskStack::default();
+    let halo = required_export_tile_halo(&job.exposure, &empty_masks);
+    let tile = crate::pipeline::ExportTile {
+        core_x: job.crop.x,
+        core_y: job.crop.y,
+        core_width: job.crop.width,
+        core_height: job.crop.height,
+        local_core_x: halo,
+        local_core_y: halo,
+        padded_width: job.crop.width.saturating_add(halo.saturating_mul(2)),
+        padded_height: job.crop.height.saturating_add(halo.saturating_mul(2)),
+        global_origin_x: job.crop.x as i32 - halo as i32,
+        global_origin_y: job.crop.y as i32 - halo as i32,
+    };
+    let tile_raw = extract_padded_tile(&job.raw, tile);
+    let mask_edge = mask_atlas_edge();
+    let params = GpuParams::new_for_tile(
+        &job.exposure,
+        &empty_masks,
+        &tile_raw,
+        tile.global_origin_x,
+        tile.global_origin_y,
+        job.raw.width,
+        job.raw.height,
+    );
+    let template = job
+        .program_prewarm
+        .as_deref()
+        .and_then(|prewarm| prewarm.wait().ok());
+    let pipeline = if let Some(template) = template.as_deref() {
+        RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
+            &job.device,
+            &job.queue,
+            &tile_raw,
+            &params,
+            ProcessingQuality::High,
+            template,
+            mask_edge,
+        )
+        .or_else(|_| {
+            RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+                &job.device,
+                &job.queue,
+                &tile_raw,
+                &params,
+                ProcessingQuality::High,
+                mask_edge,
+            )
+        })?
+    } else {
+        RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+            &job.device,
+            &job.queue,
+            &tile_raw,
+            &params,
+            ProcessingQuality::High,
+            mask_edge,
+        )?
+    };
+
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
+    pipeline.upload_remove_scene_patches(
+        &job.queue,
+        &job.remove,
+        &job.raw,
+        &job.exposure,
+        [tile.global_origin_x as f32, tile.global_origin_y as f32],
+        [tile.padded_width as f32, tile.padded_height as f32],
+    )?;
+    let scene = pipeline.read_scene_texture_blocking(&job.device, &job.queue)?;
+    let mut crop = vec![0.0f32; job.crop.width as usize * job.crop.height as usize * 3];
+    for y in 0..job.crop.height as usize {
+        let source_y = tile.local_core_y as usize + y;
+        let source_start = (source_y * tile.padded_width as usize + tile.local_core_x as usize) * 3;
+        let source_end = source_start + job.crop.width as usize * 3;
+        let destination_start = y * job.crop.width as usize * 3;
+        crop[destination_start..destination_start + job.crop.width as usize * 3]
+            .copy_from_slice(&scene[source_start..source_end]);
+    }
+    Ok(crop)
 }
 
 impl ExportFormat {
@@ -287,13 +383,152 @@ pub struct TiledExportJob {
     pub geometry: GeometryTransform,
     pub exposure: ExposureParams,
     pub masks: MaskStack,
-    pub inpaint: Option<InpaintLayer>,
+    pub remove: RemoveEditState,
     pub path: PathBuf,
     pub tile_spec: TileSpec,
     pub settings: ExportSettings,
     pub metadata: ExportMetadata,
     pub cancellation: Arc<AtomicBool>,
     pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
+}
+
+/// One synchronous native-resolution developed crop render. Call this from a
+/// worker thread; it performs GPU readback and therefore intentionally blocks
+/// only that worker, never the egui event loop.
+pub struct DevelopedCropJob {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub raw: Arc<LoadedRaw>,
+    pub geometry: GeometryTransform,
+    pub exposure: ExposureParams,
+    pub masks: MaskStack,
+    pub remove: RemoveEditState,
+    pub crop: NativeRect,
+    pub tone_statistics: Option<Arc<ToneStatisticsSnapshot>>,
+    pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
+}
+
+pub fn render_developed_linear_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        job.crop.width > 0 && job.crop.height > 0,
+        "Remove crop is empty"
+    );
+    anyhow::ensure!(
+        job.crop.right() <= job.raw.width && job.crop.bottom() <= job.raw.height,
+        "Remove crop lies outside the native source image"
+    );
+    let halo = required_export_tile_halo(&job.exposure, &job.masks);
+    let tile = crate::pipeline::ExportTile {
+        core_x: job.crop.x,
+        core_y: job.crop.y,
+        core_width: job.crop.width,
+        core_height: job.crop.height,
+        local_core_x: halo,
+        local_core_y: halo,
+        padded_width: job.crop.width.saturating_add(halo.saturating_mul(2)),
+        padded_height: job.crop.height.saturating_add(halo.saturating_mul(2)),
+        global_origin_x: job.crop.x as i32 - halo as i32,
+        global_origin_y: job.crop.y as i32 - halo as i32,
+    };
+    let tile_raw = extract_padded_tile(&job.raw, tile);
+    let mask_region = tile_mask_source_region(
+        &job.masks,
+        tile.global_origin_x,
+        tile.global_origin_y,
+        tile.padded_width,
+        tile.padded_height,
+        job.raw.width,
+        job.raw.height,
+    );
+    let mask_edge = if job.masks.masks.is_empty() {
+        mask_atlas_edge()
+    } else {
+        export_mask_atlas_edge(tile.padded_width, tile.padded_height)
+    };
+    let mask_extent = mask_region_texture_extent(mask_region, mask_edge);
+    let params = GpuParams::new_for_tile(
+        &job.exposure,
+        &job.masks,
+        &tile_raw,
+        tile.global_origin_x,
+        tile.global_origin_y,
+        job.raw.width,
+        job.raw.height,
+    )
+    .with_vignette_geometry(job.geometry)
+    .with_mask_uv_rect_and_extent(
+        mask_source_region_uv(mask_region, job.raw.width, job.raw.height),
+        mask_extent,
+    );
+    let template = job
+        .program_prewarm
+        .as_deref()
+        .and_then(|prewarm| prewarm.wait().ok());
+    let pipeline = if let Some(template) = template.as_deref() {
+        RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
+            &job.device,
+            &job.queue,
+            &tile_raw,
+            &params,
+            ProcessingQuality::High,
+            template,
+            mask_edge,
+        )
+        .or_else(|_| {
+            RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+                &job.device,
+                &job.queue,
+                &tile_raw,
+                &params,
+                ProcessingQuality::High,
+                mask_edge,
+            )
+        })?
+    } else {
+        RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+            &job.device,
+            &job.queue,
+            &tile_raw,
+            &params,
+            ProcessingQuality::High,
+            mask_edge,
+        )?
+    };
+    upload_mask_atlas(
+        &pipeline,
+        &job.queue,
+        &job.masks,
+        job.raw.width,
+        job.raw.height,
+        mask_region,
+    )?;
+    pipeline.update_light_rays_mask_layers(
+        &job.queue,
+        &job.masks,
+        job.raw.width,
+        job.raw.height,
+    )?;
+    // Keep spatial work crop-local, but inherit the already-computed global
+    // tone anchors from the main preview when available. This follows the same
+    // Raw -> Tone -> inherit -> Output sequence as AuRaw's detail preview and
+    // prevents a local Remove context crop from solving a different exposure
+    // or dehaze anchor than the surrounding photograph.
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Tone);
+    if let Some(tone_statistics) = job.tone_statistics.as_deref() {
+        pipeline.inherit_tone_statistics_snapshot(&job.queue, &job.device, tone_statistics);
+    }
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Output);
+    let mut rgb = pipeline.read_display_linear_region_blocking(
+        &job.device,
+        &job.queue,
+        tile.local_core_x,
+        tile.local_core_y,
+        tile.core_width,
+        tile.core_height,
+    )?;
+    crate::pipeline::composite_remove_edits_into_linear_region(&job.remove, job.crop, &mut rgb);
+    Ok(rgb)
 }
 
 impl ExportFormat {
@@ -444,7 +679,7 @@ fn run_export_worker(
             raw: &job.raw,
             exposure: &job.exposure,
             masks: &job.masks,
-            inpaint: job.inpaint.as_ref(),
+            remove: &job.remove,
             path,
             tile_spec,
             output_width,
@@ -540,7 +775,7 @@ struct ExportRequest<'a> {
     raw: &'a LoadedRaw,
     exposure: &'a ExposureParams,
     masks: &'a MaskStack,
-    inpaint: Option<&'a InpaintLayer>,
+    remove: &'a RemoveEditState,
     path: &'a Path,
     tile_spec: TileSpec,
     output_width: u32,
@@ -730,7 +965,7 @@ where
         raw,
         exposure,
         masks,
-        inpaint,
+        remove,
         path: _,
         tile_spec,
         output_width,
@@ -893,7 +1128,18 @@ where
             tile.core_width,
             tile.core_height,
         );
-        tile_pipeline.accumulate_export_tone_tile(queue, device, &tone_params);
+        tile_pipeline
+            .accumulate_export_tone_tile_with_remove(
+                queue,
+                device,
+                &tone_params,
+                remove,
+                raw,
+                exposure,
+                [tile.global_origin_x as f32, tile.global_origin_y as f32],
+                [tile.padded_width as f32, tile.padded_height as f32],
+            )
+            .with_context(|| format!("apply Remove to tone-analysis tile {}", index + 1))?;
     }
     tile_pipeline.finish_export_tone_analysis(queue, device);
     crate::diagnostics::record(format!(
@@ -936,19 +1182,6 @@ where
             tile_pipeline
                 .upload_raw_tile(queue, &tile_scratch)
                 .with_context(|| format!("upload export tile {}", global_index + 1))?;
-            tile_pipeline
-                .update_inpaint_layer(
-                    queue,
-                    inpaint,
-                    tile.global_origin_x,
-                    tile.global_origin_y,
-                    raw.width,
-                    raw.height,
-                )
-                .with_context(|| {
-                    format!("upload inpainting for export tile {}", global_index + 1)
-                })?;
-
             let mask_region = tile_mask_source_region(
                 masks,
                 tile.global_origin_x,
@@ -983,7 +1216,18 @@ where
                 mask_source_region_uv(mask_region, raw.width, raw.height),
                 mask_extent,
             );
-            tile_pipeline.dispatch_export_tile(queue, device, &params);
+            tile_pipeline
+                .dispatch_export_tile_with_remove(
+                    queue,
+                    device,
+                    &params,
+                    remove,
+                    raw,
+                    exposure,
+                    [tile.global_origin_x as f32, tile.global_origin_y as f32],
+                    [tile.padded_width as f32, tile.padded_height as f32],
+                )
+                .with_context(|| format!("apply Remove to export tile {}", global_index + 1))?;
             let readback = tile_pipeline
                 .begin_display_linear_region_readback(
                     device,

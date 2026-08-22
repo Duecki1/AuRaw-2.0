@@ -363,7 +363,10 @@ jobs:
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          cargo check --locked --workspace
+          # This is a host-side compile preflight, not the Android native build.
+          # The runner intentionally does not install desktop LibRaw; the real
+          # target build below stages and links the pinned Android LibRaw/Lensfun.
+          AURAW_ALLOW_NO_LIBRAW=1 cargo check --locked --workspace
           ./gradlew --version
 
           ./gradlew \

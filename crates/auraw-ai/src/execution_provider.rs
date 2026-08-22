@@ -12,20 +12,12 @@ use ort::{
     },
 };
 #[cfg(not(target_os = "android"))]
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    TryLockError,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
-
-/// Serializes AI inference while its ONNX session is being selected. Masking,
-/// inpainting, and denoise deliberately share this gate so switching tools
-/// cannot leave two large model sessions resident at the same time.
-static INTERACTIVE_AI_MODEL_GATE: Mutex<()> = Mutex::new(());
 
 #[cfg(not(target_os = "android"))]
 static AI_ACCELERATION_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -43,6 +35,7 @@ pub fn set_ai_acceleration_enabled(enabled: bool) {
             "AI GPU acceleration {} in Settings",
             if enabled { "enabled" } else { "disabled" }
         ));
+        crate::model_runtime::invalidate_for_provider_change();
     }
 }
 
@@ -54,21 +47,6 @@ pub fn ai_acceleration_enabled() -> bool {
     #[cfg(target_os = "android")]
     {
         true
-    }
-}
-
-pub(crate) fn lock_interactive_ai_model() -> MutexGuard<'static, ()> {
-    INTERACTIVE_AI_MODEL_GATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[cfg(not(target_os = "android"))]
-pub(crate) fn try_lock_interactive_ai_model() -> Option<MutexGuard<'static, ()>> {
-    match INTERACTIVE_AI_MODEL_GATE.try_lock() {
-        Ok(guard) => Some(guard),
-        Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
-        Err(TryLockError::WouldBlock) => None,
     }
 }
 

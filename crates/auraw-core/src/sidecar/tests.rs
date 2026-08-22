@@ -4,7 +4,9 @@ use super::desktop::{
     developed_thumbnail_fingerprint_path_for_raw,
     legacy_developed_thumbnail_fingerprint_path_for_raw, legacy_developed_thumbnail_path_for_raw,
 };
-use crate::pipeline::MaskKind;
+use crate::pipeline::{
+    MaskKind, NativeRect, RemoveBrushPoint, RemoveBrushStroke, RemovePatch, RemoveStroke,
+};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,12 +22,12 @@ fn sample_edits() -> EditState {
         camera_profile: None,
         masks: Arc::new(masks),
         subject_refinement: None,
-        inpainting: Arc::new(Vec::new()),
         lens: LensEditState {
             enabled: true,
             maker: "Test Optics".to_owned(),
             model: "35 mm f/2".to_owned(),
         },
+        remove: Arc::new(crate::pipeline::RemoveEditState::default()),
         ai_masks_need_update: false,
     }
 }
@@ -56,7 +58,6 @@ fn copied_adjustments_respect_category_settings_and_mark_ai_masks_stale() {
             camera_profile: false,
             masks: false,
             ai_masks: true,
-            inpainting: false,
             lens_correction: false,
         },
     );
@@ -97,7 +98,6 @@ fn copied_uncached_ai_masks_are_still_marked_stale() {
             camera_profile: false,
             masks: false,
             ai_masks: true,
-            inpainting: false,
             lens_correction: false,
         },
     );
@@ -137,7 +137,6 @@ fn manual_and_ai_masks_can_be_copied_independently() {
             camera_profile: false,
             masks: true,
             ai_masks: false,
-            inpainting: false,
             lens_correction: false,
         },
     );
@@ -160,7 +159,6 @@ fn manual_and_ai_masks_can_be_copied_independently() {
             camera_profile: false,
             masks: false,
             ai_masks: true,
-            inpainting: false,
             lens_correction: false,
         },
     );
@@ -202,7 +200,6 @@ fn mixed_mask_groups_do_not_copy_disabled_manual_components() {
             camera_profile: false,
             masks: false,
             ai_masks: true,
-            inpainting: false,
             lens_correction: false,
         },
     );
@@ -224,7 +221,6 @@ fn mixed_mask_groups_do_not_copy_disabled_manual_components() {
             camera_profile: false,
             masks: true,
             ai_masks: false,
-            inpainting: false,
             lens_correction: false,
         },
     );
@@ -248,6 +244,10 @@ fn copied_adjustments_include_camera_profile_and_replace_clears_other_categories
     source.exposure.dehaze = 48.0;
 
     let mut destination = sample_edits();
+    Arc::make_mut(&mut destination.remove)
+        .strokes
+        .push(RemoveStroke::default());
+    let destination_remove = Arc::clone(&destination.remove);
 
     apply_copied_adjustments_with_mode(
         &mut destination,
@@ -258,7 +258,6 @@ fn copied_adjustments_include_camera_profile_and_replace_clears_other_categories
             camera_profile: true,
             masks: false,
             ai_masks: false,
-            inpainting: false,
             lens_correction: false,
         },
         AdjustmentPasteMode::Replace,
@@ -270,8 +269,8 @@ fn copied_adjustments_include_camera_profile_and_replace_clears_other_categories
         Some(PathBuf::from("Adobe/Camera Standard.dcp"))
     );
     assert!(destination.masks.masks.is_empty());
-    assert!(destination.inpainting.is_empty());
     assert_eq!(destination.lens, LensEditState::default());
+    assert_eq!(destination.remove, destination_remove);
 }
 
 #[test]
@@ -305,7 +304,48 @@ fn sidecar_round_trip_preserves_edit_state() {
     let mut edits = sample_edits();
     edits.exposure.hue = 37.5;
     Arc::make_mut(&mut edits.masks).masks[0].adjustments.hue = -82.25;
+    Arc::make_mut(&mut edits.remove).strokes.push(RemoveStroke {
+        brush: RemoveBrushStroke {
+            points: vec![RemoveBrushPoint {
+                x: 1234.5,
+                y: 987.25,
+                radius: 42.0,
+            }],
+            dilation_radius: 3,
+        },
+        patches: vec![RemovePatch::new_scene(
+            NativeRect {
+                x: 1230,
+                y: 980,
+                width: 2,
+                height: 1,
+            },
+            vec![
+                half::f16::from_f32(0.25).to_bits(),
+                half::f16::from_f32(0.50).to_bits(),
+                half::f16::from_f32(0.75).to_bits(),
+                half::f16::from_f32(1.00).to_bits(),
+                half::f16::from_f32(0.10).to_bits(),
+                half::f16::from_f32(0.20).to_bits(),
+            ],
+            vec![255, 96],
+        )
+        .unwrap()],
+    });
     let encoded = encode(edits.clone()).unwrap();
+    let loaded = decode(&encoded).unwrap();
+    assert_eq!(loaded.edits, edits);
+    assert!(!loaded.migrated);
+}
+
+#[test]
+fn legacy_inpainting_field_is_ignored() {
+    let edits = sample_edits();
+    let encoded = encode(edits.clone()).unwrap();
+    let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    document["edits"]["inpainting"] = serde_json::json!([{ "legacy": true }]);
+    let encoded = serde_json::to_vec(&document).unwrap();
+
     let loaded = decode(&encoded).unwrap();
     assert_eq!(loaded.edits, edits);
     assert!(!loaded.migrated);
@@ -692,320 +732,6 @@ fn reset_all_adjustments_removes_sidecar_masks_and_thumbnail_caches() {
     assert!(load_desktop(&raw).unwrap().is_none());
 
     fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn inpainting_round_trip_preserves_individual_strokes() {
-    use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke};
-    use half::f16;
-
-    let mut edits = sample_edits();
-    let rgba16f = vec![f16::from_f32(0.25).to_bits(); 16 * 16 * 4];
-    let patch = InpaintPatch::new_linear_resampled(
-        [32, 32],
-        [8, 8],
-        [16, 16],
-        [16, 16],
-        rgba16f,
-        vec![255; 16 * 16],
-    )
-    .unwrap();
-    let stroke = InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap();
-    edits.inpainting = Arc::new(vec![stroke]);
-
-    let encoded = encode(edits.clone()).unwrap();
-    let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    assert!(document["edits"]["inpainting"][0].get("kind").is_none());
-    assert!(document["edits"]["inpainting"][0]
-        .get("source_offset")
-        .is_none());
-    assert!(document["edits"]["inpainting"][0]["patch"]["rgba16f"]
-        .as_str()
-        .unwrap()
-        .starts_with("z1:"));
-    assert!(document["edits"]["inpainting"][0]["patch"]["mask"]
-        .as_str()
-        .unwrap()
-        .starts_with("z1:"));
-    let loaded = decode(&encoded).unwrap();
-    assert_eq!(loaded.edits.inpainting, edits.inpainting);
-}
-
-#[test]
-fn source_based_inpainting_round_trip_preserves_tool_and_offset() {
-    use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke, InpaintStrokeKind};
-    use half::f16;
-
-    let mut edits = sample_edits();
-    let patch = InpaintPatch::new_linear(
-        32,
-        32,
-        8,
-        8,
-        2,
-        2,
-        vec![f16::from_f32(0.5).to_bits(); 16],
-        vec![255; 4],
-    )
-    .unwrap();
-    edits.inpainting = Arc::new(vec![InpaintStroke::from_tool_result(
-        InpaintStrokeKind::Heal,
-        Some([0.25, -0.125]),
-        vec![BrushDab::default()],
-        patch,
-    )
-    .unwrap()]);
-
-    let encoded = encode(edits.clone()).unwrap();
-    let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(document["edits"]["inpainting"][0]["kind"], "Heal");
-    assert_eq!(
-        document["edits"]["inpainting"][0]["source_offset"],
-        serde_json::json!([0.25, -0.125])
-    );
-    assert_eq!(decode(&encoded).unwrap().edits, edits);
-}
-
-#[test]
-fn schema_five_raw_inpainting_payload_migrates_to_compressed_schema_six() {
-    use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke};
-    use base64::Engine as _;
-    use half::f16;
-
-    let mut edits = sample_edits();
-    let rgba16f = vec![f16::from_f32(0.25).to_bits(); 16 * 16 * 4];
-    let patch = InpaintPatch::new_linear_resampled(
-        [32, 32],
-        [8, 8],
-        [16, 16],
-        [16, 16],
-        rgba16f.clone(),
-        vec![255; 16 * 16],
-    )
-    .unwrap();
-    edits.inpainting = Arc::new(vec![InpaintStroke::from_result(
-        vec![BrushDab::default()],
-        patch,
-    )
-    .unwrap()]);
-
-    let encoded = encode(edits.clone()).unwrap();
-    let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    document["schema_version"] = 5.into();
-    let rgba_bytes = rgba16f
-        .iter()
-        .flat_map(|value| value.to_le_bytes())
-        .collect::<Vec<_>>();
-    document["edits"]["inpainting"][0]["patch"]["rgba16f"] =
-        base64::engine::general_purpose::STANDARD
-            .encode(rgba_bytes)
-            .into();
-    document["edits"]["inpainting"][0]["patch"]["mask"] =
-        base64::engine::general_purpose::STANDARD
-            .encode(vec![255u8; 16 * 16])
-            .into();
-
-    let legacy = serde_json::to_vec(&document).unwrap();
-    let loaded = decode(&legacy).unwrap();
-    assert!(loaded.migrated);
-    assert_eq!(loaded.edits, edits);
-
-    let rewritten = encode(loaded.edits).unwrap();
-    let current: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
-    assert_eq!(current["schema_version"], SIDECAR_SCHEMA_VERSION);
-    assert!(current["edits"]["inpainting"][0]["patch"]["rgba16f"]
-        .as_str()
-        .unwrap()
-        .starts_with("z1:"));
-}
-
-#[test]
-fn prospective_inpaint_budget_counts_existing_persisted_payloads() {
-    use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke, MaskImage};
-
-    fn stroke(edge: u32, value: u16) -> InpaintStroke {
-        let pixels = edge as usize * edge as usize;
-        let patch = InpaintPatch::new_linear(
-            edge + 2,
-            edge + 2,
-            1,
-            1,
-            edge,
-            edge,
-            vec![value; pixels * 4],
-            vec![255; pixels],
-        )
-        .unwrap();
-        InpaintStroke::from_result(vec![BrushDab::default(); 3], patch).unwrap()
-    }
-
-    let mut masks = MaskStack::default();
-    masks.add_mask(MaskKind::Subject);
-    masks.masks[0].name = "subject \"mask\"".to_owned();
-    if let MaskGeometry::Ai { mask, .. } = &mut masks.masks[0].components[0].geometry {
-        *mask = MaskImage::new(32, 32, vec![127; 32 * 32]);
-    } else {
-        panic!("subject mask should use AI geometry");
-    }
-
-    let existing = stroke(16, 1);
-    let candidate = stroke(8, 2);
-    let candidate_only =
-        estimate_sidecar_bytes(&MaskStack::default(), std::iter::once(&candidate)).unwrap();
-    let prospective = estimate_sidecar_bytes(&masks, [&existing, &candidate]).unwrap();
-    let measured = measure_sidecar_dynamic_bytes(&masks, [&existing, &candidate]).unwrap();
-    assert!(prospective > candidate_only);
-    assert!(prospective > measured);
-
-    assert!(preflight_inpaint_addition_with_limit(
-        &MaskStack::default(),
-        &[],
-        &candidate,
-        prospective - 1,
-    )
-    .is_ok());
-    assert!(preflight_inpaint_addition_with_limit(
-        &masks,
-        std::slice::from_ref(&existing),
-        &candidate,
-        prospective - 1,
-    )
-    .is_ok());
-    assert!(matches!(
-        preflight_inpaint_addition_with_limit(
-            &masks,
-            std::slice::from_ref(&existing),
-            &candidate,
-            measured - 1,
-        ),
-        Err(SidecarError::TooLarge(bytes)) if bytes == measured
-    ));
-
-    let mut edits = sample_edits();
-    edits.masks = Arc::new(masks);
-    edits.inpainting = Arc::new(vec![existing, candidate]);
-    let encoded = encode(edits).unwrap();
-    assert!((encoded.len() as u64) <= prospective);
-}
-
-#[test]
-fn compressed_mask_measurement_prevents_false_inpaint_budget_rejection() {
-    use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke, MaskImage};
-
-    let mut masks = MaskStack::default();
-    for kind in [MaskKind::Subject, MaskKind::Object, MaskKind::Landscape] {
-        masks.add_mask(kind);
-        let component = masks
-            .masks
-            .last_mut()
-            .unwrap()
-            .components
-            .first_mut()
-            .unwrap();
-        let image = MaskImage::new(1024, 1024, vec![0; 1024 * 1024]).unwrap();
-        match &mut component.geometry {
-            MaskGeometry::Ai { mask, .. }
-            | MaskGeometry::Landscape { mask, .. }
-            | MaskGeometry::Object { mask, .. } => *mask = Some(image),
-            _ => panic!("generated mask kind should have generated mask storage"),
-        }
-    }
-
-    let patch = InpaintPatch::new_linear_resampled(
-        [6000, 4000],
-        [100, 100],
-        [64, 64],
-        [16, 16],
-        vec![0; 16 * 16 * 4],
-        vec![255; 16 * 16],
-    )
-    .unwrap();
-    let candidate = InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap();
-    let conservative = estimate_sidecar_bytes(&masks, std::iter::once(&candidate)).unwrap();
-    let measured = measure_sidecar_dynamic_bytes(&masks, std::iter::once(&candidate)).unwrap();
-    assert!(conservative > measured);
-    let limit = measured + (conservative - measured) / 2;
-    assert!(preflight_inpaint_addition_with_limit(&masks, &[], &candidate, limit).is_ok());
-}
-
-#[test]
-fn compressed_native_resolution_patches_exceed_old_android_stroke_ceiling() {
-    use crate::pipeline::{BrushDab, InpaintPatch, InpaintStroke};
-
-    let raster_pixels = 256usize * 256;
-    let patch = InpaintPatch::new_linear_resampled(
-        [6000, 4000],
-        [500, 500],
-        [800, 800],
-        [256, 256],
-        vec![0u16; raster_pixels * 4],
-        vec![255; raster_pixels],
-    )
-    .unwrap();
-    let stroke = InpaintStroke::from_result(vec![BrushDab::default()], patch).unwrap();
-    let android_limit = 32 * 1024 * 1024;
-    let strokes = (0..48)
-        .map(|index| {
-            let mut candidate = stroke.clone();
-            candidate.patch.x += index * 10;
-            candidate.dabs[0].center[0] = index as f32 / 48.0;
-            candidate
-        })
-        .collect::<Vec<_>>();
-    let old_raw_bound = estimate_sidecar_bytes(&MaskStack::default(), strokes.iter()).unwrap();
-    assert!(old_raw_bound > android_limit);
-    preflight_inpaint_addition_with_limit(
-        &MaskStack::default(),
-        &strokes[..47],
-        &strokes[47],
-        android_limit,
-    )
-    .unwrap();
-
-    let mut edits = sample_edits();
-    edits.inpainting = Arc::new(strokes.clone());
-    let encoded = encode(edits).unwrap();
-    assert!((encoded.len() as u64) <= android_limit);
-    let decoded = decode(&encoded).unwrap();
-    assert_eq!(decoded.edits.inpainting.as_ref(), strokes.as_slice());
-}
-
-#[test]
-fn schema_one_sidecar_without_inpainting_loads_as_empty() {
-    let document = SidecarDocument {
-        format: SIDECAR_FORMAT.to_owned(),
-        schema_version: 1,
-        edits: sample_edits(),
-        mask_assets: Vec::new(),
-        mask_asset_refs: Vec::new(),
-    };
-    let mut value = serde_json::to_value(document).unwrap();
-    value["edits"].as_object_mut().unwrap().remove("inpainting");
-    let encoded = serde_json::to_vec(&value).unwrap();
-    let loaded = decode(&encoded).unwrap();
-    assert!(loaded.edits.inpainting.is_empty());
-    assert!(loaded.migrated);
-}
-
-#[test]
-fn schema_two_full_resolution_inpaint_patch_remains_compatible() {
-    use crate::pipeline::{InpaintPatch, InpaintStroke};
-
-    let mut edits = sample_edits();
-    let patch =
-        InpaintPatch::new_linear(4, 4, 1, 1, 2, 2, vec![0u16; 16], vec![255; 4]).unwrap();
-    edits.inpainting = Arc::new(vec![InpaintStroke::from_result(Vec::new(), patch).unwrap()]);
-    let encoded = serde_json::to_vec(&SidecarDocument {
-        format: SIDECAR_FORMAT.to_owned(),
-        schema_version: 2,
-        edits,
-        mask_assets: Vec::new(),
-        mask_asset_refs: Vec::new(),
-    })
-    .unwrap();
-    let loaded = decode(&encoded).unwrap();
-    assert_eq!(loaded.edits.inpainting[0].patch.raster_dimensions(), [2, 2]);
-    assert!(loaded.migrated);
 }
 
 #[test]

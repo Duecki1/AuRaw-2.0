@@ -286,19 +286,24 @@ impl AurawApp {
             self.preview.quality_dirty = false;
             return;
         }
-        if let Err(error) = pipeline.update_inpaint_layer(
-            &render_state.queue,
-            self.inpaint.layer.as_ref(),
-            0,
-            0,
-            prepared.preview_raw.width,
-            prepared.preview_raw.height,
-        ) {
-            self.ui.notice = Some(format!("Could not rebuild preview inpainting: {error:#}"));
-            self.preview.quality_dirty = false;
-            return;
+        if let Some(full_raw) = self.develop.loaded_raw.as_ref() {
+            if let Err(error) = pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                full_raw,
+                &self.develop.exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to rebuilt preview: {error:#}"));
+                self.preview.quality_dirty = false;
+                return;
+            }
+        } else {
+            pipeline.recompute(&render_state.queue, &render_state.device, &params);
         }
-        pipeline.recompute(&render_state.queue, &render_state.device, &params);
         let previous = {
             let mut renderer = render_state.renderer.write();
             let previous = self.take_preview_pipeline_and_release_textures(&mut renderer);
@@ -333,7 +338,6 @@ impl AurawApp {
                     Some((prepared.quality, Arc::clone(preview_raw)));
             }
         }
-        self.inpaint.source_cache = None;
         self.develop.target_exposure = self.develop.exposure;
         self.preview.pending_stage = None;
         self.preview.detail_pending_stage = None;

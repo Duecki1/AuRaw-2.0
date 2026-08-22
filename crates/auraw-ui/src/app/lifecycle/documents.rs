@@ -442,7 +442,7 @@ impl AurawApp {
                     let (
                         mut rendered_exposure,
                         mut rendered_masks,
-                        inpaint_strokes,
+                        remove_edits,
                         saved_lens,
                         pasted_ai_masks_need_update,
                         mut sidecar_warning,
@@ -453,7 +453,7 @@ impl AurawApp {
                         (
                             edits.exposure,
                             Arc::unwrap_or_clone(edits.masks),
-                            Arc::unwrap_or_clone(edits.inpainting),
+                            Arc::unwrap_or_clone(edits.remove),
                             Some(edits.lens),
                             edits.ai_masks_need_update,
                             None,
@@ -472,7 +472,7 @@ impl AurawApp {
                                 (
                                     loaded.edits.exposure,
                                     Arc::unwrap_or_clone(loaded.edits.masks),
-                                    Arc::unwrap_or_clone(loaded.edits.inpainting),
+                                    Arc::unwrap_or_clone(loaded.edits.remove),
                                     Some(loaded.edits.lens),
                                     loaded.edits.ai_masks_need_update,
                                     warning,
@@ -484,7 +484,7 @@ impl AurawApp {
                             Ok(None) => (
                                 initial_exposure,
                                 MaskStack::default(),
-                                Vec::new(),
+                                RemoveEditState::default(),
                                 None,
                                 false,
                                 None,
@@ -495,7 +495,7 @@ impl AurawApp {
                             Err(error) => (
                                 initial_exposure,
                                 MaskStack::default(),
-                                Vec::new(),
+                                RemoveEditState::default(),
                                 None,
                                 false,
                                 Some(format!(
@@ -768,23 +768,6 @@ impl AurawApp {
                     drop(reusable_preview_pipeline);
                     drop(startup_gpu_prewarm_template);
 
-                    let composed_inpaint = compose_inpaint_strokes(&inpaint_strokes);
-                    let inpaint_upload_started = Instant::now();
-                    pipeline
-                        .update_inpaint_layer(
-                            &queue,
-                            composed_inpaint.as_ref(),
-                            0,
-                            0,
-                            preview_raw.width,
-                            preview_raw.height,
-                        )
-                        .map_err(|error| format!("preview inpainting setup failed: {error:#}"))?;
-                    crate::diagnostics::record(format!(
-                        "Preview inpaint layer uploaded in {:.3}s",
-                        inpaint_upload_started.elapsed().as_secs_f64()
-                    ));
-
                     // Range and promptable-object source images are canonical RAW renditions,
                     // not user edit data. Render that neutral source through the preview
                     // pipeline itself instead of allocating a second full pipeline. Keeping
@@ -841,16 +824,25 @@ impl AurawApp {
                         .write_output_transform(&queue, &display_output_transform)
                         .map_err(|error| format!("display ICC LUT upload failed: {error:#}"))?;
                     let first_render_started = Instant::now();
-                    pipeline.recompute(&queue, &device, &params);
+                    pipeline
+                        .recompute_with_remove(
+                            &queue,
+                            &device,
+                            &params,
+                            &remove_edits,
+                            &full_raw,
+                            &rendered_exposure,
+                            [0.0, 0.0],
+                            [full_raw.width as f32, full_raw.height as f32],
+                        )
+                        .map_err(|error| {
+                            format!("initial Remove scene integration failed: {error:#}")
+                        })?;
                     crate::diagnostics::record(format!(
                         "Initial GPU preview dispatch submitted in {:.3}s",
                         first_render_started.elapsed().as_secs_f64()
                     ));
 
-                    // Inpainting now captures only the required full-resolution
-                    // RAW crop when a stroke is released. Avoid precomputing and
-                    // retaining an unused preview-resolution proxy source here.
-                    let inpaint_source = None;
                     crate::diagnostics::record(format!(
                         "RAW open worker finished in {:.3}s",
                         open_started.elapsed().as_secs_f64()
@@ -866,10 +858,9 @@ impl AurawApp {
                         pipeline,
                         rendered_exposure,
                         rendered_masks,
-                        inpaint_strokes,
+                        remove: remove_edits,
                         ai_masks_need_update: pasted_ai_masks_need_update,
                         mask_source,
-                        inpaint_source,
                         lens_correction,
                         sidecar_target,
                         sidecar_generation,
@@ -1005,13 +996,7 @@ impl AurawApp {
                 self.develop_ui.straighten_drag = None;
                 self.develop.geometry_revision = 0;
                 self.masks.stack = loaded.rendered_masks;
-                self.inpaint.strokes = loaded.inpaint_strokes;
-                self.inpaint.layer = compose_inpaint_strokes(&self.inpaint.strokes);
-                self.inpaint.texture = None;
-                self.inpaint.texture_key = None;
-                self.inpaint.texture_revision = self.inpaint.texture_revision.wrapping_add(1);
-                self.inpaint.revision = 0;
-                self.inpaint.source_cache = loaded.inpaint_source;
+                self.install_remove_edits(Arc::new(loaded.remove));
                 self.ai.masks_need_update = loaded.ai_masks_need_update;
                 self.rehydrate_restored_mask_state();
                 self.ai.masks_need_update |= loaded.ai_masks_need_update;

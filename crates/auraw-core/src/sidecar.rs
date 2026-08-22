@@ -1,7 +1,7 @@
 use crate::file_ops::{replace_file, sync_parent_directory};
 use crate::pipeline::{
-    ExposureParams, GeometryTransform, InpaintStroke, MaskGeometry, MaskImage, MaskKind, MaskStack,
-    SubjectRefinement, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    ExposureParams, GeometryTransform, MaskGeometry, MaskImage, MaskKind, MaskStack,
+    SubjectRefinement, RemoveEditState, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 11;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 13;
 /// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0006;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
@@ -34,7 +34,6 @@ const SIDECAR_FORMAT: &str = "AuRaw edit sidecar";
 const MAX_BRUSH_DABS: usize = 1_000_000;
 const MAX_OBJECT_STROKES: usize = 4096;
 const MAX_OBJECT_STROKE_POINTS: usize = 1_000_000;
-const MAX_INPAINT_DABS: usize = 1_000_000;
 const MAX_MASK_IMAGE_EDGE: u32 = 8192;
 const MAX_MASK_ASSET_REFS: usize = MAX_LOCAL_MASKS * MAX_MASK_COMPONENTS;
 const MAX_DECODED_MASK_ASSET_BYTES: u64 = if cfg!(target_os = "android") {
@@ -82,8 +81,6 @@ pub struct AdjustmentCopySettings {
     #[serde(default = "default_true")]
     pub ai_masks: bool,
     #[serde(default)]
-    pub inpainting: bool,
-    #[serde(default)]
     pub lens_correction: bool,
 }
 
@@ -106,7 +103,6 @@ impl Default for AdjustmentCopySettings {
             camera_profile: true,
             masks: true,
             ai_masks: true,
-            inpainting: false,
             lens_correction: false,
         }
     }
@@ -125,13 +121,18 @@ pub struct EditState {
     /// Missing on schema <= 6, which cleanly defaults to no refinement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_refinement: Option<SubjectRefinement>,
-    #[serde(default)]
-    pub inpainting: Arc<Vec<InpaintStroke>>,
     pub lens: LensEditState,
+    /// Cached non-destructive Big-LaMa Remove strokes in native source coordinates.
+    #[serde(default, skip_serializing_if = "arc_remove_is_empty")]
+    pub remove: Arc<RemoveEditState>,
     /// Persisted because copied content-aware masks belong to the source image
     /// until they are explicitly regenerated on the destination image.
     #[serde(default)]
     pub ai_masks_need_update: bool,
+}
+
+fn arc_remove_is_empty(remove: &Arc<RemoveEditState>) -> bool {
+    remove.is_empty()
 }
 
 pub fn default_edit_state() -> EditState {
@@ -141,8 +142,8 @@ pub fn default_edit_state() -> EditState {
         camera_profile: None,
         masks: Arc::new(MaskStack::default()),
         subject_refinement: None,
-        inpainting: Arc::new(Vec::new()),
         lens: LensEditState::default(),
+        remove: Arc::new(RemoveEditState::default()),
         ai_masks_need_update: false,
     }
 }
@@ -234,8 +235,8 @@ pub fn edit_state_has_adjustments(edits: &EditState) -> bool {
         || edits.camera_profile != default.camera_profile
         || edits.masks != default.masks
         || edits.subject_refinement != default.subject_refinement
-        || edits.inpainting != default.inpainting
         || edits.lens != default.lens
+        || edits.remove != default.remove
 }
 
 /// Merge a copied edit snapshot into an existing destination according to the
@@ -261,7 +262,13 @@ pub fn apply_copied_adjustments_with_mode(
     mode: AdjustmentPasteMode,
 ) {
     if mode == AdjustmentPasteMode::Replace {
+        // Remove patches belong to this exact source image and are not a
+        // portable adjustment category. Replacing copied develop settings
+        // must therefore leave the destination's non-destructive Remove
+        // history intact.
+        let remove = Arc::clone(&destination.remove);
         *destination = default_edit_state();
+        destination.remove = remove;
     }
     if settings.adjustments {
         destination.exposure = source.exposure;
@@ -301,13 +308,6 @@ pub fn apply_copied_adjustments_with_mode(
         } else {
             previous_ai_masks_need_update
         };
-    }
-    if settings.inpainting {
-        let inpainting_changed = destination.inpainting != source.inpainting;
-        destination.inpainting = Arc::clone(&source.inpainting);
-        if inpainting_changed && masks_contain_content_aware_components(&destination.masks) {
-            destination.ai_masks_need_update = true;
-        }
     }
     if settings.lens_correction {
         let lens_changed = destination.lens != source.lens;
@@ -707,13 +707,14 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
         )));
     }
     let original_schema = document.schema_version;
-    // Schema 5 introduced extracted PNG mask assets. Schema 6 kept that layout
-    // and changed inpainting binary fields to lossless compressed Base64
-    // strings. Schema 7 adds the optional shared Subject refinement field;
+    // Schema 5 introduced extracted PNG mask assets. Schema 6 kept that layout.
+    // Schema 7 adds the optional shared Subject refinement field;
     // schema 8 adds the defaulted mask-effect selector; schema 9 adds the
     // Fullscreen mask geometry; schema 10 adds non-destructive settings for
     // implemented mask effects; schema 11 adds procedural Fog and Smoke mask
-    // effects. Serde defaults keep every earlier sidecar backward-compatible.
+    // effects; schema 12 adds cached Big-LaMa Remove strokes; schema 13 moves
+    // new Remove patch pixels to the source-scene boundary. Serde defaults keep
+    // every earlier sidecar backward-compatible.
     if original_schema >= 5 {
         restore_mask_assets(
             &mut document.edits,
@@ -764,7 +765,7 @@ pub fn save_desktop(raw_path: &Path, edits: EditState) -> Result<PathBuf, Sideca
 pub fn reset_desktop_adjustments(raw_path: &Path) -> Result<bool, String> {
     // "Reset all adjustments" is deliberately destructive: the sidecar is
     // the complete persisted edit state, including normal masks, generated AI
-    // mask bitmaps/prompts, crop, inpainting, camera-profile selection, and
+    // mask bitmaps/prompts, crop, camera-profile selection, and
     // lens correction. Removing it guarantees the next open starts from the
     // untouched RAW instead of accidentally retaining hidden mask state.
     remove_desktop_edits(raw_path)
@@ -868,57 +869,21 @@ impl Write for CappedVec {
     }
 }
 
-/// Rejects an inpainting result before it becomes visible state only when the
-/// persisted edit would exceed the platform's corruption/memory safety bound.
-/// The fast path uses conservative raw-size estimates; borderline edits are
-/// re-measured with the same lossless compression used by the sidecar writer so
-/// compressible AI masks or inpainting patches cannot create false rejections.
-pub fn preflight_inpaint_addition(
-    masks: &MaskStack,
-    existing: &[InpaintStroke],
-    candidate: &InpaintStroke,
-) -> Result<(), SidecarError> {
-    preflight_inpaint_addition_with_limit(masks, existing, candidate, MAX_SIDECAR_BYTES)
-}
-
 /// Rejects a mask copy/duplicate before it becomes live state only when the
 /// prospective persisted edit cannot fit after exact compressed re-measurement.
-pub fn preflight_mask_change(
-    masks: &MaskStack,
-    inpainting: &[InpaintStroke],
-) -> Result<(), SidecarError> {
-    preflight_sidecar_dynamic_data_with_limit(masks, inpainting, MAX_SIDECAR_BYTES)
+pub fn preflight_mask_change(masks: &MaskStack) -> Result<(), SidecarError> {
+    preflight_sidecar_dynamic_data_with_limit(masks, MAX_SIDECAR_BYTES)
 }
 
-fn preflight_inpaint_addition_with_limit(
+fn preflight_sidecar_dynamic_data_with_limit(
     masks: &MaskStack,
-    existing: &[InpaintStroke],
-    candidate: &InpaintStroke,
     limit: u64,
 ) -> Result<(), SidecarError> {
-    preflight_sidecar_dynamic_data_with_limit(
-        masks,
-        existing.iter().chain(std::iter::once(candidate)),
-        limit,
-    )
-}
-
-fn preflight_sidecar_dynamic_data_with_limit<'a>(
-    masks: &MaskStack,
-    inpainting: impl IntoIterator<Item = &'a InpaintStroke> + Clone,
-    limit: u64,
-) -> Result<(), SidecarError> {
-    let conservative = estimate_sidecar_bytes(masks, inpainting.clone())?;
+    let conservative = estimate_sidecar_bytes(masks)?;
     if conservative <= limit {
         return Ok(());
     }
-
-    // Generated AI masks are persisted as PNG assets and schema-6 inpainting
-    // payloads are losslessly zlib-compressed. The cheap estimator above uses
-    // raw-size bounds so normal editing never pays compression work. If that
-    // pessimistic bound crosses the safety limit, retry using the actual
-    // serialized dynamic payload sizes before rejecting a valid edit.
-    let measured = measure_sidecar_dynamic_bytes(masks, inpainting)?;
+    let measured = measure_sidecar_dynamic_bytes(masks)?;
     enforce_size_limit(measured, limit)
 }
 
@@ -930,17 +895,13 @@ fn enforce_size_limit(estimated: u64, limit: u64) -> Result<(), SidecarError> {
     }
 }
 
-fn estimate_sidecar_bytes<'a>(
-    masks: &MaskStack,
-    inpainting: impl IntoIterator<Item = &'a InpaintStroke>,
-) -> Result<u64, SidecarError> {
+fn estimate_sidecar_bytes(masks: &MaskStack) -> Result<u64, SidecarError> {
     // This covers the bounded camera-profile/lens strings, the complete global
     // adjustment structure, and document-level JSON punctuation. Dynamic mask
-    // names, geometry, and inpainting data are counted separately below.
+    // names and geometry are counted separately below.
     const DOCUMENT_HEADROOM: u64 = 1024 * 1024;
     const MASK_HEADROOM: u64 = 16 * 1024;
     const COMPONENT_HEADROOM: u64 = 2 * 1024;
-    const INPAINT_STROKE_HEADROOM: u64 = 512;
     const BRUSH_DAB_HEADROOM: u64 = 256;
     const OBJECT_STROKE_HEADROOM: u64 = 128;
     const OBJECT_POINT_HEADROOM: u64 = 96;
@@ -1003,43 +964,16 @@ fn estimate_sidecar_bytes<'a>(
         }
     }
 
-    for stroke in inpainting {
-        checked_add(&mut estimated, INPAINT_STROKE_HEADROOM)?;
-        checked_add_scaled(&mut estimated, stroke.dabs.len(), BRUSH_DAB_HEADROOM)?;
-        if !stroke.patch.rgba16f.is_empty() {
-            let byte_count = stroke
-                .patch
-                .rgba16f
-                .len()
-                .checked_mul(2)
-                .ok_or(SidecarError::TooLarge(u64::MAX))?;
-            checked_add(&mut estimated, base64_json_string_bytes(byte_count)?)?;
-        }
-        if !stroke.patch.rgba.is_empty() {
-            checked_add(
-                &mut estimated,
-                base64_json_string_bytes(stroke.patch.rgba.len())?,
-            )?;
-        }
-        checked_add(
-            &mut estimated,
-            base64_json_string_bytes(stroke.patch.mask.len())?,
-        )?;
-    }
     Ok(estimated)
 }
 
-fn measure_sidecar_dynamic_bytes<'a>(
-    masks: &MaskStack,
-    inpainting: impl IntoIterator<Item = &'a InpaintStroke>,
-) -> Result<u64, SidecarError> {
+fn measure_sidecar_dynamic_bytes(masks: &MaskStack) -> Result<u64, SidecarError> {
     const DOCUMENT_HEADROOM: u64 = 1024 * 1024;
     const MASK_HEADROOM: u64 = 16 * 1024;
     const COMPONENT_HEADROOM: u64 = 2 * 1024;
     const OBJECT_STROKE_HEADROOM: u64 = 128;
     const OBJECT_POINT_HEADROOM: u64 = 96;
     const BRUSH_DAB_HEADROOM: u64 = 256;
-    const INPAINT_STROKE_HEADROOM: u64 = 512;
 
     let mut measured = DOCUMENT_HEADROOM;
     checked_add_scaled(
@@ -1093,18 +1027,6 @@ fn measure_sidecar_dynamic_bytes<'a>(
         }
     }
 
-    for stroke in inpainting {
-        checked_add(&mut measured, INPAINT_STROKE_HEADROOM)?;
-        let serialized = serde_json::to_vec(stroke).map_err(|error| {
-            SidecarError::Invalid(format!(
-                "could not measure compressed inpainting payload: {error}"
-            ))
-        })?;
-        checked_add(
-            &mut measured,
-            u64::try_from(serialized.len()).map_err(|_| SidecarError::TooLarge(u64::MAX))?,
-        )?;
-    }
     Ok(measured)
 }
 

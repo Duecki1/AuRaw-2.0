@@ -38,12 +38,17 @@ const SAM_DOWNLOAD: DownloadOptions = DownloadOptions {
     attempts: 5,
     resume: true,
 };
+pub(super) const SAM21_ENCODER_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: SAM21_ENCODER_ARTIFACT,
+    download: SAM_DOWNLOAD,
+    progress_label: "SAM 2.1 encoder",
+};
+pub(super) const SAM21_DECODER_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: SAM21_DECODER_ARTIFACT,
+    download: SAM_DOWNLOAD,
+    progress_label: "SAM 2.1 decoder",
+};
 const MAX_OBJECT_MASK_PIXELS: u64 = 17_000_000;
-
-#[cfg(not(target_os = "android"))]
-pub(super) static SAM_ENCODER_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
-#[cfg(not(target_os = "android"))]
-pub(super) static SAM_DECODER_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObjectCropRect {
@@ -96,11 +101,7 @@ pub struct ObjectMaskResult {
 
 #[derive(Debug)]
 pub enum ObjectMaskEvent {
-    DownloadProgress {
-        label: &'static str,
-        downloaded: u64,
-        total: u64,
-    },
+    DownloadProgress(ModelDownloadProgress),
     Inferencing {
         decoder_only: bool,
     },
@@ -111,6 +112,7 @@ pub fn spawn_object_mask(
     encoder_path: PathBuf,
     decoder_path: PathBuf,
     vitmatte_path: PathBuf,
+    allow_download: bool,
     runtime_path: Option<PathBuf>,
     runtime_sha256: Option<String>,
     request: ObjectMaskRequest,
@@ -125,23 +127,26 @@ pub fn spawn_object_mask(
                 (|| {
                     ensure_sam_model(
                         &encoder_path,
-                        SAM21_ENCODER_ARTIFACT,
+                        SAM21_ENCODER_INSTALL,
+                        allow_download,
                         &worker_sender,
                         &cancellation,
                     )?;
                     ensure_sam_model(
                         &decoder_path,
-                        SAM21_DECODER_ARTIFACT,
+                        SAM21_DECODER_INSTALL,
+                        allow_download,
                         &worker_sender,
                         &cancellation,
                     )?;
-                    ensure_vitmatte_model(&vitmatte_path, &cancellation, |downloaded, total| {
-                        let _ = worker_sender.send(ObjectMaskEvent::DownloadProgress {
-                            label: "ViTMatte edge-refinement model",
-                            downloaded,
-                            total,
-                        });
-                    })?;
+                    ensure_vitmatte_model(
+                        &vitmatte_path,
+                        allow_download,
+                        &cancellation,
+                        |progress| {
+                            let _ = worker_sender.send(ObjectMaskEvent::DownloadProgress(progress));
+                        },
+                    )?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let decoder_only = request.cache.is_some();
                     let _ = worker_sender.send(ObjectMaskEvent::Inferencing { decoder_only });
@@ -179,20 +184,16 @@ pub fn spawn_object_mask(
 
 fn ensure_sam_model(
     path: &Path,
-    artifact: ModelArtifact,
+    install: ModelInstallSpec,
+    allow_download: bool,
     events: &mpsc::Sender<ObjectMaskEvent>,
     cancellation: &AtomicBool,
 ) -> Result<()> {
-    ensure_artifact(
+    install.ensure_installed(
         path,
-        artifact,
-        SAM_DOWNLOAD,
-        |downloaded, total| {
-            let _ = events.send(ObjectMaskEvent::DownloadProgress {
-                label: artifact.name,
-                downloaded,
-                total,
-            });
+        allow_download,
+        |progress| {
+            let _ = events.send(ObjectMaskEvent::DownloadProgress(progress));
         },
         || ensure_ai_not_cancelled(cancellation),
     )
@@ -674,50 +675,14 @@ fn encode_sam_image(
     ))
     .context("create SAM 2.1 encoder input")?;
 
-    #[cfg(target_os = "android")]
-    let tensors = {
-        let _model_guard = prepare_model(AiMaskModel::SamEncoder)?;
-        let mut session = create_session_with_fallback(
-            encoder_path,
-            SessionOptions::new("SAM 2.1 encoder")
-                .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
-        )?;
-        run_sam_encoder(&mut session, input)?
-    };
-    #[cfg(not(target_os = "android"))]
-    let tensors = {
-        let _model_guard = prepare_model(AiMaskModel::SamEncoder)?;
-        if model_cache_enabled() && cache_object_ai_sessions() {
-            let sessions = SAM_ENCODER_SESSION.get_or_init(|| Mutex::new(None));
-            let mut guard = sessions
-                .lock()
-                .map_err(|_| anyhow::anyhow!("SAM encoder session lock was poisoned"))?;
-            if guard.is_none() {
-                *guard = Some(create_session_with_fallback(
-                    encoder_path,
-                    SessionOptions::new("SAM 2.1 encoder")
-                        .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
-                )?);
-            }
-            let result = run_sam_encoder(
-                guard
-                    .as_mut()
-                    .context("SAM encoder session is unavailable")?,
-                input,
-            );
-            if !model_cache_enabled() {
-                *guard = None;
-            }
-            result?
-        } else {
-            let mut session = create_session_with_fallback(
-                encoder_path,
-                SessionOptions::new("SAM 2.1 encoder")
-                    .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
-            )?;
-            run_sam_encoder(&mut session, input)?
-        }
-    };
+    let tensors = with_model_session(
+        AiModel::SamEncoder,
+        encoder_path,
+        SessionOptions::new("SAM 2.1 encoder")
+            .with_cpu_fallback_profile(CpuFallbackProfile::WindowsSamEncoder),
+        mask_model_retention(cache_object_ai_sessions()),
+        |session| run_sam_encoder(session, input),
+    )?;
 
     Ok(ObjectInferenceCache {
         source_width,
@@ -915,61 +880,14 @@ fn decode_sam_mask(
     let has_mask = Tensor::from_array(([1usize], vec![if use_previous_mask { 1.0 } else { 0.0 }]))
         .context("create SAM previous-mask flag")?;
 
-    #[cfg(target_os = "android")]
-    let (masks, scores) = {
-        let _model_guard = prepare_model(AiMaskModel::SamDecoder)?;
-        let mut session =
-            create_session_with_fallback(decoder_path, SessionOptions::new("SAM 2.1 decoder"))?;
-        run_sam_decoder(
-            &mut session,
-            SamDecoderInputs {
-                image_embedding,
-                high_res_0,
-                high_res_1,
-                point_coords,
-                point_labels,
-                mask_input,
-                has_mask,
-            },
-        )?
-    };
-    #[cfg(not(target_os = "android"))]
-    let (masks, scores) = {
-        let _model_guard = prepare_model(AiMaskModel::SamDecoder)?;
-        if model_cache_enabled() && cache_object_ai_sessions() {
-            let sessions = SAM_DECODER_SESSION.get_or_init(|| Mutex::new(None));
-            let mut guard = sessions
-                .lock()
-                .map_err(|_| anyhow::anyhow!("SAM decoder session lock was poisoned"))?;
-            if guard.is_none() {
-                *guard = Some(create_session_with_fallback(
-                    decoder_path,
-                    SessionOptions::new("SAM 2.1 decoder"),
-                )?);
-            }
-            let result = run_sam_decoder(
-                guard
-                    .as_mut()
-                    .context("SAM decoder session is unavailable")?,
-                SamDecoderInputs {
-                    image_embedding,
-                    high_res_0,
-                    high_res_1,
-                    point_coords,
-                    point_labels,
-                    mask_input,
-                    has_mask,
-                },
-            );
-            if !model_cache_enabled() {
-                *guard = None;
-            }
-            result?
-        } else {
-            let mut session =
-                create_session_with_fallback(decoder_path, SessionOptions::new("SAM 2.1 decoder"))?;
+    let (masks, scores) = with_model_session(
+        AiModel::SamDecoder,
+        decoder_path,
+        SessionOptions::new("SAM 2.1 decoder"),
+        mask_model_retention(cache_object_ai_sessions()),
+        |session| {
             run_sam_decoder(
-                &mut session,
+                session,
                 SamDecoderInputs {
                     image_embedding,
                     high_res_0,
@@ -979,9 +897,9 @@ fn decode_sam_mask(
                     mask_input,
                     has_mask,
                 },
-            )?
-        }
-    };
+            )
+        },
+    )?;
     select_sam_candidate(masks, scores, prompt_set, cache)
 }
 

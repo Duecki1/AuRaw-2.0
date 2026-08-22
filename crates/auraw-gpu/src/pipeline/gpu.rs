@@ -3,8 +3,10 @@ use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     effect_params, export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind,
-    ExposureParams, GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw,
-    LocalMask, MaskEffect, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RenderingIntent,
+    canonical_remove_scene_to_pipeline_scene, model_srgb_to_display_linear_rec2020,
+    pipeline_scene_to_working_rec2020, working_rec2020_to_canonical_remove_scene, ExposureParams,
+    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, LocalMask, MaskEffect, MaskStack,
+    PointCurve, ProcessingStage, RawThumbnail, RemoveEditState, RemovePatch, RenderingIntent,
     SigmoidParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
@@ -34,7 +36,7 @@ pub(super) const LIGHT_RAYS_MASK_ATLAS_EDGE: u32 = if cfg!(target_os = "android"
 // The public ABI marker retains the historical monolithic payload size while
 // the runtime uses independently allocated stage uniforms.
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
-const CAMERA_UNIFORMS_SIZE_BYTES: u32 = 416;
+const CAMERA_UNIFORMS_SIZE_BYTES: u32 = 368;
 const SCENE_TONE_UNIFORMS_SIZE_BYTES: u32 = 768;
 const EFFECTS_UNIFORMS_SIZE_BYTES: u32 = 208;
 const GPU_STAGE_UNIFORM_SIZE_BYTES: u32 =
@@ -47,6 +49,64 @@ const WORKGROUP_EDGE: u32 = 8;
 const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
 const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
+
+fn remove_patch_coverage(patch: &RemovePatch, x: f32, y: f32) -> u8 {
+    if patch.alpha.is_empty() || patch.bounds.width == 0 || patch.bounds.height == 0 {
+        return 0;
+    }
+    let px = x.round().clamp(0.0, patch.bounds.width.saturating_sub(1) as f32) as usize;
+    let py = y.round().clamp(0.0, patch.bounds.height.saturating_sub(1) as f32) as usize;
+    patch.alpha[py * patch.bounds.width as usize + px]
+}
+
+fn sample_remove_patch_scene(
+    patch: &RemovePatch,
+    x: f32,
+    y: f32,
+    raw: &LoadedRaw,
+    exposure: &ExposureParams,
+) -> [f32; 3] {
+    let width = patch.bounds.width as usize;
+    let height = patch.bounds.height as usize;
+    if width == 0 || height == 0 {
+        return [0.0; 3];
+    }
+    let x = x.clamp(0.0, width.saturating_sub(1) as f32);
+    let y = y.clamp(0.0, height.saturating_sub(1) as f32);
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let decode = |index: usize| {
+        if patch.rgb_scene16f.len() == width * height * 3 {
+            [
+                half::f16::from_bits(patch.rgb_scene16f[index * 3]).to_f32(),
+                half::f16::from_bits(patch.rgb_scene16f[index * 3 + 1]).to_f32(),
+                half::f16::from_bits(patch.rgb_scene16f[index * 3 + 2]).to_f32(),
+            ]
+        } else if patch.rgb_srgb16.len() == width * height * 3 {
+            let working = model_srgb_to_display_linear_rec2020([
+                patch.rgb_srgb16[index * 3] as f32 / 65_535.0,
+                patch.rgb_srgb16[index * 3 + 1] as f32 / 65_535.0,
+                patch.rgb_srgb16[index * 3 + 2] as f32 / 65_535.0,
+            ]);
+            working_rec2020_to_canonical_remove_scene(raw, exposure, working)
+        } else {
+            [0.0; 3]
+        }
+    };
+    let a = decode(y0 * width + x0);
+    let b = decode(y0 * width + x1);
+    let c = decode(y1 * width + x0);
+    let d = decode(y1 * width + x1);
+    std::array::from_fn(|channel| {
+        let top = a[channel] + (b[channel] - a[channel]) * tx;
+        let bottom = c[channel] + (d[channel] - c[channel]) * tx;
+        top + (bottom - top) * ty
+    })
+}
 
 fn dispatch_for_extent(width: u32, height: u32) -> [u32; 3] {
     [
@@ -107,7 +167,6 @@ const SHADER_XTRANS_DEMOSAIC: &str = include_str!("../shaders/xtrans_demosaic.wg
 const SHADER_XTRANS_FINISH: &str = include_str!("../shaders/xtrans_finish.wgsl");
 const SHADER_COLOR_DENOISE: &str = include_str!("../shaders/color_denoise.wgsl");
 const SHADER_TONE_ANALYSIS: &str = include_str!("../shaders/tone_analysis.wgsl");
-const SHADER_INPAINT_SCENE: &str = include_str!("../shaders/inpaint_scene.wgsl");
 
 const SHADER_SCENE_ADJUSTMENTS: &str = include_str!("../shaders/scene_adjustments.wgsl");
 const SHADER_MASK_EFFECTS_SHARED: &str = include_str!("../shaders/mask_effects/shared.wgsl");
@@ -124,107 +183,6 @@ const SHADER_MASK_RADIAL_BLUR: &str = include_str!("../shaders/mask_effects/radi
 const SHADER_MASK_TILT_SHIFT: &str = include_str!("../shaders/mask_effects/tilt_shift.wgsl");
 const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
 const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
-
-const SHADER_INPAINT_DOWNSAMPLE: &str = r#"
-struct ResizeParams {
-    source_origin_x: u32,
-    source_origin_y: u32,
-    source_width: u32,
-    source_height: u32,
-    output_width: u32,
-    output_height: u32,
-    _pad0: u32,
-    _pad1: u32,
-    cam_to_working_0: vec4<f32>,
-    cam_to_working_1: vec4<f32>,
-    cam_to_working_2: vec4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> params: ResizeParams;
-@group(0) @binding(1) var source_tex: texture_2d<f32>;
-@group(0) @binding(2) var output_tex: texture_storage_2d<rgba32float, write>;
-
-fn sample_camera_bilinear(position: vec2<f32>) -> vec3<f32> {
-    let dimensions = vec2<i32>(textureDimensions(source_tex));
-    let coordinate = position - vec2<f32>(0.5);
-    let base = vec2<i32>(floor(coordinate));
-    let fraction = fract(coordinate);
-    let maximum = dimensions - vec2<i32>(1);
-    let p00 = clamp(base, vec2<i32>(0), maximum);
-    let p10 = clamp(base + vec2<i32>(1, 0), vec2<i32>(0), maximum);
-    let p01 = clamp(base + vec2<i32>(0, 1), vec2<i32>(0), maximum);
-    let p11 = clamp(base + vec2<i32>(1), vec2<i32>(0), maximum);
-    let top = mix(
-        textureLoad(source_tex, p00, 0).xyz,
-        textureLoad(source_tex, p10, 0).xyz,
-        fraction.x,
-    );
-    let bottom = mix(
-        textureLoad(source_tex, p01, 0).xyz,
-        textureLoad(source_tex, p11, 0).xyz,
-        fraction.x,
-    );
-    return mix(top, bottom, fraction.y);
-}
-
-@compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.output_width || gid.y >= params.output_height {
-        return;
-    }
-    let scale = vec2<f32>(
-        f32(params.source_width) / f32(params.output_width),
-        f32(params.source_height) / f32(params.output_height),
-    );
-    let samples_x = clamp(u32(ceil(scale.x)), 1u, 8u);
-    let samples_y = clamp(u32(ceil(scale.y)), 1u, 8u);
-    let footprint_origin = vec2<f32>(
-        f32(params.source_origin_x) + f32(gid.x) * scale.x,
-        f32(params.source_origin_y) + f32(gid.y) * scale.y,
-    );
-    var camera_rgb = vec3<f32>(0.0);
-    for (var sample_y = 0u; sample_y < 8u; sample_y = sample_y + 1u) {
-        if sample_y >= samples_y { break; }
-        for (var sample_x = 0u; sample_x < 8u; sample_x = sample_x + 1u) {
-            if sample_x >= samples_x { break; }
-            let offset = vec2<f32>(
-                (f32(sample_x) + 0.5) / f32(samples_x),
-                (f32(sample_y) + 0.5) / f32(samples_y),
-            ) * scale;
-            camera_rgb = camera_rgb + sample_camera_bilinear(footprint_origin + offset);
-        }
-    }
-    camera_rgb = camera_rgb / f32(samples_x * samples_y);
-    let working_rgb = vec3<f32>(
-        dot(params.cam_to_working_0.xyz, camera_rgb),
-        dot(params.cam_to_working_1.xyz, camera_rgb),
-        dot(params.cam_to_working_2.xyz, camera_rgb),
-    );
-    textureStore(
-        output_tex,
-        vec2<i32>(i32(gid.x), i32(gid.y)),
-        vec4<f32>(working_rgb, 1.0),
-    );
-}
-"#;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct InpaintResizeParams {
-    source_origin_x: u32,
-    source_origin_y: u32,
-    source_width: u32,
-    source_height: u32,
-    output_width: u32,
-    output_height: u32,
-    _pad0: u32,
-    _pad1: u32,
-    cam_to_working_0: [f32; 4],
-    cam_to_working_1: [f32; 4],
-    cam_to_working_2: [f32; 4],
-}
-
-const _: () = assert!(std::mem::size_of::<InpaintResizeParams>() == 80);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -253,9 +211,6 @@ struct CameraUniforms {
     cam_to_srgb_0: [f32; 4],
     cam_to_srgb_1: [f32; 4],
     cam_to_srgb_2: [f32; 4],
-    inpaint_wb_0: [f32; 4],
-    inpaint_wb_1: [f32; 4],
-    inpaint_wb_2: [f32; 4],
     black_levels: [f32; 4],
     white_levels: [f32; 4],
     width: u32,
@@ -365,7 +320,7 @@ struct EffectsUniforms {
 
 const _: () =
     assert!(std::mem::size_of::<EffectsUniforms>() == EFFECTS_UNIFORMS_SIZE_BYTES as usize);
-const _: () = assert!(GPU_STAGE_UNIFORM_SIZE_BYTES == 1_392);
+const _: () = assert!(GPU_STAGE_UNIFORM_SIZE_BYTES == 1_344);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -517,104 +472,6 @@ fn pack_view_color_options(grading: crate::pipeline::ColorGrading, hue: f32) -> 
         effect_params::adjustment::HUE.clamp(hue),
         0.0,
     ]
-}
-
-fn matrix3_from_rows4(rows: [[f32; 4]; 3]) -> [[f32; 3]; 3] {
-    rows.map(|row| [row[0], row[1], row[2]])
-}
-
-fn invert_matrix3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
-    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-    if !det.is_finite() || det.abs() < 1e-12 {
-        return None;
-    }
-    let inv = 1.0 / det;
-    Some([
-        [
-            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv,
-            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv,
-            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv,
-        ],
-        [
-            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv,
-            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv,
-            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv,
-        ],
-        [
-            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv,
-            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv,
-            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv,
-        ],
-    ])
-}
-
-fn multiply_matrix3(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
-    let mut out = [[0.0; 3]; 3];
-    for row in 0..3 {
-        for col in 0..3 {
-            out[row][col] = a[row][0] * b[0][col] + a[row][1] * b[1][col] + a[row][2] * b[2][col];
-        }
-    }
-    out
-}
-
-fn rows4_from_matrix3(matrix: [[f32; 3]; 3]) -> [[f32; 4]; 3] {
-    matrix.map(|row| [row[0], row[1], row[2], 0.0])
-}
-
-fn camera_transform_with_white_balance(
-    mut transform: [[f32; 4]; 3],
-    white_balance: [f32; 4],
-) -> [[f32; 4]; 3] {
-    let logical = [
-        white_balance[0],
-        0.5 * (white_balance[1] + white_balance[3]),
-        white_balance[2],
-    ];
-    for row in &mut transform {
-        for column in 0..3 {
-            row[column] *= logical[column];
-        }
-    }
-    transform
-}
-
-fn inpaint_neutral_to_current_transform(
-    neutral: [[f32; 4]; 3],
-    current: [[f32; 4]; 3],
-) -> [[f32; 4]; 3] {
-    let neutral3 = matrix3_from_rows4(neutral);
-    let current3 = matrix3_from_rows4(current);
-    let Some(neutral_inverse) = invert_matrix3(neutral3) else {
-        return [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-        ];
-    };
-    rows4_from_matrix3(multiply_matrix3(current3, neutral_inverse))
-}
-
-fn composite_inpaint_rgba16f(destination: &mut [u16], rgb: [f32; 3], alpha: f32) {
-    debug_assert_eq!(destination.len(), 4);
-    use half::f16;
-
-    let source_alpha = alpha.clamp(0.0, 1.0);
-    let destination_alpha = f16::from_bits(destination[3]).to_f32().clamp(0.0, 1.0);
-    let retained_destination = destination_alpha * (1.0 - source_alpha);
-    let output_alpha = source_alpha + retained_destination;
-    if output_alpha <= 1e-6 {
-        destination.fill(0);
-        return;
-    }
-    for channel in 0..3 {
-        let previous = f16::from_bits(destination[channel]).to_f32();
-        let output = (rgb[channel] * source_alpha + previous * retained_destination) / output_alpha;
-        destination[channel] = f16::from_f32(output).to_bits();
-    }
-    destination[3] = f16::from_f32(output_alpha).to_bits();
 }
 
 fn canonicalize_green_noise(mut coefficients: [f32; 4], green2_present: bool) -> [f32; 4] {
@@ -990,10 +847,6 @@ fn pack_camera_params(ctx: &GpuParamContext<'_>) -> CameraUniforms {
                 .tint
                 .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT),
         );
-    let inpaint_wb_transform = inpaint_neutral_to_current_transform(
-        camera_transform_with_white_balance(raw.cam_to_srgb, raw.wb_coeffs),
-        camera_transform_with_white_balance(camera_transform, white_balance),
-    );
     let mut profile_layout = raw.camera_profile.gpu_layout();
     profile_layout.flags[3] = profile_weight.clamp(0.0, 1.0).to_bits();
     let profile_stages = profile_layout.stages();
@@ -1081,9 +934,6 @@ fn pack_camera_params(ctx: &GpuParamContext<'_>) -> CameraUniforms {
         cam_to_srgb_0: camera_transform[0],
         cam_to_srgb_1: camera_transform[1],
         cam_to_srgb_2: camera_transform[2],
-        inpaint_wb_0: inpaint_wb_transform[0],
-        inpaint_wb_1: inpaint_wb_transform[1],
-        inpaint_wb_2: inpaint_wb_transform[2],
         black_levels: raw.black_levels,
         white_levels: raw.white_levels,
         width: raw.width,
@@ -1566,6 +1416,13 @@ impl GpuProgramPrewarm {
     }
 }
 
+/// A GPU-resident snapshot of the global tone-analysis anchors from a
+/// full-frame preview pipeline. Local context renders can inherit these
+/// anchors without reading them back to the CPU.
+pub struct ToneStatisticsSnapshot {
+    buffer: wgpu::Buffer,
+}
+
 pub struct RawGpuPipeline {
     pub egui_texture_id: Option<egui::TextureId>,
     pub width: u32,
@@ -1623,8 +1480,6 @@ pub struct RawGpuPipeline {
     mask_texture: wgpu::Texture,
     light_rays_mask_texture: wgpu::Texture,
     mask_layer_capacity: usize,
-    inpaint_texture: wgpu::Texture,
-    legacy_inpaint_camera_to_working: [[f32; 4]; 3],
     mask_atlas_edge: u32,
     profile_buffer: wgpu::Buffer,
     profile_buffer_size_bytes: u64,
@@ -2289,36 +2144,6 @@ impl RawGpuPipeline {
         // create a very large temporary CPU allocation. Every active layer is uploaded
         // before the first recompute, and shaders never sample layers beyond mask_counts.x.
 
-        let inpaint_texture = create_processing_texture(
-            device,
-            size,
-            wgpu::TextureFormat::Rgba16Float,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            "auraw pre-adjustment inpaint layer",
-        );
-        let empty_inpaint_len = usize::try_from(
-            u64::from(raw.width)
-                .checked_mul(u64::from(raw.height))
-                .and_then(|value| value.checked_mul(4))
-                .ok_or_else(|| anyhow!("zero inpaint upload length overflows"))?,
-        )
-        .map_err(|_| anyhow!("zero inpaint upload length does not fit in usize"))?;
-        let empty_inpaint = vec![0u16; empty_inpaint_len];
-        queue.write_texture(
-            copy_texture(&inpaint_texture),
-            bytemuck::cast_slice(&empty_inpaint),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(
-                    raw.width
-                        .checked_mul(8)
-                        .ok_or_else(|| anyhow!("inpaint upload row byte count overflows"))?,
-                ),
-                rows_per_image: Some(raw.height),
-            },
-            size,
-        );
-
         let out_view = default_texture_view(&out_texture);
         let display_linear_view = default_texture_view(&display_linear_texture);
         let reconstructed_raw_view = default_texture_view(&reconstructed_raw_texture);
@@ -2332,7 +2157,6 @@ impl RawGpuPipeline {
         let raw_view = default_texture_view(&raw_texture);
         let color_view = default_texture_view(&color_texture);
         let black_view = default_texture_view(&black_texture);
-        let inpaint_view = default_texture_view(&inpaint_texture);
         let mask_view = mask_texture.create_view(&wgpu::TextureViewDescriptor {
             label: Some("auraw local-mask array view"),
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -2684,7 +2508,6 @@ impl RawGpuPipeline {
                     storage_buffer_entry(15, false),
                     storage_buffer_entry(20, true),
                     storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
-                    texture_entry(32, wgpu::TextureSampleType::Float { filterable: false }),
                 ])
         });
 
@@ -2724,7 +2547,6 @@ impl RawGpuPipeline {
                             wgpu::TextureSampleType::Float { filterable: true },
                         ),
                         sampler_entry(28),
-                        texture_entry(32, wgpu::TextureSampleType::Float { filterable: false }),
                         storage_buffer_entry(33, true),
                     ])
             });
@@ -3016,7 +2838,6 @@ impl RawGpuPipeline {
                 buffer_binding(15, &tone_histogram_buffer),
                 buffer_binding(20, &profile_buffer),
                 texture_binding(18, &tone_guide_a_view),
-                texture_binding(32, &inpaint_view),
             ]);
 
         let make_tone_blur_bind_group =
@@ -3055,7 +2876,6 @@ impl RawGpuPipeline {
                 buffer_binding(20, &profile_buffer),
                 texture_binding(27, &mask_view),
                 sampler_binding(28, &mask_sampler),
-                texture_binding(32, &inpaint_view),
                 buffer_binding(33, &mask_data_buffer),
             ]);
 
@@ -3791,8 +3611,6 @@ impl RawGpuPipeline {
             mask_texture,
             light_rays_mask_texture,
             mask_layer_capacity,
-            inpaint_texture,
-            legacy_inpaint_camera_to_working: raw.cam_to_srgb,
             mask_atlas_edge,
             profile_buffer,
             profile_buffer_size_bytes,
@@ -3988,128 +3806,6 @@ impl RawGpuPipeline {
             let values = masks.rasterize_layer_f16(layer, edge, edge, image_width, image_height);
             self.update_light_rays_mask_layer(queue, layer, &values)?;
         }
-        Ok(())
-    }
-
-    /// Uploads the persisted baseline inpainting result into this pipeline's
-    /// local geometry. `tile_origin_*` and `full_*` map crop/export pipelines
-    /// back to full-image normalized coordinates. RGB is scene-linear Rec.2020
-    /// RGBA16F; alpha is the replacement mask consumed before Develop edits.
-    pub fn update_inpaint_layer(
-        &self,
-        queue: &wgpu::Queue,
-        layer: Option<&crate::pipeline::InpaintLayer>,
-        tile_origin_x: i32,
-        tile_origin_y: i32,
-        full_width: u32,
-        full_height: u32,
-    ) -> Result<()> {
-        let rgba_elements = u64::from(self.width)
-            .checked_mul(u64::from(self.height))
-            .and_then(|pixels| pixels.checked_mul(4))
-            .and_then(|elements| usize::try_from(elements).ok())
-            .ok_or_else(|| anyhow!("GPU inpaint upload element count overflows"))?;
-        let mut rgba16f = vec![0u16; rgba_elements];
-        if let Some(layer) = layer {
-            if full_width == 0 || full_height == 0 {
-                return Err(anyhow!("invalid inpaint coordinate space for GPU upload"));
-            }
-            // Project only each sparse patch's covered rectangle into this
-            // pipeline. This keeps preview refresh cost proportional to healed
-            // area instead of image_pixels × stroke_count.
-            for patch in layer.patches.iter() {
-                if !patch.is_valid() {
-                    return Err(anyhow!("invalid inpaint patch for GPU upload"));
-                }
-                let global_x0 = ((u64::from(patch.x) * u64::from(full_width))
-                    / u64::from(patch.source_width)) as i64;
-                let global_y0 = ((u64::from(patch.y) * u64::from(full_height))
-                    / u64::from(patch.source_height)) as i64;
-                let patch_right = patch
-                    .x
-                    .checked_add(patch.width)
-                    .ok_or_else(|| anyhow!("inpaint patch horizontal extent overflows"))?;
-                let patch_bottom = patch
-                    .y
-                    .checked_add(patch.height)
-                    .ok_or_else(|| anyhow!("inpaint patch vertical extent overflows"))?;
-                let global_x1 = (u64::from(patch_right)
-                    .checked_mul(u64::from(full_width))
-                    .ok_or_else(|| anyhow!("inpaint patch horizontal projection overflows"))?
-                    .div_ceil(u64::from(patch.source_width)))
-                    as i64;
-                let global_y1 = (u64::from(patch_bottom)
-                    .checked_mul(u64::from(full_height))
-                    .ok_or_else(|| anyhow!("inpaint patch vertical projection overflows"))?
-                    .div_ceil(u64::from(patch.source_height)))
-                    as i64;
-
-                let local_x0 =
-                    (global_x0 - i64::from(tile_origin_x)).clamp(0, i64::from(self.width)) as u32;
-                let local_y0 =
-                    (global_y0 - i64::from(tile_origin_y)).clamp(0, i64::from(self.height)) as u32;
-                let local_x1 =
-                    (global_x1 - i64::from(tile_origin_x)).clamp(0, i64::from(self.width)) as u32;
-                let local_y1 =
-                    (global_y1 - i64::from(tile_origin_y)).clamp(0, i64::from(self.height)) as u32;
-
-                for y in local_y0..local_y1 {
-                    let global_y = tile_origin_y + y as i32;
-                    if global_y < 0 || global_y >= full_height as i32 {
-                        continue;
-                    }
-                    let source_y = (global_y as f32 + 0.5) * patch.source_height as f32
-                        / full_height as f32
-                        - 0.5;
-                    for x in local_x0..local_x1 {
-                        let global_x = tile_origin_x + x as i32;
-                        if global_x < 0 || global_x >= full_width as i32 {
-                            continue;
-                        }
-                        let source_x = (global_x as f32 + 0.5) * patch.source_width as f32
-                            / full_width as f32
-                            - 0.5;
-                        let Some((mut rgb, alpha)) =
-                            patch.sample_linear_rec2020_bilinear(source_x, source_y)
-                        else {
-                            continue;
-                        };
-                        if alpha <= 1e-6 {
-                            continue;
-                        }
-                        rgb = patch.resolve_neutral_working_rgb(
-                            rgb,
-                            self.legacy_inpaint_camera_to_working,
-                        );
-                        let destination = u64::from(y)
-                            .checked_mul(u64::from(self.width))
-                            .and_then(|row| row.checked_add(u64::from(x)))
-                            .and_then(|pixel| pixel.checked_mul(4))
-                            .and_then(|offset| usize::try_from(offset).ok())
-                            .ok_or_else(|| anyhow!("GPU inpaint destination offset overflows"))?;
-                        composite_inpaint_rgba16f(
-                            &mut rgba16f[destination..destination + 4],
-                            rgb,
-                            alpha,
-                        );
-                    }
-                }
-            }
-        }
-        queue.write_texture(
-            copy_texture(&self.inpaint_texture),
-            bytemuck::cast_slice(&rgba16f),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(
-                    self.width
-                        .checked_mul(8)
-                        .ok_or_else(|| anyhow!("GPU inpaint upload row byte count overflows"))?,
-                ),
-                rows_per_image: Some(self.height),
-            },
-            texture_size(self.width, self.height),
-        );
         Ok(())
     }
 
@@ -4316,6 +4012,108 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
+    /// Dispatches one ordinary processing stage and restores cached Remove
+    /// scene patches immediately after RAW reconstruction when necessary.
+    /// Output-only slider changes therefore never touch the Remove cache.
+    pub fn dispatch_stage_with_remove(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        stage: ProcessingStage,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        self.dispatch_stage(queue, device, params, stage);
+        if stage == ProcessingStage::Raw {
+            self.upload_remove_scene_patches(
+                queue,
+                edits,
+                source_raw,
+                exposure,
+                source_origin,
+                source_size,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn recompute_with_remove(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        for stage in [ProcessingStage::Raw, ProcessingStage::Tone, ProcessingStage::Output] {
+            self.dispatch_stage_with_remove(
+                queue,
+                device,
+                params,
+                stage,
+                edits,
+                source_raw,
+                exposure,
+                source_origin,
+                source_size,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Captures the current global tone anchors without a CPU readback.
+    pub fn snapshot_tone_statistics(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> ToneStatisticsSnapshot {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("auraw tone statistics snapshot"),
+            size: TONE_STATS_SIZE_BYTES,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw capture tone statistics"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &self.tone_stats_buffer,
+            0,
+            &buffer,
+            0,
+            TONE_STATS_SIZE_BYTES,
+        );
+        queue.submit(Some(encoder.finish()));
+        ToneStatisticsSnapshot { buffer }
+    }
+
+    /// Copies a saved full-frame tone snapshot into this crop/detail pipeline.
+    pub fn inherit_tone_statistics_snapshot(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        snapshot: &ToneStatisticsSnapshot,
+    ) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw inherit tone statistics snapshot"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &snapshot.buffer,
+            0,
+            &self.tone_stats_buffer,
+            0,
+            TONE_STATS_SIZE_BYTES,
+        );
+        queue.submit(Some(encoder.finish()));
+    }
+
     /// Copies the full-frame adaptive tone anchors into a crop/detail pipeline.
     /// Spatial guides remain crop-local, but global percentiles (including the
     /// Dehaze ambient-light anchor) must not change while the user pans or
@@ -4361,6 +4159,44 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
+    /// Export tone-analysis variant that restores Remove at the scene boundary
+    /// before the histogram/guide sees the tile. The histogram itself is still
+    /// accumulated exactly once per native core by the bounds in `params`.
+    pub fn accumulate_export_tone_tile_with_remove(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        self.dispatch_stage_with_remove(
+            queue,
+            device,
+            params,
+            ProcessingStage::Raw,
+            edits,
+            source_raw,
+            exposure,
+            source_origin,
+            source_size,
+        )?;
+        self.upload_params(queue, params);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw Remove-aware export tone tile"),
+        });
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_prepare_pass_index,
+            self.tone_prepare_pass_index + 1,
+        );
+        queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
     /// Reduces the histogram accumulated from every native-resolution core.
     pub fn finish_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -4396,6 +4232,46 @@ impl RawGpuPipeline {
         );
         self.encode_output_stage(&mut encoder, params);
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// Executes one full-resolution export tile with cached Remove patches
+    /// restored between RAW reconstruction and all tone/creative adjustments.
+    /// Big-LaMa is never called here; export consumes the same scene cache as
+    /// preview.
+    pub fn dispatch_export_tile_with_remove(
+        &self,
+        queue: &wgpu::Queue,
+        device: &wgpu::Device,
+        params: &GpuParams,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        self.dispatch_stage_with_remove(
+            queue,
+            device,
+            params,
+            ProcessingStage::Raw,
+            edits,
+            source_raw,
+            exposure,
+            source_origin,
+            source_size,
+        )?;
+        self.upload_params(queue, params);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw Remove-aware tiled export encoder"),
+        });
+        self.encode_pass_range(
+            &mut encoder,
+            self.tone_prepare_pass_index,
+            self.tone_reduce_pass_index,
+        );
+        self.encode_output_stage(&mut encoder, params);
+        queue.submit(Some(encoder.finish()));
+        Ok(())
     }
 
     /// Copies an RGBA8 output sub-rectangle to CPU memory. This method blocks
@@ -4482,6 +4358,174 @@ impl RawGpuPipeline {
         )
     }
 
+    /// Reinstalls cached Remove patches at the source-scene boundary after a
+    /// RAW-stage refresh. Ordinary Develop slider changes only rerun Output, so
+    /// this upload is skipped entirely and the already patched scene texture is
+    /// reused. `source_origin`/`source_size` map this pipeline (full proxy, zoom
+    /// crop, or export tile) back into native source-image coordinates.
+    pub fn upload_remove_scene_patches(
+        &self,
+        queue: &wgpu::Queue,
+        edits: &RemoveEditState,
+        source_raw: &LoadedRaw,
+        exposure: &ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Result<()> {
+        if edits.is_empty() || source_size[0] <= 0.0 || source_size[1] <= 0.0 {
+            return Ok(());
+        }
+        let scale_x = self.width as f32 / source_size[0];
+        let scale_y = self.height as f32 / source_size[1];
+        if !scale_x.is_finite() || !scale_y.is_finite() || scale_x <= 0.0 || scale_y <= 0.0 {
+            return Ok(());
+        }
+
+        for stroke in &edits.strokes {
+            for patch in &stroke.patches {
+                let left = (((patch.bounds.x as f32 - source_origin[0]) * scale_x).floor() as i64)
+                    .clamp(0, self.width as i64) as u32;
+                let top = (((patch.bounds.y as f32 - source_origin[1]) * scale_y).floor() as i64)
+                    .clamp(0, self.height as i64) as u32;
+                let right = (((patch.bounds.right() as f32 - source_origin[0]) * scale_x).ceil()
+                    as i64)
+                    .clamp(0, self.width as i64) as u32;
+                let bottom = (((patch.bounds.bottom() as f32 - source_origin[1]) * scale_y).ceil()
+                    as i64)
+                    .clamp(0, self.height as i64) as u32;
+                if right <= left || bottom <= top {
+                    continue;
+                }
+
+                for y in top..bottom {
+                    let native_y = source_origin[1] + (y as f32 + 0.5) / scale_y;
+                    let local_y = native_y - patch.bounds.y as f32 - 0.5;
+                    let mut x = left;
+                    while x < right {
+                        while x < right {
+                            let native_x = source_origin[0] + (x as f32 + 0.5) / scale_x;
+                            let local_x = native_x - patch.bounds.x as f32 - 0.5;
+                            if remove_patch_coverage(patch, local_x, local_y) != 0 {
+                                break;
+                            }
+                            x += 1;
+                        }
+                        if x >= right {
+                            break;
+                        }
+                        let run_start = x;
+                        let mut samples = Vec::new();
+                        while x < right {
+                            let native_x = source_origin[0] + (x as f32 + 0.5) / scale_x;
+                            let local_x = native_x - patch.bounds.x as f32 - 0.5;
+                            if remove_patch_coverage(patch, local_x, local_y) == 0 {
+                                break;
+                            }
+                            let canonical = sample_remove_patch_scene(
+                                patch,
+                                local_x,
+                                local_y,
+                                source_raw,
+                                exposure,
+                            );
+                            let source_scene = canonical_remove_scene_to_pipeline_scene(
+                                source_raw,
+                                exposure,
+                                canonical,
+                            );
+                            // Fitted/detail previews are commonly pre-demosaiced
+                            // Rec.2020 rasters even when the document source is a
+                            // sensor RAW. Native export tiles remain camera RGB.
+                            // Convert the canonical patch into the scene space
+                            // expected by this concrete pipeline before upload.
+                            let scene = if self.has_raster_scene {
+                                pipeline_scene_to_working_rec2020(source_raw, source_scene)
+                            } else {
+                                source_scene
+                            };
+                            samples.push(scene);
+                            x += 1;
+                        }
+                        if samples.is_empty() {
+                            continue;
+                        }
+                        let run_width = samples.len() as u32;
+                        match self.scene_format {
+                            wgpu::TextureFormat::Rgba16Float => {
+                                let mut rgba = Vec::<u16>::with_capacity(samples.len() * 4);
+                                for rgb in samples {
+                                    for value in rgb {
+                                        let finite = if value.is_finite() { value } else { 0.0 };
+                                        rgba.push(
+                                            half::f16::from_f32(
+                                                finite.clamp(-65_504.0, 65_504.0),
+                                            )
+                                            .to_bits(),
+                                        );
+                                    }
+                                    rgba.push(half::f16::ONE.to_bits());
+                                }
+                                queue.write_texture(
+                                    wgpu::TexelCopyTextureInfo {
+                                        texture: &self.scene_texture,
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d { x: run_start, y, z: 0 },
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    bytemuck::cast_slice(&rgba),
+                                    wgpu::TexelCopyBufferLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(run_width * 8),
+                                        rows_per_image: Some(1),
+                                    },
+                                    wgpu::Extent3d {
+                                        width: run_width,
+                                        height: 1,
+                                        depth_or_array_layers: 1,
+                                    },
+                                );
+                            }
+                            wgpu::TextureFormat::Rgba32Float => {
+                                let mut rgba = Vec::<f32>::with_capacity(samples.len() * 4);
+                                for rgb in samples {
+                                    rgba.extend(
+                                        rgb.map(|value| if value.is_finite() { value } else { 0.0 }),
+                                    );
+                                    rgba.push(1.0);
+                                }
+                                queue.write_texture(
+                                    wgpu::TexelCopyTextureInfo {
+                                        texture: &self.scene_texture,
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d { x: run_start, y, z: 0 },
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    bytemuck::cast_slice(&rgba),
+                                    wgpu::TexelCopyBufferLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(run_width * 16),
+                                        rows_per_image: Some(1),
+                                    },
+                                    wgpu::Extent3d {
+                                        width: run_width,
+                                        height: 1,
+                                        depth_or_array_layers: 1,
+                                    },
+                                );
+                            }
+                            format => {
+                                return Err(anyhow!(
+                                    "unsupported Remove scene format {format:?}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Reads the demosaiced scene as RGB32F after the raw stage.
     pub fn read_scene_texture_blocking(
         &self,
@@ -4525,215 +4569,6 @@ impl RawGpuPipeline {
         self.encode_raw_stage(&mut encoder, params);
         queue.submit(Some(encoder.finish()));
         self.read_scene_texture_blocking(device, queue)
-    }
-
-    /// Renders the neutral scene used as LaMa input.
-    pub fn render_inpaint_working_scene_blocking(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        params: &GpuParams,
-    ) -> Result<Vec<f32>> {
-        self.render_scene_conversion_blocking(device, queue, params, "write_inpaint_working_scene")
-    }
-
-    fn render_scene_conversion_blocking(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        params: &GpuParams,
-        entry_point: &str,
-    ) -> Result<Vec<f32>> {
-        self.upload_params(queue, params);
-        let size = texture_size(self.width, self.height);
-        let working_texture = create_processing_texture(
-            device,
-            size,
-            wgpu::TextureFormat::Rgba32Float,
-            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            "auraw scene conversion RGBA32F",
-        );
-        let working_view = default_texture_view(&working_texture);
-        let scene_view = default_texture_view(&self.scene_texture);
-        let raw_view = default_texture_view(&self.raw_texture);
-        let color_view = default_texture_view(&self.color_texture);
-        let black_view = default_texture_view(&self.black_texture);
-
-        let layout = create_bind_group_layout(device, "auraw scene conversion layout", &[
-                buffer_entry(0),
-                texture_entry(1, wgpu::TextureSampleType::Uint),
-                texture_entry(2, wgpu::TextureSampleType::Uint),
-                texture_entry(19, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    12,
-                    wgpu::TextureFormat::Rgba32Float,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
-                storage_buffer_entry(20, true),
-            ]);
-        let bind_group = create_bind_group(device, "auraw scene conversion bind group", &layout, &[
-                buffer_binding(0, &self.camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(11, &scene_view),
-                texture_binding(12, &working_view),
-                buffer_binding(20, &self.profile_buffer),
-            ]);
-        let mut shader_manager =
-            ShaderManager::new(processing_work_format(self.processing_quality))
-                .context("initialize scene-conversion WGSL composer")?;
-        let shader = shader_manager.create_shader_module(
-            device,
-            "auraw scene conversion shader",
-            SHADER_INPAINT_SCENE,
-            "inpaint_scene.wgsl",
-        )?;
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("auraw scene conversion pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = create_compute_pipeline(
-            device,
-            "auraw scene conversion pipeline",
-            &pipeline_layout,
-            &shader,
-            entry_point,
-            self.pipeline_cache.as_ref().map(|cache| cache.raw()),
-        );
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw scene conversion encoder"),
-        });
-        self.encode_raw_stage(&mut encoder, params);
-        dispatch_compute(
-            &mut encoder,
-            "auraw scene conversion pass",
-            &pipeline,
-            &[&bind_group],
-            dispatch_for_extent(self.width, self.height),
-        );
-        queue.submit(Some(encoder.finish()));
-        read_rgba32_texture_rgb_blocking(
-            device,
-            queue,
-            &working_texture,
-            self.width,
-            self.height,
-            "auraw scene conversion readback",
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_inpaint_working_scene_region_resized_blocking(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        params: &GpuParams,
-        source_x: u32,
-        source_y: u32,
-        source_width: u32,
-        source_height: u32,
-        output_width: u32,
-        output_height: u32,
-    ) -> Result<Vec<f32>> {
-        if source_width == 0
-            || source_height == 0
-            || output_width == 0
-            || output_height == 0
-            || source_x
-                .checked_add(source_width)
-                .is_none_or(|right| right > self.width)
-            || source_y
-                .checked_add(source_height)
-                .is_none_or(|bottom| bottom > self.height)
-        {
-            return Err(anyhow!("invalid inpainting resize rectangle"));
-        }
-
-        self.upload_params(queue, params);
-        let output_texture = create_processing_texture(
-            device,
-            texture_size(output_width, output_height),
-            wgpu::TextureFormat::Rgba32Float,
-            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            "auraw inpaint working resize RGBA32F",
-        );
-        let output_view = default_texture_view(&output_texture);
-        let scene_view = default_texture_view(&self.scene_texture);
-        let resize_params = InpaintResizeParams {
-            source_origin_x: source_x,
-            source_origin_y: source_y,
-            source_width,
-            source_height,
-            output_width,
-            output_height,
-            _pad0: 0,
-            _pad1: 0,
-            cam_to_working_0: params.camera.cam_to_srgb_0,
-            cam_to_working_1: params.camera.cam_to_srgb_1,
-            cam_to_working_2: params.camera.cam_to_srgb_2,
-        };
-        let resize_params_buffer = create_initialized_buffer(
-            device,
-            "auraw inpaint resize params",
-            bytemuck::bytes_of(&resize_params),
-            wgpu::BufferUsages::UNIFORM,
-        );
-        let layout = create_bind_group_layout(device, "auraw inpaint resize layout", &[
-                buffer_entry(0),
-                texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_texture_entry(
-                    2,
-                    wgpu::TextureFormat::Rgba32Float,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
-            ]);
-        let bind_group = create_bind_group(device, "auraw inpaint resize bind group", &layout, &[
-                buffer_binding(0, &resize_params_buffer),
-                texture_binding(1, &scene_view),
-                texture_binding(2, &output_view),
-            ]);
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("auraw inpaint resize shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_INPAINT_DOWNSAMPLE.into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("auraw inpaint resize pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = create_compute_pipeline(
-            device,
-            "auraw inpaint resize pipeline",
-            &pipeline_layout,
-            &shader,
-            "main",
-            self.pipeline_cache.as_ref().map(|cache| cache.raw()),
-        );
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw inpaint resize encoder"),
-        });
-        self.encode_raw_stage(&mut encoder, params);
-        dispatch_compute(
-            &mut encoder,
-            "auraw inpaint resize pass",
-            &pipeline,
-            &[&bind_group],
-            dispatch_for_extent(output_width, output_height),
-        );
-        queue.submit(Some(encoder.finish()));
-        read_rgba32_texture_rgb_blocking(
-            device,
-            queue,
-            &output_texture,
-            output_width,
-            output_height,
-            "auraw scene conversion readback",
-        )
     }
 
     fn encode_raw_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {

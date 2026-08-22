@@ -1,12 +1,10 @@
-#[cfg(not(target_os = "android"))]
-use crate::execution_provider::try_lock_interactive_ai_model;
-use crate::execution_provider::{
-    create_session_with_fallback, lock_interactive_ai_model, CpuFallbackProfile, FallbackSession,
-    SessionOptions,
+use crate::execution_provider::{CpuFallbackProfile, FallbackSession, SessionOptions};
+use crate::model_runtime::{
+    with_model_session, AiModel, AiRuntimeContext, ModelRetention,
 };
-use crate::model_artifact::{
-    ensure_artifact, verify_artifact, ArtifactSize, DownloadOptions, ModelArtifact,
-};
+use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
+use crate::model_install::ModelInstallSpec;
+use crate::ModelDownloadProgress;
 use crate::pipeline::{LandscapeCategory, MaskImage};
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
@@ -18,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex, MutexGuard, OnceLock,
+        mpsc, Arc, Mutex, OnceLock,
     },
     time::Duration,
 };
@@ -72,13 +70,17 @@ pub struct BiRefNetModelSpec {
 }
 
 impl BiRefNetModelSpec {
-    fn artifact(self) -> ModelArtifact {
-        ModelArtifact {
-            name: self.checkpoint,
-            url: Some(self.url),
-            sha256: self.sha256_hex,
-            size: ArtifactSize::Exact(self.bytes),
-            progress_total: self.bytes,
+    fn install(self) -> ModelInstallSpec {
+        ModelInstallSpec {
+            artifact: ModelArtifact {
+                name: self.checkpoint,
+                url: Some(self.url),
+                sha256: self.sha256_hex,
+                size: ArtifactSize::Exact(self.bytes),
+                progress_total: self.bytes,
+            },
+            download: BIREFNET_DOWNLOAD,
+            progress_label: self.download_label,
         }
     }
 }
@@ -155,6 +157,11 @@ const LANDSCAPE_DOWNLOAD: DownloadOptions = DownloadOptions {
     attempts: 1,
     resume: false,
 };
+const LANDSCAPE_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: LANDSCAPE_ARTIFACT,
+    download: LANDSCAPE_DOWNLOAD,
+    progress_label: "MaskFormer landscape model",
+};
 
 const VITMATTE_ARTIFACT: ModelArtifact = ModelArtifact {
     name: "ViTMatte model",
@@ -169,6 +176,11 @@ const VITMATTE_DOWNLOAD: DownloadOptions = DownloadOptions {
     body_timeout: Duration::from_secs(30 * 60),
     attempts: 5,
     resume: true,
+};
+const VITMATTE_INSTALL: ModelInstallSpec = ModelInstallSpec {
+    artifact: VITMATTE_ARTIFACT,
+    download: VITMATTE_DOWNLOAD,
+    progress_label: "ViTMatte edge-refinement model",
 };
 
 const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
@@ -199,121 +211,41 @@ const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 #[cfg(not(target_os = "android"))]
-static SESSION: OnceLock<Mutex<Option<(BiRefNetQuality, FallbackSession)>>> = OnceLock::new();
-#[cfg(not(target_os = "android"))]
-static VITMATTE_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
-#[cfg(not(target_os = "android"))]
-static LANDSCAPE_SESSION: OnceLock<Mutex<Option<FallbackSession>>> = OnceLock::new();
-#[cfg(not(target_os = "android"))]
 static DESKTOP_RUNTIME_IDENTITY: OnceLock<(PathBuf, String)> = OnceLock::new();
 static RUNTIME_INITIALIZED: OnceLock<()> = OnceLock::new();
 static RUNTIME_INIT_LOCK: Mutex<()> = Mutex::new(());
-#[cfg(not(target_os = "android"))]
-static AI_MASK_MODEL_CACHE_ENABLED: AtomicBool = AtomicBool::new(false);
 #[cfg(not(target_os = "android"))]
 type RuntimeProbeResult = (PathBuf, String);
 #[cfg(not(target_os = "android"))]
 static RUNTIME_PROBE_CACHE: OnceLock<Mutex<Option<RuntimeProbeResult>>> = OnceLock::new();
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AiMaskModel {
-    Subject,
-    Landscape,
-    VitMatte,
-    SamEncoder,
-    SamDecoder,
+fn subject_model_id(quality: BiRefNetQuality) -> AiModel {
+    match quality {
+        BiRefNetQuality::Low => AiModel::BiRefNetLow,
+        BiRefNetQuality::Medium => AiModel::BiRefNetMedium,
+        BiRefNetQuality::High => AiModel::BiRefNetHigh,
+    }
 }
 
-#[cfg(not(target_os = "android"))]
-fn clear_cached_session<T>(cache: &OnceLock<Mutex<Option<T>>>, label: &str) -> Result<()> {
-    let Some(cache) = cache.get() else {
-        return Ok(());
-    };
-    let mut session = cache
-        .lock()
-        .map_err(|_| anyhow::anyhow!("{label} session lock was poisoned"))?;
-    *session = None;
-    Ok(())
-}
-
-pub(crate) fn unload_all_models_locked() -> Result<()> {
-    #[cfg(not(target_os = "android"))]
-    {
-        clear_cached_session(&SESSION, "BiRefNet")?;
-        clear_cached_session(&LANDSCAPE_SESSION, "MaskFormer")?;
-        clear_cached_session(&VITMATTE_SESSION, "ViTMatte")?;
-        clear_cached_session(&object::SAM_ENCODER_SESSION, "SAM encoder")?;
-        clear_cached_session(&object::SAM_DECODER_SESSION, "SAM decoder")?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "android"))]
-fn unload_other_models_locked(active: AiMaskModel) -> Result<()> {
-    if active != AiMaskModel::Subject {
-        clear_cached_session(&SESSION, "BiRefNet")?;
-    }
-    if active != AiMaskModel::Landscape {
-        clear_cached_session(&LANDSCAPE_SESSION, "MaskFormer")?;
-    }
-    if active != AiMaskModel::VitMatte {
-        clear_cached_session(&VITMATTE_SESSION, "ViTMatte")?;
-    }
-    if active != AiMaskModel::SamEncoder {
-        clear_cached_session(&object::SAM_ENCODER_SESSION, "SAM encoder")?;
-    }
-    if active != AiMaskModel::SamDecoder {
-        clear_cached_session(&object::SAM_DECODER_SESSION, "SAM decoder")?;
-    }
-    Ok(())
-}
-
-fn prepare_model(active: AiMaskModel) -> Result<MutexGuard<'static, ()>> {
-    let guard = lock_interactive_ai_model();
-    #[cfg(not(target_os = "android"))]
-    unload_other_models_locked(active)?;
+fn mask_model_retention(cache_supported: bool) -> ModelRetention {
     #[cfg(target_os = "android")]
-    let _ = active;
-    crate::inpainting::unload_model_locked()?;
-    Ok(guard)
-}
-
-#[cfg(not(target_os = "android"))]
-fn model_cache_enabled() -> bool {
-    AI_MASK_MODEL_CACHE_ENABLED.load(Ordering::Acquire)
-}
-
-/// Keep at most the active mask model cached while the Masking tab is visible.
-/// Disabling the cache never waits on an in-flight native inference; that
-/// inference observes the flag before releasing the shared model gate and drops
-/// its session then.
-pub fn set_model_cache_enabled(enabled: bool) {
+    {
+        let _ = cache_supported;
+        ModelRetention::OneShot
+    }
     #[cfg(not(target_os = "android"))]
     {
-        AI_MASK_MODEL_CACHE_ENABLED.store(enabled, Ordering::Release);
-        if !enabled {
-            // Retry on every policy synchronization. This closes the narrow
-            // race where inference checked the flag just before the UI left the
-            // tab, while the UI's first non-blocking gate attempt still saw the
-            // inference as active.
-            if let Some(_guard) = try_lock_interactive_ai_model() {
-                if let Err(error) = unload_all_models_locked() {
-                    log::warn!("could not unload cached AI-mask models: {error:#}");
-                }
-            }
+        if cache_supported {
+            ModelRetention::Interactive(AiRuntimeContext::Masks)
+        } else {
+            ModelRetention::OneShot
         }
     }
-    #[cfg(target_os = "android")]
-    let _ = enabled;
 }
 
 #[derive(Debug)]
 pub enum SubjectMaskEvent {
-    DownloadProgress {
-        label: &'static str,
-        downloaded: u64,
-        total: u64,
-    },
+    DownloadProgress(ModelDownloadProgress),
     Inferencing,
     Finished(Result<SubjectMaskResult, String>),
 }
@@ -338,11 +270,7 @@ impl SubjectMaskResult {
 
 #[derive(Debug)]
 pub enum LandscapeMaskEvent {
-    DownloadProgress {
-        label: &'static str,
-        downloaded: u64,
-        total: u64,
-    },
+    DownloadProgress(ModelDownloadProgress),
     Inferencing,
     Finished(Result<LandscapeMaskResult, String>),
 }
@@ -403,33 +331,20 @@ pub fn spawn_landscape_mask(
                         &model_path,
                         allow_download,
                         &cancellation,
-                        |downloaded, total| {
-                            let _ = worker_sender.send(LandscapeMaskEvent::DownloadProgress {
-                                label: "MaskFormer landscape model",
-                                downloaded,
-                                total,
-                            });
+                        |progress| {
+                            let _ = worker_sender
+                                .send(LandscapeMaskEvent::DownloadProgress(progress));
                         },
                     )?;
-                    if allow_download {
-                        ensure_vitmatte_model(
-                            &vitmatte_path,
-                            &cancellation,
-                            |downloaded, total| {
-                                let _ = worker_sender.send(
-                                    LandscapeMaskEvent::DownloadProgress {
-                                        label: "ViTMatte edge-refinement model",
-                                        downloaded,
-                                        total,
-                                    },
-                                );
-                            },
-                        )?;
-                    } else {
-                        verify_artifact(&vitmatte_path, VITMATTE_ARTIFACT).context(
-                            "the pinned ViTMatte landscape refiner is unavailable or invalid; consent to its download again",
-                        )?;
-                    }
+                    ensure_vitmatte_model(
+                        &vitmatte_path,
+                        allow_download,
+                        &cancellation,
+                        |progress| {
+                            let _ = worker_sender
+                                .send(LandscapeMaskEvent::DownloadProgress(progress));
+                        },
+                    )?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(LandscapeMaskEvent::Inferencing);
                     infer_landscape(LandscapeInferenceRequest {
@@ -469,46 +384,38 @@ fn ensure_landscape_model<F>(
     path: &Path,
     allow_download: bool,
     cancellation: &AtomicBool,
-    mut progress: F,
+    progress: F,
 ) -> Result<()>
 where
-    F: FnMut(u64, u64),
+    F: FnMut(ModelDownloadProgress),
 {
-    if !allow_download {
-        return verify_artifact(path, LANDSCAPE_ARTIFACT).map_err(|error| {
-            anyhow::anyhow!(
-                "the pinned MaskFormer model is unavailable or invalid ({error:#}); consent to its download again"
-            )
-        });
-    }
-    ensure_artifact(
-        path,
-        LANDSCAPE_ARTIFACT,
-        LANDSCAPE_DOWNLOAD,
-        &mut progress,
-        || ensure_ai_not_cancelled(cancellation),
-    )
+    LANDSCAPE_INSTALL.ensure_installed(path, allow_download, progress, || {
+        ensure_ai_not_cancelled(cancellation)
+    })
 }
 
 pub fn landscape_model_is_verified(path: &Path) -> bool {
-    verify_artifact(path, LANDSCAPE_ARTIFACT).is_ok()
+    LANDSCAPE_INSTALL.is_installed(path)
 }
 
 pub fn vitmatte_model_is_verified(path: &Path) -> bool {
-    verify_artifact(path, VITMATTE_ARTIFACT).is_ok()
+    VITMATTE_INSTALL.is_installed(path)
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
+pub fn birefnet_model_is_verified(quality: BiRefNetQuality, path: &Path) -> bool {
+    quality.model().install().is_installed(path)
+}
+
 pub fn object_models_are_verified(encoder: &Path, decoder: &Path, vitmatte: &Path) -> bool {
-    verify_artifact(encoder, object::SAM21_ENCODER_ARTIFACT).is_ok()
-        && verify_artifact(decoder, object::SAM21_DECODER_ARTIFACT).is_ok()
-        && verify_artifact(vitmatte, VITMATTE_ARTIFACT).is_ok()
+    object::SAM21_ENCODER_INSTALL.is_installed(encoder)
+        && object::SAM21_DECODER_INSTALL.is_installed(decoder)
+        && VITMATTE_INSTALL.is_installed(vitmatte)
 }
 
 pub struct SubjectMaskWorkerRequest {
     pub quality: BiRefNetQuality,
     pub model_path: PathBuf,
+    pub allow_download: bool,
     pub runtime_path: Option<PathBuf>,
     pub runtime_sha256: Option<String>,
     pub width: u32,
@@ -523,6 +430,7 @@ pub fn spawn_subject_mask(
     let SubjectMaskWorkerRequest {
         quality,
         model_path,
+        allow_download,
         runtime_path,
         runtime_sha256,
         width,
@@ -537,7 +445,13 @@ pub fn spawn_subject_mask(
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (|| {
                     ensure_ai_not_cancelled(&cancellation)?;
-                    ensure_model(quality, &model_path, &worker_sender, &cancellation)?;
+                    ensure_model(
+                        quality,
+                        &model_path,
+                        allow_download,
+                        &worker_sender,
+                        &cancellation,
+                    )?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
                     infer_subject(
@@ -576,20 +490,15 @@ pub fn spawn_subject_mask(
 fn ensure_model(
     quality: BiRefNetQuality,
     path: &Path,
+    allow_download: bool,
     events: &mpsc::Sender<SubjectMaskEvent>,
     cancellation: &AtomicBool,
 ) -> Result<()> {
-    let model = quality.model();
-    ensure_artifact(
+    quality.model().install().ensure_installed(
         path,
-        model.artifact(),
-        BIREFNET_DOWNLOAD,
-        |downloaded, total| {
-            let _ = events.send(SubjectMaskEvent::DownloadProgress {
-                label: model.download_label,
-                downloaded,
-                total,
-            });
+        allow_download,
+        |progress| {
+            let _ = events.send(SubjectMaskEvent::DownloadProgress(progress));
         },
         || ensure_ai_not_cancelled(cancellation),
     )
@@ -763,16 +672,19 @@ fn running_from_appimage() -> bool {
     std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some()
 }
 
-#[cfg(not(target_os = "android"))]
 fn cache_object_ai_sessions() -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "android")]
+    {
+        false
+    }
+    #[cfg(all(not(target_os = "android"), target_os = "linux"))]
     {
         // AppImages frequently use a user-selected external ONNX Runtime. Do
-        // not retain even the one active object-mask session between calls;
-        // each temporary session still gets the full GPU -> CPU fallback.
+        // not retain object-mask/matting sessions between calls; each temporary
+        // session still gets the full GPU -> CPU fallback.
         !running_from_appimage()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "android"), not(target_os = "linux")))]
     {
         true
     }
@@ -830,46 +742,13 @@ fn infer_subject(
     ))
     .context("create BiRefNet input tensor")?;
 
-    #[cfg(target_os = "android")]
-    let (output_width, output_height, logits) = {
-        let _model_guard = prepare_model(AiMaskModel::Subject)?;
-        // Mobile memory is more important than avoiding session startup. Drop
-        // all model weights and allocator state immediately after inference.
-        let mut session =
-            create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?;
-        run_subject_session(&mut session, input, model.input_width, model.input_height)?
-    };
-
-    #[cfg(not(target_os = "android"))]
-    let (output_width, output_height, logits) = {
-        let _model_guard = prepare_model(AiMaskModel::Subject)?;
-        let sessions = SESSION.get_or_init(|| Mutex::new(None));
-        let mut guard = sessions
-            .lock()
-            .map_err(|_| anyhow::anyhow!("BiRefNet session lock was poisoned"))?;
-        if guard
-            .as_ref()
-            .is_none_or(|(cached_quality, _)| *cached_quality != quality)
-        {
-            // A quality change selects a different BiRefNet checkpoint. Drop
-            // the old tier before constructing the new session so even two
-            // variants of the same mask family never overlap in memory.
-            *guard = None;
-            let session =
-                create_session_with_fallback(model_path, SessionOptions::new("BiRefNet"))?;
-            *guard = Some((quality, session));
-        }
-        let result = {
-            let (_, session) = guard.as_mut().ok_or_else(|| {
-                anyhow::anyhow!("BiRefNet session initialization produced no session")
-            })?;
-            run_subject_session(session, input, model.input_width, model.input_height)
-        };
-        if !model_cache_enabled() {
-            *guard = None;
-        }
-        result?
-    };
+    let (output_width, output_height, logits) = with_model_session(
+        subject_model_id(quality),
+        model_path,
+        SessionOptions::new("BiRefNet"),
+        mask_model_retention(true),
+        |session| run_subject_session(session, input, model.input_width, model.input_height),
+    )?;
 
     // BiRefNet is itself a high-resolution dichotomous segmentation model and
     // its sigmoid output contains calibrated fractional coverage. Preserve it
@@ -1042,38 +921,13 @@ fn infer_landscape(request: LandscapeInferenceRequest<'_>) -> Result<LandscapeMa
     ))
     .context("create MaskFormer input tensor")?;
 
-    #[cfg(target_os = "android")]
-    let (output_width, output_height, probabilities) = {
-        let _model_guard = prepare_model(AiMaskModel::Landscape)?;
-        let mut session =
-            create_session_with_fallback(model_path, SessionOptions::new("MaskFormer"))?;
-        run_landscape_session(&mut session, input, category, layout)?
-    };
-
-    #[cfg(not(target_os = "android"))]
-    let (output_width, output_height, probabilities) = {
-        let _model_guard = prepare_model(AiMaskModel::Landscape)?;
-        let sessions = LANDSCAPE_SESSION.get_or_init(|| Mutex::new(None));
-        let mut guard = sessions
-            .lock()
-            .map_err(|_| anyhow::anyhow!("MaskFormer session lock was poisoned"))?;
-        if guard.is_none() {
-            *guard = Some(create_session_with_fallback(
-                model_path,
-                SessionOptions::new("MaskFormer"),
-            )?);
-        }
-        let result = {
-            let session = guard.as_mut().ok_or_else(|| {
-                anyhow::anyhow!("MaskFormer session initialization produced no session")
-            })?;
-            run_landscape_session(session, input, category, layout)
-        };
-        if !model_cache_enabled() {
-            *guard = None;
-        }
-        result?
-    };
+    let (output_width, output_height, probabilities) = with_model_session(
+        AiModel::MaskFormer,
+        model_path,
+        SessionOptions::new("MaskFormer"),
+        mask_model_retention(true),
+        |session| run_landscape_session(session, input, category, layout),
+    )?;
 
     let coarse_mask =
         object::resize_probability_u8(&probabilities, output_width, output_height, width, height);
@@ -1384,17 +1238,18 @@ fn restore_birefnet_output(
         .collect())
 }
 
-fn ensure_vitmatte_model<F>(path: &Path, cancellation: &AtomicBool, progress: F) -> Result<()>
+fn ensure_vitmatte_model<F>(
+    path: &Path,
+    allow_download: bool,
+    cancellation: &AtomicBool,
+    progress: F,
+) -> Result<()>
 where
-    F: FnMut(u64, u64),
+    F: FnMut(ModelDownloadProgress),
 {
-    ensure_artifact(
-        path,
-        VITMATTE_ARTIFACT,
-        VITMATTE_DOWNLOAD,
-        progress,
-        || ensure_ai_not_cancelled(cancellation),
-    )
+    VITMATTE_INSTALL.ensure_installed(path, allow_download, progress, || {
+        ensure_ai_not_cancelled(cancellation)
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1597,43 +1452,13 @@ fn refine_mask_with_vitmatte(
     ))
     .context("create ViTMatte input tensor")?;
 
-    #[cfg(target_os = "android")]
-    let (output_width, output_height, alpha) = {
-        let _model_guard = prepare_model(AiMaskModel::VitMatte)?;
-        let mut session =
-            create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
-        run_vitmatte_session(&mut session, input)?
-    };
-    #[cfg(not(target_os = "android"))]
-    let (output_width, output_height, alpha) = {
-        let _model_guard = prepare_model(AiMaskModel::VitMatte)?;
-        if model_cache_enabled() && cache_object_ai_sessions() {
-            let sessions = VITMATTE_SESSION.get_or_init(|| Mutex::new(None));
-            let mut session = sessions
-                .lock()
-                .map_err(|_| anyhow::anyhow!("ViTMatte session lock was poisoned"))?;
-            if session.is_none() {
-                *session = Some(create_session_with_fallback(
-                    model_path,
-                    SessionOptions::new("ViTMatte"),
-                )?);
-            }
-            let result = run_vitmatte_session(
-                session
-                    .as_mut()
-                    .context("ViTMatte session initialization produced no session")?,
-                input,
-            );
-            if !model_cache_enabled() {
-                *session = None;
-            }
-            result?
-        } else {
-            let mut session =
-                create_session_with_fallback(model_path, SessionOptions::new("ViTMatte"))?;
-            run_vitmatte_session(&mut session, input)?
-        }
-    };
+    let (output_width, output_height, alpha) = with_model_session(
+        AiModel::ViTMatte,
+        model_path,
+        SessionOptions::new("ViTMatte"),
+        mask_model_retention(cache_object_ai_sessions()),
+        |session| run_vitmatte_session(session, input),
+    )?;
 
     let alpha_image =
         ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, alpha)

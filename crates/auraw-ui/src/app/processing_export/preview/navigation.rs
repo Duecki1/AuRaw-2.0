@@ -98,18 +98,19 @@ impl AurawApp {
                 self.ui.notice = Some(error);
                 return;
             }
-            if let Err(error) = pipeline.update_inpaint_layer(
+            if let Err(error) = pipeline.recompute_with_remove(
                 &render_state.queue,
-                self.inpaint.layer.as_ref(),
-                0,
-                0,
-                raw.width,
-                raw.height,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                &full_raw,
+                &self.develop.target_exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
             ) {
-                self.ui.notice = Some(format!("Could not update navigation inpainting: {error:#}"));
+                self.ui.notice = Some(format!("Could not apply Remove to navigation preview: {error:#}"));
                 return;
             }
-            pipeline.recompute(&render_state.queue, &render_state.device, &params);
             let mut renderer = render_state.renderer.write();
             pipeline.register_egui_texture(&render_state.device, &mut renderer);
             drop(renderer);
@@ -164,17 +165,6 @@ impl AurawApp {
             }
         }
 
-        if let Err(error) = preview.pipeline.update_inpaint_layer(
-            &render_state.queue,
-            self.inpaint.layer.as_ref(),
-            0,
-            0,
-            preview.raw.width,
-            preview.raw.height,
-        ) {
-            self.ui.notice = Some(format!("Could not update navigation inpainting: {error:#}"));
-            return;
-        }
         let params = GpuParams::new(&self.develop.target_exposure, &self.masks.stack, &preview.raw)
             .with_vignette_geometry(self.develop.geometry);
         let stages = match stage {
@@ -187,12 +177,21 @@ impl AurawApp {
             ProcessingStage::Output => &[ProcessingStage::Output][..],
         };
         for stage in stages {
-            preview.pipeline.dispatch_stage(
+            if let Err(error) = preview.pipeline.dispatch_stage_with_remove(
                 &render_state.queue,
                 &render_state.device,
                 &params,
                 *stage,
-            );
+                &self.inpaint.edits,
+                &full_raw,
+                &self.develop.target_exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to navigation preview: {error:#}"));
+                self.preview.navigation_pending_stage = None;
+                return;
+            }
         }
         self.preview.navigation_pending_stage = None;
         self.egui_ctx.request_repaint();

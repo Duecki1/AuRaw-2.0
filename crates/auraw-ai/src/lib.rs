@@ -15,8 +15,12 @@ pub mod pipeline {
 pub mod ai_denoise;
 pub mod ai_masks;
 pub mod execution_provider;
-pub mod inpainting;
+pub mod remove;
 mod model_artifact;
+mod model_install;
+mod model_runtime;
+pub use model_install::ModelDownloadProgress;
+pub use model_runtime::{set_active_ai_context, AiRuntimeContext};
 
 #[cfg(not(target_os = "android"))]
 pub use model_artifact::desktop_model_cache_root;
