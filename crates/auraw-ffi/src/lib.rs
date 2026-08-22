@@ -1,12 +1,9 @@
-//! C ABI and Android JNI boundary for AuRaw.
 
-/// Stable ABI marker for native hosts.
 #[unsafe(no_mangle)]
 pub extern "C" fn auraw_abi_version() -> u32 {
     1
 }
 
-/// AuRaw's packed semantic version: major << 16 | minor << 8 | patch.
 #[unsafe(no_mangle)]
 pub extern "C" fn auraw_version_packed() -> u32 {
     2_u32 << 16

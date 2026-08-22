@@ -7,13 +7,8 @@ impl AurawApp {
         }
         let zoomed = self.preview.zoom > DETAIL_ZOOM_START;
         let should_update = self.preview.navigation_pending_stage.is_some();
-        // The normal preview is already a complete full-frame fallback while the
-        // user only zooms or pans. Create the tiny navigation pipeline lazily when
-        // an actual edit needs its fast full-frame update, then retain it until fit.
-        // Eager creation here caused a visible hitch on the first pinch frame.
         let should_exist = zoomed && (self.preview.navigation.is_some() || should_update);
         if !should_exist && !should_update {
-            // Release the navigation proxy when fit view is stable.
             if frame.wgpu_render_state().is_some() {
                 if let Some(old) = self.preview.navigation.take() {
                     if let Some(texture_id) = old.pipeline.egui_texture_id {

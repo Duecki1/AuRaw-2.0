@@ -2,7 +2,6 @@ use super::raw_loader::RawThumbnail;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Lens warp.
 #[derive(Clone, Debug)]
 pub struct LensGeometryMap {
     width: u32,
@@ -48,7 +47,6 @@ impl LensGeometryMap {
         self.height
     }
 
-    /// Maps output to source coordinates.
     pub fn source_position_for_raster(
         &self,
         corrected_x: f32,
@@ -67,7 +65,6 @@ impl LensGeometryMap {
         ]
     }
 
-    /// Inverts the lens map.
     pub fn corrected_position_for_raster(
         &self,
         source_x: f32,
@@ -85,7 +82,6 @@ impl LensGeometryMap {
         let mut best = estimate;
         let mut best_error = f32::INFINITY;
 
-        // Iterate
         for _ in 0..10 {
             let mapped = self.source_position_for_raster(
                 estimate[0],
@@ -107,7 +103,6 @@ impl LensGeometryMap {
             }
 
             let step = 0.5_f32;
-            // Derivative
             let sample_x = if estimate[0] + step <= max_x {
                 estimate[0] + step
             } else {
@@ -258,22 +253,18 @@ impl CropAspectRatio {
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub struct GeometryTransform {
-    /// Normalized crop rectangle in full-image coordinates: left, top, right, bottom.
     #[serde(default = "default_crop_rect")]
     pub crop: [f32; 4],
     #[serde(default)]
     pub aspect_ratio: CropAspectRatio,
-    /// Clockwise quarter-turns, stored separately from fine straighten.
     #[serde(default)]
     pub quarter_turns: u8,
-    /// Clockwise straighten angle in degrees.
     #[serde(default)]
     pub rotation_degrees: f32,
     #[serde(default)]
     pub flip_horizontal: bool,
     #[serde(default)]
     pub flip_vertical: bool,
-    /// Affine keystone/shear correction in degrees.
     #[serde(default)]
     pub horizontal_transform: f32,
     #[serde(default)]
@@ -357,7 +348,6 @@ impl GeometryTransform {
         };
     }
 
-    /// Fits the crop inside the transformed image.
     pub fn fit_crop_inside_transformed_source(
         &mut self,
         source_width: u32,
@@ -379,9 +369,6 @@ impl GeometryTransform {
             (original_crop[1] + original_crop[3]) * 0.5 * source_height_f,
         ];
 
-        // Feasibility is monotonic in a uniform scale: once a crop of a given
-        // aspect fits inside the transformed source, every smaller crop fits as
-        // well. Binary search therefore gives the largest no-pasteboard crop.
         let mut low = 0.0_f32;
         let mut high = 1.0_f32;
         for _ in 0..32 {
@@ -401,9 +388,6 @@ impl GeometryTransform {
             }
         }
 
-        // Stay a hair inside the mathematical boundary. Preview/export sampling
-        // uses floating point and bilinear filtering, so this avoids a one-pixel
-        // black seam on GPUs that round the edge in the opposite direction.
         let scale = (low * 0.999_999).clamp(0.0, 1.0);
         let fitted_width = (width * scale)
             .max(Self::MIN_CROP_EXTENT * source_width_f)
@@ -419,9 +403,6 @@ impl GeometryTransform {
             source_width_f,
             source_height_f,
         ) else {
-            // With the currently allowed transform ranges this should never be
-            // reached, but keep a deterministic fallback rather than producing
-            // an invalid crop if future transform limits become more extreme.
             return false;
         };
         let center_x = original_center[0].clamp(min_cx, max_cx);
@@ -438,10 +419,6 @@ impl GeometryTransform {
         changed
     }
 
-    /// Clamp a crop drag to the largest point between the drag start and the
-    /// proposed crop that still contains no transformed pasteboard. Interpolating
-    /// the rectangle preserves the user's active anchor/opposite corner behavior,
-    /// including fixed-aspect corner drags.
     pub fn constrain_crop_drag_to_transformed_source(
         self,
         start_crop: [f32; 4],
@@ -456,9 +433,6 @@ impl GeometryTransform {
         }
         let start = sanitized_crop(start_crop);
         if !crop_fits_transformed_source(geometry, start, source_width, source_height) {
-            // Legacy sidecars can contain a crop that predates constrained
-            // rotation. Fit that state first so the drag always starts from a
-            // valid rectangle.
             let mut fitted = geometry;
             fitted.crop = start;
             fitted.fit_crop_inside_transformed_source(source_width, source_height);
@@ -480,12 +454,6 @@ impl GeometryTransform {
     }
 }
 
-/// Inverse mapping from destination pixel centers to native source pixel
-/// centers for the complete non-destructive crop/orientation transform.
-///
-/// Keeping this mapping in native source coordinates lets export combine
-/// crop, rotation, keystone, orientation, and resize into one linear-light
-/// resampling pass instead of first rasterizing an encoded intermediate.
 #[derive(Clone, Copy, Debug)]
 pub struct GeometryInverseMap<'a> {
     geometry: GeometryTransform,
@@ -554,9 +522,6 @@ impl<'a> GeometryInverseMap<'a> {
         })
     }
 
-    /// Source-space displacement caused by moving one destination pixel in X
-    /// and Y. This remains constant for ordinary affine geometry and becomes a
-    /// local Jacobian when Lensfun distortion is composed into the map.
     pub fn pixel_jacobian(self) -> [[f32; 2]; 2] {
         self.pixel_jacobian_at(0.0, 0.0)
     }
@@ -566,14 +531,7 @@ impl<'a> GeometryInverseMap<'a> {
         let y = output_y.clamp(0.0, self.output_height.saturating_sub(1) as f32);
         let origin = self.source_position(x, y);
 
-        // Keep derivative probes inside the destination raster. A forward
-        // difference at the final row/column used to step onto pasteboard; with
-        // nonlinear Lensfun mapping that probe bypasses the lens map and can
-        // create a bogus EWA footprint exactly along the exported image edge.
         let jx = if self.output_width == 1 {
-            // A one-pixel output still represents the entire destination width.
-            // Sampling both pixel edges recovers that footprint for antialiasing
-            // instead of collapsing the X Jacobian to zero.
             let left = self.source_position(-0.5, y);
             let right = self.source_position(0.5, y);
             [right[0] - left[0], right[1] - left[1]]
@@ -612,8 +570,6 @@ impl<'a> GeometryInverseMap<'a> {
         let center_x = (crop[0] + crop[2]) * 0.5 * source_width;
         let center_y = (crop[1] + crop[3]) * 0.5 * source_height;
 
-        // Undo discrete orientation first so the continuous transform stays in
-        // the crop's original coordinate system.
         let (u, v) = match geometry.quarter_turns % 4 {
             0 => (output_u, output_v),
             1 => (output_v, 1.0 - output_u),
@@ -631,8 +587,6 @@ impl<'a> GeometryInverseMap<'a> {
         let c = angle.cos();
         let s = angle.sin();
 
-        // Forward transform is R * Shear * Flip. Invert its 2x2 matrix for
-        // destination-to-source sampling.
         let a = c * fx - s * shy * fx;
         let b = c * shx * fy - s * fy;
         let c2 = s * fx + c * shy * fx;
@@ -644,8 +598,6 @@ impl<'a> GeometryInverseMap<'a> {
         let source_dx = (d * dx - b * dy) / determinant;
         let source_dy = (-c2 * dx + a * dy) / determinant;
 
-        // Geometry is naturally expressed in pixel-edge coordinates, while
-        // the raster is indexed by pixel centers at integer coordinates.
         [center_x + source_dx - 0.5, center_y + source_dy - 0.5]
     }
 }
@@ -771,9 +723,6 @@ fn finite_clamp(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
-/// Applies the saved non-destructive crop/orientation transform to a small RGBA
-/// thumbnail. This intentionally mirrors export sampling so Library cards show
-/// the same framing/orientation as Develop and the final file.
 pub fn transform_thumbnail_geometry(
     thumbnail: &RawThumbnail,
     geometry: GeometryTransform,

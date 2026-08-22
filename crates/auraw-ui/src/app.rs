@@ -156,8 +156,6 @@ pub(crate) enum PreviewQuality {
 impl PreviewQuality {
     pub const fn pixel_scale(self) -> f32 {
         match self {
-            // Medium is the native-density baseline. Lower quality is an
-            // explicit performance trade-off rather than the default blur.
             Self::Low => 0.75,
             Self::Medium => 1.00,
             Self::High => 1.25,
@@ -270,21 +268,14 @@ pub(crate) struct OverlayRasterKey {
 
 pub(crate) struct PreviewNavigation {
     pub pipeline: RawGpuPipeline,
-    /// Very-low-resolution full-frame RAW proxy used as the adjusted backing
-    /// image while the high-resolution visible crop is rebuilt or moved.
     raw: Arc<LoadedRaw>,
 }
 
 pub(crate) struct PreviewDetail {
     pub pipeline: RawGpuPipeline,
-    /// Full-image UV rectangle covered on screen by the detail texture.
     pub uv_rect: PreviewUvRect,
-    /// UV rectangle sampled from the padded detail texture. Keeping the padded
-    /// processing border outside this rectangle prevents crop-edge seams.
     pub texture_uv_rect: PreviewUvRect,
     pub revision: u64,
-    /// Reusable RAW proxy for the padded visible crop. Adjustment interaction
-    /// updates this pipeline directly instead of touching the full-frame proxy.
     raw: Arc<LoadedRaw>,
     source_origin: [u32; 2],
     source_size: [u32; 2],
@@ -447,7 +438,7 @@ impl LensCorrectionState {
     }
 }
 
-struct LoadedPreview {
+pub(crate) struct LoadedPreview {
     source_path: Option<PathBuf>,
     raw_cache_key: String,
     label: String,
@@ -469,7 +460,7 @@ struct LoadedPreview {
     geometry: GeometryTransform,
 }
 
-struct PreparedPreviewRebuild {
+pub(crate) struct PreparedPreviewRebuild {
     source_raw: Arc<LoadedRaw>,
     preview_raw: Arc<LoadedRaw>,
     quality: PreviewQuality,
@@ -477,14 +468,11 @@ struct PreparedPreviewRebuild {
     ai_enabled: bool,
 }
 
-enum PreviewRebuildEvent {
+pub(crate) enum PreviewRebuildEvent {
     Finished(Result<PreparedPreviewRebuild, String>),
 }
 
-/// CPU-only result of preparing the source region for a zoomed preview. RAW
-/// proxy construction stays off the interactive egui frame; the GPU graph is
-/// created on the render thread after this request is verified as current.
-struct PreparedPreviewDetail {
+pub(crate) struct PreparedPreviewDetail {
     source_raw: Arc<LoadedRaw>,
     revision: u64,
     quality: PreviewQuality,
@@ -495,11 +483,11 @@ struct PreparedPreviewDetail {
     raw: Arc<LoadedRaw>,
 }
 
-enum PreviewDetailRebuildEvent {
+pub(crate) enum PreviewDetailRebuildEvent {
     Finished(Result<PreparedPreviewDetail, String>),
 }
 
-enum LoadEvent {
+pub(crate) enum LoadEvent {
     Finished(Result<LoadedPreview, String>),
 }
 
@@ -519,7 +507,7 @@ enum LensCorrectionEvent {
 }
 
 #[derive(Clone)]
-struct SidecarSaveRequest {
+pub(crate) struct SidecarSaveRequest {
     target: crate::sidecar::SidecarTarget,
     generation: u64,
     revision: u64,
@@ -528,31 +516,31 @@ struct SidecarSaveRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SidecarSaveJob {
+pub(crate) struct SidecarSaveJob {
     generation: u64,
     revision: u64,
     explicit: bool,
 }
 
-struct SidecarSaveEvent {
+pub(crate) struct SidecarSaveEvent {
     job: SidecarSaveJob,
     result: Result<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DevelopedThumbnailJob {
+pub(crate) struct DevelopedThumbnailJob {
     target: crate::sidecar::SidecarTarget,
     generation: u64,
     revision: u64,
 }
 
-struct DevelopedThumbnailEvent {
+pub(crate) struct DevelopedThumbnailEvent {
     job: DevelopedThumbnailJob,
     result: Result<crate::pipeline::RawThumbnail, String>,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct SidecarAutosaveDeadline {
+pub(crate) struct SidecarAutosaveDeadline {
     generation: u64,
     due_at: Instant,
 }
@@ -605,7 +593,7 @@ pub(crate) const fn maximum_raw_cache_limit() -> usize {
 }
 
 #[derive(Clone)]
-struct CachedRawDecode {
+pub(crate) struct CachedRawDecode {
     key: String,
     raw: Arc<LoadedRaw>,
 }
@@ -676,7 +664,7 @@ enum LibraryAiMaskRefreshPhase {
 }
 
 #[derive(Debug)]
-struct LibraryAiMaskRefreshState {
+pub(crate) struct LibraryAiMaskRefreshState {
     pending: VecDeque<LibraryAiMaskRefreshJob>,
     current: Option<LibraryAiMaskRefreshJob>,
     phase: LibraryAiMaskRefreshPhase,
@@ -689,7 +677,7 @@ struct LibraryAiMaskRefreshState {
 }
 
 #[derive(Debug)]
-struct LibraryBatchExportState {
+pub(crate) struct LibraryBatchExportState {
     pending: VecDeque<LibraryBatchExportJob>,
     current: Option<LibraryBatchExportJob>,
     total: usize,
@@ -757,7 +745,7 @@ impl ExportDestination {
     }
 }
 
-struct ExportTask {
+pub(crate) struct ExportTask {
     kind: ExportTaskKind,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
     receiver: Option<ExportTaskReceiver>,
@@ -868,7 +856,7 @@ enum ForegroundOperationContext {
     LensCorrection,
 }
 
-struct ForegroundOperation {
+pub(crate) struct ForegroundOperation {
     kind: ForegroundOperationKind,
     document_id: u64,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
@@ -881,10 +869,6 @@ struct ForegroundOperation {
 #[cfg(target_os = "android")]
 type AndroidAdjustmentPasteResult = (Vec<(String, String)>, Vec<(String, String)>, Vec<String>);
 
-/// A content-aware mask result must be matched to the component that started
-/// the request, not merely to the slot it occupied at that time.  Reordering
-/// is allowed while inference runs, so the snapshot is deliberately compared
-/// before applying a result.  Ambiguous duplicate snapshots are discarded.
 #[derive(Clone, Debug, PartialEq)]
 struct AiMaskTarget {
     mask_index: usize,
@@ -904,7 +888,6 @@ pub(crate) struct DevelopState {
     pub(crate) geometry_revision: u64,
     pub(crate) lens_correction: LensCorrectionState,
     pub(crate) lens_correction_dirty: bool,
-    /// Explicit DCP chosen for the currently edited image. None keeps automatic selection.
     pub(crate) selected_camera_profile: Option<PathBuf>,
     pub(crate) load_receiver: Option<mpsc::Receiver<LoadEvent>>,
     pub(crate) loading_label: Option<String>,
@@ -916,14 +899,7 @@ pub(crate) struct DevelopState {
 
 pub(crate) struct PreviewState {
     pub(crate) gpu_pipeline: Option<RawGpuPipeline>,
-    // Compiled preview programs are tiny compared with an image-sized render
-    // graph. Retain them independently so replacing or temporarily releasing
-    // a preview never forces Android to compile the full graph again.
     pub(crate) program_template: Option<RawGpuProgramTemplate>,
-    // Native preview texture IDs cannot be freed during `App::ui`: egui may
-    // already have emitted meshes that reference them for the current frame.
-    // Retire them now and remove them from the renderer at the start of the
-    // next frame, before any new paint meshes are built.
     pub(crate) retired_egui_textures: Vec<egui::TextureId>,
     pub(crate) gpu_prewarm_receiver: Option<mpsc::Receiver<Result<RawGpuPipeline, String>>>,
     pub(crate) quality: PreviewQuality,
@@ -964,14 +940,11 @@ pub(crate) struct DevelopUiState {
     pub(crate) filmstrip_centered_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
     pub(crate) sidebar_open: bool,
-    /// Runtime-only crop before automatic rotation/keystone containment. This
-    /// lets the crop expand again when the user reduces the straighten angle.
     pub(crate) crop_constraint_reference: Option<[f32; 4]>,
     pub(crate) crop_drag: Option<CropDragState>,
     pub(crate) straighten_tool_active: bool,
     pub(crate) straighten_drag: Option<StraightenDragState>,
     pub(crate) white_balance_picker_active: bool,
-    /// Native-source UV start/current corners while the neutral-area picker is dragged.
     pub(crate) white_balance_picker_drag: Option<[[f32; 2]; 2]>,
     pub(crate) adjustment_section: AdjustmentSection,
     pub(crate) mask_section: MaskSection,
@@ -1004,8 +977,6 @@ pub(crate) struct PreferencesState {
     pub(crate) camera_profile_folder: Option<PathBuf>,
     pub(crate) camera_profile_folder_label: Option<String>,
     pub(crate) camera_profile_auto_detect: bool,
-    /// Last manually selected DCP, relative to `camera_profile_folder`. This is
-    /// a sticky default only for newly opened RAWs that have no sidecar yet.
     pub(crate) last_camera_profile: Option<PathBuf>,
 }
 
@@ -1013,7 +984,6 @@ pub(crate) struct UiState {
     pub(crate) active_tab: AppTab,
     pub(crate) sidebar_tab: SidebarTab,
     pub(crate) status: String,
-    /// Reveals low-level darktable/RAW controls hidden by the standard view.
     pub(crate) expert_mode: bool,
     pub(crate) notice: Option<String>,
     pub(crate) thumbnail_cache_size: Option<Result<u64, String>>,
@@ -1077,18 +1047,12 @@ pub(crate) struct ExportState {
     pub(crate) task: Option<ExportTask>,
     pub(crate) batch: Option<LibraryBatchExportState>,
     pub(crate) publish_pending: bool,
-    /// True while the Android SAF result and RAW decode belong to the batch
-    /// exporter rather than to an interactive Library open. The batch exporter
-    /// shares Android's document bridge, so completion must be routed by owner
-    /// instead of merely checking whether a batch happens to exist.
     #[cfg(target_os = "android")]
     pub(crate) android_batch_load_pending: bool,
 }
 
 pub(crate) struct PersistenceState {
     pub(crate) history: EditHistory,
-    /// A history restore across a lens-geometry change must put back the masks
-    /// associated with that historical geometry after the normal lens rebuild.
     pub(crate) lens_restore_masks: Option<MaskStack>,
     pub(crate) sidecar_target: Option<crate::sidecar::SidecarTarget>,
     pub(crate) sidecar_generation: u64,
@@ -1123,12 +1087,7 @@ pub(crate) struct InpaintState {
 pub(crate) struct AndroidState {
     pub(crate) android_app: auraw_ffi::AndroidApp,
     pub(crate) picker_pending: bool,
-    /// True while an internal Android RAW reopen belongs to Reset All. The
-    /// document is reloaded so Develop cannot retain stale in-memory edits,
-    /// but the Library remains the active tab.
     pub(crate) pending_android_library_reset_reload: bool,
-    /// Label of the SAF tree currently being mirrored into app-private DCP storage.
-    /// This is UI-only transient state and is never persisted as the active folder.
     pub(crate) camera_profile_folder_importing_label: Option<String>,
     pub(crate) pending_android_profile_reload: Option<(Option<PathBuf>, SidecarEditState)>,
 }
@@ -1184,19 +1143,12 @@ impl AurawApp {
         };
         auraw_ai::set_active_ai_context(context);
 
-        // Leaving Remove cooperatively stops a pending multi-crop job. The
-        // runtime manager itself never waits here; an in-flight ONNX call keeps
-        // its session until it returns, then observes the context change and
-        // drops it at that safe point.
         if context != Some(auraw_ai::AiRuntimeContext::Remove)
             && self.inpaint.cancellation.is_some()
         {
             self.cancel_remove_processing();
         }
 
-        // Ordinary interactive mask jobs use the existing foreground
-        // cancellation token when their UI context disappears. Library batch
-        // refresh is deliberately exempt because it is a non-interactive job.
         if context != Some(auraw_ai::AiRuntimeContext::Masks)
             && self.ai.library_mask_refresh.is_none()
             && matches!(
@@ -1220,7 +1172,6 @@ impl AurawApp {
             self.preview.original_hold = None;
         }
         if self.ui.active_tab == AppTab::Library && tab != AppTab::Library {
-            // Keep thumbnail decoding from competing with Develop rendering.
             self.library.prepare_for_develop();
             #[cfg(target_os = "android")]
             self.library.set_folder_sidebar_open(false);

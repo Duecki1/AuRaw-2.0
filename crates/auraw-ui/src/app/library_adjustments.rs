@@ -69,8 +69,6 @@ impl AurawApp {
             self.masks.stack = Arc::unwrap_or_clone(merged.masks);
             self.ai.masks_need_update = merged.ai_masks_need_update;
             self.rehydrate_restored_mask_state();
-            // Rehydration validates which generated masks exist; retain the
-            // explicit cross-image stale marker for pasted content-aware masks.
             self.ai.masks_need_update |= merged.ai_masks_need_update;
             self.mark_all_mask_layers_dirty();
         }
@@ -308,9 +306,6 @@ impl AurawApp {
         let mut ai_refresh = Vec::new();
         let mut failures = Vec::new();
 
-        // Applying a copied camera profile to the loaded image starts an
-        // asynchronous reopen. Handle sidecar-only assets first so that reload
-        // cannot interrupt a multi-image paste halfway through the selection.
         let mut ordered_assets = assets.to_vec();
         ordered_assets.sort_by_key(|asset| self.library_asset_is_current(asset));
 
@@ -352,10 +347,6 @@ pub(super) fn desktop_library_sidecar_edits(
 ) -> Result<Option<SidecarEditState>, String> {
     match crate::sidecar::load_desktop(raw_path) {
         Ok(loaded) => Ok(loaded.map(|loaded| loaded.edits)),
-        // Opening a RAW already recovers from malformed sidecars by using the
-        // default edit state. Library copy/paste must do the same so one bad
-        // JSON file cannot make its thumbnail disappear or block a paste that
-        // will replace it with a valid sidecar.
         Err(crate::sidecar::SidecarError::Invalid(error)) => {
             log::warn!(
                 "ignoring invalid sidecar while handling library adjustments for {}: {error}",
@@ -431,9 +422,6 @@ impl AurawApp {
                     && self.ai.masks_need_update
                     && !self.ai_mask_update_busy()
                 {
-                    // The update could not start (for example a missing model
-                    // or runtime). Keep its progress at zero until the batch
-                    // records the failure on this frame.
                     return 0;
                 }
                 job.mask_targets
@@ -787,10 +775,6 @@ impl AurawApp {
                     return;
                 }
 
-                // Do not advance to the next RAW until the regenerated masks
-                // are durable. Otherwise the final item can be reported as
-                // complete (and the library refreshed) while its sidecar is
-                // still writing, and a following load can observe stale data.
                 self.commit_edit_history_now();
                 self.queue_explicit_sidecar_save();
                 if let Some(state) = self.ai.library_mask_refresh.as_mut() {

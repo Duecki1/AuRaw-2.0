@@ -64,9 +64,6 @@ pub(super) fn show_library_folder_node(
             } else {
                 egui_phosphor::regular::FOLDER
             };
-            // Sensing both clicks and drags makes egui wait until the pointer
-            // crosses its real drag threshold. A simple press/release remains
-            // normal folder navigation and never creates a drag payload.
             let response = crate::ui::theme::navigation_row(
                 ui,
                 egui::RichText::new(format!("{folder_icon}  {}", node.name)),
@@ -373,10 +370,6 @@ pub(in crate::ui::library) fn can_create_local_folder(app: &AurawApp) -> bool {
     app.library.folder.is_some()
 }
 
-pub(in crate::ui::library) fn navigation_enabled(_action_in_progress: bool) -> bool {
-    true
-}
-
 pub(in crate::ui::library) fn apply_local_toolbar_action(
     app: &mut AurawApp,
     action: super::LocalFolderToolbarAction,
@@ -443,10 +436,6 @@ pub(in crate::ui::library) fn show_local_folder_tree(
     if let Some(action) = requested_action {
         apply_library_folder_ui_action(app, action, ui.ctx());
     }
-}
-
-pub(in crate::ui::library) fn close_sidebar_after_navigation() -> bool {
-    false
 }
 
 pub(in crate::ui::library) fn show_sidebar_dialogs(ui: &mut Ui, app: &mut AurawApp) {

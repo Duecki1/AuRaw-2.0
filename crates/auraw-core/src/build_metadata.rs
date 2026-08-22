@@ -1,4 +1,3 @@
-//! Build contract embedded by `build.rs` from Cargo workspace metadata.
 
 pub const ANDROID_NDK_VERSION: &str = env!("AURAW_ANDROID_NDK_VERSION");
 pub const ANDROID_BUILD_TOOLS_VERSION: &str = env!("AURAW_ANDROID_BUILD_TOOLS_VERSION");

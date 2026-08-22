@@ -5,8 +5,6 @@ use eframe::egui::{
 const PICKER_MAX_WIDTH: f32 = 360.0;
 const PICKER_MIN_WIDTH: f32 = 120.0;
 const PICKER_SCREEN_MARGIN: f32 = 48.0;
-// Header, labels, hue control, preview, Done button, gaps, and frame margins.
-// Reserving this before sizing the color plane keeps the modal on-screen in
 const PICKER_VERTICAL_CHROME: f32 = 260.0;
 const PICKER_MIN_PLANE_EDGE: f32 = 96.0;
 const PLANE_SEGMENTS: usize = 16;
@@ -18,11 +16,6 @@ struct PickerState {
     hue: f32,
 }
 
-/// A touch-friendly, modal RGB color picker for mask effects.
-///
-/// The modal backdrop is intentional: an effect picker floats over controls in
-/// a scrolling settings panel, and those controls must not receive the same
-/// click or drag that is operating (or dismissing) the picker.
 pub fn effect_color_picker(
     ui: &mut Ui,
     id_salt: impl egui::AsIdSalt,

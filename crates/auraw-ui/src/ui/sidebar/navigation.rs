@@ -11,10 +11,6 @@ fn mobile_tab_text_geometry(height: f32) -> (f32, f32, f32, f32) {
 
 impl Sidebar {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
-        // The scroll area below uses a solid scrollbar that reserves its own
-        // width. Let the resizable panel own this dimension and only consume
-        // what it assigned us; reporting a larger desired width makes the panel
-        // fight the user's resize gesture.
         ui.take_available_width();
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
 
@@ -47,11 +43,6 @@ impl Sidebar {
             app.develop_ui.adjustment_section = AdjustmentSection::Light;
         }
 
-        // The order here is intentional. Bottom panels consume their space in
-        // call order: the primary tool rail is attached to the screen edge, the
-        // current tool's categories sit directly above it, and the scrollable
-        // controls receive all remaining height. This mirrors mobile darkroom
-        // apps while preserving the desktop sidebar's tool/category hierarchy.
         egui::Panel::bottom("develop_portrait_primary_tabs")
             .resizable(false)
             .exact_size(62.0)
@@ -66,10 +57,6 @@ impl Sidebar {
                 .show(ui, |ui| Self::show_mobile_context_tabs(ui, app));
         }
 
-        // A central panel is required after nested edge panels so the scroll area
-        // is constrained to their remainder. Without it, ScrollArea measures its
-        // full contents against the outer resizable panel and can make the mobile
-        // sheet expand far beyond its requested default height.
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(0)))
             .show(ui, |ui| {
@@ -302,8 +289,6 @@ impl Sidebar {
             egui::scroll_area::ScrollSource::default()
         };
         ui.scope(|ui| {
-            // A solid bar owns real layout space, so wide sliders, curves, and
-            // dropdowns can never sit underneath its hit area.
             let mut scroll_style = egui::style::ScrollStyle::solid();
             scroll_style.bar_width = 7.0;
             scroll_style.bar_inner_margin = 7.0;
@@ -357,16 +342,11 @@ impl Sidebar {
                 .clicked()
                 {
                     app.ui.sidebar_tab = tab;
-                    // Choosing a tool while the properties panel is hidden is a
-                    // natural request to reveal that tool's controls again.
                     app.develop_ui.sidebar_open = true;
                 }
             }
         });
 
-        // Keep both Develop visibility controls pinned to the bottom of the
-        // right-hand icon rail. `bottom_up` lays out the first button closest
-        // to the window edge, so Filmstrip is below Sidebar as requested.
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             ui.add_space(5.0);
 
@@ -472,9 +452,6 @@ impl Sidebar {
         layout: ScreenLayout,
         frame: &eframe::Frame,
     ) {
-        // Keep the context label and reset action in one predictable header row.
-        // Nesting the right-aligned action inside a horizontal row also prevents
-        // it from consuming the scroll area's remaining vertical height.
         crate::ui::theme::toolbar_row(ui, |ui| {
             if layout == ScreenLayout::Vertical {
                 ui.strong(match app.develop_ui.adjustment_section {
@@ -694,9 +671,6 @@ impl Sidebar {
                 egui::CollapsingHeader::new(egui::RichText::new(title).strong())
                     .default_open(default_open)
                     .show_background(false)
-                    // Cards already provide their own visual grouping. Keep
-                    // expanded controls on the card's content axis instead of
-                    // adding egui's inset body and vertical guide rule.
                     .show_unindented(ui, contents);
             } else {
                 contents(ui);

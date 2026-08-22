@@ -65,9 +65,6 @@ pub fn is_tiff_path(path: &Path) -> bool {
         })
 }
 
-/// Performs a bounded TIFF/BigTIFF IFD walk before selecting a decoder. DNG and
-/// CFA tags are sufficient to identify sensor containers without asking the
-/// generic raster decoder to interpret mosaic samples as RGB.
 pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
     let mut file = File::open(path).with_context(|| format!("open TIFF {}", path.display()))?;
     let file_len = file
@@ -172,15 +169,14 @@ pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
 
             if matches!(
                 tag,
-                33421 // CFARepeatPatternDim
-                    | 33422 // CFAPattern
+                33421
+                    | 33422
             ) {
                 return Ok(TiffContainerKind::Sensor);
             }
 
             if tag == 262 && count == 1 {
                 if let Some(value) = scalar_u64(&mut file, field)? {
-                    // 32803 = CFA, 34892 = LinearRaw (DNG).
                     if matches!(value, 32803 | 34892) {
                         return Ok(TiffContainerKind::Sensor);
                     }
@@ -336,13 +332,7 @@ fn decode_scene_linear_rec2020(path: &Path) -> Result<(u32, u32, Vec<f32>)> {
             ));
         }
     } else if source_is_float {
-        // Untagged float TIFFs remain AuRaw's scene-linear Rec.2020 interchange
-        // format. An embedded ICC profile always wins, so tagged float TIFFs do
-        // not accidentally inherit these working-space primaries.
     } else {
-        // TIFF has no universal default RGB color space. sRGB is the practical
-        // fallback for untagged integer files, but an embedded profile must take
-        // precedence.
         rgb.par_chunks_exact_mut(3).for_each(|pixel| {
             let r = srgb_to_linear(pixel[0]);
             let g = srgb_to_linear(pixel[1]);
@@ -508,7 +498,6 @@ fn read_embedded_icc_profile(path: &Path) -> Result<Option<Vec<u8>>> {
                 file_len,
             };
 
-            // TIFF/EP ICC Profile tag stores the selected export color space.
             if tag == 34675 {
                 anyhow::ensure!(
                     matches!(field_type, 1 | 7),
@@ -565,8 +554,6 @@ fn normalize_icc_profile(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
         (MIN_TIFF_ICC_BYTES as usize..=bytes.len()).contains(&declared),
         "TIFF ICC profile declares an invalid size"
     );
-    // Container padding is not part of the ICC profile. Passing it downstream
-    // makes profile hashes unstable and can confuse stricter CMS backends.
     bytes.truncate(declared);
     Ok(bytes)
 }
@@ -645,15 +632,12 @@ mod tests {
         bytes.extend_from_slice(&8u32.to_le_bytes());
         bytes.extend_from_slice(&3u16.to_le_bytes());
 
-        // PhotometricInterpretation = RGB.
         bytes.extend_from_slice(&262u16.to_le_bytes());
         bytes.extend_from_slice(&3u16.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.extend_from_slice(&2u16.to_le_bytes());
         bytes.extend_from_slice(&0u16.to_le_bytes());
 
-        // DNGVersion and ColorMatrix1 can be copied into rendered TIFF metadata.
-        // Neither tag, by itself, proves that the pixel raster is a sensor mosaic.
         bytes.extend_from_slice(&50706u16.to_le_bytes());
         bytes.extend_from_slice(&1u16.to_le_bytes());
         bytes.extend_from_slice(&4u32.to_le_bytes());
@@ -755,8 +739,6 @@ mod tests {
         icc[20..24].copy_from_slice(b"XYZ ");
         icc[36..40].copy_from_slice(b"acsp");
 
-        // Classic little-endian TIFF: one UNDEFINED ICCProfile entry, with its
-        // payload immediately after the IFD and next-IFD pointer.
         let payload_offset = 8 + 2 + 12 + 4;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"II");

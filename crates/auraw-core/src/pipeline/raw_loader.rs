@@ -18,13 +18,8 @@ use std::sync::{Arc, RwLock};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CameraProfileMode {
-    /// Ignore DCP creative stages and use only camera/DNG/LibRaw matrices.
     MatrixOnly,
-    /// Use a matching external DCP from the configured folder, otherwise
-    /// fall back to the camera matrix without using an embedded DCP.
     DcpProfiles,
-    /// Use the embedded camera matrix unless an external DCP was explicitly
-    /// selected for the image.
     #[default]
     Automatic,
 }
@@ -225,18 +220,12 @@ impl<T> CompactPixelMap<T> {
         CompactPixelMapIter { map: self, next: 0 }
     }
 
-    /// Compact backing storage used when fingerprinting runtime-derived data.
-    /// Including the stored shape distinguishes a dense map from a repeating
-    /// map without materializing either map at full image resolution.
     pub fn storage_parts(&self) -> (u32, u32, &[T]) {
         (self.storage_width, self.storage_height, &self.values)
     }
 }
 
 impl<T: Copy> CompactPixelMap<T> {
-    /// Appends one logical row without materializing the whole logical map.
-    /// Repeating maps are copied a pattern-row slice at a time, avoiding a
-    /// modulo/division pair for every pixel in hot GPU-upload paths.
     pub fn append_row_to(&self, y: u32, output: &mut Vec<T>) {
         if y >= self.height || self.width == 0 || self.values.is_empty() {
             return;
@@ -261,9 +250,6 @@ impl<T: Copy + PartialEq> CompactPixelMap<T> {
         if width == 0 || height == 0 || values.is_empty() {
             return Self::dense(width, height, values);
         }
-        // Dense full-resolution correction maps can contain tens of millions of
-        // values. Avoid an expensive period search there; the LibRaw loader
-        // constructs compact maps directly for the normal periodic case.
         if values.len() > 4_000_000 {
             return Self::dense(width, height, values);
         }
@@ -332,9 +318,6 @@ impl<T: Copy + PartialEq> CompactPixelMap<T> {
                 values.push(self[(source_y * self.width + source_x) as usize]);
             }
         }
-        // Clamped border tiles are not strictly periodic at the duplicated
-        // edges. Keep the exact dense values rather than spending time trying
-        // many full-tile period candidates that cannot match.
         Self::dense(width, height, values)
     }
 }
@@ -380,22 +363,12 @@ impl<'a, T> IntoIterator for &'a CompactPixelMap<T> {
 
 #[derive(Clone, Debug, Default)]
 pub struct CaptureMetadata {
-    /// ISO sensitivity. Zero means unavailable.
     pub iso_speed: f32,
-    /// Exposure time in seconds. Zero means unavailable.
     pub shutter_seconds: f32,
-    /// Original image description supplied by the camera or photographer.
     pub description: String,
-    /// Original artist/creator string supplied by the camera or photographer.
     pub artist: String,
 }
 
-/// Cached RawNIND output. Bayer models are retained as a denoised CFA mosaic
-/// in the original sensor code-value domain, so highlight reconstruction and
-/// demosaic remain full-frame, edit-dependent pipeline stages. The linear
-/// model used for X-Trans remains interleaved camera-RGB IEEE-754 half floats.
-/// Exactly one payload is populated. Sidecars persist only the model toggle;
-/// this derived cache is always rebuildable from the original sensor mosaic.
 #[derive(Clone, Debug)]
 pub struct AiDenoisedImage {
     pub width: u32,
@@ -405,7 +378,6 @@ pub struct AiDenoisedImage {
 }
 
 impl AiDenoisedImage {
-    /// Constructs a linear camera-RGB result (currently the X-Trans path).
     pub fn new(width: u32, height: u32, rgb16f: Vec<u16>) -> Result<Self> {
         let expected = u64::from(width)
             .checked_mul(u64::from(height))
@@ -425,7 +397,6 @@ impl AiDenoisedImage {
         })
     }
 
-    /// Constructs a Bayer result in the source RAW's code-value domain.
     pub fn new_bayer_cfa(width: u32, height: u32, raw_cfa16: Vec<u16>) -> Result<Self> {
         let expected = u64::from(width)
             .checked_mul(u64::from(height))
@@ -481,55 +452,28 @@ pub struct LoadedRaw {
     pub height: u32,
     pub camera_make: String,
     pub camera_model: String,
-    /// Lens manufacturer reported by the RAW metadata, when available.
     pub lens_make: String,
-    /// Lens model reported by the RAW metadata, when available.
     pub lens_model: String,
-    /// Capture focal length in millimetres. Zero means unavailable.
     pub focal_length: f32,
-    /// Capture aperture (f-number). Zero means unavailable.
     pub aperture: f32,
-    /// Subject distance in metres. Zero means unavailable.
     pub focus_distance: f32,
-    /// Capture details retained from LibRaw for export metadata.
     pub capture_metadata: CaptureMetadata,
     pub cfa_kind: CfaKind,
     pub raw_pixels: Vec<u16>,
-    /// Pre-demosaiced scene-linear Rec.2020 D65 RGB raster. TIFF raster inputs
-    /// populate this buffer and leave `raw_pixels` empty; sensor RAW files leave
-    /// it empty and follow the CFA reconstruction path.
     pub scene_linear_raster: Option<Arc<[f32]>>,
     pub color_indices: CompactPixelMap<u8>,
     pub wb_coeffs: [f32; 4],
     pub cam_to_srgb: [[f32; 4]; 3],
     pub black_levels: [f32; 4],
-    /// Effective LibRaw black level for every oriented active-area photosite.
-    /// This includes the shared level, per-CFA-plane offsets, and an optional
-    /// repeating row/column pattern from `cblack[4..]`.
     pub black_levels_per_pixel: CompactPixelMap<f32>,
     pub white_levels: [f32; 4],
-    /// Per-capture signal-dependent sensor noise estimate in normalized RAW units.
     pub noise_profile: NoiseProfile,
-    /// DCP creative profile stages and retained embedded camera ICC data.
     pub camera_profile: CameraProfile,
-    /// External DCP actually applied to this RAW, when one was selected.
     pub camera_profile_source: Option<PathBuf>,
-    /// All external DCPs in the configured root that match this camera.
     pub available_camera_profiles: Vec<CameraProfileCandidate>,
-    /// Camera/DCP calibration data retained so global white-balance edits can
-    /// rebuild the camera transform instead of applying generic RGB gains.
     pub white_balance_model: Option<CameraWhiteBalanceModel>,
-    /// Smooth corrected-image -> native-source distortion map. Lens shading
-    /// and TCA are already applied to the CFA, while this common geometric
-    /// component is deferred until the float RGB geometry pass.
     pub lens_geometry: Option<Arc<LensGeometryMap>>,
-    /// Runtime-only derived output. Interior mutability lets a background
-    /// worker publish it without cloning the much larger decoded RAW buffers.
     pub ai_denoised: Arc<RwLock<Option<AiDenoisedImage>>>,
-    /// Full-frame chrominance offsets used by darktable-compatible inpaint
-    /// opposed reconstruction, keyed by black point, clip threshold, and
-    /// whether the derived Bayer CFA is active. Export tiles share this cache
-    /// with their source so every tile uses one full-image measurement.
     pub opposed_chroma_cache: OpposedChromaCache,
 }
 
@@ -633,8 +577,6 @@ impl LoadedRaw {
         let mut means = [0.0f32; 3];
         let mut counts = [0u32; 3];
 
-        // These bounds intentionally follow darktable's implementation,
-        // including its last-row/last-column exclusion at the sensor edge.
         let row_end = (row + 2).min(height.saturating_sub(1));
         let col_end = (col + 2).min(width.saturating_sub(1));
         for sample_row in row.saturating_sub(1)..row_end {
@@ -675,13 +617,6 @@ impl LoadedRaw {
             return [0.0; 3];
         }
 
-        // Match darktable's mask storage: the logical dimensions use integer
-        // division by three, and `_raw_to_cmap` still maps partial right/bottom
-        // sensor edges into zero-filled padding. darktable describes this as an
-        // over-allocation for every width/height combination. Its rounded-area
-        // formula alone is one element too short when a logical dimension is
-        // already eight-aligned, so explicitly include the largest mapped raw
-        // index in each independent channel plane.
         let mask_width = width / 3;
         let mask_height = height / 3;
         if mask_width == 0 || mask_height == 0 {
@@ -696,7 +631,6 @@ impl LoadedRaw {
         let mut clipped_mask = vec![false; 3 * mask_size];
         let clip = 0.987 * clip_threshold.max(0.01);
 
-        // darktable leaves the last complete superpixel row and column clear.
         for mask_row in 0..mask_height.saturating_sub(1) {
             for mask_col in 0..mask_width.saturating_sub(1) {
                 let mask_index = mask_row * mask_width + mask_col;
@@ -849,13 +783,10 @@ impl LoadedRaw {
         }
     }
 
-    /// ISO sensitivity retained from the RAW metadata. Zero means unavailable.
     pub fn iso_speed(&self) -> f32 {
         self.capture_metadata.iso_speed
     }
 
-    /// Apply sensor-specific Detail-panel starting values without touching
-    /// creative tone/color controls or the user's demosaic preferences.
     pub fn apply_adaptive_detail_defaults(&self, exposure: &mut ExposureParams) {
         let defaults = self.noise_profile.adaptive_detail_defaults(
             self.capture_metadata.iso_speed,
@@ -868,15 +799,10 @@ impl LoadedRaw {
         exposure.denoise_quality = defaults.denoise_quality;
     }
 
-    /// Estimated as-shot scene illuminant temperature used as the neutral point
-    /// for the user-facing Kelvin control.
     pub fn as_shot_temperature_kelvin(&self) -> Option<f32> {
         self.as_shot_white_balance().map(|value| value.0)
     }
 
-    /// darktable-compatible absolute temperature and tint values derived from
-    /// the actual as-shot camera multipliers. Tint deliberately does not start
-    /// at zero: it reflects the camera matrix and capture metadata.
     pub fn as_shot_white_balance(&self) -> Option<(f32, f32)> {
         #[cfg(libraw_available)]
         {
@@ -951,19 +877,12 @@ impl LoadedRaw {
         }
     }
 
-    /// Samples an area of the sensor before white balance and returns relative
-    /// temperature/tint edits. Each CFA plane is black-level corrected before
-    /// averaging; reciprocal channel means then make the selected area neutral,
-    /// matching darktable's image-area picker.
     pub fn white_balance_offsets_from_area(
         &self,
         first: [f32; 2],
         second: [f32; 2],
         black_point: f32,
     ) -> Option<(f32, f32)> {
-        // The picker below operates on sensor CFA planes and a LibRaw white
-        // balance model. Rendered TIFFs use the generic raster temperature/tint
-        // transform on the GPU, so there are no sensor coefficients to solve.
         if self.is_pre_demosaiced_raster() {
             return None;
         }
@@ -995,7 +914,6 @@ impl LoadedRaw {
             .max(y0 + 1)
             .min(self.height);
 
-        // Sampling
         const MAX_PICKER_SAMPLES: f64 = 262_144.0;
         let area_pixels = f64::from(x1 - x0) * f64::from(y1 - y0);
         let mut stride = (area_pixels / MAX_PICKER_SAMPLES).sqrt().ceil().max(1.0) as usize;
@@ -1017,8 +935,6 @@ impl LoadedRaw {
                     .clamp(0.0, white - 1.0);
                 let value = (f32::from(self.raw_pixels[index]) - calibrated_black)
                     / (white - calibrated_black);
-                // Ignore nearly black and clipped samples; neither contains
-                // reliable chromatic information for a neutral estimate.
                 if value.is_finite() && (0.001..0.98).contains(&value) {
                     sums[channel] += f64::from(value);
                     counts[channel] += 1;
@@ -1041,9 +957,6 @@ impl LoadedRaw {
         self.white_balance_offsets_from_coefficients([green / red, 1.0, green / blue, 1.0])
     }
 
-    /// RawNIND's published Bayer weights were trained with a D65/daylight
-    /// white balance. Return camera-channel multipliers normalized to green,
-    /// falling back to the as-shot multipliers when a colour matrix is absent.
     pub fn rawnind_daylight_white_balance(&self) -> [f32; 3] {
         #[cfg(libraw_available)]
         if let Some(model) = &self.white_balance_model {
@@ -1076,12 +989,6 @@ impl LoadedRaw {
         ]
     }
 
-    /// Returns the RAW multipliers for a relative global white-balance edit.
-    /// Temperature is expressed as a reciprocal-temperature (mired)
-    /// displacement and tint as a relative encoding of darktable's absolute
-    /// tint ratio. Like darktable's white-balance module, the camera transform
-    /// and profile interpolation stay fixed while those sensor coefficients
-    /// change.
     pub fn adjusted_white_balance_and_camera_transform(
         &self,
         temperature: f32,
@@ -1483,11 +1390,6 @@ mod tests {
 
     #[test]
     fn inpaint_opposed_chrominance_pads_partial_three_pixel_edge_blocks() {
-        // Bayer preview proxies are phase-aligned to two pixels, not three.
-        // A 26-pixel row therefore has two photosites beyond its eight complete
-        // 3x3 blocks. With an already eight-aligned mask width, those pixels
-        // previously indexed exactly one element past the blue mask plane. The
-        // padded edge remains part of darktable's full-frame chroma scan.
         const WIDTH: u32 = 26;
         const HEIGHT: u32 = 24;
         let mut raw = raw_with_white_balance_model();

@@ -198,9 +198,6 @@ impl ExportHarness<'_> {
             }
         }
         let output = finished.context("export worker exited without a completion event")?;
-        // The completion event is sent at the end of the worker, but wait for its
-        // sender to disconnect before releasing the final device handle. This
-        // avoids racing Vulkan teardown in short-lived headless invocations.
         while receiver.recv().is_ok() {}
         println!(
             "wrote {} ({}x{}, sRGB PNG, {:?})",

@@ -110,9 +110,6 @@ impl AurawApp {
                     self.android.camera_profile_folder_importing_label = Some(label.clone());
                     self.ui.status = format!("Importing DCP profiles from {label}…");
                     self.ui.notice = None;
-                    // The SAF picker has returned, but its tree is copied on a Java
-                    // worker thread. Keep picker_pending set so a second picker cannot
-                    // race the import; eframe_impl keeps polling while it is pending.
                 }
                 crate::android::CameraProfileFolderResult::Picked {
                     path,
@@ -213,11 +210,6 @@ impl AurawApp {
                         );
                     }
 
-                    // `open_path_labeled*` reports setup failures synchronously by
-                    // leaving `load_receiver` empty. Route that failure back to the
-                    // internal owner immediately; otherwise Android batch export or
-                    // library AI refresh would wait forever for a load event that can
-                    // never arrive.
                     if self.develop.load_receiver.is_none() {
                         let error = self.ui.notice.clone().unwrap_or_else(|| {
                             "The RAW decode worker could not be started.".to_owned()

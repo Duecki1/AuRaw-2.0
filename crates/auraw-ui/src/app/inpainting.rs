@@ -92,9 +92,6 @@ impl AurawApp {
             self.ui.notice = Some("GPU rendering is unavailable for Remove.".to_owned());
             return false;
         };
-        // Android ships its ONNX Runtime with the application, so AiState does
-        // not retain a user-selected runtime there. Keep this in sync with the
-        // other AI workers, which pass no runtime override on Android.
         #[cfg(not(target_os = "android"))]
         let runtime_path = self.ai.runtime_path.clone();
         #[cfg(not(target_os = "android"))]
@@ -264,9 +261,6 @@ impl AurawApp {
                             Arc::make_mut(&mut self.inpaint.edits).strokes.push(stroke);
                             self.inpaint.selected_stroke = None;
                             self.inpaint.hovered_stroke = None;
-                            // Rebuild the RAW/scene stage once so the cached patch enters
-                            // the normal image graph. Subsequent Develop adjustments reuse
-                            // it and never invoke Big-LaMa again.
                             self.note_remove_edit_changed();
                             self.ui.notice = Some("Remove applied.".to_owned());
                         }

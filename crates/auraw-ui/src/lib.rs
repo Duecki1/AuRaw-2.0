@@ -1,4 +1,3 @@
-//! AuRaw's egui/eframe application shell and interactive Develop interface.
 
 pub mod diagnostics {
     pub use auraw_core::diagnostics::*;
@@ -9,7 +8,6 @@ pub mod file_ops {
 }
 
 pub(crate) mod performance_settings;
-
 
 pub mod thumbnail_cache {
     pub use auraw_core::thumbnail_cache::*;
@@ -37,7 +35,6 @@ pub mod remove {
     pub use auraw_ai::remove::*;
 }
 
-
 #[cfg(target_os = "android")]
 pub mod android {
     pub use auraw_ffi::*;
@@ -61,12 +58,7 @@ fn native_options() -> eframe::NativeOptions {
     }
 
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-        // Memory
         setup.instance_descriptor.memory_budget_thresholds = eframe::wgpu::MemoryBudgetThresholds {
-            // ONNX execution providers allocate outside wgpu but compete for
-            // the same VRAM. Leave substantial headroom so a rejected AI
-            // allocation cannot strand egui without enough memory for its next
-            // tiny staging upload.
             for_resource_creation: Some(70),
             for_device_loss: Some(97),
         };

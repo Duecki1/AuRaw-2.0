@@ -1,4 +1,3 @@
-//! Validation for decoded and newly serialized sidecar edit state.
 
 use super::*;
 

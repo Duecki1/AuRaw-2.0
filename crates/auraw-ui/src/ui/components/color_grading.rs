@@ -14,11 +14,6 @@ pub fn color_grading_editor(
     grading: &mut ColorGrading,
     selected: &mut ColorGradeTab,
 ) -> bool {
-    // The Develop sidebar can render Color and Color Grading at the same time.
-    // Both contain controls named `Hue` and `Saturation`, and adjustment_slider
-    // derives its interaction IDs from the label. Keep every grading control in
-    // its own namespace so a grading drag can never be observed by the global
-    // Color controls (or by another editor that reuses the same labels).
     ui.push_id("color-grading-editor", |ui| {
         color_grading_editor_contents(ui, grading, selected)
     })
@@ -118,8 +113,6 @@ fn color_grading_editor_contents(
 
 fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
     let mut changed = false;
-    // Respect the true remaining content width. A forced minimum can place the
-    // wheel under the scrollbar when the Develop panel is narrowed.
     let size = ui.available_width().clamp(1.0, WHEEL_MAX_SIZE);
 
     crate::ui::theme::toolbar_row(ui, |ui| {

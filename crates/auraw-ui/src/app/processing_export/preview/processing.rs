@@ -50,9 +50,6 @@ impl AurawApp {
             return;
         };
         if detail.pipeline.mask_layer_capacity() < self.masks.stack.masks.len().max(1) {
-            // Explicit-edge detail atlases allocate only active layers. Adding
-            // another mask invalidates that small texture and rebuilds just the
-            // detail pipeline on the next frame.
             if let Some(detail) = self.preview.detail.as_mut() {
                 detail.revision = self.preview.revision.wrapping_sub(1);
             }

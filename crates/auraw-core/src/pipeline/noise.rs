@@ -1,17 +1,8 @@
 use super::raw_loader::CompactPixelMap;
 use serde::{Deserialize, Serialize};
 
-// Horizontal and vertical same-CFA second differences share their center
-// sample, so their normalized Gaussian correlation is 2/3. The median of the
-// flatter squared difference is therefore about 0.163 * variance, not the
-// 0.454936 median of one squared standard normal. Keeping this calibration
-// explicit prevents flat-field selection from underestimating sensor variance
-// by roughly 2.8x.
 const FLAT_MIN_SECOND_DIFFERENCE_MEDIAN_SQUARED: f32 = 0.163;
 
-/// Per-capture Detail-panel starting values. These are derived from the RAW
-/// noise model rather than being global defaults, so low-noise captures remain
-/// neutral while noisier captures open with useful color/luminance cleanup.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdaptiveDetailDefaults {
     pub luminance_denoise: f32,
@@ -20,12 +11,6 @@ pub struct AdaptiveDetailDefaults {
     pub denoise_quality: DenoiseQuality,
 }
 
-/// Signal-dependent RAW noise model in normalized sensor units.
-///
-/// For each CFA plane, variance is modeled as `shot[channel] * signal +
-/// read[channel]`. The coefficients are estimated from flat, same-color
-/// second differences in the active mosaic, with a conservative ISO-derived
-/// fallback when the capture does not contain enough usable samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoiseProfile {
     pub shot: [f32; 4],
@@ -36,8 +21,6 @@ pub struct NoiseProfile {
 
 impl Default for NoiseProfile {
     fn default() -> Self {
-        // Roughly half a 16-bit code of variance. This is intentionally tiny:
-        // an unavailable profile must not cause visible smoothing by itself.
         let quantization = (0.5f32 / 65_535.0).powi(2);
         Self {
             shot: [0.0; 4],
@@ -49,9 +32,6 @@ impl Default for NoiseProfile {
 }
 
 impl NoiseProfile {
-    /// Estimate one heteroscedastic `a*signal+b` model per CFA plane directly
-    /// from the decoded mosaic. Sampling is bounded so RAW open time remains
-    /// effectively independent of megapixel count.
     #[allow(clippy::too_many_arguments)]
     pub fn estimate(
         width: u32,
@@ -81,9 +61,6 @@ impl NoiseProfile {
 
         let pixels = u64::from(width) * u64::from(height);
         let coarse = ((pixels / TARGET_ANCHORS).max(1) as f64).sqrt().ceil() as u32;
-        // Keep the sampling stride coprime with the CFA period. Otherwise a
-        // perfectly reasonable even stride can repeatedly hit only one Bayer
-        // phase (or a subset of X-Trans phases) and bias the fitted profile.
         let radius = cfa_period.max(1);
         let stride = coprime_stride(coarse.max(1), radius);
         let mut bins: [[Vec<f32>; BIN_COUNT]; 4] =
@@ -115,9 +92,6 @@ impl NoiseProfile {
                     }
                 };
 
-                // Same-CFA second differences suppress first-order scene gradients.
-                // Taking the flatter of horizontal/vertical estimates further
-                // rejects real edges without requiring a full image analysis pass.
                 let h = normalized(x - radius, y, channel)
                     .zip(normalized(x + radius, y, channel))
                     .map(|(a, b)| (a - 2.0 * center + b).powi(2) / 6.0);
@@ -150,8 +124,6 @@ impl NoiseProfile {
                 }
                 values.sort_unstable_by(|a, b| a.total_cmp(b));
                 let median_sq = values[values.len() / 2];
-                // Undo the bias introduced by selecting the flatter of the
-                // correlated horizontal/vertical second differences.
                 let variance = (median_sq / FLAT_MIN_SECOND_DIFFERENCE_MEDIAN_SQUARED).max(0.0);
                 let signal = (bin_index as f32 + 0.5) / BIN_COUNT as f32;
                 let weight = values.len().min(256) as f32;
@@ -173,10 +145,6 @@ impl NoiseProfile {
             if denom.abs() <= 1e-12 {
                 continue;
             }
-            // Bound both failure modes of a single-image fit: real texture can
-            // inflate the model, while clipped/over-smoothed flat regions can
-            // collapse it toward zero. The ISO prior remains deliberately loose
-            // enough for measured sensor variation without encouraging plasticity.
             let min_shot = fallback.shot[channel] * 0.15;
             let min_read = fallback.read[channel] * 0.15;
             let max_shot = (fallback.shot[channel] * 8.0).clamp(0.001, 0.08);
@@ -184,8 +152,6 @@ impl NoiseProfile {
             let fitted_a = ((sw * sxy - sx * sy) / denom).clamp(min_shot, max_shot);
             let fitted_b = ((sy - fitted_a * sx) / sw).clamp(min_read, max_read);
 
-            // Blend a weak metadata prior into low-sample captures; measured
-            // data dominates quickly once several thousand flat samples exist.
             let confidence =
                 (points.iter().map(|point| point.2).sum::<f32>() / 2_000.0).clamp(0.0, 1.0);
             shot[channel] = fallback.shot[channel] * (1.0 - confidence) + fitted_a * confidence;
@@ -193,8 +159,6 @@ impl NoiseProfile {
             channel_confidence[channel] = confidence;
         }
 
-        // One-green-plane mosaics mirror G1 into the spare slot. For a real
-        // Bayer G2 plane with too little fit data, retain its metadata fallback.
         if !green2_present {
             shot[3] = shot[1];
             read[3] = read[1];
@@ -204,16 +168,12 @@ impl NoiseProfile {
         Self {
             shot,
             read,
-            // RGB confidence reflects actual fitted channels rather than raw
-            // sample count, which prevents a single well-sampled plane from
-            // making fallback coefficients look fully calibrated.
             confidence: (channel_confidence[0] + channel_confidence[1] + channel_confidence[2])
                 / 3.0,
             green2_present,
         }
     }
 
-    /// Account for proxy pixels that average several same-color photosites.
     pub fn scaled_variance(self, factor: f32) -> Self {
         let factor = factor.clamp(1e-4, 1.0);
         Self {
@@ -224,11 +184,6 @@ impl NoiseProfile {
         }
     }
 
-    /// Choose conservative opening values from noise at an
-    /// 18%-signal reference. The metadata fallback is retained as a floor so a
-    /// highly textured frame cannot convince the single-image fit that a high
-    /// ISO capture is clean. White-balance gains matter because red/blue sensor
-    /// noise is amplified before this denoise stage.
     pub fn adaptive_detail_defaults(
         self,
         iso_speed: f32,
@@ -255,10 +210,6 @@ impl NoiseProfile {
         let relative_signal_sigma = signal_variance.max(0.0).sqrt() / REFERENCE_SIGNAL;
         let relative_opponent_sigma = opponent_variance.max(0.0).sqrt() / REFERENCE_SIGNAL;
 
-        // At the generic ISO-100 prior these thresholds are exact no-ops.
-        // ISO 1000 with ordinary Bayer WB gains lands near Luminance 10 and
-        // Color 25; progressively noisier captures rise smoothly and remain
-        // bounded well below the plastic high end of either slider.
         let luminance_need = smoothstep(0.018, 0.080, relative_signal_sigma);
         let chroma_need = smoothstep(0.035, 0.160, relative_opponent_sigma);
         let luminance_denoise = 34.0 * luminance_need.powf(1.15);
@@ -282,9 +233,6 @@ impl NoiseProfile {
         let mut read = [0.0; 4];
         for channel in 0..4 {
             let range = white_levels[channel].max(1_024.0);
-            // Conservative generic prior expressed in normalized sensor units.
-            // It exists only as a floor/fallback; per-capture estimation above
-            // is the primary profile source.
             shot[channel] = (iso_gain / range).clamp(0.0, 0.02);
             let sigma_codes = 0.75 * iso_gain.sqrt();
             read[channel] = (sigma_codes / range).powi(2).clamp(1e-12, 0.005);

@@ -137,9 +137,6 @@ impl BrushMode {
         }
     }
 
-    /// Returns the signed opacity captured by a newly emitted brush dab.
-    /// Positive values paint and negative values erase. Keeping this value on
-    /// each dab means later tool-setting changes never alter existing strokes.
     pub fn dab_opacity(self, opacity_enabled: bool, opacity: f32) -> f32 {
         let magnitude = if opacity_enabled {
             opacity.clamp(0.0, 1.0)
@@ -156,34 +153,19 @@ impl BrushMode {
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct BrushDab {
     pub center: [f32; 2],
-    /// Positive dabs paint; negative dabs erase.
     pub opacity: f32,
-    /// Captured when the dab is painted so changing the tool does not reshape
-    /// previous strokes. Radius is relative to the shorter image edge.
     pub size: f32,
     pub feather: f32,
 }
 
-/// Shared, non-destructive correction layer for BiRefNet subject probability.
-///
-/// The stored dabs are resolution independent and always describe corrections
-/// to the *subject* probability. Positive opacity paints subject; negative
-/// opacity paints background. Subject and Not Subject components consume this
-/// same layer, so the latter can remain the exact complement of the former.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct SubjectRefinement {
-    /// Radius as a fraction of the image's shorter edge for newly drawn dabs.
     #[serde(default = "default_subject_refinement_size")]
     pub size: f32,
     #[serde(default = "default_subject_refinement_feather")]
     pub feather: f32,
-    /// Signed dab magnitude is captured when painted; this is the default for
-    /// newly emitted dabs only and changing it never alters existing strokes.
     #[serde(default = "default_subject_refinement_flow")]
     pub flow: f32,
-    /// Dab indexes that begin pointer/touch strokes. Within one continuous
-    /// stroke, overlapping dabs collapse to one coverage field so a slow drag
-    /// does not accidentally become stronger than a fast drag.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stroke_starts: Vec<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -212,9 +194,6 @@ impl SubjectRefinement {
         self.stroke_starts.clear();
     }
 
-    /// Applies the stored signed delta to a raw 8-bit AI probability map.
-    /// This helper is useful for non-atlas consumers; the normal mask pipeline
-    /// applies the same math directly at its target raster resolution.
     pub fn composite(&self, raw_ai_mask: &MaskImage) -> Option<MaskImage> {
         if self.is_empty() {
             return Some(raw_ai_mask.clone());
@@ -244,13 +223,8 @@ impl SubjectRefinement {
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ObjectStroke {
-    /// Normalized full-image coordinates. Positive strokes add foreground;
-    /// negative strokes explicitly mark background.
     pub points: Vec<[f32; 2]>,
     pub positive: bool,
-    /// Image-relative radius captured when the stroke starts. New code stores
-    /// the zoom-adjusted value so the tool remains a constant on-screen size.
-    /// Zero means a legacy sidecar and falls back to the component tool size.
     #[serde(default)]
     pub brush_size: f32,
 }
@@ -261,9 +235,6 @@ pub struct MaskImage {
     pub height: u32,
     #[serde(with = "base64_arc_bytes")]
     pub pixels: Arc<[u8]>,
-    /// Transient normalized view into `pixels`. Cropped preview/export stacks
-    /// share the original matte and change only this sampling transform, which
-    /// keeps sub-pixel alignment identical across adjacent tiles.
     #[serde(skip, default = "unit_sampling_rect")]
     sampling_rect: [f32; 4],
 }
@@ -351,25 +322,16 @@ impl Default for BrushDab {
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum MaskGeometry {
-    /// Constant coverage across the complete image. This has no editable
-    /// geometry and is immediately initialized when created.
     Fullscreen,
     Brush {
-        /// Radius as a fraction of the image's shorter edge.
         size: f32,
         feather: f32,
-        /// Whether newly drawn brush and eraser strokes use `opacity`.
-        /// Legacy sidecars default to full-strength strokes.
         #[serde(default)]
         opacity_enabled: bool,
         #[serde(default = "default_brush_opacity")]
         opacity: f32,
-        /// Whether separate recorded strokes build coverage where they overlap.
         #[serde(default = "default_brush_overlap_enabled")]
         overlap_enabled: bool,
-        /// Dab indexes that begin strokes recorded by overlap-aware versions.
-        /// Dabs before the first index are a legacy prefix and keep their exact
-        /// historical compositing behavior.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         stroke_starts: Vec<usize>,
         dabs: Vec<BrushDab>,
@@ -398,8 +360,6 @@ pub enum MaskGeometry {
         #[serde(default)]
         grow: f32,
         feather: f32,
-        /// Radius as a fraction of the image's shorter edge. This controls the
-        /// on-canvas object prompt brush and is captured before SAM inference.
         #[serde(default = "default_object_brush_size")]
         brush_size: f32,
         #[serde(default = "default_object_edge_refine")]
@@ -631,7 +591,6 @@ pub struct LocalAdjustments {
     pub blacks: f32,
     pub temperature: f32,
     pub tint: f32,
-    /// Uniform hue rotation in degrees.
     #[serde(default)]
     pub hue: f32,
     pub saturation: f32,
@@ -700,9 +659,6 @@ impl LocalAdjustments {
 
     pub fn is_neutral(self) -> bool {
         let mut normalized = self;
-        // Hue is intentionally remembered when a wheel is pulled back to the
-        // center. With zero saturation/luminance it must still count as a
-        // neutral local adjustment and take the exact bypass path.
         if normalized.color_grading.is_neutral() {
             normalized.color_grading = super::ColorGrading::default();
         }
@@ -725,13 +681,8 @@ impl LocalAdjustments {
 pub struct LocalMask {
     #[serde(flatten)]
     pub common: MaskCommon,
-    /// What the combined mask coverage does. Missing in older sidecars, which
-    /// must retain the original adjustment-mask behavior.
     #[serde(default)]
     pub effect: MaskEffect,
-    /// Editable, non-destructive parameters for implemented effect types.
-    /// Keeping these separate means switching mask types never discards the
-    /// settings belonging to another type.
     #[serde(default, skip_serializing_if = "MaskEffectSettings::is_default")]
     pub effect_settings: MaskEffectSettings,
     pub opacity: f32,
@@ -775,9 +726,6 @@ pub struct MaskStack {
     pub masks: Vec<LocalMask>,
     pub selected_mask: Option<usize>,
     pub selected_component: Option<usize>,
-    /// One shared correction layer for every Subject / Not Subject component.
-    /// Sidecars persist this at `EditState.subject_refinement`; the runtime
-    /// stack keeps a synchronized copy so all rasterization paths see it.
     #[serde(skip, default)]
     pub subject_refinement: SubjectRefinement,
 }
@@ -787,9 +735,6 @@ impl MaskStack {
         *self = Self::default();
     }
 
-    /// Returns a mask stack remapped to a cropped image region. The region is
-    /// expressed in full-image pixels, so geometric masks and cached AI/range
-    /// sources continue to line up with a zoomed detail preview.
     pub fn cropped_for_region(
         &self,
         x: u32,
@@ -985,10 +930,6 @@ impl MaskStack {
         true
     }
 
-    /// Source-pixel context needed around a partial mask raster so grow and
-    /// feather produce the same boundary as a full-frame raster. Procedural
-    /// brushes and gradients do not need a halo because their geometry remains
-    /// available after cropping; distance-shaped masks do.
     pub fn raster_margin_pixels_for_layer(
         &self,
         mask_index: usize,
@@ -1075,8 +1016,6 @@ impl MaskStack {
         });
         if invert {
             mask.common.toggle_invert();
-            // A complementary duplicate keeps coverage but intentionally starts
-            // from neutral local adjustments, matching the existing UI action.
             mask.adjustments.reset();
         }
         let insert_at = mask_index + 1;
@@ -1226,9 +1165,6 @@ impl MaskStack {
 
             let Some(existing) = combined.as_mut() else {
                 combined = Some(if component.combine == MaskCombineMode::Add {
-                    // The common one-component Brush case can take ownership
-                    // directly instead of allocating and copying a second
-                    // full-size f32 atlas.
                     coverage
                 } else {
                     vec![0.0; len]
@@ -1284,8 +1220,6 @@ impl MaskStack {
             .collect()
     }
 
-    /// Full-precision GPU mask coverage. R16F avoids the 1/255 opacity steps
-    /// becoming visible at feathered boundaries under strong local exposure.
     pub fn rasterize_layer_f16(
         &self,
         layer: usize,
@@ -1446,9 +1380,6 @@ fn rasterize_component(
                 *grow
             };
             shape_probability_mask(&mut coverage, width, height, grow, *feather);
-            // Feather the subject boundary once, then complement it for Not
-            // Subject. This keeps the two AI masks exact opposites at every
-            // feather value instead of separately blurring an inverted map.
             if component.kind == MaskKind::Background {
                 coverage
                     .par_iter_mut()
@@ -1614,17 +1545,9 @@ fn shape_probability_mask(mask: &mut [f32], width: u32, height: u32, grow: f32, 
         return;
     }
 
-    // Cropped viewport atlases scale these normalized controls so the source-
-    // pixel grow/feather radius remains identical to a full-frame raster.
-    // Persisted/UI values stay in [-1,1]/[0,1]; the wider internal range is
-    // only needed by those cropped clones.
     let grow = grow.clamp(-32.0, 32.0);
     let feather = feather.clamp(0.0, 32.0);
     if grow.abs() <= 1e-5 && feather <= 1e-5 {
-        // ViTMatte deliberately returns fractional alpha for hair, fur,
-        // translucent fabric, and sub-pixel contours. Zero feather means "use
-        // the generated matte as-is", not "threshold it back to a coarse
-        // binary segmentation".
         mask.par_iter_mut()
             .for_each(|value| *value = value.clamp(0.0, 1.0));
         return;
@@ -1640,17 +1563,9 @@ fn shape_probability_mask(mask: &mut [f32], width: u32, height: u32, grow: f32, 
     let distance_to_outside = chamfer_distance(&binary, width, height, 0);
     let edge = width.min(height) as f32;
     let grow_radius = grow * edge * 0.05;
-    // Feather is an image-relative boundary width, so thumbnails, the preview
-    // overlay, the mask atlas, and export all show the same shape. The ramp is
-    // centered on the original 0.5 contour: increasing feather changes only
-    // the edge transition and cannot grow or contract the selected contour.
     let feather_radius = (feather.powf(1.30) * edge * 0.045).max(0.75);
 
     mask.par_iter_mut().enumerate().for_each(|(index, value)| {
-        // Preserve sub-pixel model confidence without letting it overpower the
-        // user-visible grow radius. This offset is zero at alpha=0.5 and is
-        // smaller than the one-pixel sign separating inside from outside, so
-        // feathering retains the exact same selected contour.
         let confidence_offset = (*value - 0.5) * 0.5;
         let signed_distance = distance_to_outside[index] - distance_to_inside[index]
             + confidence_offset
@@ -1851,10 +1766,6 @@ fn rasterize_brush(space: MaskRasterSpace, dabs: &[BrushDab]) -> Vec<f32> {
 
     let specs = brush_raster_specs(space, dabs);
 
-    // Each row band is independent, so the expensive full-resolution atlas can
-    // use all CPU cores while preserving the exact original dab order inside
-    // every pixel. Paint/erase semantics therefore remain bit-for-bit the same
-    // as the serial implementation.
     const ROW_BAND_HEIGHT: usize = 64;
     let row_stride = width as usize;
     let mut out = vec![0.0f32; row_stride * height as usize];
@@ -1906,9 +1817,6 @@ fn brush_raster_specs(space: MaskRasterSpace, dabs: &[BrushDab]) -> Vec<BrushRas
         let bbox_x = radius_x.ceil().max(1.0) as i32 + 1;
         let bbox_y = radius_y.ceil().max(1.0) as i32 + 1;
         let feather = dab.feather.clamp(0.0, 1.0);
-        // UV coordinates describe continuous image space; texel samples live
-        // at x + 0.5/y + 0.5. Keeping the center in continuous texel space
-        // makes even-sized atlases symmetric around a centered brush dab.
         let center_x = dab.center[0] * width as f32;
         let center_y = dab.center[1] * height as f32;
         let min_x = (center_x.floor() as i32 - bbox_x).max(0);
@@ -1996,17 +1904,12 @@ fn rasterize_recorded_brush(
 
     let (legacy_end, groups) = recorded_brush_groups(dabs, stroke_starts);
     if groups.is_empty() {
-        // Sidecars created before stroke boundaries were recorded retain the
-        // exact historical per-dab compositing behavior.
         return rasterize_brush(space, dabs);
     }
 
     let mut out = rasterize_brush(space, &dabs[..legacy_end]);
     let specs = brush_raster_specs(space, &dabs[legacy_end..]);
 
-    // Collapse overlapping dabs within one pointer stroke to a single coverage
-    // field. Separate strokes can then alpha-build without a slow continuous
-    // stroke becoming opaque merely because its regularly spaced dabs overlap.
     const ROW_BAND_HEIGHT: usize = 64;
     let row_stride = width as usize;
     out.par_chunks_mut(row_stride * ROW_BAND_HEIGHT)
@@ -2111,8 +2014,6 @@ fn rasterize_subject_refinement_delta(
                 }
             };
 
-            // A refinement sidecar should always have stroke starts, but this
-            // prefix keeps manually constructed/forward-compatible data useful.
             for spec in &specs[..legacy_end] {
                 apply_spec(band, spec);
             }

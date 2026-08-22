@@ -31,16 +31,9 @@ pub(super) fn responsive_thumbnail_target_height(
     android: bool,
 ) -> f32 {
     if android {
-        // Android's logical-point coordinate system already follows device density.
-        // Keep touch targets predictable instead of making them balloon on very dense phones.
         return 120.0;
     }
 
-    // egui sizes are already expressed in DPI-aware logical points, so using the raw
-    // pixels-per-point value as a direct multiplier would double-apply OS display scaling.
-    // Scale primarily with usable window area: a 4K/full-screen workspace should show
-    // substantially larger rows than a small laptop window, while preserving similar
-    // gallery density as the app is resized.
     const REFERENCE_WIDTH: f32 = 1280.0;
     const REFERENCE_HEIGHT: f32 = 720.0;
     const BASE_HEIGHT: f32 = 140.0;
@@ -59,8 +52,6 @@ pub(super) fn responsive_thumbnail_target_height(
         .sqrt()
         .clamp(0.90, 1.70);
 
-    // A restrained density adjustment helps very high-DPI desktop displays without
-    // fighting egui/OS scaling. sqrt keeps 150–200% scaling from becoming excessive.
     let density_scale = if pixels_per_point.is_finite() {
         pixels_per_point.max(1.0).sqrt().clamp(1.0, 1.20)
     } else {
@@ -80,10 +71,6 @@ pub(super) fn balanced_justified_row_ranges(
         return Vec::new();
     }
 
-    // Treat every item as its aspect-ratio width plus the gap that follows it.
-    // This lets us estimate the ideal number of rows for the whole gallery
-    // before choosing any breaks, instead of greedily leaving a tiny orphan
-    // row at the end.
     let gap_weight = gap / target_height.max(1.0);
     let weights = aspects
         .iter()
@@ -111,9 +98,6 @@ pub(super) fn balanced_justified_row_ranges(
         let mut end = start + 1;
         let mut row_weight = weights[start];
 
-        // Pick the break closest to an equal share of the gallery's total
-        // visual width. Because every future row is reserved at least one
-        // image, the final row cannot collapse into a few oversized leftovers.
         while end < max_end {
             let with_next = row_weight + weights[end];
             if (row_weight - desired_weight).abs() <= (with_next - desired_weight).abs() {
@@ -165,20 +149,11 @@ pub(super) fn justified_thumbnail_layout(
         let gaps_width = gap * (item_count.saturating_sub(1) as f32);
         let justified_height =
             ((available_width - gaps_width).max(1.0) / aspect_sum.max(f32::EPSILON)).max(1.0);
-        // A sparse row must not inflate a handful of thumbnails to fill the
-        // entire viewport. Keep such rows at the same responsive target height
-        // as a full gallery row and leave the unused space on the right. Rows
-        // that need to shrink still justify normally so they never overflow a
-        // narrow phone or window.
         let row_is_justified = justified_height <= target_height;
         let row_height = justified_height.min(target_height);
         let mut x = 0.0;
 
         for (row_offset, aspect) in row_aspects.iter().copied().enumerate() {
-            // Give the final item the exact remaining width to absorb floating-
-            // point rounding when this is a justified row. Sparse rows retain
-            // every thumbnail's natural aspect width instead of stretching the
-            // final item across all remaining space.
             let width = if row_is_justified && row_offset + 1 == item_count {
                 (available_width - x).max(1.0)
             } else {
@@ -244,7 +219,7 @@ pub(super) fn thumbnail_tile(
     let visuals = ui.visuals();
 
     ui.painter()
-        .rect_filled(rect, 0.0, Color32::from_rgb(17, 18, 20));
+        .rect_filled(rect, 0.0, crate::ui::theme::THUMBNAIL_BACKDROP);
     if let Some(texture) = &entry.texture {
         let uv = thumbnail_cover_uv(entry.thumbnail_size, rect.size());
         ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
@@ -270,14 +245,11 @@ pub(super) fn thumbnail_tile(
             rect.right() - badge_edge * 0.5 - 6.0,
             rect.top() + badge_edge * 0.5 + 6.0,
         );
-        ui.painter()
-            .circle_filled(center, badge_edge * 0.5, Color32::from_black_alpha(190));
-        ui.painter().text(
+        crate::ui::components::pending_indicator(
+            ui.painter(),
             center,
-            Align2::CENTER_CENTER,
-            egui_phosphor::regular::ARROW_CLOCKWISE,
-            FontId::proportional((badge_edge * 0.72).max(12.0)),
-            Color32::from_rgb(244, 142, 48),
+            badge_edge * 0.5,
+            (badge_edge * 0.72).max(12.0),
         );
     }
 

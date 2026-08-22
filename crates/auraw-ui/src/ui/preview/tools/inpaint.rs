@@ -51,9 +51,6 @@ impl Preview {
             ) else {
                 return;
             };
-            // Share only interaction sampling with Local Mask Brush. Remove
-            // stores native center/radius points and keeps its hard binary
-            // rasterizer; no feather, opacity, or flow state crosses this boundary.
             let radius_native =
                 stroke.dab_size * source_width.min(source_height).max(1) as f32;
             let mut changed = false;
@@ -78,8 +75,6 @@ impl Preview {
         }
 
         if primary_is_down {
-            // Leaving the visible image while dragging must not bridge a hidden
-            // chord through pasteboard when the pointer later re-enters.
             app.inpaint.last_brush_uv = None;
             return;
         }
@@ -130,7 +125,7 @@ impl Preview {
                 source_width,
                 source_height,
                 &stroke.brush.points,
-                Color32::from_rgba_unmultiplied(255, 96, 78, 62),
+                crate::ui::theme::inpaint_stroke_highlight(),
             );
         }
         if let Some(stroke) = app.inpaint.pending_brush.as_ref() {
@@ -142,7 +137,7 @@ impl Preview {
                 source_width,
                 source_height,
                 &stroke.points,
-                Color32::from_rgba_unmultiplied(255, 120, 84, 84),
+                crate::ui::theme::inpaint_stroke_active(),
             );
         }
         if !app.inpaint.active_points.is_empty() {
@@ -154,7 +149,7 @@ impl Preview {
                 source_width,
                 source_height,
                 &app.inpaint.active_points,
-                Color32::from_rgba_unmultiplied(255, 120, 84, 84),
+                crate::ui::theme::inpaint_stroke_active(),
             );
         }
 

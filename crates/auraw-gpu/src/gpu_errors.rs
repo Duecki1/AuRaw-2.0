@@ -2,30 +2,38 @@ use anyhow::{anyhow, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-static GPU_OUT_OF_MEMORY: AtomicBool = AtomicBool::new(false);
+struct OomSignal(AtomicBool);
 
-/// Replaces wgpu's default panic-on-error callback for an application device.
-///
-/// Fallible AuRaw allocations use error scopes and return their failures to the
-/// caller. This handler is the last line of defence for allocations owned by
-/// egui, a backend, or another path that cannot be scoped by AuRaw itself.
+impl OomSignal {
+    const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    fn raise(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn take(&self) -> bool {
+        self.0.swap(false, Ordering::AcqRel)
+    }
+}
+
+static GPU_OUT_OF_MEMORY: OomSignal = OomSignal::new();
+
 pub fn install_uncaptured_gpu_error_handler(device: &wgpu::Device) {
     device.on_uncaptured_error(Arc::new(|error| {
         record_gpu_error(&error, "uncaptured GPU operation");
     }));
 }
 
-/// Returns whether an unhandled or scoped GPU allocation has exhausted memory
-/// since the previous call. The UI uses this to release optional resources and
-/// tell the user why the requested operation was skipped.
 pub fn take_gpu_out_of_memory() -> bool {
-    GPU_OUT_OF_MEMORY.swap(false, Ordering::AcqRel)
+    GPU_OUT_OF_MEMORY.take()
 }
 
 fn record_gpu_error(error: &wgpu::Error, context: &str) {
     let message = match error {
         wgpu::Error::OutOfMemory { .. } => {
-            GPU_OUT_OF_MEMORY.store(true, Ordering::Release);
+            GPU_OUT_OF_MEMORY.raise();
             format!("{context} ran out of GPU memory; the operation was cancelled")
         }
         wgpu::Error::Validation { description, .. } => {
@@ -39,10 +47,6 @@ fn record_gpu_error(error: &wgpu::Error, context: &str) {
     crate::diagnostics::record(message);
 }
 
-/// Captures all errors produced by one synchronous GPU allocation sequence.
-/// wgpu resource constructors are intentionally infallible at the type level;
-/// without these scopes a real driver allocation failure reaches the global
-/// handler only after the constructor has returned an unusable resource.
 pub(crate) struct GpuErrorScopes {
     validation: wgpu::ErrorScopeGuard,
     internal: wgpu::ErrorScopeGuard,
@@ -62,9 +66,6 @@ impl GpuErrorScopes {
     }
 
     pub(crate) fn finish(self, context: &'static str) -> Result<()> {
-        // Error scopes are a stack and therefore must be popped in reverse
-        // order. wgpu-core resolves these futures immediately; WebGPU resolves
-        // them through its normal promise machinery.
         let validation = pollster::block_on(self.validation.pop());
         let internal = pollster::block_on(self.internal.pop());
         let out_of_memory = pollster::block_on(self.out_of_memory.pop());
@@ -83,8 +84,10 @@ mod tests {
 
     #[test]
     fn out_of_memory_signal_is_edge_triggered() {
-        GPU_OUT_OF_MEMORY.store(true, Ordering::Release);
-        assert!(take_gpu_out_of_memory());
-        assert!(!take_gpu_out_of_memory());
+        let signal = OomSignal::new();
+        assert!(!signal.take());
+        signal.raise();
+        assert!(signal.take());
+        assert!(!signal.take());
     }
 }

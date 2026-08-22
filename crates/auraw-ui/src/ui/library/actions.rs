@@ -276,7 +276,6 @@ pub(crate) fn apply_library_action(
     }
 }
 
-
 fn set_library_clipboard(
     app: &mut AurawApp,
     mode: ImageClipboardMode,

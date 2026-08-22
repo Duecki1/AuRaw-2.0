@@ -219,86 +219,17 @@ impl Sidebar {
     ) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Tone Curve", false, foldable, |ui| {
-            ui.horizontal(|ui| {
-                let spacing = ui.spacing().item_spacing.x;
-                let segment_width =
-                    ((ui.available_width() - crate::ui::theme::TOOLBAR_ICON_EDGE - spacing * 4.0)
-                        .max(4.0))
-                        / 4.0;
-                for (tab, label, color) in [
-                    (ToneCurveTab::Rgb, "RGB", egui::Color32::WHITE),
-                    (ToneCurveTab::Red, "R", egui::Color32::from_rgb(238, 84, 84)),
-                    (
-                        ToneCurveTab::Green,
-                        "G",
-                        egui::Color32::from_rgb(92, 210, 116),
-                    ),
-                    (
-                        ToneCurveTab::Blue,
-                        "B",
-                        egui::Color32::from_rgb(88, 150, 245),
-                    ),
-                ] {
-                    let text = egui::RichText::new(label).color(color);
-                    if crate::ui::theme::segmented_button(
-                        ui,
-                        text,
-                        *selected_tab == tab,
-                        segment_width,
-                    )
-                    .clicked()
-                    {
-                        *selected_tab = tab;
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if crate::ui::icons::phosphor_icon_button(
-                        ui,
-                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                        crate::ui::theme::toolbar_icon_size(),
-                        "Reset the selected tone curve",
-                    )
-                    .clicked()
-                    {
-                        match selected_tab {
-                            ToneCurveTab::Rgb => exposure.tone_curve.reset(),
-                            ToneCurveTab::Red => exposure.tone_curve_red.reset(),
-                            ToneCurveTab::Green => exposure.tone_curve_green.reset(),
-                            ToneCurveTab::Blue => exposure.tone_curve_blue.reset(),
-                        }
-                        changed = true;
-                    }
-                });
-            });
-
-            let (curve, color, description) = match selected_tab {
-                ToneCurveTab::Rgb => (
-                    &mut exposure.tone_curve,
-                    egui::Color32::WHITE,
-                    "Composite luminance curve",
-                ),
-                ToneCurveTab::Red => (
-                    &mut exposure.tone_curve_red,
-                    egui::Color32::from_rgb(238, 84, 84),
-                    "Red channel curve",
-                ),
-                ToneCurveTab::Green => (
-                    &mut exposure.tone_curve_green,
-                    egui::Color32::from_rgb(92, 210, 116),
-                    "Green channel curve",
-                ),
-                ToneCurveTab::Blue => (
-                    &mut exposure.tone_curve_blue,
-                    egui::Color32::from_rgb(88, 150, 245),
-                    "Blue channel curve",
-                ),
-            };
-            ui.label(
-                egui::RichText::new(description)
-                    .size(11.5)
-                    .color(ui.visuals().weak_text_color()),
+            changed |= tone_curve_channel_editor(
+                ui,
+                ToneCurveChannels {
+                    rgb: &mut exposure.tone_curve,
+                    red: &mut exposure.tone_curve_red,
+                    green: &mut exposure.tone_curve_green,
+                    blue: &mut exposure.tone_curve_blue,
+                },
+                selected_tab,
+                4.0,
             );
-            changed |= tone_curve_editor(ui, curve, color);
         });
         changed
     }
@@ -454,9 +385,6 @@ impl Sidebar {
                     .expect("white-balance model was checked above");
                 let base_kelvin = raw.as_shot_temperature_kelvin().unwrap_or(kelvin);
                 let kelvin_changed = ui
-                    // The slider's double-click reset is cached by widget id.
-                    // Include this image's neutral so loading another camera
-                    // white balance also updates the reset value.
                     .push_id(base_kelvin.to_bits(), |ui| {
                         gradient_adjustment_slider(
                             ui,
@@ -498,8 +426,6 @@ impl Sidebar {
                     })
                     .inner;
                 if tint_changed {
-                    // The UI exposes the absolute value; &mut exposure.tint remains
-                    // a camera-relative sidecar offset so zero always means as shot.
                     exposure.tint = crate::pipeline::white_balance_tint_offset(base_tint, tint);
                     *white_balance_picker_active = false;
                     changed = true;

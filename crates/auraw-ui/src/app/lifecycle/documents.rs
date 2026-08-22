@@ -14,11 +14,6 @@ impl AurawApp {
             return;
         }
 
-        // Android batch export has already decoded its current item into the
-        // regular Develop document before the export worker is launched. If the
-        // user taps that exact item, reopening it would allocate a second preview
-        // pipeline beside the export pipeline and exceed the mobile GPU budget.
-        // The existing document is already the requested RAW, so just expose it.
         let already_loaded = self.develop.loaded_raw.is_some()
             && self.develop.preview_raw.is_some()
             && self.preview.gpu_pipeline.is_some()
@@ -39,8 +34,6 @@ impl AurawApp {
 
         self.prepare_android_develop_loading_thumbnail(uri);
 
-        // This is a user-owned picker result. Keep it distinct from the
-        // Android batch exporter's internal document-load result routing.
         self.export.android_batch_load_pending = false;
         match crate::android::open_library_document(&self.android.android_app, uri, display_name) {
             Ok(()) => {
@@ -67,8 +60,6 @@ impl AurawApp {
             ));
             return;
         }
-        // Establish ownership before invoking Java so even an unusually fast
-        // result cannot be mistaken for an interactive open.
         self.export.android_batch_load_pending = false;
         self.android.pending_android_library_reset_reload = true;
         match crate::android::open_library_document(&self.android.android_app, uri, display_name) {
@@ -105,9 +96,6 @@ impl AurawApp {
         let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
             raw_path: path.clone(),
         };
-        // Reset All is a Library action. Reload the current document so its
-        // in-memory edit state matches the deleted sidecar, but do not navigate
-        // away from the Library merely because the reset target was current.
         self.open_path_labeled(path, label, false, sidecar_target, frame, None);
     }
 
@@ -140,7 +128,6 @@ impl AurawApp {
         delete_after_decode: bool,
         sidecar_target: crate::sidecar::SidecarTarget,
         frame: &eframe::Frame,
-        // None = use sidecar selection; Some(None) = automatic; Some(Some(path)) = explicit DCP.
         profile_selection_override: Option<Option<PathBuf>>,
         edit_override: Option<SidecarEditState>,
         raw_fd_guard: Option<std::fs::File>,
@@ -203,9 +190,6 @@ impl AurawApp {
                 .unwrap_or_default(),
             profile_selection_key,
         );
-        // A normal open may obtain an explicit per-image profile from the
-        // sidecar, which is intentionally read on the worker. Do not reuse an
-        // ambiguous cache entry before that selection is known.
         let cache_selection_is_known = profile_selection_override.is_some()
             || self.preferences.camera_profile_mode == CameraProfileMode::MatrixOnly
             || self.preferences.camera_profile_folder.is_none();
@@ -217,18 +201,11 @@ impl AurawApp {
             "RAW open requested: label=\"{label}\" cached={decode_was_cached} preview_quality={}",
             self.preview.quality.label()
         ));
-        // Image-bound workers may still be inside a native phase. Request
-        // cancellation before advancing the document identity, and keep their
-        // receivers alive so their terminal events can be drained safely.
         self.cancel_document_bound_foreground_operation();
         self.abandon_ai_denoise_worker();
-        // A DPI rebuild belongs to the outgoing document. Dropping the
-        // receiver lets its worker dispose the result instead of installing it
-        // over the newly opened RAW.
         self.preview.rebuild_receiver = None;
         self.preview.detail_rebuild_receiver = None;
         let sidecar_generation = self.begin_sidecar_open();
-        // Reuse compiled GPU programs across RAW opens; retire the old texture IDs for next-frame cleanup.
         let reusable_preview_pipeline = {
             let mut renderer = render_state.renderer.write();
             self.take_preview_pipeline_and_release_textures(&mut renderer)
@@ -335,12 +312,6 @@ impl AurawApp {
                 let open_started = Instant::now();
                 #[cfg(target_os = "android")]
                 let reusable_preview_pipeline = if export_active_while_opening {
-                    // A live tiled export already consumes most of Android's GPU
-                    // working-set allowance. Keeping the old preview solely as a
-                    // program template would retain its full resource reservation
-                    // and make the replacement preview fail admission. Drop it
-                    // before allocating the new preview; the persistent Vulkan
-                    // pipeline cache still avoids most driver compilation work.
                     crate::diagnostics::record(
                         "Released the previous Android preview before concurrent RAW open",
                     );
@@ -359,7 +330,6 @@ impl AurawApp {
                     "RAW sidecar lookup finished in {:.3}s",
                     sidecar_started.elapsed().as_secs_f64()
                 ));
-                // Existing sidecar edits win; only new RAWs inherit the last valid DCP.
                 let (requested_camera_profile, requested_profile_from_sidecar) =
                     match profile_selection_override {
                         Some(selection) => (selection, false),
@@ -429,8 +399,6 @@ impl AurawApp {
                         decode_started.elapsed().as_secs_f64()
                     )),
                 }
-                // The descriptor must remain open until LibRaw has finished reading the
-                // `/proc/self/fd/<n>` path. It can be closed immediately after decode.
                 drop(raw_fd_guard);
                 if delete_after_decode && !fd_backed_source {
                     remove_temporary_raw(&path);
@@ -651,9 +619,6 @@ impl AurawApp {
                             }
                         }
                     } else {
-                        // Decoded RAWs are reused in-process. Do not retain a
-                        // previous document's large derived scene when the
-                        // current sidecar has AI denoise disabled.
                         full_raw.clear_ai_denoised_image();
                     }
                     let preview_spec = ProxySpec {
@@ -683,7 +648,6 @@ impl AurawApp {
                     let initial_params =
                         GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw)
                             .with_vignette_geometry(geometry);
-                    // Preview
                     let preview_quality = ProcessingQuality::Preview;
                     let mut startup_gpu_prewarm_template = None;
                     if reusable_preview_pipeline.is_none()
@@ -761,16 +725,9 @@ impl AurawApp {
                         "GPU preview pipeline created in {:.3}s",
                         pipeline_started.elapsed().as_secs_f64()
                     ));
-                    // Program handles have been cloned into `pipeline`; release the old
-                    // preview textures before doing any readback from the new preview.
                     drop(reusable_preview_pipeline);
                     drop(startup_gpu_prewarm_template);
 
-                    // Range and promptable-object source images are canonical RAW renditions,
-                    // not user edit data. Render that neutral source through the preview
-                    // pipeline itself instead of allocating a second full pipeline. Keeping
-                    // only one preview allocation is important when a tiled export is using
-                    // GPU resources at the same time.
                     let mut mask_source = None;
                     if needs_canonical_mask_source(&rendered_masks) {
                         let mask_source_started = Instant::now();
@@ -936,12 +893,6 @@ impl AurawApp {
                     self.on_library_batch_load_finished(false, frame);
                     return;
                 };
-                // Do not keep the renderer write lock alive while installing the
-                // decoded document or notifying internal batch owners. Android
-                // batch export immediately releases this temporary preview before
-                // starting its tiled worker; retaining this guard until the end of
-                // the match arm caused a recursive write-lock acquisition and the
-                // epaint 10-second deadlock panic.
                 let previous_pipeline = {
                     let mut renderer = render_state.renderer.write();
                     let previous = self.take_preview_pipeline_and_release_textures(&mut renderer);
@@ -977,9 +928,6 @@ impl AurawApp {
                 self.develop.current_path = loaded.source_path;
                 self.develop.current_label = Some(loaded.label.clone());
                 self.develop.selected_camera_profile = loaded.selected_camera_profile.clone();
-                // Loading an existing sidecar must not change the sticky global
-                // profile preference. Only an explicit user dropdown change in
-                // `select_camera_profile_for_current` may update it.
                 self.cache_raw_decode(loaded.raw_cache_key, Arc::clone(&loaded.original_raw));
                 self.develop.original_raw = Some(loaded.original_raw);
                 self.develop.loaded_raw = Some(loaded.full_raw);
@@ -1048,9 +996,6 @@ impl AurawApp {
                 self.develop.target_exposure = loaded.rendered_exposure;
                 self.preview.pending_stage = None;
                 self.ui.notice = loaded.sidecar_warning;
-                // Automatic lens matching and initial render setup are the
-                // baseline for this RAW, not user edits inherited from the
-                // previous image or from the decode worker.
                 self.reset_edit_history();
                 self.install_sidecar_target(
                     loaded.sidecar_target,

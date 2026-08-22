@@ -147,6 +147,7 @@ impl LibraryState {
         self.adjustment_clipboard = Some(LibraryAdjustmentClipboard { edits, settings });
     }
 
+    #[cfg(any(target_os = "android", test))]
     pub(crate) fn has_selection(&self) -> bool {
         !self.selected_assets.is_empty()
     }

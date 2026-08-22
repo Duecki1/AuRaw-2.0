@@ -15,7 +15,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub const SIDECAR_SCHEMA_VERSION: u32 = 13;
-/// Bump when developed-thumbnail rendering semantics change without changing the sidecar bytes.
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0006;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
@@ -44,9 +43,6 @@ const MAX_DECODED_MASK_ASSET_BYTES: u64 = if cfg!(target_os = "android") {
 const MAX_EDIT_NAME_BYTES: usize = 4096;
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Stable location used by a background save worker. Android targets retain
-/// the MediaStore URI because the native decode path itself uses a disposable
-/// cache file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidecarTarget {
     Desktop {
@@ -74,10 +70,8 @@ pub struct AdjustmentCopySettings {
     pub geometry: bool,
     #[serde(default = "default_true")]
     pub camera_profile: bool,
-    /// Manual Brush, Radial, and Linear mask components.
     #[serde(default = "default_true")]
     pub masks: bool,
-    /// AI and source-dependent mask components.
     #[serde(default = "default_true")]
     pub ai_masks: bool,
     #[serde(default)]
@@ -113,20 +107,14 @@ pub struct EditState {
     pub exposure: ExposureParams,
     #[serde(default)]
     pub geometry: GeometryTransform,
-    /// Explicit per-image DCP selection relative to the configured camera-profile root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_profile: Option<PathBuf>,
     pub masks: Arc<MaskStack>,
-    /// Shared signed brush correction for every AI Subject / Not Subject mask.
-    /// Missing on schema <= 6, which cleanly defaults to no refinement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_refinement: Option<SubjectRefinement>,
     pub lens: LensEditState,
-    /// Cached non-destructive Big-LaMa Remove strokes in native source coordinates.
     #[serde(default, skip_serializing_if = "arc_remove_is_empty")]
     pub remove: Arc<RemoveEditState>,
-    /// Persisted because copied content-aware masks belong to the source image
-    /// until they are explicitly regenerated on the destination image.
     #[serde(default)]
     pub ai_masks_need_update: bool,
 }
@@ -165,10 +153,6 @@ fn filtered_mask_stack(masks: &MaskStack, include_manual: bool, include_ai: bool
             .masks
             .iter()
             .filter_map(|mask| {
-                // A local-mask group can combine a brush/radial/linear component
-                // with an AI or range component. Filter those components one by
-                // one: classifying the whole group as AI used to leak the manual
-                // refinement even when "Normal masks" was disabled.
                 let mut selected = mask.clone();
                 selected.components.retain(|component| {
                     if is_manual_mask_kind(component.kind) {
@@ -210,8 +194,6 @@ fn replace_selected_mask_categories(
 }
 
 fn masks_contain_content_aware_components(masks: &MaskStack) -> bool {
-    // Generated bitmaps are caches, not the identity of an AI component. A
-    // stale pasted mask can have `mask: None` and still require regeneration.
     masks.masks.iter().any(|mask| {
         mask.components
             .iter()
@@ -238,9 +220,6 @@ pub fn edit_state_has_adjustments(edits: &EditState) -> bool {
         || edits.remove != default.remove
 }
 
-/// Merge a copied edit snapshot into an existing destination according to the
-/// user's library copy settings. Content-aware masks are deliberately marked
-/// stale after crossing image boundaries so Develop exposes the refresh action.
 pub fn apply_copied_adjustments(
     destination: &mut EditState,
     source: &EditState,
@@ -249,11 +228,6 @@ pub fn apply_copied_adjustments(
     apply_copied_adjustments_with_mode(destination, source, settings, AdjustmentPasteMode::Merge);
 }
 
-/// Applies copied edits using an explicit conflict policy.
-///
-/// Merge preserves destination categories that were not enabled when the copy
-/// was made. Replace first resets the destination to a clean edit state, then
-/// installs the enabled copied categories.
 pub fn apply_copied_adjustments_with_mode(
     destination: &mut EditState,
     source: &EditState,
@@ -261,10 +235,6 @@ pub fn apply_copied_adjustments_with_mode(
     mode: AdjustmentPasteMode,
 ) {
     if mode == AdjustmentPasteMode::Replace {
-        // Remove patches belong to this exact source image and are not a
-        // portable adjustment category. Replacing copied develop settings
-        // must therefore leave the destination's non-destructive Remove
-        // history intact.
         let remove = Arc::clone(&destination.remove);
         *destination = default_edit_state();
         destination.remove = remove;
@@ -607,8 +577,6 @@ fn restore_mask_assets(
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadedSidecar {
     pub edits: EditState,
-    /// True when an older supported schema was canonicalized in memory and
-    /// should be rewritten on load.
     pub migrated: bool,
 }
 
@@ -702,14 +670,6 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
         )));
     }
     let original_schema = document.schema_version;
-    // Schema 5 introduced extracted PNG mask assets. Schema 6 kept that layout.
-    // Schema 7 adds the optional shared Subject refinement field;
-    // schema 8 adds the defaulted mask-effect selector; schema 9 adds the
-    // Fullscreen mask geometry; schema 10 adds non-destructive settings for
-    // implemented mask effects; schema 11 adds procedural Fog and Smoke mask
-    // effects; schema 12 adds cached Big-LaMa Remove strokes; schema 13 moves
-    // new Remove patch pixels to the source-scene boundary. Serde defaults keep
-    // every earlier sidecar backward-compatible.
     if original_schema >= 5 {
         restore_mask_assets(
             &mut document.edits,
@@ -717,9 +677,6 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
             &document.mask_asset_refs,
         )?;
     } else {
-        // TODO(pre-release cleanup): Remove this beta-only schema <= 4 inline-mask migration
-        // once AuRaw is published. It exists only so beta testers keep their edits and masks;
-        // `LoadedSidecar::migrated` immediately queues a current-schema rewrite after opening the RAW.
         if !document.mask_assets.is_empty() || !document.mask_asset_refs.is_empty() {
             return invalid("legacy sidecar unexpectedly contains current mask assets");
         }
@@ -758,11 +715,6 @@ pub fn save_desktop(raw_path: &Path, edits: EditState) -> Result<PathBuf, Sideca
 
 #[cfg(not(target_os = "android"))]
 pub fn reset_desktop_adjustments(raw_path: &Path) -> Result<bool, String> {
-    // "Reset all adjustments" is deliberately destructive: the sidecar is
-    // the complete persisted edit state, including normal masks, generated AI
-    // mask bitmaps/prompts, crop, camera-profile selection, and
-    // lens correction. Removing it guarantees the next open starts from the
-    // untouched RAW instead of accidentally retaining hidden mask state.
     remove_desktop_edits(raw_path)
 }
 
@@ -792,9 +744,6 @@ pub fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), SidecarError> {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), SidecarError> {
-    // A single relative component has `Some("")` as its parent. Opening that
-    // empty path for the durability sync fails even though the rename already
-    // succeeded, so normalize it to the current directory up front.
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -864,8 +813,6 @@ impl Write for CappedVec {
     }
 }
 
-/// Rejects a mask copy/duplicate before it becomes live state only when the
-/// prospective persisted edit cannot fit after exact compressed re-measurement.
 pub fn preflight_mask_change(masks: &MaskStack) -> Result<(), SidecarError> {
     preflight_sidecar_dynamic_data_with_limit(masks, MAX_SIDECAR_BYTES)
 }
@@ -891,18 +838,12 @@ fn enforce_size_limit(estimated: u64, limit: u64) -> Result<(), SidecarError> {
 }
 
 fn estimate_sidecar_bytes(masks: &MaskStack) -> Result<u64, SidecarError> {
-    // This covers the bounded camera-profile/lens strings, the complete global
-    // adjustment structure, and document-level JSON punctuation. Dynamic mask
-    // names and geometry are counted separately below.
     const DOCUMENT_HEADROOM: u64 = 1024 * 1024;
     const MASK_HEADROOM: u64 = 16 * 1024;
     const COMPONENT_HEADROOM: u64 = 2 * 1024;
     const BRUSH_DAB_HEADROOM: u64 = 256;
     const OBJECT_STROKE_HEADROOM: u64 = 128;
     const OBJECT_POINT_HEADROOM: u64 = 96;
-    // PNG adds scanline filters, chunks, and DEFLATE framing. The real schema-6
-    // encoder normally makes masks much smaller, but the fast preflight uses
-    // a compression-independent upper bound so an accepted edit is always savable.
     const MASK_PNG_FIXED_HEADROOM: u64 = 64 * 1024;
 
     let mut estimated = DOCUMENT_HEADROOM;

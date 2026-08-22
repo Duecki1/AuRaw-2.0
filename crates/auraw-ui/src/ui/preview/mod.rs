@@ -87,7 +87,6 @@ impl Preview {
         }
 
         let (outer_rect, _) = ui.allocate_exact_size(available, Sense::hover());
-        // Anchor zoom geometry to the full developed image, independent of proxy size.
         let source_dimensions = app.develop.loaded_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
@@ -96,12 +95,6 @@ impl Preview {
             .as_ref()
             .and_then(|raw| raw.lens_geometry.clone());
         let crop_preview = app.ui.sidebar_tab == SidebarTab::Crop && !app.preview.original_visible();
-        // *start = screen_to_normalized_unclamped(image_rect, midpoint - half_vector);
-        // *end = screen_to_normalized_unclamped(image_rect, midpoint + half_vector);
-        // Every non-Crop Develop surface uses the same final geometry frame that
-        // export writes. Mask interactions are inverse-mapped back
-        // into source coordinates below, so their tools remain accurate while the
-        // pixels and overlays stay aligned with crop/rotation/flip/transform.
         let final_geometry_preview =
             !crop_preview && (!app.develop.geometry.is_identity() || lens_geometry.is_some());
         let (geometry_width, geometry_height) = if final_geometry_preview {
@@ -126,14 +119,8 @@ impl Preview {
             zoomed_image_rect(outer_rect, base_size, app.preview.zoom, app.preview.center);
         let visible_image_rect = outer_rect.intersect(image_rect);
         let mut interaction_rect = if app.ui.sidebar_tab == SidebarTab::Masks {
-            // Geometry handles for radial/linear masks are allowed to live in
-            // the pasteboard around the image, so the mask canvas must receive
-            // pointer input across the whole preview panel. Brush-like tools
-            // still filter their pointer to the visible image below.
             outer_rect
         } else if app.ui.sidebar_tab == SidebarTab::Crop {
-            // Crop edge/corner hit targets deliberately extend into the pasteboard,
-            // which is especially important for finger input near image boundaries.
             outer_rect
         } else {
             visible_image_rect
@@ -141,11 +128,6 @@ impl Preview {
         if interaction_rect.width() <= 0.0 || interaction_rect.height() <= 0.0 {
             interaction_rect = outer_rect;
         }
-        // Desktop shows every adjustment category as an accordion, so its
-        // `adjustment_section` retains the mobile navigation selection and is
-        // not evidence that the Color accordion is closed. Once the eyedropper
-        // is armed it owns the Adjustments preview regardless of that mobile-
-        // only section state.
         let white_balance_canvas =
             white_balance_picker_owns_canvas(app.ui.sidebar_tab, app.develop_ui.white_balance_picker_active);
         if !white_balance_canvas {
@@ -180,9 +162,6 @@ impl Preview {
         });
         #[cfg(target_os = "android")]
         if any_touches {
-            // NativeActivity is event-driven, while Android may batch motion
-            // samples. Keep navigation repainting at the surface cadence until
-            // the last finger lifts so intermediate pinch/pan states stay fluid.
             ui.ctx().request_repaint();
         }
         if multi_touch.is_some() {
@@ -193,9 +172,6 @@ impl Preview {
         let touch_navigation = app.preview.touch_navigation_active;
 
         if let Some(multi_touch) = multi_touch {
-            // Keep the image point that was under the previous gesture center under
-            // the current center. This combines pinch zooming and two-finger panning
-            // without accumulating a separate touch-only camera state.
             let previous_touch_center = multi_touch.center_pos - multi_touch.translation_delta;
             moved |= transform_preview_about_screen_points(
                 outer_rect,
@@ -212,8 +188,6 @@ impl Preview {
         }
 
         if multi_touch.is_some() {
-            // A second finger switches a mask gesture into viewport navigation.
-            // Roll back any pending mask stroke and prevent this frame from painting.
             if app.ui.sidebar_tab == SidebarTab::Masks {
                 app.cancel_mask_touch_gesture();
             } else if app.ui.sidebar_tab == SidebarTab::Crop {
@@ -252,10 +226,6 @@ impl Preview {
             }
         }
 
-        // Once a pinch drops back to one finger, resume ordinary panning
-        // immediately. `touch_navigation` deliberately stays latched until all
-        // fingers lift so brush/crop gestures cannot restart halfway through a
-        // pinch, but that latch must not freeze the viewport itself.
         let pan_with_primary = multi_touch.is_none()
             && !original_hold_tracking
             && !brush_canvas
@@ -479,7 +449,6 @@ impl Preview {
                     &response,
                 );
             }
-            // Paint the native Remove brush/cursor above the cached repaired pixels.
             Self::paint_inpaint_overlay(
                 ui,
                 app,
@@ -524,8 +493,6 @@ impl Preview {
                         &response,
                     );
                 }
-                // Coverage stays clipped to the image, while geometry/transform
-                // handles may extend into the surrounding preview pasteboard.
                 Self::paint_mask_overlay(
                     ui,
                     app,

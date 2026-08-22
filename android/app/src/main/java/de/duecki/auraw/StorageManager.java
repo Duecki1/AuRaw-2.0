@@ -37,7 +37,6 @@ final class StorageManager {
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
     private static final String LEGACY_MEDIASTORE_RAW_RELATIVE_PATH =
             Environment.DIRECTORY_DOWNLOADS + "/AuRaw/";
-    private static final String PICKER_PREFERENCES = "auraw-picker-locations";
     private static final String RAW_PICKER_URI_KEY = "raw-document-uri";
 
     interface Callbacks {
@@ -54,15 +53,17 @@ final class StorageManager {
 
     }
 
-    private final AuRawActivity activity;
+    private final AndroidStorageAccess storage;
     private final Callbacks callbacks;
     private final ThumbnailCache thumbnailCache;
+    private final PickerLocationStore pickerLocations;
     private volatile String selectedRawLibraryFolder = "";
 
-    StorageManager(AuRawActivity activity, Callbacks callbacks) {
-        this.activity = activity;
+    StorageManager(AndroidStorageAccess storage, Callbacks callbacks) {
+        this.storage = storage;
         this.callbacks = callbacks;
-        this.thumbnailCache = new ThumbnailCache(activity);
+        this.thumbnailCache = new ThumbnailCache(storage);
+        this.pickerLocations = new PickerLocationStore(storage);
     }
 
     Intent createRawDocumentPickerIntent() {
@@ -71,7 +72,7 @@ final class StorageManager {
         intent.setType("*/*");
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        Uri initialUri = rememberedPickerUri(RAW_PICKER_URI_KEY);
+        Uri initialUri = pickerLocations.readContentUri(RAW_PICKER_URI_KEY);
         if (initialUri != null) {
             intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
         }
@@ -94,33 +95,8 @@ final class StorageManager {
                 .start();
     }
 
-    private Uri rememberedPickerUri(String key) {
-        String uriText = activity
-                .getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
-                .getString(key, "");
-        if (uriText == null || uriText.isEmpty()) {
-            return null;
-        }
-        try {
-            Uri uri = Uri.parse(uriText);
-            return ContentResolver.SCHEME_CONTENT.equals(uri.getScheme()) ? uri : null;
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private void rememberPickerUri(String key, Uri uri) {
-        if (uri == null || !ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
-            return;
-        }
-        activity.getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
-                .edit()
-                .putString(key, uri.toString())
-                .apply();
-    }
-
     void scavengeTemporaryRawFiles() {
-        File[] cachedFiles = activity.getCacheDir().listFiles((directory, name) ->
+        File[] cachedFiles = storage.getCacheDir().listFiles((directory, name) ->
                 name.startsWith("auraw-library-")
                         || name.startsWith("auraw-import-")
                         || name.startsWith("auraw-sidecar-")
@@ -184,7 +160,7 @@ final class StorageManager {
             try {
                 stored = importDocumentIntoLibrary(uri, displayName);
                 if (imported == 0) {
-                    rememberPickerUri(RAW_PICKER_URI_KEY, uri);
+                    pickerLocations.writeContentUri(RAW_PICKER_URI_KEY, uri);
                 }
                 imported++;
             } catch (Exception error) {
@@ -207,7 +183,7 @@ final class StorageManager {
         StoredRaw stored = null;
         try {
             stored = importDocumentIntoLibrary(uri, displayName);
-            rememberPickerUri(RAW_PICKER_URI_KEY, uri);
+            pickerLocations.writeContentUri(RAW_PICKER_URI_KEY, uri);
             deliverLibraryRawFd(stored.uri, stored.displayName);
         } catch (Exception error) {
             if (stored != null) {
@@ -294,12 +270,10 @@ final class StorageManager {
             descriptor = ParcelFileDescriptor.open(
                     new File(uri.getPath()), ParcelFileDescriptor.MODE_READ_ONLY);
         } else {
-            descriptor = activity.getContentResolver().openFileDescriptor(uri, "r");
+            descriptor = storage.getContentResolver().openFileDescriptor(uri, "r");
         }
-        if (descriptor == null) {
-            throw new IllegalStateException("The RAW library returned no file descriptor");
-        }
-        return descriptor.detachFd();
+        return NativeFileDescriptors.detach(
+                descriptor, "The RAW library returned no file descriptor");
     }
 
     /** Returns a persistent private JPEG path for an unedited RAW thumbnail. */
@@ -346,7 +320,7 @@ final class StorageManager {
         String safeName = AndroidStorageContract.safeRawName(displayName);
         int dot = safeName.lastIndexOf('.');
         String suffix = dot >= 0 ? safeName.substring(dot) : ".raw";
-        File cached = File.createTempFile("auraw-library-", suffix, activity.getCacheDir());
+        File cached = File.createTempFile("auraw-library-", suffix, storage.getCacheDir());
         boolean completed = false;
         try {
             try (InputStream input = openLibraryInput(uri);
@@ -354,7 +328,11 @@ final class StorageManager {
                 if (input == null) {
                     throw new IllegalStateException("Android storage returned no RAW stream");
                 }
-                copy(input, output, MAX_RAW_IMPORT_BYTES);
+                BoundedStreams.copy(
+                        input,
+                        output,
+                        MAX_RAW_IMPORT_BYTES,
+                        storageLimitMessage(MAX_RAW_IMPORT_BYTES));
                 output.getFD().sync();
             }
             completed = true;
@@ -505,7 +483,7 @@ final class StorageManager {
             if (raw.exists() && !raw.delete()) {
                 throw new IllegalStateException("Could not delete the RAW file");
             }
-        } else if (activity.getContentResolver().delete(rawUri, null, null) <= 0) {
+        } else if (storage.getContentResolver().delete(rawUri, null, null) <= 0) {
             throw new IllegalStateException("Android storage could not delete the RAW file");
         }
         clearDevelopedThumbnailCache(rawUriText);
@@ -528,12 +506,16 @@ final class StorageManager {
             return "";
         }
 
-        File cached = File.createTempFile("auraw-sidecar-", ".auraw", activity.getCacheDir());
+        File cached = File.createTempFile("auraw-sidecar-", ".auraw", storage.getCacheDir());
         boolean completed = false;
         try {
             try (FileInputStream input = new FileInputStream(sidecar);
                  FileOutputStream output = new FileOutputStream(cached)) {
-                copy(input, output, MAX_SIDECAR_BYTES);
+                BoundedStreams.copy(
+                        input,
+                        output,
+                        MAX_SIDECAR_BYTES,
+                        storageLimitMessage(MAX_SIDECAR_BYTES));
                 output.getFD().sync();
             }
             completed = true;
@@ -552,15 +534,19 @@ final class StorageManager {
         }
 
         Uri newestGeneration = generations.get(0);
-        File cached = File.createTempFile("auraw-sidecar-", ".auraw", activity.getCacheDir());
+        File cached = File.createTempFile("auraw-sidecar-", ".auraw", storage.getCacheDir());
         boolean completed = false;
         try {
-            try (InputStream input = activity.getContentResolver().openInputStream(newestGeneration);
+            try (InputStream input = storage.getContentResolver().openInputStream(newestGeneration);
                  FileOutputStream output = new FileOutputStream(cached)) {
                 if (input == null) {
                     throw new IllegalStateException("Android storage returned no sidecar stream");
                 }
-                copy(input, output, MAX_SIDECAR_BYTES);
+                BoundedStreams.copy(
+                        input,
+                        output,
+                        MAX_SIDECAR_BYTES,
+                        storageLimitMessage(MAX_SIDECAR_BYTES));
                 output.getFD().sync();
             }
             completed = true;
@@ -574,7 +560,7 @@ final class StorageManager {
 
     /** Creates the private staging file populated by Rust's sidecar worker. */
     String createRawSidecarCache() throws Exception {
-        return File.createTempFile("auraw-sidecar-", ".auraw", activity.getCacheDir()).getAbsolutePath();
+        return File.createTempFile("auraw-sidecar-", ".auraw", storage.getCacheDir()).getAbsolutePath();
     }
 
     /**
@@ -603,7 +589,7 @@ final class StorageManager {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
         }
-        ContentResolver resolver = activity.getContentResolver();
+        ContentResolver resolver = storage.getContentResolver();
         String displayName = AndroidStorageContract.sidecarDisplayName(rawDisplayName);
         String stagedName = AndroidStorageContract.sidecarStagePrefix(rawDisplayName)
                 + Long.toUnsignedString(System.nanoTime());
@@ -628,7 +614,11 @@ final class StorageManager {
                 if (output == null) {
                     throw new IllegalStateException("Android storage returned no sidecar output");
                 }
-                copy(input, output, MAX_SIDECAR_BYTES);
+                BoundedStreams.copy(
+                        input,
+                        output,
+                        MAX_SIDECAR_BYTES,
+                        storageLimitMessage(MAX_SIDECAR_BYTES));
                 output.flush();
             }
             values.clear();
@@ -690,7 +680,7 @@ final class StorageManager {
         };
         String selection = legacyMediaStoreSidecarSelection();
         String[] args = legacyMediaStoreSidecarSelectionArgs(displayName, stagedPrefix);
-        try (Cursor cursor = activity.getContentResolver().query(
+        try (Cursor cursor = storage.getContentResolver().query(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 projection,
                 selection,
@@ -727,7 +717,7 @@ final class StorageManager {
         String[] args = new String[sidecarArgs.length + 1];
         args[0] = Long.toString(generationId);
         System.arraycopy(sidecarArgs, 0, args, 1, sidecarArgs.length);
-        return activity.getContentResolver().delete(
+        return storage.getContentResolver().delete(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 selection,
                 args);
@@ -744,7 +734,7 @@ final class StorageManager {
     private String[] legacyMediaStoreSidecarSelectionArgs(String displayName, String stagedPrefix) {
         return new String[]{
                 LEGACY_MEDIASTORE_RAW_RELATIVE_PATH,
-                activity.getPackageName(),
+                storage.getPackageName(),
                 displayName,
                 escapeLike(stagedPrefix) + "%"
         };
@@ -807,7 +797,7 @@ final class StorageManager {
                 MediaStore.Downloads.OWNER_PACKAGE_NAME,
                 MediaStore.Downloads.IS_PENDING
         };
-        try (Cursor cursor = activity.getContentResolver().query(
+        try (Cursor cursor = storage.getContentResolver().query(
                 rawUri,
                 projection,
                 null,
@@ -833,7 +823,7 @@ final class StorageManager {
                     storedName,
                     LEGACY_MEDIASTORE_RAW_RELATIVE_PATH,
                     storedPath,
-                    activity.getPackageName(),
+                    storage.getPackageName(),
                     storedOwner,
                     pending,
                     cursor.moveToNext())) {
@@ -866,7 +856,11 @@ final class StorageManager {
                 if (input == null) {
                     throw new IllegalStateException("The document provider returned no input stream");
                 }
-                copy(input, output, MAX_RAW_IMPORT_BYTES);
+                BoundedStreams.copy(
+                        input,
+                        output,
+                        MAX_RAW_IMPORT_BYTES,
+                        storageLimitMessage(MAX_RAW_IMPORT_BYTES));
             }
             if (!partial.renameTo(destination)) {
                 throw new IllegalStateException("Could not publish the imported RAW in " + directory);
@@ -889,11 +883,7 @@ final class StorageManager {
             handedOff = true;
         } finally {
             if (!handedOff) {
-                try {
-                    ParcelFileDescriptor.adoptFd(fd).close();
-                } catch (Exception ignored) {
-                    // The native side owns the descriptor only after a successful handoff.
-                }
+                NativeFileDescriptors.closeTransferred(fd);
             }
         }
     }
@@ -902,7 +892,7 @@ final class StorageManager {
         if (ContentResolver.SCHEME_FILE.equals(uri.getScheme())) {
             return new FileInputStream(new File(uri.getPath()));
         }
-        return activity.getContentResolver().openInputStream(uri);
+        return storage.getContentResolver().openInputStream(uri);
     }
 
     private String listCombinedRawLibrary() {
@@ -993,8 +983,8 @@ final class StorageManager {
         String selection = MediaStore.Downloads.RELATIVE_PATH + "=? AND "
                 + MediaStore.Downloads.OWNER_PACKAGE_NAME + "=? AND "
                 + MediaStore.Downloads.IS_PENDING + "=0";
-        String[] selectionArgs = {LEGACY_MEDIASTORE_RAW_RELATIVE_PATH, activity.getPackageName()};
-        try (Cursor cursor = activity.getContentResolver().query(
+        String[] selectionArgs = {LEGACY_MEDIASTORE_RAW_RELATIVE_PATH, storage.getPackageName()};
+        try (Cursor cursor = storage.getContentResolver().query(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 projection,
                 selection,
@@ -1070,7 +1060,7 @@ final class StorageManager {
 
     private String queryStoredDisplayName(Uri uri) {
         String[] projection = {MediaStore.Downloads.DISPLAY_NAME};
-        try (Cursor cursor = activity.getContentResolver().query(uri, projection, null, null, null)) {
+        try (Cursor cursor = storage.getContentResolver().query(uri, projection, null, null, null)) {
             if (cursor == null || !cursor.moveToFirst()) {
                 throw new IllegalStateException("Android storage returned no stored filename");
             }
@@ -1084,7 +1074,7 @@ final class StorageManager {
     }
 
     private File externalMediaRootDirectory() {
-        File[] mediaDirectories = activity.getExternalMediaDirs();
+        File[] mediaDirectories = storage.getExternalMediaDirs();
         if (mediaDirectories != null) {
             for (File directory : mediaDirectories) {
                 if (directory != null) {
@@ -1209,12 +1199,16 @@ final class StorageManager {
             String cachedSidecar = "";
             boolean rawPublished = false;
             try {
-                try (InputStream input = activity.getContentResolver().openInputStream(source);
+                try (InputStream input = storage.getContentResolver().openInputStream(source);
                      FileOutputStream output = new FileOutputStream(partial)) {
                     if (input == null) {
                         throw new IllegalStateException("Android storage returned no legacy RAW stream");
                     }
-                    copy(input, output, MAX_RAW_IMPORT_BYTES);
+                    BoundedStreams.copy(
+                            input,
+                            output,
+                            MAX_RAW_IMPORT_BYTES,
+                            storageLimitMessage(MAX_RAW_IMPORT_BYTES));
                     output.getFD().sync();
                 }
                 if (destination.exists() || !partial.renameTo(destination)) {
@@ -1227,7 +1221,7 @@ final class StorageManager {
                     publishRawSidecarFile(new File(cachedSidecar), rawLibraryDirectory(), destination.getName());
                 }
 
-                if (activity.getContentResolver().delete(source, null, null) <= 0) {
+                if (storage.getContentResolver().delete(source, null, null) <= 0) {
                     throw new IllegalStateException(
                             "Could not remove legacy MediaStore RAW after migration: " + source);
                 }
@@ -1268,7 +1262,7 @@ final class StorageManager {
             if (ContentResolver.SCHEME_FILE.equals(uri.getScheme())) {
                 new File(uri.getPath()).delete();
             } else {
-                activity.getContentResolver().delete(uri, null, null);
+                storage.getContentResolver().delete(uri, null, null);
             }
         } catch (Exception ignored) {
             // Preserve the original import error.
@@ -1322,42 +1316,12 @@ final class StorageManager {
         }
     }
 
-    private static void copy(InputStream input, OutputStream output, long maximumBytes)
-            throws Exception {
-        byte[] buffer = new byte[1024 * 1024];
-        long copied = 0;
-        while (true) {
-            int count = input.read(buffer);
-            if (count < 0) {
-                break;
-            }
-            if (count == 0) {
-                // Some ContentProvider streams are allowed to make no
-                // progress. A one-byte read either advances or reaches EOF,
-                // avoiding an unbounded zero-byte loop.
-                int value = input.read();
-                if (value < 0) {
-                    break;
-                }
-                copied = checkedCopyLength(copied, 1, maximumBytes);
-                output.write(value);
-                continue;
-            }
-            copied = checkedCopyLength(copied, count, maximumBytes);
-            output.write(buffer, 0, count);
-        }
-    }
-
-    private static long checkedCopyLength(long copied, int count, long maximumBytes) {
-        if (count < 0 || copied > maximumBytes - count) {
-            throw new IllegalStateException(
-                    "The document exceeds the " + maximumBytes + "-byte import limit");
-        }
-        return copied + count;
+    private static String storageLimitMessage(long maximumBytes) {
+        return "The document exceeds the " + maximumBytes + "-byte import limit";
     }
 
     private Long queryDocumentSize(Uri uri) {
-        try (Cursor cursor = activity.getContentResolver().query(
+        try (Cursor cursor = storage.getContentResolver().query(
                 uri,
                 new String[]{OpenableColumns.SIZE},
                 null,
@@ -1380,7 +1344,7 @@ final class StorageManager {
     }
 
     private String queryDisplayName(Uri uri) {
-        try (Cursor cursor = activity.getContentResolver().query(
+        try (Cursor cursor = storage.getContentResolver().query(
                 uri,
                 new String[]{OpenableColumns.DISPLAY_NAME},
                 null,

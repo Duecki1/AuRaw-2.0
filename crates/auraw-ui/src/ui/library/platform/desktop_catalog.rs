@@ -33,9 +33,6 @@ impl PartialOrd for RankedLibraryAsset {
 
 impl Ord for RankedLibraryAsset {
     fn cmp(&self, other: &Self) -> CmpOrdering {
-        // This is also the final display order: newest first, then stable
-        // lexical tie-breakers. BinaryHeap therefore keeps the worst retained
-        // item at its root, where a better candidate can replace it.
         other
             .asset
             .metadata
@@ -194,7 +191,6 @@ pub(in crate::ui::library) fn scan_folder_with_limit(
         .map(|ranked| ranked.asset)
         .collect::<Vec<_>>();
 
-    // Reserve stable gallery geometry before preview pixels arrive.
     for asset in &mut assets {
         if is_cancelled() {
             return Ok(None);

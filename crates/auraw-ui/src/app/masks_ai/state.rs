@@ -285,10 +285,6 @@ impl AurawApp {
             || self.ai.object_consent_open
     }
 
-    pub(crate) fn ai_masks_need_update(&self) -> bool {
-        self.ai.masks_need_update && !self.masks.stack.masks.is_empty()
-    }
-
     pub(crate) fn ai_mask_update_remaining_target_count(&self) -> usize {
         if !self.ai.mask_update_active {
             return 0;
@@ -347,42 +343,6 @@ impl AurawApp {
             Some(
                 ForegroundOperationKind::SubjectMask
                     | ForegroundOperationKind::ObjectMask
-            )
-        ) {
-            self.cancel_foreground_operation();
-        }
-        self.ai.object_pending_target = None;
-        self.ai.mask_update_active = false;
-        self.ai.mask_update_subject_pending = false;
-        self.ai.mask_update_object_queue.clear();
-        self.ai.mask_update_failed = false;
-    }
-
-    pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
-        let has_ranges = self.has_range_mask_targets();
-        self.invalidate_generated_mask_sources();
-        // Manual/geometric masks remain intact and are immediately reused.
-        // Only source-dependent masks need regeneration against the newly
-        // corrected (or uncorrected) image geometry.
-        self.ai.masks_need_update = has_subject
-            || !object_targets.is_empty()
-            || has_ranges;
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub(crate) fn validate_onnx_runtime_for_ai(&mut self) -> bool {
-        let (Some(runtime_path), Some(runtime_sha256)) = (
-            self.ai.runtime_path.clone(),
-            self.ai.runtime_sha256.clone(),
-        ) else {
-            self.ui.notice = Some(
-                "Choose an ONNX Runtime library under Settings before using desktop AI tools."
-                    .to_owned(),
-            );
-            return false;
-        };
-        match crate::ai_masks::probe_runtime_subprocess(&runtime_path, &runtime_sha256) {
-            Ok(()) => true,
             Err(error) => {
                 self.ui.notice = Some(format!(
                     "ONNX Runtime validation failed: {error:#}. Select a different onnxruntime.dll in Settings."
@@ -424,8 +384,6 @@ impl AurawApp {
             || !object_targets.is_empty()
             || update_ranges
         {
-            // Force a new canonical source because lens correction changed
-            // the image under content-aware masks.
             self.masks.source_cache = None;
             self.masks.subject_cache = None;
             self.ai.object_cache = None;
