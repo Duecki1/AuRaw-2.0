@@ -587,6 +587,18 @@ fn filmstrip_thumbnail(
         );
     }
 
+    if item.developed_thumbnail_pending {
+        let center = rect.right_top() + egui::vec2(-13.0, 13.0);
+        painter.circle_filled(center, 10.0, Color32::from_black_alpha(190));
+        painter.text(
+            center,
+            Align2::CENTER_CENTER,
+            egui_phosphor::regular::ARROW_CLOCKWISE,
+            FontId::proportional(13.0),
+            Color32::from_rgb(244, 142, 48),
+        );
+    }
+
     let label_rect = egui::Rect::from_min_max(
         egui::pos2(rect.left() + 2.0, rect.bottom() - 22.0),
         rect.max - egui::vec2(2.0, 2.0),

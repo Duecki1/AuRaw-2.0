@@ -261,6 +261,9 @@ pub(crate) struct LibraryEntry {
     thumbnail_retry_after: Option<Instant>,
     thumbnail_queued: bool,
     developed_thumbnail: bool,
+    // The card is deliberately showing the camera/RAW preview while the
+    // adjusted replacement is rendered by a thumbnail worker.
+    developed_thumbnail_pending: bool,
     last_used: u64,
 }
 
@@ -271,12 +274,20 @@ pub(crate) struct DesktopFilmstripItem {
     pub(crate) path: PathBuf,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) thumbnail_size: Option<[u32; 2]>,
+    pub(crate) developed_thumbnail_pending: bool,
 }
 
 struct LoadedLibraryThumbnail {
     thumbnail: RawThumbnail,
     resident_thumbnail: RawThumbnail,
     developed: bool,
+    developed_render_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThumbnailLoadStage {
+    RawPreview,
+    DevelopedPreview,
 }
 
 #[derive(Clone)]
@@ -284,12 +295,14 @@ struct ThumbnailRequest {
     generation: u64,
     asset_id: LibraryAssetId,
     display_priority: bool,
+    stage: ThumbnailLoadStage,
 }
 
 struct ThumbnailWorkQueue {
     background: VecDeque<ThumbnailRequest>,
     in_flight: HashMap<LibraryAssetId, bool>,
     initial_completed: HashSet<LibraryAssetId>,
+    developed_queued: HashSet<LibraryAssetId>,
 }
 
 /// Catalog-wide worker progress. Per-card state still drives placeholders and
@@ -341,15 +354,20 @@ impl ThumbnailWorkQueue {
                     generation,
                     asset_id: asset.id.clone(),
                     display_priority: false,
+                    stage: ThumbnailLoadStage::RawPreview,
                 })
                 .collect(),
             in_flight: HashMap::new(),
             initial_completed: HashSet::new(),
+            developed_queued: HashSet::new(),
         }
     }
 
     fn claim(&mut self, request: &ThumbnailRequest, initial_background: bool) -> bool {
-        if initial_background && self.initial_completed.contains(&request.asset_id) {
+        if initial_background
+            && request.stage == ThumbnailLoadStage::RawPreview
+            && self.initial_completed.contains(&request.asset_id)
+        {
             return false;
         }
         if let Some(display_priority) = self.in_flight.get_mut(&request.asset_id) {
@@ -361,9 +379,27 @@ impl ThumbnailWorkQueue {
         true
     }
 
-    fn finish(&mut self, asset_id: &LibraryAssetId) -> bool {
-        self.initial_completed.insert(asset_id.clone());
-        self.in_flight.remove(asset_id).unwrap_or(false)
+    fn finish(&mut self, request: &ThumbnailRequest) -> bool {
+        if request.stage == ThumbnailLoadStage::RawPreview {
+            self.initial_completed.insert(request.asset_id.clone());
+        } else {
+            self.developed_queued.remove(&request.asset_id);
+        }
+        self.in_flight.remove(&request.asset_id).unwrap_or(false)
+    }
+
+    fn schedule_developed_preview(&mut self, generation: u64, asset_id: LibraryAssetId) {
+        if self.developed_queued.insert(asset_id.clone()) {
+            self.background.push_back(ThumbnailRequest {
+                generation,
+                asset_id,
+                // The embedded RAW preview was already delivered. Rendering
+                // edits remains ordinary background work so Develop keeps
+                // priority over it.
+                display_priority: false,
+                stage: ThumbnailLoadStage::DevelopedPreview,
+            });
+        }
     }
 }
 
@@ -388,6 +424,7 @@ enum ScanEvent {
         generation: u64,
         asset_id: LibraryAssetId,
         display_priority: bool,
+        final_thumbnail: bool,
         result: Result<LoadedLibraryThumbnail, String>,
     },
     Failed {

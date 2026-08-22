@@ -31,6 +31,7 @@ impl LibraryState {
             generation,
             asset_id: entry.asset.id.clone(),
             display_priority: true,
+            stage: ThumbnailLoadStage::RawPreview,
         };
         if request_sender
             .as_ref()
@@ -124,6 +125,7 @@ impl LibraryState {
         entry.thumbnail_retry_after = None;
         entry.thumbnail_queued = false;
         entry.developed_thumbnail = false;
+        entry.developed_thumbnail_pending = false;
     }
 
     pub(super) fn install_developed_thumbnail_at(
@@ -153,6 +155,7 @@ impl LibraryState {
         self.entries[index].thumbnail_retry_after = None;
         self.entries[index].thumbnail_queued = false;
         self.entries[index].developed_thumbnail = true;
+        self.entries[index].developed_thumbnail_pending = false;
     }
 
     pub(crate) fn evict_old_textures(&mut self, protected_indices: &HashSet<usize>) {
@@ -286,6 +289,7 @@ pub(super) fn new_library_entry(asset: LibraryAsset) -> LibraryEntry {
         thumbnail_retry_after: None,
         thumbnail_queued: false,
         developed_thumbnail: false,
+        developed_thumbnail_pending: false,
         last_used: 0,
     }
 }
@@ -372,11 +376,20 @@ pub(super) fn loaded_library_thumbnail(thumbnail: RawThumbnail, developed: bool)
         thumbnail,
         resident_thumbnail,
         developed,
+        developed_render_pending: false,
     }
 }
 
+pub(super) fn loaded_library_raw_preview_pending_development(
+    thumbnail: RawThumbnail,
+) -> LoadedLibraryThumbnail {
+    let mut loaded = loaded_library_thumbnail(thumbnail, false);
+    loaded.developed_render_pending = true;
+    loaded
+}
+
 pub(super) type ThumbnailLoader =
-    Arc<dyn Fn(&LibraryAsset) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static>;
+    Arc<dyn Fn(&LibraryAsset, ThumbnailLoadStage) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static>;
 
 #[cfg(not(target_os = "android"))]
 pub(super) struct DevelopedThumbnailGpu {
@@ -497,6 +510,9 @@ pub(super) fn render_uncached_developed_thumbnail(
             ))
         }
     };
+    if !crate::sidecar::edit_state_has_adjustments(&loaded_sidecar.edits) {
+        return Ok(None);
+    }
     let sidecar_fingerprint = crate::sidecar::desktop_sidecar_fingerprint(path)?
         .ok_or_else(|| "edit sidecar disappeared before thumbnail rendering".to_owned())?;
 
@@ -698,30 +714,61 @@ pub(crate) fn load_desktop_cached_thumbnail(
 #[cfg(not(target_os = "android"))]
 pub(super) fn load_desktop_library_thumbnail(
     asset: &LibraryAsset,
+    stage: ThumbnailLoadStage,
 ) -> Result<LoadedLibraryThumbnail, String> {
     let Some(path) = asset.desktop_path() else {
         return Err("invalid desktop thumbnail request".to_owned());
     };
-    match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
-        Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
-        Ok(None) => {}
-        Err(error) => log::warn!(
-            "could not use developed thumbnail cache for {}: {error}",
-            path.display()
-        ),
-    }
-    match render_uncached_developed_thumbnail(path, THUMBNAIL_EDGE) {
-        Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
-        Ok(None) => {}
-        Err(error) => {
-            return Err(format!(
-                "could not render the edited RAW thumbnail for {}: {error}",
-                path.display()
-            ))
+    match stage {
+        ThumbnailLoadStage::RawPreview => {
+            match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
+                Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
+                Ok(None) => {}
+                Err(error) => log::warn!(
+                    "could not use developed thumbnail cache for {}: {error}",
+                    path.display()
+                ),
+            }
+
+            // Keep the first visible card as cheap as every other RAW: a
+            // filesystem existence check decides whether the background stage
+            // should inspect/render its edits. Parsing mask-heavy sidecars is
+            // deliberately deferred until after the embedded RAW preview is
+            // already on screen.
+            let render_developed = crate::sidecar::sidecar_path_for_raw(path).is_file();
+            return load_desktop_raw_library_thumbnail(path, render_developed);
+        }
+        ThumbnailLoadStage::DevelopedPreview => {
+            match render_uncached_developed_thumbnail(path, THUMBNAIL_EDGE) {
+                Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
+                // The sidecar may have been removed or reset between loading
+                // the RAW preview and this background job. Keep that RAW
+                // preview instead of leaving a card in a permanent spinner.
+                Ok(None) => return load_desktop_raw_library_thumbnail(path, false),
+                Err(error) => {
+                    return Err(format!(
+                        "could not render the edited RAW thumbnail for {}: {error}",
+                        path.display()
+                    ))
+                }
+            }
         }
     }
+}
+
+#[cfg(not(target_os = "android"))]
+fn load_desktop_raw_library_thumbnail(
+    path: &Path,
+    render_developed: bool,
+) -> Result<LoadedLibraryThumbnail, String> {
     match crate::thumbnail_cache::load_desktop_raw_thumbnail(path, THUMBNAIL_EDGE) {
-        Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, false)),
+        Ok(Some(thumbnail)) => {
+            return Ok(if render_developed {
+                loaded_library_raw_preview_pending_development(thumbnail)
+            } else {
+                loaded_library_thumbnail(thumbnail, false)
+            })
+        }
         Ok(None) => {}
         Err(error) => log::warn!(
             "could not use RAW thumbnail cache for {}: {error}",
@@ -740,13 +787,18 @@ pub(super) fn load_desktop_library_thumbnail(
             path.display()
         );
     }
-    Ok(loaded_library_thumbnail(thumbnail, false))
+    Ok(if render_developed {
+        loaded_library_raw_preview_pending_development(thumbnail)
+    } else {
+        loaded_library_thumbnail(thumbnail, false)
+    })
 }
 
 #[cfg(target_os = "android")]
 pub(super) fn load_android_library_thumbnail(
     app: &auraw_ffi::AndroidApp,
     asset: &LibraryAsset,
+    _stage: ThumbnailLoadStage,
 ) -> Result<LoadedLibraryThumbnail, String> {
     let Some(uri) = asset.android_uri() else {
         return Err("invalid Android thumbnail request".to_owned());
@@ -966,22 +1018,38 @@ fn run_one_thumbnail_worker(context: ThumbnailWorkerContext) {
             let Some(asset) = assets.iter().find(|asset| asset.id == request.asset_id) else {
                 break Err("thumbnail asset disappeared from the catalog".to_owned());
             };
-            break load(asset);
+            break load(asset, request.stage);
         };
-        let display_priority = work_queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish(&request.asset_id);
+        let queue_developed_preview = request.stage == ThumbnailLoadStage::RawPreview
+            && result
+                .as_ref()
+                .is_ok_and(|loaded| loaded.developed_render_pending);
+        let display_priority = {
+            let mut queue = work_queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            queue.finish(&request)
+        };
         if event_sender
             .send(ScanEvent::Thumbnail {
                 generation,
-                asset_id: request.asset_id,
+                asset_id: request.asset_id.clone(),
                 display_priority,
+                final_thumbnail: !queue_developed_preview,
                 result,
             })
             .is_err()
         {
             break;
+        }
+        // Publish the visible RAW preview before another worker can claim the
+        // developed stage. Otherwise its completion could arrive first and a
+        // stale RAW event would briefly replace the finished card.
+        if queue_developed_preview {
+            work_queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .schedule_developed_preview(generation, request.asset_id.clone());
         }
         repaint.request_repaint();
     }

@@ -264,6 +264,23 @@ pub(super) fn thumbnail_tile(
         );
     }
 
+    if entry.developed_thumbnail_pending {
+        let badge_edge = 25.0_f32.min(rect.width() * 0.32).min(rect.height() * 0.32);
+        let center = egui::pos2(
+            rect.right() - badge_edge * 0.5 - 6.0,
+            rect.top() + badge_edge * 0.5 + 6.0,
+        );
+        ui.painter()
+            .circle_filled(center, badge_edge * 0.5, Color32::from_black_alpha(190));
+        ui.painter().text(
+            center,
+            Align2::CENTER_CENTER,
+            egui_phosphor::regular::ARROW_CLOCKWISE,
+            FontId::proportional((badge_edge * 0.72).max(12.0)),
+            Color32::from_rgb(244, 142, 48),
+        );
+    }
+
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, 0.0, Color32::from_white_alpha(14));
@@ -297,6 +314,9 @@ pub(super) fn thumbnail_tile(
     if let Some(error) = &entry.thumbnail_error {
         tooltip.push_str("\nPreview: ");
         tooltip.push_str(error);
+    }
+    if entry.developed_thumbnail_pending {
+        tooltip.push_str("\nRendering edits in the background.");
     }
     response.on_hover_text(tooltip)
 }
