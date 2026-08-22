@@ -13,11 +13,6 @@ pub(super) struct BrushStrokeSamples {
     pub samples: Vec<[f32; 2]>,
 }
 
-/// Samples one brush-pointer update in the final transformed preview frame.
-///
-/// Both Local Mask Brush and Remove use this path so crop/rotation/perspective,
-/// zoom scaling, geometry-aware radius, dab spacing, interpolation, stationary
-/// suppression, and stroke continuity have one authoritative implementation.
 pub(super) fn sample_brush_stroke(
     image_rect: Rect,
     geometry: GeometryTransform,

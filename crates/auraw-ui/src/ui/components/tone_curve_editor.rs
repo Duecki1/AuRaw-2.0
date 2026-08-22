@@ -1,5 +1,7 @@
+use crate::app::ToneCurveTab;
 use crate::pipeline::{PointCurve, MAX_POINT_CURVE_POINTS};
-use eframe::egui::{self, Color32, Pos2, Sense, Stroke, StrokeKind, Ui};
+use crate::ui::theme::{CHANNEL_BLUE, CHANNEL_GREEN, CHANNEL_RED};
+use eframe::egui::{self, Align, Color32, Pos2, Sense, Stroke, StrokeKind, Ui};
 
 const CURVE_HEIGHT: f32 = 210.0;
 const POINT_RADIUS: f32 = 5.0;
@@ -8,15 +10,10 @@ const MIN_POINT_X_GAP: f32 = 0.005;
 
 pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color32) -> bool {
     curve.sanitize();
-    // Stay inside the scroll area's reserved content column even when the
-    // sidebar is resized narrower than the preferred curve width.
     let width = ui.available_width().max(1.0);
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, CURVE_HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    // The graph background and grid belong inside the plot, but the curve stroke
-    // and control points need the surrounding UI's clip rect. Otherwise points
-    // on the 0/1 boundaries are cut in half by `painter_at(rect)`.
     let overlay_painter = ui.painter().with_clip_rect(ui.clip_rect());
     let visuals = ui.visuals();
 
@@ -240,4 +237,75 @@ fn tangent(curve: &PointCurve, index: usize, len: usize) -> f32 {
 
 fn secant(a: [f32; 2], b: [f32; 2]) -> f32 {
     (b[1] - a[1]) / (b[0] - a[0]).max(1e-5)
+}
+
+pub struct ToneCurveChannels<'a> {
+    pub rgb: &'a mut PointCurve,
+    pub red: &'a mut PointCurve,
+    pub green: &'a mut PointCurve,
+    pub blue: &'a mut PointCurve,
+}
+
+const TONE_CURVE_TABS: [(ToneCurveTab, &str, Color32); 4] = [
+    (ToneCurveTab::Rgb, "RGB", Color32::WHITE),
+    (ToneCurveTab::Red, "R", CHANNEL_RED),
+    (ToneCurveTab::Green, "G", CHANNEL_GREEN),
+    (ToneCurveTab::Blue, "B", CHANNEL_BLUE),
+];
+
+pub fn tone_curve_channel_editor(
+    ui: &mut Ui,
+    curves: ToneCurveChannels<'_>,
+    selected_tab: &mut ToneCurveTab,
+    min_segment_width: f32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let spacing = ui.spacing().item_spacing.x;
+        let segment_width = ((ui.available_width()
+            - crate::ui::theme::TOOLBAR_ICON_EDGE
+            - spacing * 4.0)
+            .max(min_segment_width))
+            / 4.0;
+        for (tab, label, color) in TONE_CURVE_TABS {
+            let text = egui::RichText::new(label).color(color);
+            if crate::ui::theme::segmented_button(ui, text, *selected_tab == tab, segment_width)
+                .clicked()
+            {
+                *selected_tab = tab;
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            if crate::ui::icons::phosphor_icon_button(
+                ui,
+                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                crate::ui::theme::toolbar_icon_size(),
+                "Reset the selected tone curve",
+            )
+            .clicked()
+            {
+                match *selected_tab {
+                    ToneCurveTab::Rgb => curves.rgb.reset(),
+                    ToneCurveTab::Red => curves.red.reset(),
+                    ToneCurveTab::Green => curves.green.reset(),
+                    ToneCurveTab::Blue => curves.blue.reset(),
+                }
+                changed = true;
+            }
+        });
+    });
+
+    let (curve, color, description) = match *selected_tab {
+        ToneCurveTab::Rgb => (curves.rgb, Color32::WHITE, "Composite luminance curve"),
+        ToneCurveTab::Red => (curves.red, CHANNEL_RED, "Red channel curve"),
+        ToneCurveTab::Green => (curves.green, CHANNEL_GREEN, "Green channel curve"),
+        ToneCurveTab::Blue => (curves.blue, CHANNEL_BLUE, "Blue channel curve"),
+    };
+    ui.label(
+        egui::RichText::new(description)
+            .size(11.5)
+            .color(ui.visuals().weak_text_color()),
+    );
+    changed |= tone_curve_editor(ui, curve, color);
+    changed
 }

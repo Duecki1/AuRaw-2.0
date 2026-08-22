@@ -28,10 +28,6 @@ impl Develop {
         app: &mut AurawApp,
         frame: &eframe::Frame,
     ) {
-        // Do not steal arrow keys from focused text fields/sliders or other
-        // widgets that currently own keyboard input. Outside such focused
-        // controls, Left/Right mirrors clicking the previous/next filmstrip
-        // thumbnail and therefore follows the normal document-switch path.
         if context.egui_wants_keyboard_input() {
             return;
         }
@@ -70,10 +66,6 @@ impl Develop {
     }
 
     pub(crate) fn show_filmstrip(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
-        // Develop normally pauses catalog-wide thumbnail decoding. Polling here
-        // installs only work that was already queued or explicitly requested by
-        // visible filmstrip/reference items; the worker keeps ordinary catalog
-        // background work paused.
         app.library.poll(ui.ctx());
         sync_reference_texture(app, ui.ctx());
 
@@ -97,11 +89,6 @@ impl Develop {
             return;
         }
 
-        // Reserve the complete split canvas once, then construct each pane with
-        // an explicit max rect AND clip rect. `allocate_ui` constrains layout but
-        // its child painter inherits the parent's clip, which lets a zoomed
-        // Develop mesh spill across the divider. Shrinking the child clip here
-        // gives the edited pane a hard egui/wgpu scissor boundary.
         let (split_rect, _) = ui.allocate_exact_size(available, Sense::hover());
         let usable_width = (split_rect.width() - SPLIT_GAP).max(0.0);
         if usable_width < 2.0 {
@@ -113,9 +100,6 @@ impl Develop {
             .split_ratio
             .clamp(min_ratio, max_ratio);
 
-        // Treat the center gutter as a real drag handle. Using the pointer's
-        // absolute x position avoids accumulating `drag_delta()` across frames,
-        // and the ratio is retained when the reference image changes.
         let divider_left = split_rect.left() + usable_width * app.develop_ui.reference.split_ratio;
         let initial_divider_rect = egui::Rect::from_min_max(
             egui::pos2(divider_left, split_rect.top()),
@@ -208,9 +192,6 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
     let stride = FILMSTRIP_CARD_WIDTH + FILMSTRIP_GAP;
     let cards_width = count as f32 * stride - FILMSTRIP_GAP;
 
-    // On desktop, a one-axis horizontal ScrollArea should consume a normal
-    // vertical mouse-wheel gesture while the pointer is over it. Keep this
-    // style override local to the filmstrip UI.
     ui.style_mut().always_scroll_the_only_direction = true;
 
     egui::ScrollArea::horizontal()
@@ -219,11 +200,6 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
         .id_salt("develop-filmstrip-scroll")
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, viewport| {
-            // Keep the content bounds equal to the real thumbnail run. That
-            // lets egui clamp a center request naturally at either end: the
-            // active image is centered only when there are enough thumbnails
-            // on both sides, while first/last-nearby images stay edge-aligned
-            // instead of gaining artificial blank padding.
             let content_height = ui.available_height().max(FILMSTRIP_CARD_HEIGHT);
             let (content_rect, _) = ui.allocate_exact_size(
                 egui::vec2(cards_width.max(1.0), content_height),
@@ -231,11 +207,6 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
             );
             let items_left = content_rect.left();
 
-            // This is deliberately a one-shot request. It fires when Develop is
-            // first shown for an image, when another thumbnail becomes active,
-            // or after the filmstrip is reopened. Align::Center is clamped by
-            // the real content bounds above, so manual wheel/drag scrolling
-            // remains under user control and edge images are not force-centered.
             if let Some((index, path)) = center_request.as_ref() {
                 let x = items_left + *index as f32 * stride;
                 let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
@@ -250,13 +221,6 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
                 ui.ctx().request_repaint();
             }
 
-            // `show_viewport` reports `viewport` in scroll-content coordinates,
-            // while `content_rect`/`items_left` are screen coordinates after egui
-            // has translated the child UI by the current scroll offset. Mixing
-            // those spaces makes the offset get counted twice: as the user
-            // scrolls, the virtualized range advances faster than the cards and
-            // thumbnails disappear one-by-one. Convert the item-run origin back
-            // into the viewport's content-relative coordinate space first.
             let items_origin_in_content = items_left - ui.max_rect().left();
             let preload = viewport.expand(FILMSTRIP_PRELOAD_POINTS);
             let relative_left =
@@ -288,7 +252,6 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Fram
                 }
 
                 response.context_menu(|ui| {
-                    // Develop and both Library UIs use the exact same action menu.
                     let context_assets = [item.asset.clone()];
                     if let Some(action) =
                         library_image_context_menu(ui, app, &item.asset, &context_assets)
@@ -327,9 +290,6 @@ fn set_reference_image(app: &mut AurawApp, item: &DesktopFilmstripItem, context:
     let path = item.path.clone();
     app.develop_ui.reference.path = Some(path);
     app.develop_ui.reference.label = Some(item.asset.display_name.clone());
-    // Install the existing catalog texture immediately so Reference mode opens
-    // without a blank frame. A dedicated high-quality preview replaces it as
-    // soon as the background request completes.
     app.develop_ui.reference.texture = item.texture.clone();
     app.develop_ui.reference.texture_size = item.thumbnail_size;
     app.develop_ui.reference.high_quality = false;
@@ -424,9 +384,6 @@ fn sync_reference_texture(app: &mut AurawApp, context: &egui::Context) {
         }
     }
 
-    // Keep the existing 512 px catalog texture as an immediate placeholder.
-    // If it was evicted before Reference mode opened, ask the normal thumbnail
-    // worker to repopulate it while the high-quality request is running.
     if app.develop_ui.reference.texture.is_none() {
         if let Some(index) = app.library.filmstrip_index_for_path(&path) {
             app.library.touch_and_request_thumbnail(index, context);
@@ -448,7 +405,7 @@ fn sync_reference_texture(app: &mut AurawApp, context: &egui::Context) {
 
 fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
     egui::Frame::new()
-        .fill(Color32::from_rgb(15, 16, 18))
+        .fill(crate::ui::theme::CANVAS_BACKDROP)
         .stroke(Stroke::new(
             1.0,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
@@ -457,7 +414,7 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
             let available = ui.available_size();
             let (rect, _) = ui.allocate_exact_size(available, Sense::hover());
             let painter = ui.painter_at(rect);
-            painter.rect_filled(rect, 0.0, Color32::from_rgb(15, 16, 18));
+            painter.rect_filled(rect, 0.0, crate::ui::theme::CANVAS_BACKDROP);
 
             if let Some(texture) = app.develop_ui.reference.texture.as_ref() {
                 let texture_size = app.develop_ui.reference
@@ -564,7 +521,7 @@ fn filmstrip_thumbnail(
         Sense::click(),
     );
     let painter = ui.painter();
-    painter.rect_filled(rect, 3.0, Color32::from_rgb(17, 18, 20));
+    painter.rect_filled(rect, 3.0, crate::ui::theme::THUMBNAIL_BACKDROP);
 
     if let Some(texture) = item.texture.as_ref() {
         let image_rect = egui::Rect::from_min_max(
@@ -589,14 +546,7 @@ fn filmstrip_thumbnail(
 
     if item.developed_thumbnail_pending {
         let center = rect.right_top() + egui::vec2(-13.0, 13.0);
-        painter.circle_filled(center, 10.0, Color32::from_black_alpha(190));
-        painter.text(
-            center,
-            Align2::CENTER_CENTER,
-            egui_phosphor::regular::ARROW_CLOCKWISE,
-            FontId::proportional(13.0),
-            Color32::from_rgb(244, 142, 48),
-        );
+        crate::ui::components::pending_indicator(&painter, center, 10.0, 13.0);
     }
 
     let label_rect = egui::Rect::from_min_max(

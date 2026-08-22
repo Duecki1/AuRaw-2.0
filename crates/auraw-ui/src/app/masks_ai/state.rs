@@ -287,10 +287,6 @@ impl AurawApp {
             || self.ai.landscape_consent_open
     }
 
-    pub(crate) fn ai_masks_need_update(&self) -> bool {
-        self.ai.masks_need_update && !self.masks.stack.masks.is_empty()
-    }
-
     pub(crate) fn ai_mask_update_remaining_target_count(&self) -> usize {
         if !self.ai.mask_update_active {
             return 0;
@@ -394,9 +390,6 @@ impl AurawApp {
         let (has_subject, object_targets, landscape_targets) = self.generated_ai_mask_targets();
         let has_ranges = self.has_range_mask_targets();
         self.invalidate_generated_mask_sources();
-        // Manual/geometric masks remain intact and are immediately reused.
-        // Only source-dependent masks need regeneration against the newly
-        // corrected (or uncorrected) image geometry.
         self.ai.masks_need_update = has_subject
             || !object_targets.is_empty()
             || !landscape_targets.is_empty()
@@ -461,8 +454,6 @@ impl AurawApp {
             || !landscape_targets.is_empty()
             || update_ranges
         {
-            // Force a new canonical source because lens correction changed
-            // the image under content-aware masks.
             self.masks.source_cache = None;
             self.masks.subject_cache = None;
             self.ai.object_cache = None;

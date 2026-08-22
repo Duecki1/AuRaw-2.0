@@ -1,4 +1,3 @@
-//! Promptable object-mask inference using SAM 2.1 Hiera Tiny.
 
 use super::*;
 
@@ -8,8 +7,6 @@ pub const SAM21_ENCODER_SHA256_HEX: &str =
     "667384d1e686de6828b841ac8a24db0fafa2b3452494225f82eeedac56141230";
 pub const SAM21_DECODER_SHA256_HEX: &str =
     "c40f5aa7d37b681cd500481a85d44839fd81c93dce1e86271a2c866470d22105";
-/// Display/progress estimate only. Integrity is enforced by SHA-256, because
-/// Hugging Face's Xet response does not publish a stable Content-Length.
 pub const SAM21_MODEL_BYTES_ESTIMATE: u64 = 125_500_000;
 const SAM21_MODEL_SIZE: u32 = 1024;
 const SAM21_MASK_INPUT_SIZE: u32 = 256;
@@ -73,9 +70,6 @@ pub struct ObjectInferenceCache {
     pub high_res_feats_1: SamTensorData,
     pub image_embedding: SamTensorData,
     pub low_res_logits: std::sync::Arc<[f32]>,
-    /// Prompt state that produced `low_res_logits`. Encoder features may be
-    /// reused for any prompts in the same crop, while prior logits are only
-    /// valid when the new prompt list extends this one.
     pub prompt_strokes: Vec<crate::pipeline::ObjectStroke>,
     pub prompt_brush_size: f32,
 }
@@ -362,9 +356,6 @@ fn infer_object_mask(
     ) {
         Ok(refined) => refined,
         Err(error) => {
-            // ViTMatte is an edge refinement stage, not the source of the
-            // object selection. A provider/model failure must not discard a
-            // perfectly usable SAM mask and look like a cancelled operation.
             log::warn!(
                 "ViTMatte object-edge refinement failed; using the cleaned SAM mask: {error:#}"
             );
@@ -497,10 +488,6 @@ fn sampled_object_prompts(
             }),
     );
 
-    // A box tells SAM that the painted region is the intended object part,
-    // rather than merely one foreground sample somewhere on a larger person or
-    // connected object. Labels 2 and 3 are SAM's top-left/bottom-right box
-    // prompts.
     if prompts.len() + 2 <= limit {
         prompts.push(ObjectPrompt {
             point: focus.min,
@@ -512,10 +499,6 @@ fn sampled_object_prompts(
         });
     }
 
-    // Automatic background guards just outside the brush-sized focus box make
-    // a stroke through an arm prefer the arm instead of the nearby shoulder and
-    // torso. They remain outside the painted area and are omitted at image
-    // boundaries where clamping would move them back into the focus region.
     let width = source_width.max(1) as f32;
     let height = source_height.max(1) as f32;
     let image_min = source_width.min(source_height).max(1) as f32;
@@ -737,10 +720,6 @@ fn extract_sam_encoder_output(
             !_accelerated,
             "SAM 2.1 {label} produced {non_finite} non-finite values on the accelerated execution provider"
         );
-        // A very small number of isolated NaN/Inf values has been observed from
-        // third-party Windows ORT CPU DLLs even with conservative session
-        // settings. Replacing a handful with neutral zeros is safer than making
-        // Object Mask unusable, but never accept broadly-corrupted CPU features.
         let repair_limit = 64usize.max(data.len() / 100_000);
         anyhow::ensure!(
             non_finite <= repair_limit,
@@ -838,8 +817,6 @@ fn decode_sam_mask(
         prompts.len() <= SAM21_MAX_PROMPTS,
         "SAM 2.1 prompt count exceeds the fixed decoder budget"
     );
-    // Keep prompt tensor shapes stable so GPU execution providers can reuse
-    // compiled kernels. SAM uses label -1 for padding points.
     let mut coords = vec![0.0f32; SAM21_MAX_PROMPTS * 2];
     let mut labels = vec![-1.0f32; SAM21_MAX_PROMPTS];
     for (index, prompt) in prompts.iter().enumerate() {
@@ -1174,7 +1151,6 @@ fn keep_prompt_connected_component(
     }
 
     if !keep.iter().any(|value| *value) {
-        // Fallback: retain the largest foreground component.
         let mut largest = Vec::new();
         visited.fill(false);
         for index in 0..probabilities.len() {
@@ -1205,11 +1181,6 @@ fn keep_prompt_connected_component(
         }
     }
 
-    // SAM probabilities can contain small sub-threshold islands inside a
-    // visually solid object. Fill enclosed holes in the selected silhouette,
-    // then make the deep interior definitively opaque while keeping a narrow
-    // soft band for edge-aware/ViTMatte refinement. This prevents texture from
-    // appearing as pinholes without sacrificing hair or anti-aliased edges.
     fill_enclosed_component_holes(&mut keep, width_usize, height_usize);
     let background = keep.iter().map(|selected| !*selected).collect::<Vec<_>>();
     let near_background = dilate_component_band(&background, width_usize, height_usize, 3);
@@ -1271,8 +1242,6 @@ fn fill_enclosed_component_holes(selected: &mut [bool], width: usize, height: us
             }
         }
     }
-    // Preserve genuine large holes (for example the opening inside a handle)
-    // while removing tiny enclosed probability pinholes.
     let max_hole_area = (selected.len() / 512).clamp(32, 2048);
     let mut visited_holes = vec![false; selected.len()];
     for start in 0..selected.len() {

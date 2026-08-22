@@ -2,12 +2,13 @@ use super::basicadj::sigmoid_contrast_from_percent;
 use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
-    effect_params, export_mask_atlas_edge_limit, mask_atlas_edge, AiDenoisedImage, CfaKind,
-    canonical_remove_scene_to_pipeline_scene, model_srgb_to_display_linear_rec2020,
-    pipeline_scene_to_working_rec2020, working_rec2020_to_canonical_remove_scene, ExposureParams,
-    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, LocalMask, MaskEffect, MaskStack,
-    PointCurve, ProcessingStage, RawThumbnail, RemoveEditState, RemovePatch, RenderingIntent,
-    SigmoidParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
+    canonical_remove_scene_to_pipeline_scene, effect_params, export_mask_atlas_edge_limit,
+    mask_atlas_edge, model_srgb_to_display_linear_rec2020, pipeline_scene_to_working_rec2020,
+    working_rec2020_to_canonical_remove_scene, AiDenoisedImage, CfaKind, ExposureParams,
+    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, LocalMask,
+    MaskEffect, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RemoveEditState, RemovePatch,
+    RenderingIntent, SigmoidParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT,
+    MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -15,10 +16,12 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::gpu_errors::GpuErrorScopes;
 
+mod builder;
 mod readback;
 mod resources;
 mod shader_manager;
 
+use builder::*;
 use readback::*;
 use resources::*;
 use shader_manager::ShaderManager;
@@ -33,15 +36,12 @@ pub(super) const LIGHT_RAYS_MASK_ATLAS_EDGE: u32 = if cfg!(target_os = "android"
 } else {
     512
 };
-// The public ABI marker retains the historical monolithic payload size while
-// the runtime uses independently allocated stage uniforms.
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
 const CAMERA_UNIFORMS_SIZE_BYTES: u32 = 368;
 const SCENE_TONE_UNIFORMS_SIZE_BYTES: u32 = 768;
 const EFFECTS_UNIFORMS_SIZE_BYTES: u32 = 208;
 const GPU_STAGE_UNIFORM_SIZE_BYTES: u32 =
     CAMERA_UNIFORMS_SIZE_BYTES + SCENE_TONE_UNIFORMS_SIZE_BYTES + EFFECTS_UNIFORMS_SIZE_BYTES;
-// Resource accounting rounds each independently allocated buffer to 256 bytes.
 const GPU_STAGE_UNIFORM_ALLOCATION_BYTES: u64 = 512 + 768 + 256;
 const MASK_DATA_SIZE_BYTES: u64 = (std::mem::size_of::<MaskData>() * MAX_LOCAL_MASKS) as u64;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
@@ -54,8 +54,12 @@ fn remove_patch_coverage(patch: &RemovePatch, x: f32, y: f32) -> u8 {
     if patch.alpha.is_empty() || patch.bounds.width == 0 || patch.bounds.height == 0 {
         return 0;
     }
-    let px = x.round().clamp(0.0, patch.bounds.width.saturating_sub(1) as f32) as usize;
-    let py = y.round().clamp(0.0, patch.bounds.height.saturating_sub(1) as f32) as usize;
+    let px = x
+        .round()
+        .clamp(0.0, patch.bounds.width.saturating_sub(1) as f32) as usize;
+    let py = y
+        .round()
+        .clamp(0.0, patch.bounds.height.saturating_sub(1) as f32) as usize;
     patch.alpha[py * patch.bounds.width as usize + px]
 }
 
@@ -141,9 +145,7 @@ const COLOR_DENOISE_ENTRY_POINTS: [&str; 6] = [
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProcessingQuality {
-    /// Half-float image intermediates for lower memory use and faster previews.
     Preview,
-    /// Full-float demosaic, scene, and highlight-reconstruction intermediates.
     #[default]
     High,
 }
@@ -153,8 +155,6 @@ fn expected_pass_count(cfa_kind: CfaKind) -> usize {
         CfaKind::Bayer => 6,
         CfaKind::XTrans => 10,
     };
-    // One highlight reconstruction pass, demosaic, six colour-denoise scales,
-    // four tone-analysis passes, and eighteen adjustment/output passes.
     1 + demosaic_passes + COLOR_DENOISE_ENTRY_POINTS.len() + 4 + 18
 }
 
@@ -289,8 +289,6 @@ struct SceneToneUniforms {
     grade_highlights: [f32; 4],
     grade_global: [f32; 4],
     grade_options: [f32; 4],
-    // WGSL mat3x3 uniform columns have a 16-byte stride. The fourth value in
-    // every Rust column is explicit padding and is ignored by the shader.
     rec2020_to_xyz: [[f32; 4]; 3],
     xyz_to_rec2020: [[f32; 4]; 3],
     xyz_to_bradford: [[f32; 4]; 3],
@@ -477,9 +475,6 @@ fn pack_view_color_options(grading: crate::pipeline::ColorGrading, hue: f32) -> 
 fn canonicalize_green_noise(mut coefficients: [f32; 4], green2_present: bool) -> [f32; 4] {
     if green2_present {
         let green = 0.5 * (coefficients[1] + coefficients[3]);
-        // Keep both green slots canonical. The dual-demosaic shader averages
-        // G1/G2 once; retaining the original G2 in alpha would bias the result
-        // to 25% G1 / 75% G2 after a second average.
         coefficients[1] = green;
         coefficients[3] = green;
     }
@@ -548,7 +543,9 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
                 [
                     effect_params::lens_blur::AMOUNT.clamp(effect.amount),
                     effect_params::lens_blur::RADIUS.clamp(effect.radius),
-                    effect_params::lens_blur::BLADES.clamp(effect.blades).round(),
+                    effect_params::lens_blur::BLADES
+                        .clamp(effect.blades)
+                        .round(),
                     effect_params::lens_blur::ROTATION.clamp(effect.rotation),
                 ],
                 [
@@ -622,12 +619,7 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
                     effect_params::edge_glow::DETAIL.clamp(effect.detail),
                     effect_params::edge_glow::GLOW.clamp(effect.glow),
                 ],
-                [
-                    color[0],
-                    color[1],
-                    color[2],
-                    0.0,
-                ],
+                [color[0], color[1], color[2], 0.0],
                 zero,
             )
         }
@@ -643,12 +635,7 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
                     effect_params::glow::CORE.clamp(effect.core),
                     0.0,
                 ],
-                [
-                    color[0],
-                    color[1],
-                    color[2],
-                    0.0,
-                ],
+                [color[0], color[1], color[2], 0.0],
                 zero,
             )
         }
@@ -768,8 +755,6 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
 
 fn pack_adjustment_mask(mask: &LocalMask) -> MaskData {
     let adjustment = mask.adjustments;
-    // Non-adjustment effect types retain adjustment values for reversible UI
-    // switching, but only the Adjustment variant is allowed to apply them.
     let adjustment_enabled = mask.enabled && mask.effect.uses_adjustments();
     let has_hsl = adjustment.has_color_mixer();
     let curve_flags = adjustment.curve_feature_flags();
@@ -855,8 +840,6 @@ fn pack_camera_params(ctx: &GpuParamContext<'_>) -> CameraUniforms {
         profile_layout.hue_sat_2
     );
     let highlight_method = if raw.is_pre_demosaiced_raster() {
-        // Highlight reconstruction is a sensor/CFA operation. A rendered
-        // TIFF already supplies RGB scene values, including any HDR headroom.
         0.0
     } else {
         shader_highlight_method(raw.cfa_kind, exposure.highlight_method)
@@ -898,8 +881,7 @@ fn pack_camera_params(ctx: &GpuParamContext<'_>) -> CameraUniforms {
         } else {
             0.0
         },
-        _pad_1: if !raw.is_pre_demosaiced_raster() || raster_uses_scene_view_transform(exposure)
-        {
+        _pad_1: if !raw.is_pre_demosaiced_raster() || raster_uses_scene_view_transform(exposure) {
             1.0
         } else {
             0.0
@@ -963,8 +945,6 @@ fn pack_scene_tone_params(ctx: &GpuParamContext<'_>) -> SceneToneUniforms {
     let mut sigmoid_params = exposure.sigmoid;
     sigmoid_params.contrast = sigmoid_contrast_from_percent(exposure.contrast);
     let sigmoid = sigmoid_coefficients(sigmoid_params);
-    // Sigmoid is the single view transform, so Contrast changes its
-    // middle-grey slope without switching view operators.
     let (hsl_hue_0, hsl_hue_1) = split_eight(exposure.hsl_hue);
     let (hsl_saturation_0, hsl_saturation_1) = split_eight(exposure.hsl_saturation);
     let (hsl_luminance_0, hsl_luminance_1) = split_eight(exposure.hsl_luminance);
@@ -1058,10 +1038,6 @@ fn pack_effect_params(ctx: &GpuParamContext<'_>, mask_data: &[MaskData]) -> Effe
         full_height,
         ..
     } = ctx.tile;
-    // Global and masked Glow share one linear diffusion chain. Using the
-    // widest active request preserves every halo's support while avoiding
-    // another full-resolution texture stack for a non-destructive local
-    // effect.
     let local_glow_radius = mask_data
         .iter()
         .filter(|mask| {
@@ -1156,11 +1132,6 @@ impl GpuParams {
         let center_u = (crop[0] + crop[2]) * 0.5;
         let center_v = (crop[1] + crop[3]) * 0.5;
 
-        // Match GeometryInverseMap / preview geometry exactly: forward mapping
-        // is quarter-turn * rotation * shear * flip. Convert source-normalized
-        // deltas directly into final-frame normalized deltas so the shader can
-        // evaluate the vignette before geometry resampling without baking it
-        // into the source image's orientation.
         let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
         let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
         let shx = geometry.horizontal_transform.to_radians().tan();
@@ -1212,14 +1183,8 @@ impl GpuParams {
         self
     }
 
-    /// Maps the normalized local-mask atlas to a source-image sub-rectangle.
-    /// Coordinates are packed as UNORM16 pairs into fields that were already
-    /// reserved in the GPU ABI, giving sub-pixel precision on ordinary RAWs
-    /// without growing the scene-tone uniform block.
     pub fn with_mask_uv_rect(mut self, rect: [f32; 4]) -> Self {
         self.set_mask_uv_rect(rect);
-        // All atlas texels are valid. This sentinel avoids coupling ordinary
-        // callers to a pipeline's texture dimensions.
         self.scene_tone.mask_counts[3] = u32::MAX;
         self
     }
@@ -1259,14 +1224,6 @@ impl GpuParams {
     }
 
     fn needs_intermediate_adjustment_passes(&self) -> bool {
-        // Saturation and Vibrance live in apply_scene_effects_node alongside the
-        // presence controls. They must therefore keep the intermediate passes
-        // enabled even when Texture, Clarity, Dehaze, and Glow are all neutral.
-        // Vignette runs in the always-dispatched display-linear view pass.
-        // Capture sharpening now lives in the always-run pre-tone sharpen/tone
-        // pass and must not force these later optional passes.
-        // Omitting Saturation/Vibrance here made both global color
-        // sliders a no-op.
         let global_effects = self.scene_tone.saturation.abs() > 1e-6
             || self.scene_tone.vibrance.abs() > 1e-6
             || self.effects.presence[..3]
@@ -1297,12 +1254,6 @@ impl GpuParams {
                 return true;
             }
 
-            // The local tone shader is physically part of the optional
-            // intermediate chain. Keep that chain scheduled when any control
-            // handled by apply_local_scene_tone_node is active. Exposure is
-            // already applied by prepare_scene_node, Blacks is deferred to the
-            // display-linear view node, and local mixer/grading run in the
-            // always-dispatched view pass, so none of those need this gate.
             let tone = local.adjust_0[1..].iter().any(|value| value.abs() > 1e-6);
             let white_balance = local.adjust_1[0].abs() > 1e-6
                 || local.adjust_1[2].abs() > 1e-6
@@ -1377,7 +1328,6 @@ pub struct RawGpuProgramTemplate {
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
 }
 
-/// Prewarm state.
 #[derive(Default)]
 pub struct GpuProgramPrewarm {
     result: Mutex<Option<std::result::Result<Arc<RawGpuProgramTemplate>, String>>>,
@@ -1416,9 +1366,6 @@ impl GpuProgramPrewarm {
     }
 }
 
-/// A GPU-resident snapshot of the global tone-analysis anchors from a
-/// full-frame preview pipeline. Local context renders can inherit these
-/// anchors without reading them back to the CPU.
 pub struct ToneStatisticsSnapshot {
     buffer: wgpu::Buffer,
 }
@@ -1487,13 +1434,9 @@ pub struct RawGpuPipeline {
     out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
-    // Declared last so GPU textures/buffers are dropped before process-wide
-    // admission capacity is returned.
     _gpu_budget_reservation: GpuBudgetReservation,
 }
 
-/// A cheap, thread-safe handle to one completed display output. Reading it on
-/// a worker keeps thumbnail cache refreshes off the render thread.
 #[derive(Clone)]
 pub struct GpuOutputSnapshot {
     texture: wgpu::Texture,
@@ -1571,8 +1514,6 @@ impl RawGpuPipeline {
                 }
             }
             Err(_) => {
-                // A poisoned cache must not prevent rendering. Fall back to a
-                // complete upload while preserving the stage-specific buffers.
                 queue.write_buffer(&self.camera_uniforms_buffer, 0, params.camera_bytes());
                 queue.write_buffer(
                     &self.scene_tone_uniforms_buffer,
@@ -1607,11 +1548,6 @@ impl RawGpuPipeline {
         }
     }
 
-    /// Compiles the complete interactive preview compute program set against a
-    /// tiny synthetic RAW. The returned pipeline is only a program template:
-    /// later real RAWs allocate their own textures/bind groups while cloning
-    /// these already-compiled compute pipeline handles. This keeps startup
-    /// prewarming independent of image resolution and has no effect on output.
     pub fn prewarm_preview_template(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1636,10 +1572,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Compiles the complete full-quality export compute program set against a
-    /// tiny synthetic RAW. The returned pipeline is retained only as a program
-    /// template, allowing tiled export to clone already-compiled pipeline
-    /// handles while allocating its own image-sized resources and mask atlas.
     pub fn prewarm_export_program_template_with_cache(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1807,9 +1739,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Creates a headless pipeline with an explicit normalized-mask atlas edge.
-    /// Full-quality export uses a larger atlas than the interactive preview so
-    /// fine mask edges are not limited to preview resolution.
     pub fn new_headless_with_quality_and_mask_edge(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1833,10 +1762,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Allocates a new set of textures and bind groups while reusing the
-    /// already-compiled compute programs from another pipeline with the same
-    /// CFA family and processing quality. This avoids recompiling the complete
-    /// RAW pipeline whenever the zoomed preview moves to a new crop.
     pub fn new_headless_reusing_programs(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1859,9 +1784,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Reuses compiled programs while allocating a smaller local-mask atlas.
-    /// This is intended for the very-low-resolution full-frame navigation proxy,
-    /// where a 2048px atlas would cost more CPU/GPU work than the image itself.
     pub fn new_headless_reusing_programs_with_mask_edge(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1887,8 +1809,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Allocates export-sized resources while cloning compute pipelines from a
-    /// lightweight startup-prewarmed program template.
     pub fn new_headless_reusing_program_template_with_mask_edge(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1913,9 +1833,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Reuses an owned program template for a normal interactive preview.
-    /// Keeping this template separate from image-sized textures lets preview
-    /// surfaces be replaced without recompiling the complete shader graph.
     pub fn new_headless_reusing_program_template(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1962,39 +1879,7 @@ impl RawGpuPipeline {
             }
         }
 
-        let size = texture_size(raw.width, raw.height);
-        let work_format = processing_work_format(quality);
-        let demosaic_format = work_format;
-        let highlight_work_format = work_format;
-        let tone_scale = tone_analysis_scale();
-        let tone_size = texture_size(
-            raw.width.div_ceil(tone_scale),
-            raw.height.div_ceil(tone_scale),
-        );
-        let tone_format = tone_guide_format();
-        let image_workgroups = dispatch_for_extent(raw.width, raw.height);
-        let tone_workgroups = dispatch_for_extent(tone_size.width, tone_size.height);
-        let single_workgroup = [1, 1, 1];
-
-        // A full-frame mask atlas cannot add spatial detail beyond the image
-        // it masks. Capping it to the current proxy avoids reserving a 2048²
-        // texture for every layer of an 800px preview (and, importantly, for
-        // the tiny startup prewarm pipeline). Explicit detail/export atlases
-        // keep their caller-selected resolution.
-        let mask_atlas_edge = config
-            .mask_atlas_edge_override
-            .unwrap_or_else(|| interactive_mask_atlas_edge(raw.width, raw.height))
-            .clamp(64, export_mask_atlas_edge_limit());
-        let mask_layer_capacity = if config.mask_atlas_edge_override.is_some() {
-            // Viewport detail and export both use explicit atlas sizes and can
-            // allocate exactly the layers they will sample. This is what makes
-            // a dense cropped detail atlas affordable alongside the main
-            // preview; the ordinary full-frame interactive pipeline keeps all
-            // 32 slots so adding common masks remains instant.
-            (params.scene_tone.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
-        } else {
-            MAX_LOCAL_MASKS
-        };
+        let geometry = compute_derived_geometry(raw, params, quality, config);
 
         let default_output_transform = IccOutputTransform::srgb();
         let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
@@ -2012,9 +1897,9 @@ impl RawGpuPipeline {
             width: raw.width,
             height: raw.height,
             quality,
-            tone_scale,
-            mask_atlas_edge,
-            mask_layers: u32::try_from(mask_layer_capacity)
+            tone_scale: tone_analysis_scale(),
+            mask_atlas_edge: geometry.mask_atlas_edge,
+            mask_layers: u32::try_from(geometry.mask_layer_capacity)
                 .map_err(|_| anyhow!("mask layer capacity does not fit in u32"))?,
             profile_buffer_bytes: profile_buffer_size_bytes,
             stage_uniform_buffer_bytes: GPU_STAGE_UNIFORM_ALLOCATION_BYTES,
@@ -2023,1531 +1908,63 @@ impl RawGpuPipeline {
         let gpu_budget_reservation =
             GpuBudgetReservation::acquire(&resource_plan, gpu_working_set_limit_bytes())?;
 
-        // wgpu's create_* methods do not return allocation errors. Capture the
-        // complete construction sequence so a driver OOM becomes this
-        // constructor's Result instead of reaching wgpu's fatal default handler.
         let gpu_error_scopes = GpuErrorScopes::push(device);
 
-        // Admission succeeds before the first device allocation, including all
-        // other live main/detail/navigation/headless pipelines in this process. Every persistent
-        // allocation below has a corresponding named entry in `resource_plan`;
-        // on-demand conversion/readback peaks and the 20% safety margin are also
-        // reserved before construction begins.
         let ai_image = raw.ai_denoised_image();
         let ai_cfa = params
             .uses_ai_denoise()
             .then(|| ai_image.as_ref().and_then(AiDenoisedImage::bayer_cfa))
             .flatten();
         let has_ai_cfa = ai_cfa.is_some();
-        let raw_texture = create_raw_texture(
-            device,
-            queue,
-            raw,
-            ai_cfa.unwrap_or(raw.raw_pixels.as_slice()),
-        );
-        let color_texture = create_color_texture(device, queue, raw);
-        let black_texture = create_black_texture(device, queue, raw);
-
-        // All demosaic stages sample this canonical reconstructed CFA.
-        let reconstructed_raw_texture = create_processing_texture(
-            device,
-            size,
-            wgpu::TextureFormat::R32Float,
-            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            "auraw reconstructed raw CFA",
-        );
-
-        // Shared demosaic work surfaces. Bayer dual mode and X-Trans reuse
-        // these after highlight reconstruction has written the canonical CFA.
-        let highlight_work_a = create_float_work_texture(
-            device,
-            size,
-            highlight_work_format,
-            "auraw highlight work A",
-        );
-        let highlight_work_b = create_float_work_texture(
-            device,
-            size,
-            highlight_work_format,
-            "auraw highlight work B",
-        );
-
-        // Preserve a scene-linear camera-RGB result between demosaic and the
-        // display pass. This lets local controls read true
-        // RGB neighbourhoods instead of raw Bayer samples.
-        let scene_texture = create_demosaic_texture(
-            device,
-            size,
-            demosaic_format,
-            "auraw scene-linear camera RGB",
-        );
+        let (surfaces, has_ai_scene) =
+            create_pipeline_surfaces(device, queue, raw, ai_cfa, &geometry)?;
         let has_raster_scene = raw.is_pre_demosaiced_raster();
-        let has_ai_scene = upload_ai_scene_texture(queue, &scene_texture, demosaic_format, raw)?;
 
-        // The final creative result is tone-mapped into display-linear Rec.2020
-        // before any output transfer function is applied. Export reads this
-        // surface so resizing happens after demosaic/tone processing and before
-        // sRGB encoding.
-        let display_linear_texture =
-            create_demosaic_texture(device, size, work_format, "auraw display-linear Rec.2020");
-
-        let out_texture = create_processing_texture(
+        let buffers = create_pipeline_buffers(
             device,
-            size,
-            wgpu::TextureFormat::Rgba8Unorm,
-            wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            "auraw output texture",
+            params,
+            &profile_gpu_data.words,
+            profile_gpu_data.layout.output[3],
         );
 
-        let tex1 = create_demosaic_texture(device, size, demosaic_format, "auraw tex1");
-        let tex2 = create_demosaic_texture(device, size, demosaic_format, "auraw tex2");
-        let tone_guide_a = create_tone_guide_texture(
+        let layouts = create_bind_group_layouts(
             device,
-            tone_size,
-            tone_format,
-            "auraw adaptive tone guide A",
+            program_template,
+            raw.cfa_kind,
+            geometry.demosaic_format,
+            geometry.work_format,
+            geometry.tone_format,
         );
-        let tone_guide_b = create_tone_guide_texture(
+        let groups = create_bind_groups(device, &layouts, &buffers, &surfaces, raw.cfa_kind);
+
+        let shaders = load_shader_set(
             device,
-            tone_size,
-            tone_format,
-            "auraw adaptive tone guide B",
-        );
-        // The ordinary full-frame interactive pipeline reserves all 32 layers
-        // so masks can be added without rebuilding it. Explicit-edge detail and
-        // export pipelines allocate only the layers they actually sample.
-        let mask_texture = create_processing_texture_array(
-            device,
-            mask_atlas_edge,
-            mask_atlas_edge,
-            mask_layer_capacity as u32,
-            wgpu::TextureFormat::R16Float,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            "auraw normalized local-mask atlas",
-        );
-        // Light Rays needs the same full-image emission field in the fit
-        // preview, zoom-detail crops, and independently processed export tiles.
-        // A compact dedicated atlas is sufficient because shafts intentionally
-        // integrate and soften their source over a long distance.
-        let light_rays_mask_texture = create_processing_texture_array(
-            device,
-            LIGHT_RAYS_MASK_ATLAS_EDGE,
-            LIGHT_RAYS_MASK_ATLAS_EDGE,
-            mask_layer_capacity as u32,
-            wgpu::TextureFormat::R16Float,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            "auraw full-image Light Rays emission atlas",
-        );
-        // Do not upload an all-zero atlas here. With 32 supported layers that would
-        // create a very large temporary CPU allocation. Every active layer is uploaded
-        // before the first recompute, and shaders never sample layers beyond mask_counts.x.
-
-        let out_view = default_texture_view(&out_texture);
-        let display_linear_view = default_texture_view(&display_linear_texture);
-        let reconstructed_raw_view = default_texture_view(&reconstructed_raw_texture);
-        let highlight_work_a_view = default_texture_view(&highlight_work_a);
-        let highlight_work_b_view = default_texture_view(&highlight_work_b);
-        let scene_view = default_texture_view(&scene_texture);
-        let tex1_view = default_texture_view(&tex1);
-        let tex2_view = default_texture_view(&tex2);
-        let tone_guide_a_view = default_texture_view(&tone_guide_a);
-        let tone_guide_b_view = default_texture_view(&tone_guide_b);
-        let raw_view = default_texture_view(&raw_texture);
-        let color_view = default_texture_view(&color_texture);
-        let black_view = default_texture_view(&black_texture);
-        let mask_view = mask_texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("auraw local-mask array view"),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let light_rays_mask_view =
-            light_rays_mask_texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("auraw full-image Light Rays mask array view"),
-                dimension: Some(wgpu::TextureViewDimension::D2Array),
-                ..Default::default()
-            });
-        let mask_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("auraw local-mask linear sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let output_lut_offset_bytes =
-            u64::from(profile_gpu_data.layout.output[3]) * std::mem::size_of::<[f32; 4]>() as u64;
-        let profile_buffer = create_initialized_buffer(
-            device,
-            "auraw DCP and ICC profile LUTs",
-            bytemuck::cast_slice(&profile_gpu_data.words),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
-
-        let camera_uniforms_buffer = create_initialized_buffer(
-            device,
-            "auraw camera uniforms",
-            params.camera_bytes(),
-            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        );
-        let scene_tone_uniforms_buffer = create_initialized_buffer(
-            device,
-            "auraw scene-tone uniforms",
-            params.scene_tone_bytes(),
-            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        );
-        let effects_uniforms_buffer = create_initialized_buffer(
-            device,
-            "auraw effects uniforms",
-            params.effects_bytes(),
-            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        );
-        let mask_data_buffer = create_initialized_buffer(
-            device,
-            "auraw local-mask data",
-            params.mask_data_bytes(),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
-
-        let tone_histogram_buffer = create_gpu_buffer(
-            device,
-            "auraw tone histogram",
-            256 * std::mem::size_of::<u32>() as u64,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
-        let tone_stats_buffer = create_gpu_buffer(
-            device,
-            "auraw tone statistics",
-            TONE_STATS_SIZE_BYTES,
-            wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        );
-
-        let common_entries = [
-            buffer_entry(0),
-            texture_entry(1, wgpu::TextureSampleType::Uint),
-            texture_entry(2, wgpu::TextureSampleType::Uint),
-            texture_entry(19, wgpu::TextureSampleType::Float { filterable: false }),
-        ];
-
-        // Groups 1 and 2 are intentionally identical for every compute
-        // pipeline. Reusing them across passes isolates scene-tone and effects
-        // updates from the camera/raw resource bind groups in group 0.
-        let bgl_scene_tone = program_template
-            .map(|template| template.pipelines[0].get_bind_group_layout(1))
-            .unwrap_or_else(|| {
-                create_bind_group_layout(
-                    device,
-                    "bgl scene-tone uniforms",
-                    &[buffer_entry(0)],
-                )
-            });
-        let bgl_effects = program_template
-            .map(|template| template.pipelines[0].get_bind_group_layout(2))
-            .unwrap_or_else(|| {
-                create_bind_group_layout(device, "bgl effects uniforms", &[buffer_entry(0)])
-            });
-
-        let scene_tone_bind_group = create_bind_group(
-            device,
-            "bg scene-tone uniforms",
-            &bgl_scene_tone,
-            &[buffer_binding(0, &scene_tone_uniforms_buffer)],
-        );
-        let effects_bind_group = create_bind_group(
-            device,
-            "bg effects uniforms",
-            &bgl_effects,
-            &[buffer_binding(0, &effects_uniforms_buffer)],
-        );
-
-        let demosaic_start_for_programs = 1;
-        let demosaic_high_pass_count = match raw.cfa_kind {
-            CfaKind::Bayer => 3,
-            CfaKind::XTrans => 7,
-        };
-        let dual_green_for_programs = demosaic_start_for_programs + demosaic_high_pass_count;
-        let dual_rgb_for_programs = dual_green_for_programs + 1;
-        let demosaic_finish_for_programs = dual_rgb_for_programs + 1;
-        let color_denoise_for_programs = demosaic_finish_for_programs + 1;
-        let tone_prepare_for_programs =
-            color_denoise_for_programs + COLOR_DENOISE_ENTRY_POINTS.len();
-        let adjustment_prepare_for_programs = tone_prepare_for_programs + 4;
-        let reused_layout = |pass_index: usize| {
-            program_template.map(|template| template.pipelines[pass_index].get_bind_group_layout(0))
-        };
-
-        let bgl_highlights = reused_layout(0).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl highlights", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    storage_texture_entry(
-                        3,
-                        wgpu::TextureFormat::R32Float,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl1 = reused_layout(demosaic_start_for_programs).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl1", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        4,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl2 = reused_layout(demosaic_start_for_programs + 1).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl2", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        6,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl3 = reused_layout(demosaic_start_for_programs + 2).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl3", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        8,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl_dual_green = reused_layout(dual_green_for_programs).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl dual demosaic green", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        20,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl_dual_rgb = reused_layout(dual_rgb_for_programs).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl dual demosaic rgb", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(21, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        22,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl4 = (matches!(raw.cfa_kind, CfaKind::Bayer)
-            .then(|| reused_layout(demosaic_finish_for_programs))
-            .flatten())
-        .unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl4", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(23, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        10,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        // X-Trans Markesteijn-3 uses the two highlight work textures as
-        // derivative scratch after highlight reconstruction has finalized.
-        // This retains the reference eight-direction homogeneity stages without
-        // allocating eight full-resolution RGB candidate images.
-        let bgl_xtrans_derivatives = (matches!(raw.cfa_kind, CfaKind::XTrans)
-            .then(|| reused_layout(demosaic_start_for_programs + 4))
-            .flatten())
-        .unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl X-Trans derivatives", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        20,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                    storage_texture_entry(
-                        21,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl_xtrans_homogeneity = (matches!(raw.cfa_kind, CfaKind::XTrans)
-            .then(|| reused_layout(demosaic_start_for_programs + 5))
-            .flatten())
-        .unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl X-Trans homogeneity", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(27, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(28, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        24,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                    storage_texture_entry(
-                        25,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl_xtrans_accumulate = (matches!(raw.cfa_kind, CfaKind::XTrans)
-            .then(|| reused_layout(demosaic_start_for_programs + 6))
-            .flatten())
-        .unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl X-Trans accumulate", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(29, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(30, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        26,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl_xtrans_finish = (matches!(raw.cfa_kind, CfaKind::XTrans)
-            .then(|| reused_layout(demosaic_finish_for_programs))
-            .flatten())
-        .unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl X-Trans finish", &[
-                    common_entries[0],
-                    common_entries[1],
-                    common_entries[2],
-                    common_entries[3],
-                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
-                    texture_entry(23, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(
-                        10,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                ])
-        });
-
-        let bgl_color_denoise = reused_layout(color_denoise_for_programs).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl multiscale color denoise", &[
-                    buffer_entry(0),
-                    storage_texture_entry(
-                        10,
-                        demosaic_format,
-                        wgpu::StorageTextureAccess::WriteOnly,
-                    ),
-                    texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                ])
-        });
-
-        let bgl_tone_prepare = reused_layout(tone_prepare_for_programs).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl tone prepare", &[
-                    buffer_entry(0),
-                    texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_buffer_entry(15, false),
-                    storage_buffer_entry(20, true),
-                    storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
-                ])
-        });
-
-        let bgl_tone_blur = reused_layout(tone_prepare_for_programs + 1).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl tone guide blur", &[
-                    buffer_entry(0),
-                    texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
-                    storage_texture_entry(18, tone_format, wgpu::StorageTextureAccess::WriteOnly),
-                ])
-        });
-
-        let bgl_tone_reduce = reused_layout(tone_prepare_for_programs + 3).unwrap_or_else(|| {
-            create_bind_group_layout(device, "bgl tone histogram reduction", &[
-                    storage_buffer_entry(15, false),
-                    storage_buffer_entry(16, false),
-                ])
-        });
-
-        let bgl_adjust_prepare =
-            reused_layout(adjustment_prepare_for_programs).unwrap_or_else(|| {
-                create_bind_group_layout(device, "bgl scene preparation", &[
-                        common_entries[0],
-                        common_entries[1],
-                        common_entries[2],
-                        common_entries[3],
-                        texture_entry(11, wgpu::TextureSampleType::Float { filterable: false }),
-                        storage_texture_entry(
-                            21,
-                            work_format,
-                            wgpu::StorageTextureAccess::WriteOnly,
-                        ),
-                        storage_buffer_entry(16, true),
-                        texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
-                        storage_buffer_entry(20, true),
-                        texture_array_entry(
-                            27,
-                            wgpu::TextureSampleType::Float { filterable: true },
-                        ),
-                        sampler_entry(28),
-                        storage_buffer_entry(33, true),
-                    ])
-            });
-
-        let bgl_adjust_tone =
-            reused_layout(adjustment_prepare_for_programs + 1).unwrap_or_else(|| {
-                create_bind_group_layout(device, "bgl scene tone edits", &[
-                        buffer_entry(0),
-                        texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
-                        storage_texture_entry(
-                            23,
-                            work_format,
-                            wgpu::StorageTextureAccess::WriteOnly,
-                        ),
-                        storage_buffer_entry(16, true),
-                        texture_entry(17, wgpu::TextureSampleType::Float { filterable: false }),
-                        storage_buffer_entry(20, true),
-                        texture_array_entry(
-                            27,
-                            wgpu::TextureSampleType::Float { filterable: true },
-                        ),
-                        sampler_entry(28),
-                        storage_buffer_entry(33, true),
-                    ])
-            });
-
-        let bgl_adjust_effects =
-            reused_layout(adjustment_prepare_for_programs + 3).unwrap_or_else(|| {
-                create_bind_group_layout(device, "bgl scene presence and color", &[
-                        buffer_entry(0),
-                        texture_entry(22, wgpu::TextureSampleType::Float { filterable: false }),
-                        storage_texture_entry(
-                            23,
-                            work_format,
-                            wgpu::StorageTextureAccess::WriteOnly,
-                        ),
-                        storage_buffer_entry(16, true),
-                        texture_array_entry(
-                            27,
-                            wgpu::TextureSampleType::Float { filterable: true },
-                        ),
-                        sampler_entry(28),
-                        storage_buffer_entry(33, true),
-                    ])
-            });
-
-        let bgl_mask_blur =
-            reused_layout(adjustment_prepare_for_programs + 5).unwrap_or_else(|| {
-                create_bind_group_layout(device, "bgl mask Blur diffusion", &[
-                        buffer_entry(0),
-                        texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
-                        storage_texture_entry(
-                            25,
-                            work_format,
-                            wgpu::StorageTextureAccess::WriteOnly,
-                        ),
-                        texture_array_entry(
-                            27,
-                            wgpu::TextureSampleType::Float { filterable: true },
-                        ),
-                        sampler_entry(28),
-                        storage_buffer_entry(33, true),
-                    ])
-            });
-
-        let bgl_glow_prepare =
-            reused_layout(adjustment_prepare_for_programs + 10).unwrap_or_else(|| {
-                create_bind_group_layout(device, "bgl Glow source extraction", &[
-                        buffer_entry(0),
-                        texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
-                        storage_texture_entry(
-                            31,
-                            work_format,
-                            wgpu::StorageTextureAccess::WriteOnly,
-                        ),
-                        texture_array_entry(
-                            27,
-                            wgpu::TextureSampleType::Float { filterable: true },
-                        ),
-                        sampler_entry(28),
-                        storage_buffer_entry(33, true),
-                    ])
-            });
-
-        let bgl_glow_blur =
-            reused_layout(adjustment_prepare_for_programs + 11).unwrap_or_else(|| {
-                create_bind_group_layout(device, "bgl Glow diffusion", &[
-                        buffer_entry(0),
-                        texture_entry(30, wgpu::TextureSampleType::Float { filterable: false }),
-                        storage_texture_entry(
-                            31,
-                            work_format,
-                            wgpu::StorageTextureAccess::WriteOnly,
-                        ),
-                    ])
-            });
-
-        let bgl_adjust_creative = reused_layout(adjustment_prepare_for_programs + 16)
-            .unwrap_or_else(|| {
-                create_bind_group_layout(device, "bgl creative glow", &[
-                        buffer_entry(0),
-                        texture_entry(24, wgpu::TextureSampleType::Float { filterable: false }),
-                        storage_texture_entry(
-                            25,
-                            work_format,
-                            wgpu::StorageTextureAccess::WriteOnly,
-                        ),
-                        texture_entry(30, wgpu::TextureSampleType::Float { filterable: false }),
-                        texture_array_entry(
-                            27,
-                            wgpu::TextureSampleType::Float { filterable: true },
-                        ),
-                        sampler_entry(28),
-                        storage_buffer_entry(33, true),
-                        texture_array_entry(
-                            34,
-                            wgpu::TextureSampleType::Float { filterable: true },
-                        ),
-                    ])
-            });
-
-        let bgl_adjust_render = create_bind_group_layout(device, "bgl scene look view and output", &[
-                buffer_entry(0),
-                storage_texture_entry(
-                    12,
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    wgpu::StorageTextureAccess::WriteOnly,
-                ),
-                texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
-                // The final DCP/view shoulder reads the cached scene percentiles
-                // to choose a headroom-aware highlight knee. Keep binding 16 in
-                // this entry point's layout even though earlier adjustment passes
-                // already bind the same tone-statistics buffer independently.
-                storage_buffer_entry(16, true),
-                storage_buffer_entry(20, true),
-                texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
-                sampler_entry(28),
-                storage_texture_entry(29, work_format, wgpu::StorageTextureAccess::WriteOnly),
-                storage_buffer_entry(33, true),
-            ]);
-        let bgl_adjust_render =
-            reused_layout(adjustment_prepare_for_programs + 17).unwrap_or(bgl_adjust_render);
-
-        let bg_highlights = create_bind_group(device, "bg highlight reconstruction", &bgl_highlights, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-            ]);
-
-        let bg1 = create_bind_group(device, "bg1", &bgl1, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(4, &tex1_view),
-            ]);
-
-        let bg2 = create_bind_group(device, "bg2", &bgl2, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(5, &tex1_view),
-                texture_binding(6, &tex2_view),
-            ]);
-
-        let bg3 = create_bind_group(device, "bg3", &bgl3, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(7, &tex2_view),
-                texture_binding(8, &tex1_view),
-            ]);
-
-        let (dual_green_view, dual_low_view) = match raw.cfa_kind {
-            CfaKind::Bayer => (&highlight_work_a_view, &highlight_work_b_view),
-            CfaKind::XTrans => (&tex1_view, &tex2_view),
-        };
-
-        let bg_dual_green = create_bind_group(device, "bg dual demosaic green", &bgl_dual_green, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(20, dual_green_view),
-            ]);
-
-        let bg_dual_rgb = create_bind_group(device, "bg dual demosaic rgb", &bgl_dual_rgb, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(21, dual_green_view),
-                texture_binding(22, dual_low_view),
-            ]);
-
-        let bg4 = create_bind_group(device, "bg4", &bgl4, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(7, &tex2_view),
-                texture_binding(9, &tex1_view),
-                texture_binding(23, dual_low_view),
-                texture_binding(10, &scene_view),
-            ]);
-
-        let bg_xtrans_derivatives = create_bind_group(device, "bg X-Trans derivatives", &bgl_xtrans_derivatives, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(9, &tex2_view),
-                texture_binding(20, &highlight_work_a_view),
-                texture_binding(21, &highlight_work_b_view),
-            ]);
-
-        let bg_xtrans_homogeneity = create_bind_group(device, "bg X-Trans homogeneity", &bgl_xtrans_homogeneity, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(27, &highlight_work_a_view),
-                texture_binding(28, &highlight_work_b_view),
-                texture_binding(24, &tex1_view),
-                texture_binding(25, &scene_view),
-            ]);
-
-        let bg_xtrans_accumulate = create_bind_group(device, "bg X-Trans accumulate", &bgl_xtrans_accumulate, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(9, &tex2_view),
-                texture_binding(29, &tex1_view),
-                texture_binding(30, &scene_view),
-                texture_binding(26, &highlight_work_a_view),
-            ]);
-
-        let bg_xtrans_finish = create_bind_group(device, "bg X-Trans finish", &bgl_xtrans_finish, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(3, &reconstructed_raw_view),
-                texture_binding(26, &highlight_work_a_view),
-                texture_binding(23, dual_low_view),
-                texture_binding(10, &scene_view),
-            ]);
-
-        let make_color_denoise_bind_group =
-            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
-                create_bind_group(device, label, &bgl_color_denoise, &[
-                        buffer_binding(0, &camera_uniforms_buffer),
-                        texture_binding(10, write_view),
-                        texture_binding(11, read_view),
-                    ])
-            };
-        // Six passes end back in scene_texture. Disabled Fast/Balanced scales
-        // are explicit copies so every quality setting has identical parity.
-        let bg_color_denoise_0 =
-            make_color_denoise_bind_group("bg color denoise scale 1", &scene_view, &tex1_view);
-        let bg_color_denoise_1 =
-            make_color_denoise_bind_group("bg color denoise scale 2", &tex1_view, &tex2_view);
-        let bg_color_denoise_2 =
-            make_color_denoise_bind_group("bg color denoise scale 4", &tex2_view, &tex1_view);
-        let bg_color_denoise_3 =
-            make_color_denoise_bind_group("bg color denoise scale 8", &tex1_view, &tex2_view);
-        let bg_color_denoise_4 =
-            make_color_denoise_bind_group("bg color denoise scale 16", &tex2_view, &tex1_view);
-        let bg_color_denoise_5 =
-            make_color_denoise_bind_group("bg color denoise scale 32", &tex1_view, &scene_view);
-
-        let bg_tone_prepare = create_bind_group(device, "bg tone prepare", &bgl_tone_prepare, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(11, &scene_view),
-                buffer_binding(15, &tone_histogram_buffer),
-                buffer_binding(20, &profile_buffer),
-                texture_binding(18, &tone_guide_a_view),
-            ]);
-
-        let make_tone_blur_bind_group =
-            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
-                create_bind_group(device, label, &bgl_tone_blur, &[
-                        buffer_binding(0, &camera_uniforms_buffer),
-                        texture_binding(17, read_view),
-                        texture_binding(18, write_view),
-                    ])
-            };
-        let bg_tone_horizontal = make_tone_blur_bind_group(
-            "bg tone guide horizontal",
-            &tone_guide_a_view,
-            &tone_guide_b_view,
-        );
-        let bg_tone_vertical = make_tone_blur_bind_group(
-            "bg tone guide vertical",
-            &tone_guide_b_view,
-            &tone_guide_a_view,
-        );
-
-        let bg_tone_reduce = create_bind_group(device, "bg tone histogram reduction", &bgl_tone_reduce, &[
-                buffer_binding(15, &tone_histogram_buffer),
-                buffer_binding(16, &tone_stats_buffer),
-            ]);
-
-        let bg_adjust_prepare = create_bind_group(device, "bg adjustment preparation", &bgl_adjust_prepare, &[
-                buffer_binding(0, &camera_uniforms_buffer),
-                texture_binding(1, &raw_view),
-                texture_binding(2, &color_view),
-                texture_binding(19, &black_view),
-                texture_binding(11, &scene_view),
-                texture_binding(21, &tex1_view),
-                buffer_binding(16, &tone_stats_buffer),
-                texture_binding(17, &tone_guide_a_view),
-                buffer_binding(20, &profile_buffer),
-                texture_binding(27, &mask_view),
-                sampler_binding(28, &mask_sampler),
-                buffer_binding(33, &mask_data_buffer),
-            ]);
-
-        let make_adjust_tone_bind_group =
-            |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
-                create_bind_group(device, label, &bgl_adjust_tone, &[
-                        buffer_binding(0, &camera_uniforms_buffer),
-                        texture_binding(22, input),
-                        texture_binding(23, output),
-                        buffer_binding(16, &tone_stats_buffer),
-                        texture_binding(17, &tone_guide_a_view),
-                        buffer_binding(20, &profile_buffer),
-                        texture_binding(27, &mask_view),
-                        sampler_binding(28, &mask_sampler),
-                        buffer_binding(33, &mask_data_buffer),
-                    ])
-            };
-        let bg_adjust_tone =
-            make_adjust_tone_bind_group("bg scene tone edits", &tex1_view, &tex2_view);
-        let bg_adjust_local_tone =
-            make_adjust_tone_bind_group("bg local scene tone edits", &tex2_view, &tex1_view);
-
-        let make_adjust_effects_bind_group =
-            |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
-                create_bind_group(device, label, &bgl_adjust_effects, &[
-                        buffer_binding(0, &camera_uniforms_buffer),
-                        texture_binding(22, input),
-                        texture_binding(23, output),
-                        buffer_binding(16, &tone_stats_buffer),
-                        texture_binding(27, &mask_view),
-                        sampler_binding(28, &mask_sampler),
-                        buffer_binding(33, &mask_data_buffer),
-                    ])
-            };
-        let bg_adjust_effects = make_adjust_effects_bind_group(
-            "bg scene presence and color",
-            &tex1_view,
-            &tex2_view,
-        );
-        let bg_adjust_effects_copy =
-            make_adjust_effects_bind_group("bg scene effects copy", &tex2_view, &tex1_view);
-
-        // Mask Blur diffuses the completed local-effects image through five
-        // adjacent scales. It ends in tex2 and keeps tex1 available until the
-        // chain has fully incorporated mask coverage and Amount.
-        let make_mask_blur_bind_group =
-            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
-                create_bind_group(device, label, &bgl_mask_blur, &[
-                        buffer_binding(0, &camera_uniforms_buffer),
-                        texture_binding(24, read_view),
-                        texture_binding(25, write_view),
-                        texture_binding(27, &mask_view),
-                        sampler_binding(28, &mask_sampler),
-                        buffer_binding(33, &mask_data_buffer),
-                    ])
-            };
-        let bg_mask_blur_0 =
-            make_mask_blur_bind_group("bg mask Blur diffusion 0", &tex1_view, &tex2_view);
-        let bg_mask_blur_1 =
-            make_mask_blur_bind_group("bg mask Blur diffusion 1", &tex2_view, &display_linear_view);
-        let bg_mask_blur_2 =
-            make_mask_blur_bind_group("bg mask Blur diffusion 2", &display_linear_view, &tex2_view);
-        let bg_mask_blur_3 =
-            make_mask_blur_bind_group("bg mask Blur diffusion 3", &tex2_view, &display_linear_view);
-        let bg_mask_blur_4 =
-            make_mask_blur_bind_group("bg mask Blur diffusion 4", &display_linear_view, &tex2_view);
-
-        // Glow is extracted from the completed local-effects image in tex1.
-        // Five adjacent B3-spline diffusion stages then ping-pong through tex2
-        // and the display-linear surface. The latter is safe scratch here: the
-        // final render overwrites it only after the creative composite.
-        let make_glow_prepare_bind_group =
-            |label: &str, source: &wgpu::TextureView, extracted: &wgpu::TextureView| {
-                create_bind_group(device, label, &bgl_glow_prepare, &[
-                        buffer_binding(0, &camera_uniforms_buffer),
-                        texture_binding(24, source),
-                        texture_binding(31, extracted),
-                        texture_binding(27, &mask_view),
-                        sampler_binding(28, &mask_sampler),
-                        buffer_binding(33, &mask_data_buffer),
-                    ])
-            };
-        let bg_glow_prepare = make_glow_prepare_bind_group(
-            "bg Glow source extraction",
-            &tex1_view,
-            &tex2_view,
-        );
-
-        let make_glow_blur_bind_group =
-            |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
-                create_bind_group(device, label, &bgl_glow_blur, &[
-                        buffer_binding(0, &camera_uniforms_buffer),
-                        texture_binding(30, read_view),
-                        texture_binding(31, write_view),
-                    ])
-            };
-        let bg_glow_blur_0 =
-            make_glow_blur_bind_group("bg Glow diffusion 0", &tex2_view, &display_linear_view);
-        let bg_glow_blur_1 =
-            make_glow_blur_bind_group("bg Glow diffusion 1", &display_linear_view, &tex2_view);
-        let bg_glow_blur_2 =
-            make_glow_blur_bind_group("bg Glow diffusion 2", &tex2_view, &display_linear_view);
-        let bg_glow_blur_3 =
-            make_glow_blur_bind_group("bg Glow diffusion 3", &display_linear_view, &tex2_view);
-        let bg_glow_blur_4 =
-            make_glow_blur_bind_group("bg Glow diffusion 4", &tex2_view, &display_linear_view);
-
-        // When mask Blur ran first, tex2 contains the new creative base. Glow
-        // uses tex1/display-linear as scratch so that base remains available
-        // for the final creative composite.
-        let bg_glow_prepare_after_blur = make_glow_prepare_bind_group(
-            "bg Glow source extraction after mask Blur",
-            &tex2_view,
-            &tex1_view,
-        );
-        let bg_glow_blur_after_blur_0 = make_glow_blur_bind_group(
-            "bg Glow diffusion after mask Blur 0",
-            &tex1_view,
-            &display_linear_view,
-        );
-        let bg_glow_blur_after_blur_1 = make_glow_blur_bind_group(
-            "bg Glow diffusion after mask Blur 1",
-            &display_linear_view,
-            &tex1_view,
-        );
-        let bg_glow_blur_after_blur_2 = make_glow_blur_bind_group(
-            "bg Glow diffusion after mask Blur 2",
-            &tex1_view,
-            &display_linear_view,
-        );
-        let bg_glow_blur_after_blur_3 = make_glow_blur_bind_group(
-            "bg Glow diffusion after mask Blur 3",
-            &display_linear_view,
-            &tex1_view,
-        );
-        let bg_glow_blur_after_blur_4 = make_glow_blur_bind_group(
-            "bg Glow diffusion after mask Blur 4",
-            &tex1_view,
-            &display_linear_view,
-        );
-
-        // The creative pass keeps the untouched local-effects result in tex1,
-        // composites the final Glow diffusion from display_linear and writes
-        // the result into tex2. The post-crop vignette is applied later in the
-        // always-dispatched display-linear view pass.
-        let make_adjust_creative_bind_group =
-            |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
-                create_bind_group(device, label, &bgl_adjust_creative, &[
-                        buffer_binding(0, &camera_uniforms_buffer),
-                        texture_binding(24, input),
-                        texture_binding(25, output),
-                        texture_binding(30, &display_linear_view),
-                        texture_binding(27, &mask_view),
-                        sampler_binding(28, &mask_sampler),
-                        buffer_binding(33, &mask_data_buffer),
-                        texture_binding(34, &light_rays_mask_view),
-                    ])
-            };
-        let bg_adjust_creative =
-            make_adjust_creative_bind_group("bg creative glow", &tex1_view, &tex2_view);
-        let bg_adjust_creative_after_blur = make_adjust_creative_bind_group(
-            "bg creative effects after mask Blur",
-            &tex2_view,
-            &tex1_view,
-        );
-
-        let make_adjust_render_bind_group = |label: &str, source: &wgpu::TextureView| {
-            create_bind_group(device, label, &bgl_adjust_render, &[
-                    buffer_binding(0, &camera_uniforms_buffer),
-                    texture_binding(12, &out_view),
-                    texture_binding(26, source),
-                    buffer_binding(16, &tone_stats_buffer),
-                    buffer_binding(20, &profile_buffer),
-                    texture_binding(27, &mask_view),
-                    sampler_binding(28, &mask_sampler),
-                    texture_binding(29, &display_linear_view),
-                    buffer_binding(33, &mask_data_buffer),
-                ])
-        };
-        let bg_adjust_render =
-            make_adjust_render_bind_group("bg scene look view and output", &tex2_view);
-        let bg_adjust_render_after_blur = make_adjust_render_bind_group(
-            "bg scene look view and output after mask Blur",
-            &tex1_view,
-        );
-
-        // Storage texture declarations are format-specific in the demosaic and
-        // scene shaders. Highlight reconstruction writes its fixed R32F CFA.
-        let bayer_rcd_p1 = work_shader_source(SHADER_BAYER_RCD_P1, demosaic_format)
-            .context("specialize Bayer RCD pass 1 work format")?;
-        let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format)
-            .context("specialize Bayer RCD pass 2 work format")?;
-        let bayer_rcd_p3 = work_shader_source(SHADER_BAYER_RCD_P3, demosaic_format)
-            .context("specialize Bayer RCD pass 3 work format")?;
-        let bayer_rcd_p4 = work_shader_source(SHADER_BAYER_RCD_P4, demosaic_format)
-            .context("specialize Bayer RCD pass 4 work format")?;
-        let dual_demosaic = work_shader_source(SHADER_DUAL_DEMOSAIC, demosaic_format)
-            .context("specialize dual-demosaic work format")?;
-        let xtrans_demosaic = work_shader_source(SHADER_XTRANS_DEMOSAIC, demosaic_format)
-            .context("specialize grouped X-Trans demosaic work format")?;
-        let xtrans_finish = work_shader_source(SHADER_XTRANS_FINISH, demosaic_format)
-            .context("specialize X-Trans finish work format")?;
-        let color_denoise_shader = work_shader_source(SHADER_COLOR_DENOISE, demosaic_format)
-            .context("specialize multiscale color denoise work format")?;
-        let scene_adjustments_shader = work_shader_source(SHADER_SCENE_ADJUSTMENTS, work_format)
-            .context("specialize scene-adjustments shader work format")?;
-
-        let mut shader_manager = program_template
-            .is_none()
-            .then(|| ShaderManager::new(work_format))
-            .transpose()
-            .context("initialize WGSL shader composer")?;
-        let mut create_shader =
-            |label: &'static str, source: &str, file_name: &str| -> Result<wgpu::ShaderModule> {
-                shader_manager
-                    .as_mut()
-                    .expect("shader manager exists without a program template")
-                    .create_shader_module(device, label, source, file_name)
-            };
-        // One validated Naga module per WGSL entrypoint source. Entry-point
-        // pipelines below share these modules instead of recompiling the same
-        // source for every pass.
-        let mut load_shader = |label: &'static str, source: &str, file_name: &str| {
-            if program_template.is_some() {
-                Ok(None)
-            } else {
-                create_shader(label, source, file_name).map(Some)
-            }
-        };
-        let highlight_module =
-            load_shader("auraw highlight module", SHADER_HIGHLIGHTS, "highlights.wgsl")?;
-        let bayer_rcd_p1_module =
-            load_shader("auraw Bayer RCD pass 1", bayer_rcd_p1.as_ref(), "pass1.wgsl")?;
-        let bayer_rcd_p2_module =
-            load_shader("auraw Bayer RCD pass 2", bayer_rcd_p2.as_ref(), "pass2.wgsl")?;
-        let bayer_rcd_p3_module =
-            load_shader("auraw Bayer RCD pass 3", bayer_rcd_p3.as_ref(), "pass3.wgsl")?;
-        let bayer_rcd_p4_module =
-            load_shader("auraw Bayer RCD pass 4", bayer_rcd_p4.as_ref(), "pass4.wgsl")?;
-        let dual_demosaic_module = load_shader(
-            "auraw robust dual demosaic",
-            dual_demosaic.as_ref(),
-            "dual_demosaic.wgsl",
+            program_template.is_some(),
+            geometry.demosaic_format,
+            geometry.work_format,
         )?;
-        let xtrans_demosaic_module = load_shader(
-            "auraw grouped X-Trans demosaic",
-            xtrans_demosaic.as_ref(),
-            "xtrans_demosaic.wgsl",
+
+        let assembled = assemble_passes(
+            device,
+            program_template,
+            pipeline_cache.as_ref(),
+            &layouts,
+            &groups,
+            &shaders,
+            raw.cfa_kind,
+            geometry.image_workgroups,
+            geometry.tone_workgroups,
         )?;
-        let xtrans_finish_module = load_shader(
-            "auraw X-Trans finish",
-            xtrans_finish.as_ref(),
-            "xtrans_finish.wgsl",
-        )?;
-        let color_denoise_module = load_shader(
-            "auraw multiscale color denoise",
-            color_denoise_shader.as_ref(),
-            "color_denoise.wgsl",
-        )?;
-        let tone_analysis_module =
-            load_shader("auraw tone analysis", SHADER_TONE_ANALYSIS, "tone_analysis.wgsl")?;
-        let scene_adjustments_module = load_shader(
-            "auraw scene adjustments",
-            scene_adjustments_shader.as_ref(),
-            "scene_adjustments.wgsl",
-        )?;
-        let creative_effects_module = load_shader(
-            "auraw creative effects",
-            SHADER_CREATIVE_EFFECTS,
-            "creative_effects.wgsl",
-        )?;
-        let view_transform_module =
-            load_shader("auraw view transform", SHADER_VIEW_TRANSFORM, "view_transform.wgsl")?;
-
-        let mut next_program_index = 0usize;
-        let mut make_pass = |shader: Option<&wgpu::ShaderModule>,
-                             entry: &str,
-                             bgl: &wgpu::BindGroupLayout,
-                             bind_group: wgpu::BindGroup,
-                             workgroups: [u32; 3]|
-         -> Pass {
-            let program_index = next_program_index;
-            next_program_index += 1;
-            let pipeline = if let Some(template) = program_template {
-                template.pipelines[program_index].clone()
-            } else {
-                let shader = shader.expect("shader module exists without a program template");
-                let pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some(&format!("pll_{}", entry)),
-                    bind_group_layouts: &[Some(bgl), Some(&bgl_scene_tone), Some(&bgl_effects)],
-                    immediate_size: 0,
-                });
-                create_compute_pipeline(
-                    device,
-                    entry,
-                    &pll,
-                    shader,
-                    entry,
-                    pipeline_cache.as_ref().map(|cache| cache.raw()),
-                )
-            };
-            Pass {
-                pipeline,
-                bind_group,
-                workgroups,
-            }
-        };
-
-        let mut passes = Vec::with_capacity(expected_pass_count(raw.cfa_kind));
-
-        // Reconstruct clipped photosites before every demosaic path.
-        passes.push(make_pass(
-            highlight_module.as_ref(),
-            "highlight_reconstruct",
-            &bgl_highlights,
-            bg_highlights,
-            image_workgroups,
-        ));
-
-        let demosaic_start_index = passes.len();
-        // Build the high-detail reference first. The robust low-frequency
-        // branch is represented by two real full-frame buffers, but its two
-        // dispatches are skipped at encode time unless Dual mode is selected.
-        match raw.cfa_kind {
-            CfaKind::Bayer => passes.extend([
-                make_pass(bayer_rcd_p1_module.as_ref(), "bayer_rcd_directional", &bgl1, bg1, image_workgroups),
-                make_pass(bayer_rcd_p2_module.as_ref(), "bayer_rcd_green", &bgl2, bg2, image_workgroups),
-                make_pass(bayer_rcd_p3_module.as_ref(), "bayer_rcd_chroma", &bgl3, bg3, image_workgroups),
-            ]),
-            CfaKind::XTrans => passes.extend([
-                make_pass(xtrans_demosaic_module.as_ref(), "xtrans_seed", &bgl1, bg1, image_workgroups),
-                make_pass(
-                    xtrans_demosaic_module.as_ref(),
-                    "xtrans_markesteijn_pass1",
-                    &bgl2,
-                    bg2.clone(),
-                    image_workgroups,
-                ),
-                make_pass(
-                    xtrans_demosaic_module.as_ref(),
-                    "xtrans_markesteijn_pass2",
-                    &bgl3,
-                    bg3,
-                    image_workgroups,
-                ),
-                make_pass(
-                    xtrans_demosaic_module.as_ref(),
-                    "xtrans_markesteijn_pass3",
-                    &bgl2,
-                    bg2,
-                    image_workgroups,
-                ),
-                make_pass(
-                    xtrans_demosaic_module.as_ref(),
-                    "xtrans_markesteijn_derivatives",
-                    &bgl_xtrans_derivatives,
-                    bg_xtrans_derivatives,
-                    image_workgroups,
-                ),
-                make_pass(
-                    xtrans_demosaic_module.as_ref(),
-                    "xtrans_markesteijn_homogeneity",
-                    &bgl_xtrans_homogeneity,
-                    bg_xtrans_homogeneity,
-                    image_workgroups,
-                ),
-                make_pass(
-                    xtrans_demosaic_module.as_ref(),
-                    "xtrans_markesteijn_accumulate",
-                    &bgl_xtrans_accumulate,
-                    bg_xtrans_accumulate,
-                    image_workgroups,
-                ),
-            ]),
-        }
-
-        let demosaic_dual_start_index = passes.len();
-        passes.extend([
-            make_pass(
-                dual_demosaic_module.as_ref(),
-                "dual_green_reconstruct",
-                &bgl_dual_green,
-                bg_dual_green,
-                image_workgroups,
-            ),
-            make_pass(
-                dual_demosaic_module.as_ref(),
-                "dual_rgb_reconstruct",
-                &bgl_dual_rgb,
-                bg_dual_rgb,
-                image_workgroups,
-            ),
-        ]);
-        let demosaic_dual_end_index = passes.len();
-
-        let demosaic_finish_index = passes.len();
-        match raw.cfa_kind {
-            CfaKind::Bayer => passes.push(make_pass(
-                bayer_rcd_p4_module.as_ref(),
-                "bayer_rcd_output",
-                &bgl4,
-                bg4,
-                image_workgroups,
-            )),
-            CfaKind::XTrans => passes.push(make_pass(
-                xtrans_finish_module.as_ref(),
-                "xtrans_demosaic_finish",
-                &bgl_xtrans_finish,
-                bg_xtrans_finish,
-                image_workgroups,
-            )),
-        }
-
-        let color_denoise_start_index = passes.len();
-        let color_denoise_bind_groups = [
-            bg_color_denoise_0,
-            bg_color_denoise_1,
-            bg_color_denoise_2,
-            bg_color_denoise_3,
-            bg_color_denoise_4,
-            bg_color_denoise_5,
-        ];
-        for (entry, bind_group) in COLOR_DENOISE_ENTRY_POINTS
-            .iter()
-            .zip(color_denoise_bind_groups)
-        {
-            passes.push(make_pass(
-                color_denoise_module.as_ref(),
-                entry,
-                &bgl_color_denoise,
-                bind_group,
-                image_workgroups,
-            ));
-        }
-        let color_denoise_end_index = passes.len();
-
-        // Analyze the unexposed scene at reduced resolution. The guide is
-        // bilateral and the histogram reduction emits robust tonal anchors.
-        // recompute() clears the histogram immediately before this pass.
-        let tone_prepare_pass_index = passes.len();
-        passes.extend([
-            make_pass(
-                tone_analysis_module.as_ref(),
-                "tone_guide_prepare",
-                &bgl_tone_prepare,
-                bg_tone_prepare,
-                tone_workgroups,
-            ),
-            make_pass(
-                tone_analysis_module.as_ref(),
-                "tone_guide_horizontal",
-                &bgl_tone_blur,
-                bg_tone_horizontal,
-                tone_workgroups,
-            ),
-            make_pass(
-                tone_analysis_module.as_ref(),
-                "tone_guide_vertical",
-                &bgl_tone_blur,
-                bg_tone_vertical,
-                tone_workgroups,
-            ),
-            make_pass(
-                tone_analysis_module.as_ref(),
-                "tone_reduce_histogram",
-                &bgl_tone_reduce,
-                bg_tone_reduce,
-                single_workgroup,
-            ),
-        ]);
-
-        let tone_reduce_pass_index = tone_prepare_pass_index + 3;
-        let tone_stage_end = passes.len();
-        let adjustment_prepare_pass_index = passes.len();
-        let adjustment_tone_pass_index = adjustment_prepare_pass_index + 1;
-        let adjustment_effects_pass_index = adjustment_prepare_pass_index + 3;
-        let mask_blur_start_index = adjustment_prepare_pass_index + 5;
-        let mask_blur_end_index = mask_blur_start_index + 5;
-        let glow_prepare_pass_index = mask_blur_end_index;
-        let glow_blur_start_index = glow_prepare_pass_index + 1;
-        let glow_blur_end_index = glow_blur_start_index + 5;
-        let adjustment_creative_pass_index = glow_blur_end_index;
-        let adjustment_render_pass_index = adjustment_creative_pass_index + 1;
-
-        passes.extend([
-            make_pass(
-                scene_adjustments_module.as_ref(),
-                "prepare_scene_node",
-                &bgl_adjust_prepare,
-                bg_adjust_prepare,
-                image_workgroups,
-            ),
-            make_pass(
-                scene_adjustments_module.as_ref(),
-                "apply_scene_tone_node",
-                &bgl_adjust_tone,
-                bg_adjust_tone,
-                image_workgroups,
-            ),
-            make_pass(
-                scene_adjustments_module.as_ref(),
-                "apply_local_scene_tone_node",
-                &bgl_adjust_tone,
-                bg_adjust_local_tone,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "apply_scene_effects_node",
-                &bgl_adjust_effects,
-                bg_adjust_effects,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "copy_scene_effects_node",
-                &bgl_adjust_effects,
-                bg_adjust_effects_copy,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_mask_blur_0",
-                &bgl_mask_blur,
-                bg_mask_blur_0,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_mask_blur_1",
-                &bgl_mask_blur,
-                bg_mask_blur_1,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_mask_blur_2",
-                &bgl_mask_blur,
-                bg_mask_blur_2,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_mask_blur_3",
-                &bgl_mask_blur,
-                bg_mask_blur_3,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_mask_blur_4",
-                &bgl_mask_blur,
-                bg_mask_blur_4,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "prepare_glow_source",
-                &bgl_glow_prepare,
-                bg_glow_prepare,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_glow_0",
-                &bgl_glow_blur,
-                bg_glow_blur_0,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_glow_1",
-                &bgl_glow_blur,
-                bg_glow_blur_1,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_glow_2",
-                &bgl_glow_blur,
-                bg_glow_blur_2,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_glow_3",
-                &bgl_glow_blur,
-                bg_glow_blur_3,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "diffuse_glow_4",
-                &bgl_glow_blur,
-                bg_glow_blur_4,
-                image_workgroups,
-            ),
-            make_pass(
-                creative_effects_module.as_ref(),
-                "apply_creative_effects",
-                &bgl_adjust_creative,
-                bg_adjust_creative,
-                image_workgroups,
-            ),
-            make_pass(
-                view_transform_module.as_ref(),
-                "apply_view_node",
-                &bgl_adjust_render,
-                bg_adjust_render,
-                image_workgroups,
-            ),
-        ]);
-
-        // These variants reuse the same compiled pipelines with bind groups
-        // that follow tex2 as the creative base after mask Blur. Keeping them
-        // outside `passes` avoids duplicating programs in reusable templates.
-        let post_blur_glow_passes = vec![
-            Pass {
-                pipeline: passes[glow_prepare_pass_index].pipeline.clone(),
-                bind_group: bg_glow_prepare_after_blur,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: passes[glow_blur_start_index].pipeline.clone(),
-                bind_group: bg_glow_blur_after_blur_0,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: passes[glow_blur_start_index + 1].pipeline.clone(),
-                bind_group: bg_glow_blur_after_blur_1,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: passes[glow_blur_start_index + 2].pipeline.clone(),
-                bind_group: bg_glow_blur_after_blur_2,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: passes[glow_blur_start_index + 3].pipeline.clone(),
-                bind_group: bg_glow_blur_after_blur_3,
-                workgroups: image_workgroups,
-            },
-            Pass {
-                pipeline: passes[glow_blur_start_index + 4].pipeline.clone(),
-                bind_group: bg_glow_blur_after_blur_4,
-                workgroups: image_workgroups,
-            },
-        ];
-        let post_blur_creative_pass = Pass {
-            pipeline: passes[adjustment_creative_pass_index].pipeline.clone(),
-            bind_group: bg_adjust_creative_after_blur,
-            workgroups: image_workgroups,
-        };
-        let post_blur_render_pass = Pass {
-            pipeline: passes[adjustment_render_pass_index].pipeline.clone(),
-            bind_group: bg_adjust_render_after_blur,
-            workgroups: image_workgroups,
-        };
-
-        let expected_programs = expected_pass_count(raw.cfa_kind);
-        if next_program_index != expected_programs || passes.len() != expected_programs {
-            return Err(anyhow!(
-                "GPU render-plan mismatch for {:?}: built {} passes and consumed {} programs; expected {}",
-                raw.cfa_kind,
-                passes.len(),
-                next_program_index,
-                expected_programs,
-            ));
-        }
+        let AssembledPasses {
+            passes,
+            post_blur_glow_passes,
+            post_blur_creative_pass,
+            post_blur_render_pass,
+            indices,
+        } = assembled;
 
         let egui_texture_id = renderer.as_deref_mut().map(|renderer| {
-            renderer.register_native_texture(device, &out_view, wgpu::FilterMode::Linear)
+            renderer.register_native_texture(device, &surfaces.out_view, wgpu::FilterMode::Linear)
         });
 
         let pipeline = Self {
@@ -3556,67 +1973,67 @@ impl RawGpuPipeline {
             height: raw.height,
             cfa_kind: raw.cfa_kind,
             processing_quality: quality,
-            camera_uniforms_buffer,
-            scene_tone_uniforms_buffer,
-            effects_uniforms_buffer,
-            scene_tone_bind_group,
-            effects_bind_group,
+            camera_uniforms_buffer: buffers.camera_uniforms_buffer,
+            scene_tone_uniforms_buffer: buffers.scene_tone_uniforms_buffer,
+            effects_uniforms_buffer: buffers.effects_uniforms_buffer,
+            scene_tone_bind_group: groups.scene_tone_bind_group,
+            effects_bind_group: groups.effects_bind_group,
             uploaded_stage_uniforms: Mutex::new(UploadedStageUniforms {
                 camera: params.camera,
                 scene_tone: params.scene_tone,
                 effects: params.effects,
             }),
-            mask_data_buffer,
-            tone_histogram_buffer,
-            tone_stats_buffer,
-            tone_prepare_pass_index,
-            tone_reduce_pass_index,
-            tone_stage_end,
-            demosaic_start_index,
-            demosaic_dual_start_index,
-            demosaic_dual_end_index,
-            demosaic_finish_index,
-            color_denoise_start_index,
-            color_denoise_end_index,
-            adjustment_prepare_pass_index,
-            adjustment_tone_pass_index,
-            adjustment_effects_pass_index,
-            mask_blur_start_index,
-            mask_blur_end_index,
-            glow_prepare_pass_index,
-            glow_blur_start_index,
-            glow_blur_end_index,
-            adjustment_creative_pass_index,
-            adjustment_render_pass_index,
+            mask_data_buffer: buffers.mask_data_buffer,
+            tone_histogram_buffer: buffers.tone_histogram_buffer,
+            tone_stats_buffer: buffers.tone_stats_buffer,
+            tone_prepare_pass_index: indices.tone_prepare_pass_index,
+            tone_reduce_pass_index: indices.tone_reduce_pass_index,
+            tone_stage_end: indices.tone_stage_end,
+            demosaic_start_index: indices.demosaic_start_index,
+            demosaic_dual_start_index: indices.demosaic_dual_start_index,
+            demosaic_dual_end_index: indices.demosaic_dual_end_index,
+            demosaic_finish_index: indices.demosaic_finish_index,
+            color_denoise_start_index: indices.color_denoise_start_index,
+            color_denoise_end_index: indices.color_denoise_end_index,
+            adjustment_prepare_pass_index: indices.adjustment_prepare_pass_index,
+            adjustment_tone_pass_index: indices.adjustment_tone_pass_index,
+            adjustment_effects_pass_index: indices.adjustment_effects_pass_index,
+            mask_blur_start_index: indices.mask_blur_start_index,
+            mask_blur_end_index: indices.mask_blur_end_index,
+            glow_prepare_pass_index: indices.glow_prepare_pass_index,
+            glow_blur_start_index: indices.glow_blur_start_index,
+            glow_blur_end_index: indices.glow_blur_end_index,
+            adjustment_creative_pass_index: indices.adjustment_creative_pass_index,
+            adjustment_render_pass_index: indices.adjustment_render_pass_index,
             post_blur_glow_passes,
             post_blur_creative_pass,
             post_blur_render_pass,
             passes,
-            raw_texture,
-            color_texture,
-            black_texture,
-            _reconstructed_raw_texture: reconstructed_raw_texture,
-            _highlight_work_a: highlight_work_a,
-            _highlight_work_b: highlight_work_b,
-            _tex1: tex1,
-            _tex2: tex2,
-            scene_texture,
-            scene_format: demosaic_format,
+            raw_texture: surfaces.raw_texture,
+            color_texture: surfaces.color_texture,
+            black_texture: surfaces.black_texture,
+            _reconstructed_raw_texture: surfaces.reconstructed_raw_texture,
+            _highlight_work_a: surfaces.highlight_work_a,
+            _highlight_work_b: surfaces.highlight_work_b,
+            _tex1: surfaces.tex1,
+            _tex2: surfaces.tex2,
+            scene_texture: surfaces.scene_texture,
+            scene_format: geometry.demosaic_format,
             has_ai_scene,
             has_raster_scene,
             has_ai_cfa,
-            display_linear_texture,
-            _tone_guide_a: tone_guide_a,
-            _tone_guide_b: tone_guide_b,
-            mask_texture,
-            light_rays_mask_texture,
-            mask_layer_capacity,
-            mask_atlas_edge,
-            profile_buffer,
+            display_linear_texture: surfaces.display_linear_texture,
+            _tone_guide_a: surfaces.tone_guide_a,
+            _tone_guide_b: surfaces.tone_guide_b,
+            mask_texture: surfaces.mask_texture,
+            light_rays_mask_texture: surfaces.light_rays_mask_texture,
+            mask_layer_capacity: geometry.mask_layer_capacity,
+            mask_atlas_edge: geometry.mask_atlas_edge,
+            profile_buffer: buffers.profile_buffer,
             profile_buffer_size_bytes,
-            output_lut_offset_bytes,
-            out_texture,
-            _out_view: out_view,
+            output_lut_offset_bytes: buffers.output_lut_offset_bytes,
+            out_texture: surfaces.out_texture,
+            _out_view: surfaces.out_view,
             pipeline_cache,
             _gpu_budget_reservation: gpu_budget_reservation,
         };
@@ -3629,11 +2046,6 @@ impl RawGpuPipeline {
         Ok(pipeline)
     }
 
-    /// Uploads one normalized, anti-aliased local-mask layer as IEEE-754 half
-    /// floats. Subject / Not Subject refinement is already composited by the
-    /// core rasterizer before this upload, so the atlas remains the single mask
-    /// source consumed by preview and export shaders. Export can allocate a
-    /// larger atlas for higher spatial fidelity.
     pub fn update_mask_layer(
         &self,
         queue: &wgpu::Queue,
@@ -3783,9 +2195,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Uploads full-image mask coverage used only as the Light Rays emission
-    /// field. Its fixed normalized resolution deliberately does not change for
-    /// zoom-detail or tiled-export pipelines, preventing view-dependent rays.
     pub fn update_light_rays_mask_layers(
         &self,
         queue: &wgpu::Queue,
@@ -3817,10 +2226,6 @@ impl RawGpuPipeline {
         self.mask_layer_capacity
     }
 
-    /// Whether this image-sized graph already contains every immutable AI
-    /// source texture needed for the requested state. Bayer AI output replaces
-    /// the mosaic upload and therefore must match exactly. X-Trans uses a
-    /// separate scene texture which may safely remain resident while disabled.
     pub const fn immutable_ai_source_matches(&self, cfa_kind: CfaKind, enabled: bool) -> bool {
         match cfa_kind {
             CfaKind::Bayer => self.has_ai_cfa == enabled,
@@ -3828,8 +2233,6 @@ impl RawGpuPipeline {
         }
     }
 
-    /// Registers a headless pipeline's output texture with egui after the
-    /// expensive GPU setup has completed on a worker thread.
     pub fn register_egui_texture(
         &mut self,
         device: &wgpu::Device,
@@ -3845,9 +2248,6 @@ impl RawGpuPipeline {
         texture_id
     }
 
-    /// Updates the preview/display transform from an RGB ICC profile. Desktop
-    /// builds accept matrix-shaper and LUT/CLUT profiles through LCMS2, then
-    /// upload the sampled 3D LUT without rebuilding pipelines or bind groups.
     pub fn set_display_icc_profile(
         &self,
         queue: &wgpu::Queue,
@@ -3858,8 +2258,6 @@ impl RawGpuPipeline {
         self.write_output_transform(queue, &transform)
     }
 
-    /// Alias for export-oriented callers that use the same managed output
-    /// transform as the live preview.
     pub fn set_output_icc_profile(
         &self,
         queue: &wgpu::Queue,
@@ -3897,9 +2295,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Compatibility entry point that executes the complete pipeline. New UI
-    /// code should prefer `dispatch_stage` so cached upstream results survive
-    /// ordinary Develop adjustments.
     pub fn recompute(&self, queue: &wgpu::Queue, device: &wgpu::Device, params: &GpuParams) {
         self.upload_params(queue, params);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3916,8 +2311,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Dispatches exactly one dependency stage. GPU submission is asynchronous;
-    /// callers can spread Raw -> Tone -> Output across event-loop iterations.
     pub fn dispatch_stage(
         &self,
         queue: &wgpu::Queue,
@@ -3946,9 +2339,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Replaces the sensor textures of a fixed-size headless pipeline so one
-    /// allocation and one set of compiled compute pipelines can process every
-    /// export tile.
     pub fn upload_raw_tile(&self, queue: &wgpu::Queue, raw: &LoadedRaw) -> Result<()> {
         if raw.width != self.width || raw.height != self.height {
             return Err(anyhow!(
@@ -4003,7 +2393,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Clears the reusable histogram before a full-resolution tiled analysis.
     pub fn begin_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw export tone histogram clear"),
@@ -4012,9 +2401,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Dispatches one ordinary processing stage and restores cached Remove
-    /// scene patches immediately after RAW reconstruction when necessary.
-    /// Output-only slider changes therefore never touch the Remove cache.
     pub fn dispatch_stage_with_remove(
         &self,
         queue: &wgpu::Queue,
@@ -4052,7 +2438,11 @@ impl RawGpuPipeline {
         source_origin: [f32; 2],
         source_size: [f32; 2],
     ) -> Result<()> {
-        for stage in [ProcessingStage::Raw, ProcessingStage::Tone, ProcessingStage::Output] {
+        for stage in [
+            ProcessingStage::Raw,
+            ProcessingStage::Tone,
+            ProcessingStage::Output,
+        ] {
             self.dispatch_stage_with_remove(
                 queue,
                 device,
@@ -4068,7 +2458,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Captures the current global tone anchors without a CPU readback.
     pub fn snapshot_tone_statistics(
         &self,
         device: &wgpu::Device,
@@ -4094,7 +2483,6 @@ impl RawGpuPipeline {
         ToneStatisticsSnapshot { buffer }
     }
 
-    /// Copies a saved full-frame tone snapshot into this crop/detail pipeline.
     pub fn inherit_tone_statistics_snapshot(
         &self,
         queue: &wgpu::Queue,
@@ -4114,10 +2502,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Copies the full-frame adaptive tone anchors into a crop/detail pipeline.
-    /// Spatial guides remain crop-local, but global percentiles (including the
-    /// Dehaze ambient-light anchor) must not change while the user pans or
-    /// zooms. Call this after the detail Tone stage and before its Output stage.
     pub fn inherit_tone_statistics(
         &self,
         queue: &wgpu::Queue,
@@ -4137,9 +2521,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Demosaics one native-resolution tile and adds only its non-halo core to
-    /// the shared export histogram. The bounds in `params` prevent duplicated
-    /// halo pixels from biasing the full-image percentiles.
     pub fn accumulate_export_tone_tile(
         &self,
         queue: &wgpu::Queue,
@@ -4159,9 +2540,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Export tone-analysis variant that restores Remove at the scene boundary
-    /// before the histogram/guide sees the tile. The histogram itself is still
-    /// accumulated exactly once per native core by the bounds in `params`.
     pub fn accumulate_export_tone_tile_with_remove(
         &self,
         queue: &wgpu::Queue,
@@ -4197,7 +2575,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Reduces the histogram accumulated from every native-resolution core.
     pub fn finish_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw export tone histogram reduction"),
@@ -4210,9 +2587,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Executes one export tile using the full-resolution histogram cached by
-    /// `finish_export_tone_analysis`. The tile still builds its own halo-aware
-    /// tone guide; skipping reduction keeps the global statistics unchanged.
     pub fn dispatch_export_tile(
         &self,
         queue: &wgpu::Queue,
@@ -4234,10 +2608,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Executes one full-resolution export tile with cached Remove patches
-    /// restored between RAW reconstruction and all tone/creative adjustments.
-    /// Big-LaMa is never called here; export consumes the same scene cache as
-    /// preview.
     pub fn dispatch_export_tile_with_remove(
         &self,
         queue: &wgpu::Queue,
@@ -4274,8 +2644,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Copies an RGBA8 output sub-rectangle to CPU memory. This method blocks
-    /// only the export worker thread; the interactive UI remains responsive.
     pub fn read_output_region_blocking(
         &self,
         device: &wgpu::Device,
@@ -4298,9 +2666,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Queues a display-linear RGBA32F copy and immediately returns a mapped
-    /// readback handle. Export can submit the next tile before waiting on this
-    /// handle, overlapping GPU work with CPU readback/encoding.
     pub fn begin_display_linear_region_readback(
         &self,
         device: &wgpu::Device,
@@ -4328,9 +2693,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Copies a post-tone-map, display-linear Rec.2020 sub-rectangle as
-    /// tightly packed RGB32F. High-quality export uses this surface so any
-    /// resize occurs before the output transfer function and after demosaic.
     pub fn read_display_linear_region_blocking(
         &self,
         device: &wgpu::Device,
@@ -4358,11 +2720,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Reinstalls cached Remove patches at the source-scene boundary after a
-    /// RAW-stage refresh. Ordinary Develop slider changes only rerun Output, so
-    /// this upload is skipped entirely and the already patched scene texture is
-    /// reused. `source_origin`/`source_size` map this pipeline (full proxy, zoom
-    /// crop, or export tile) back into native source-image coordinates.
     pub fn upload_remove_scene_patches(
         &self,
         queue: &wgpu::Queue,
@@ -4422,22 +2779,11 @@ impl RawGpuPipeline {
                                 break;
                             }
                             let canonical = sample_remove_patch_scene(
-                                patch,
-                                local_x,
-                                local_y,
-                                source_raw,
-                                exposure,
+                                patch, local_x, local_y, source_raw, exposure,
                             );
                             let source_scene = canonical_remove_scene_to_pipeline_scene(
-                                source_raw,
-                                exposure,
-                                canonical,
+                                source_raw, exposure, canonical,
                             );
-                            // Fitted/detail previews are commonly pre-demosaiced
-                            // Rec.2020 rasters even when the document source is a
-                            // sensor RAW. Native export tiles remain camera RGB.
-                            // Convert the canonical patch into the scene space
-                            // expected by this concrete pipeline before upload.
                             let scene = if self.has_raster_scene {
                                 pipeline_scene_to_working_rec2020(source_raw, source_scene)
                             } else {
@@ -4457,10 +2803,8 @@ impl RawGpuPipeline {
                                     for value in rgb {
                                         let finite = if value.is_finite() { value } else { 0.0 };
                                         rgba.push(
-                                            half::f16::from_f32(
-                                                finite.clamp(-65_504.0, 65_504.0),
-                                            )
-                                            .to_bits(),
+                                            half::f16::from_f32(finite.clamp(-65_504.0, 65_504.0))
+                                                .to_bits(),
                                         );
                                     }
                                     rgba.push(half::f16::ONE.to_bits());
@@ -4469,7 +2813,11 @@ impl RawGpuPipeline {
                                     wgpu::TexelCopyTextureInfo {
                                         texture: &self.scene_texture,
                                         mip_level: 0,
-                                        origin: wgpu::Origin3d { x: run_start, y, z: 0 },
+                                        origin: wgpu::Origin3d {
+                                            x: run_start,
+                                            y,
+                                            z: 0,
+                                        },
                                         aspect: wgpu::TextureAspect::All,
                                     },
                                     bytemuck::cast_slice(&rgba),
@@ -4488,16 +2836,24 @@ impl RawGpuPipeline {
                             wgpu::TextureFormat::Rgba32Float => {
                                 let mut rgba = Vec::<f32>::with_capacity(samples.len() * 4);
                                 for rgb in samples {
-                                    rgba.extend(
-                                        rgb.map(|value| if value.is_finite() { value } else { 0.0 }),
-                                    );
+                                    rgba.extend(rgb.map(|value| {
+                                        if value.is_finite() {
+                                            value
+                                        } else {
+                                            0.0
+                                        }
+                                    }));
                                     rgba.push(1.0);
                                 }
                                 queue.write_texture(
                                     wgpu::TexelCopyTextureInfo {
                                         texture: &self.scene_texture,
                                         mip_level: 0,
-                                        origin: wgpu::Origin3d { x: run_start, y, z: 0 },
+                                        origin: wgpu::Origin3d {
+                                            x: run_start,
+                                            y,
+                                            z: 0,
+                                        },
                                         aspect: wgpu::TextureAspect::All,
                                     },
                                     bytemuck::cast_slice(&rgba),
@@ -4514,9 +2870,7 @@ impl RawGpuPipeline {
                                 );
                             }
                             format => {
-                                return Err(anyhow!(
-                                    "unsupported Remove scene format {format:?}"
-                                ));
+                                return Err(anyhow!("unsupported Remove scene format {format:?}"));
                             }
                         }
                     }
@@ -4526,7 +2880,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Reads the demosaiced scene as RGB32F after the raw stage.
     pub fn read_scene_texture_blocking(
         &self,
         device: &wgpu::Device,
@@ -4548,9 +2901,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Runs only RAW reconstruction and returns its white-balanced camera-RGB
-    /// boundary. RawNIND's linear Rec.2020 variant uses this for non-Bayer
-    /// sensors before converting into the model's declared colour space.
     pub fn render_camera_scene_blocking(
         &self,
         device: &wgpu::Device,
@@ -4573,9 +2923,6 @@ impl RawGpuPipeline {
 
     fn encode_raw_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
         if self.has_raster_scene {
-            // Pre-demosaiced TIFFs are uploaded directly at the scene-linear
-            // Rec.2020 boundary. Retain the shared post-demosaic chroma filter
-            // when requested, but never execute CFA reconstruction shaders.
             if params.camera.chroma_denoise > 1e-6 {
                 self.encode_pass_range(
                     encoder,
@@ -4586,9 +2933,6 @@ impl RawGpuPipeline {
             return;
         }
         if self.has_ai_scene && params.uses_ai_denoise() {
-            // The RawNIND result was uploaded directly into the camera-RGB
-            // scene boundary. Tone analysis and the complete output stage,
-            // including capture sharpening, still execute normally.
             return;
         }
         self.encode_pass(encoder, 0);
@@ -4616,9 +2960,6 @@ impl RawGpuPipeline {
 
     fn encode_output_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
         self.encode_pass(encoder, self.adjustment_prepare_pass_index);
-        // Capture sharpening and tone finalization are always required: when
-        // optional presence/creative effects are neutral this pass already
-        // writes the final adjustment image into tex2 for the render pass.
         self.encode_pass(encoder, self.adjustment_tone_pass_index);
         let blur_active = params.needs_blur_passes();
         if params.needs_intermediate_adjustment_passes() {
@@ -4633,9 +2974,6 @@ impl RawGpuPipeline {
                         self.mask_blur_end_index,
                     );
                 } else {
-                    // Lens, Motion, Radial, and Tilt-Shift all finish in the
-                    // first gather pass, which already writes the tex2 base
-                    // consumed by every post-blur binding variant.
                     self.encode_pass(encoder, self.mask_blur_start_index);
                 }
             }

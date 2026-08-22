@@ -5,9 +5,6 @@ use std::ops::RangeInclusive;
 const VALUE_FIELD_WIDTH: f32 = 72.0;
 #[cfg(target_os = "android")]
 const VALUE_FIELD_WIDTH: f32 = 60.0;
-// The label row and numeric field must reserve the same height as every other
-// themed control. A shorter allocation lets egui's minimum interaction height
-// paint the value field outside its row and leaves the label visibly off-axis.
 const HEADER_HEIGHT: f32 = crate::ui::theme::CONTROL_HEIGHT;
 #[cfg(not(target_os = "android"))]
 const SLIDER_HEIGHT: f32 = 28.0;
@@ -30,40 +27,20 @@ const ROW_BOTTOM_SPACE: f32 = 7.0;
 #[cfg(target_os = "android")]
 const ROW_BOTTOM_SPACE: f32 = 3.0;
 
-/// Semantic color treatment for slider tracks.
-///
-/// Gradients are opt-in so only controls whose values have a clear visual
-/// color meaning use them. Interaction, reset, focus, and keyboard behavior
-/// remain shared by every adjustment slider.
 #[derive(Clone, Copy, Debug)]
 pub enum SliderGradient {
-    /// Map the track directly to hue angles in degrees.
     HueDegrees { start: f32, end: f32 },
-    /// Shift around a named color channel toward its neighboring ranges.
     ChannelHue {
         left: egui::Color32,
         center: egui::Color32,
         right: egui::Color32,
     },
-    /// Dark-to-bright tonal meaning.
     Brightness,
-    /// Cool-to-warm white-balance meaning.
     Temperature,
-    /// Green-to-magenta signed/local white-balance meaning.
     Tint,
-    /// Absolute camera tint ratio used by the global RAW white-balance control.
-    /// Increasing this ratio makes the rendered correction greener (the inverse
-    /// of the signed local Tint control). A ratio of 1.0 is visually neutral.
     CameraTint { neutral_fraction: f32 },
-    /// Desaturated-to-multi-hue treatment for whole-image saturation/vibrance.
-    ///
-    /// The negative half remains neutral while the positive half traverses a
-    /// restrained spectrum, communicating increasing colorfulness without
-    /// tying the control to one arbitrary representative hue.
     Colorfulness,
-    /// Desaturated-to-saturated treatment around a representative color.
     Saturation(egui::Color32),
-    /// Dark-to-channel-to-bright treatment around a representative color.
     Luminance(egui::Color32),
 }
 
@@ -81,11 +58,6 @@ fn slider_scroll_lock_id() -> egui::Id {
     egui::Id::new("auraw-adjustment-slider-scroll-lock")
 }
 
-/// Returns whether an adjustment slider currently owns the pointer drag.
-///
-/// Scroll areas use this before laying out their contents so touch scrolling,
-/// wheel scrolling, and scrollbar movement are frozen until the slider is
-/// released.
 pub fn slider_scroll_locked(ctx: &egui::Context) -> bool {
     let pointer_down = ctx.input(|input| input.pointer.any_down());
     if !pointer_down {
@@ -102,20 +74,9 @@ fn slider_scroll_lock_owner(ctx: &egui::Context) -> Option<egui::Id> {
 
 fn lock_slider_scroll(ctx: &egui::Context, slider_id: egui::Id) {
     ctx.data_mut(|data| data.insert_temp(slider_scroll_lock_id(), slider_id));
-    // Claim the drag immediately once horizontal intent is established. The
-    // containing ScrollArea sees a different dragged id before it applies its
-    // drag delta at the end of this pass, so the view stops moving in the same
-    // frame rather than one frame later.
     ctx.set_dragged_id(slider_id);
 }
 
-/// Reusable adjustment control used by the Develop sidebar and Settings.
-///
-/// The slider deliberately does not jump on a track tap. A value changes only
-/// after a horizontal drag that starts on the handle, or after a deliberate
-/// horizontal slide beginning elsewhere on the track. Vertical touch motion is
-/// therefore left to the containing ScrollArea instead of changing a setting
-/// while the user is trying to scroll.
 pub fn adjustment_slider<Num>(
     ui: &mut Ui,
     label: &str,
@@ -144,7 +105,6 @@ where
     )
 }
 
-/// Adjustment slider with a semantic color gradient.
 #[allow(clippy::too_many_arguments)]
 pub fn gradient_adjustment_slider<Num>(
     ui: &mut Ui,
@@ -175,7 +135,6 @@ where
     )
 }
 
-/// Adjustment slider with both a channel accent and semantic gradient.
 #[allow(clippy::too_many_arguments)]
 pub fn accented_gradient_adjustment_slider<Num>(
     ui: &mut Ui,
@@ -207,9 +166,6 @@ where
     )
 }
 
-/// Whole-spectrum Hue control using the exact same interaction model as every
-/// other adjustment slider. The only specialization is its visual track and
-/// explicit neutral reset value.
 pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&str>) -> bool {
     let spec = crate::pipeline::effect_params::adjustment::HUE;
     adjustment_slider_impl(
@@ -231,7 +187,6 @@ pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&s
     )
 }
 
-/// Slider with a reset value.
 #[allow(clippy::too_many_arguments)]
 pub fn adjustment_slider_with_reset<Num>(
     ui: &mut Ui,
@@ -278,7 +233,7 @@ where
         hover_text,
         explicit_reset_value,
         accent,
-        gradient,
+        gradient: _,
     } = options;
     let mut changed = false;
 
@@ -295,8 +250,6 @@ where
                 }
             })
         });
-        // Never manufacture width inside a scroll area. A forced minimum here
-        // can extend a slider beneath a floating scrollbar on a narrow panel.
         let control_width = ui.available_width().max(1.0);
 
         ui.vertical(|ui| {
@@ -415,10 +368,6 @@ where
     )
     .intersect(rect);
 
-    // Both overlapping hit regions only request click sensing. In egui this
-    // lets a parent ScrollArea claim a vertical drag, while we still inspect
-    // the global pointer displacement to recognize an intentional horizontal
-    // slider gesture.
     let track_response = ui.interact(rect, ui.id().with("guarded-track"), Sense::click());
     let handle_response = ui.interact(
         handle_hit_rect,
@@ -451,9 +400,6 @@ where
     if !reset_requested {
         if let (Some(origin), Some(position), true) = pointer {
             if slider_drag_active {
-                // Once a horizontal slider drag has started it keeps ownership even
-                // if the finger moves vertically or leaves the original hit rect.
-                // This prevents the parent ScrollArea from waking up mid-drag.
                 lock_slider_scroll(ui.ctx(), slider_drag_id);
                 changed |= set_from_pointer(value, start, end, decimals, track_rect, position.x);
             } else if rect.contains(origin) {
@@ -518,9 +464,6 @@ where
             ui.visuals().widgets.inactive.bg_fill,
         );
     }
-    // Signed adjustment ranges use zero as their visual origin on every
-    // platform. Android retains its touch geometry, but uses the same visual
-    // language as the desktop Develop controls.
     let bipolar = start < 0.0 && end > 0.0;
     let fill_origin = if bipolar {
         let zero_fraction = ((-start) / span).clamp(0.0, 1.0) as f32;
@@ -633,15 +576,11 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
         }
         SliderGradient::Brightness => {
             if t <= 0.5 {
-                lerp_color(
-                    egui::Color32::from_gray(18),
-                    egui::Color32::from_gray(118),
-                    t * 2.0,
-                )
+                lerp_color(crate::ui::theme::BRIGHTNESS_SHADOW, crate::ui::theme::BRIGHTNESS_MID, t * 2.0)
             } else {
                 lerp_color(
-                    egui::Color32::from_gray(118),
-                    egui::Color32::from_gray(245),
+                    crate::ui::theme::BRIGHTNESS_MID,
+                    crate::ui::theme::BRIGHTNESS_HIGHLIGHT,
                     (t - 0.5) * 2.0,
                 )
             }
@@ -649,29 +588,25 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
         SliderGradient::Temperature => {
             if t <= 0.5 {
                 lerp_color(
-                    egui::Color32::from_rgb(72, 128, 235),
-                    egui::Color32::from_gray(208),
+                    crate::ui::theme::TEMPERATURE_COOL,
+                    crate::ui::theme::TEMPERATURE_NEUTRAL,
                     t * 2.0,
                 )
             } else {
                 lerp_color(
-                    egui::Color32::from_gray(208),
-                    egui::Color32::from_rgb(244, 157, 62),
+                    crate::ui::theme::TEMPERATURE_NEUTRAL,
+                    crate::ui::theme::TEMPERATURE_WARM,
                     (t - 0.5) * 2.0,
                 )
             }
         }
         SliderGradient::Tint => {
             if t <= 0.5 {
-                lerp_color(
-                    egui::Color32::from_rgb(76, 181, 112),
-                    egui::Color32::from_gray(202),
-                    t * 2.0,
-                )
+                lerp_color(crate::ui::theme::TINT_GREEN, crate::ui::theme::TINT_NEUTRAL, t * 2.0)
             } else {
                 lerp_color(
-                    egui::Color32::from_gray(202),
-                    egui::Color32::from_rgb(222, 84, 174),
+                    crate::ui::theme::TINT_NEUTRAL,
+                    crate::ui::theme::TINT_MAGENTA,
                     (t - 0.5) * 2.0,
                 )
             }
@@ -684,11 +619,7 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
                 } else {
                     t / neutral
                 };
-                lerp_color(
-                    egui::Color32::from_rgb(222, 84, 174),
-                    egui::Color32::from_gray(202),
-                    u,
-                )
+                lerp_color(crate::ui::theme::TINT_MAGENTA, crate::ui::theme::TINT_NEUTRAL, u)
             } else {
                 let span = 1.0 - neutral;
                 let u = if span <= f32::EPSILON {
@@ -696,28 +627,17 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
                 } else {
                     (t - neutral) / span
                 };
-                lerp_color(
-                    egui::Color32::from_gray(202),
-                    egui::Color32::from_rgb(76, 181, 112),
-                    u,
-                )
+                lerp_color(crate::ui::theme::TINT_NEUTRAL, crate::ui::theme::TINT_GREEN, u)
             }
         }
         SliderGradient::Colorfulness => {
             if t <= 0.5 {
-                // Negative saturation/vibrance moves toward monochrome. Keep
-                // this half intentionally neutral so the track does not imply
-                // a hue shift.
                 lerp_color(
-                    egui::Color32::from_gray(92),
-                    egui::Color32::from_gray(178),
+                    crate::ui::theme::COLORFULNESS_SHADOW,
+                    crate::ui::theme::COLORFULNESS_MID,
                     t * 2.0,
                 )
             } else {
-                // Positive colorfulness affects every hue, so show a compact
-                // spectrum instead of choosing a single representative color.
-                // Saturation ramps in from the neutral midpoint to keep the
-                // center visually continuous.
                 let u = (t - 0.5) * 2.0;
                 let hue = u * 360.0;
                 let saturation = egui::lerp(0.0..=0.94, u.sqrt());
@@ -736,13 +656,9 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
         }
         SliderGradient::Luminance(color) => {
             if t <= 0.5 {
-                lerp_color(egui::Color32::from_rgb(10, 10, 10), color, t * 2.0)
+                lerp_color(crate::ui::theme::LUMINANCE_BLACK, color, t * 2.0)
             } else {
-                lerp_color(
-                    color,
-                    egui::Color32::from_rgb(246, 246, 246),
-                    (t - 0.5) * 2.0,
-                )
+                lerp_color(color, crate::ui::theme::LUMINANCE_WHITE, (t - 0.5) * 2.0)
             }
         }
     }

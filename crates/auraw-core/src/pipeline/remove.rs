@@ -9,11 +9,8 @@ pub const REMOVE_MAX_PATCHES_PER_STROKE: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RemoveBrushPoint {
-    /// Native source-image X coordinate in pixels.
     pub x: f32,
-    /// Native source-image Y coordinate in pixels.
     pub y: f32,
-    /// Native source-image brush radius in pixels.
     pub radius: f32,
 }
 
@@ -55,10 +52,6 @@ impl NativeRect {
     }
 }
 
-/// One local Big-LaMa job: `context` is the square RGB crop presented to the
-/// model, while `target` is the overlapping native core whose mask may be
-/// changed by this job. Keeping those geometries separate preserves real image
-/// context even when one Remove stroke spans many model calls.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RemoveContextCrop {
     pub context: NativeRect,
@@ -68,27 +61,14 @@ pub struct RemoveContextCrop {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RemovePatch {
     pub bounds: NativeRect,
-    /// Canonical scene-boundary RGB stored as IEEE-754 binary16 bits.
-    ///
-    /// For sensor RAW files this is camera RGB with the white-balance gains
-    /// divided back out. At render time the current white balance is reapplied
-    /// before the patch is uploaded into the GPU scene texture. For rendered
-    /// raster sources this is scene-linear Rec.2020, which is already the
-    /// pipeline's source-scene boundary. Storing Remove here keeps every
-    /// downstream Develop adjustment live without rerunning Big-LaMa.
     #[serde(default, with = "arc_u16_le_base64")]
     pub rgb_scene16f: Arc<[u16]>,
-    /// Legacy post-adjustment sRGB cache used by sidecars written by the first
-    /// Remove implementation. New strokes never populate this field.
     #[serde(
         default,
         with = "arc_u16_le_base64",
         skip_serializing_if = "arc_u16_is_empty"
     )]
     pub rgb_srgb16: Arc<[u16]>,
-    /// Feathered compositing coverage, one byte per patch pixel. The feather is
-    /// already composited into `rgb_scene16f`; alpha remains so scaled preview
-    /// uploads can avoid touching pixels outside the affected mask.
     #[serde(with = "arc_u8_base64")]
     pub alpha: Arc<[u8]>,
 }
@@ -123,7 +103,6 @@ impl RemovePatch {
         })
     }
 
-    /// Compatibility constructor for schema-12 Remove patches.
     pub fn new(
         bounds: NativeRect,
         rgb_srgb16: Vec<u16>,
@@ -173,7 +152,6 @@ impl RemoveEditState {
     }
 }
 
-/// A compact native-resolution binary brush mask. `pixels` is local to `bounds`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoveMask {
     pub bounds: NativeRect,
@@ -249,9 +227,6 @@ pub fn rasterize_remove_brush(
     };
     let mut pixels = vec![0u8; bounds.width as usize * bounds.height as usize];
 
-    // The UI records points at roughly 0.22 brush radii, so filled native-pixel
-    // discs overlap substantially. This both preserves the actual sampled brush
-    // geometry and avoids gaps without inventing a second, lower-resolution path.
     for point in &brush.points {
         let radius = point.radius.max(0.5) + dilation;
         paint_disc(&mut pixels, bounds, point.x, point.y, radius);
@@ -288,9 +263,6 @@ fn paint_disc(pixels: &mut [u8], bounds: NativeRect, center_x: f32, center_y: f3
     }
 }
 
-/// Plan square local-context crops. Small strokes get one ~3x context square.
-/// Large strokes are covered by overlapping 1024-native-pixel context windows
-/// rather than shrinking an enormous source region into the 512 model tensor.
 pub fn plan_remove_context_crops(
     image_width: u32,
     image_height: u32,
@@ -317,11 +289,6 @@ pub fn plan_remove_context_crops(
         }];
     }
 
-    // For masks larger than one context window, use overlapping target cores.
-    // Start at a 2x context ratio; for truly enormous masks, grow the target
-    // core (while retaining overlap) so one stroke can never exceed the
-    // persisted patch safety cap. The model still sees a full local context
-    // square rather than a globally downscaled photograph.
     let mut core_edge = (max_context / 2).max(96);
     let max_core_edge = (max_context * 3 / 4).max(core_edge);
     loop {
@@ -440,9 +407,6 @@ fn square_inside_image(
     }
 }
 
-/// Returns the logical RGB white-balance gains used by the demosaiced scene
-/// texture. The two physical green planes are averaged because Remove patches
-/// live after demosaic, where they have already collapsed to logical RGB.
 pub fn remove_scene_white_balance(raw: &LoadedRaw, exposure: &ExposureParams) -> [f32; 3] {
     if raw.is_pre_demosaiced_raster() {
         return [1.0; 3];
@@ -548,10 +512,6 @@ pub fn working_rec2020_to_canonical_remove_scene(
     pipeline_scene_to_canonical_remove_scene(raw, exposure, camera_wb)
 }
 
-/// Build a stable, photographic model view from the scene boundary. The
-/// exposure gain is crop-global and the luminance shoulder is analytically
-/// invertible, so Big-LaMa sees a normal gamma-encoded image while its result
-/// can still be cached upstream of all editable Develop controls.
 pub fn remove_scene_to_model_srgb(
     raw: &LoadedRaw,
     scene_rgb: [f32; 3],
@@ -594,13 +554,10 @@ pub fn remove_model_view_gain(raw: &LoadedRaw, scene_rgb: &[f32]) -> f32 {
     luminance.sort_by(f32::total_cmp);
     let index = ((luminance.len() - 1) as f32 * 0.75).round() as usize;
     let p75 = luminance[index].max(1e-5);
-    // Map the 75th percentile to about 0.55 after the reversible shoulder.
     let target_linear = 0.55 / (1.0 - 0.55);
     (target_linear / p75).clamp(0.25, 64.0)
 }
 
-/// Apply cached Remove patches, in stroke order, to one display-linear Rec.2020
-/// region. This is used by both local model input construction and export.
 pub fn composite_remove_edits_into_linear_region(
     edits: &RemoveEditState,
     region: NativeRect,
@@ -621,9 +578,6 @@ pub fn composite_patch_into_linear_region(
     region: NativeRect,
     rgb: &mut [f32],
 ) {
-    // Scene-space patches belong upstream of the Develop graph and are applied
-    // directly to the GPU scene texture. This post-adjustment helper remains
-    // only for loading schema-12 legacy patches.
     if patch.has_scene_pixels() {
         return;
     }

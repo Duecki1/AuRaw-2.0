@@ -16,6 +16,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Publishes completed exports through MediaStore or the Android 8/9 legacy path. */
 final class ExportPublisher {
@@ -29,9 +30,8 @@ final class ExportPublisher {
 
     private final AuRawActivity activity;
     private final Callbacks callbacks;
-    private String pendingExportPath;
-    private String pendingExportName;
-    private String pendingExportMimeType;
+    /** Permission callbacks and publish requests may arrive from different bridge threads. */
+    private final AtomicReference<PendingLegacyExport> pendingLegacyExport = new AtomicReference<>();
 
     ExportPublisher(AuRawActivity activity, Callbacks callbacks) {
         this.activity = activity;
@@ -60,16 +60,9 @@ final class ExportPublisher {
         boolean transferred = false;
         try {
             ParcelFileDescriptor descriptor = resolver.openFileDescriptor(uri, "w");
-            if (descriptor == null) {
-                throw new IllegalStateException("Android MediaStore returned no file descriptor");
-            }
-            int fd;
-            try {
-                fd = descriptor.detachFd();
-                transferred = true;
-            } finally {
-                descriptor.close();
-            }
+            int fd = NativeFileDescriptors.detach(
+                    descriptor, "Android MediaStore returned no file descriptor");
+            transferred = true;
             String location = AndroidStorageContract.exportLocation(
                     Environment.DIRECTORY_PICTURES, displayName);
             return fd + "\t" + uri + "\t" + location;
@@ -110,9 +103,13 @@ final class ExportPublisher {
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
                 && activity.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
-            pendingExportPath = cachedPath;
-            pendingExportName = displayName;
-            pendingExportMimeType = normalizedMime;
+            PendingLegacyExport replaced = pendingLegacyExport.getAndSet(
+                    new PendingLegacyExport(cachedPath, displayName, normalizedMime));
+            if (replaced != null) {
+                deleteCachedExport(replaced.cachedPath);
+                callbacks.onExportPublished(
+                        "", "A newer export replaced the pending permission request");
+            }
             activity.requestPermissions(
                     new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
                     WRITE_EXPORT_PERMISSION);
@@ -176,7 +173,7 @@ final class ExportPublisher {
                 if (output == null) {
                     throw new IllegalStateException("Android MediaStore returned no output stream");
                 }
-                copy(input, output, Long.MAX_VALUE);
+                BoundedStreams.copy(input, output, Long.MAX_VALUE, "Export is too large");
             }
             values.clear();
             values.put(MediaStore.Images.Media.IS_PENDING, 0);
@@ -207,7 +204,7 @@ final class ExportPublisher {
         File destination = uniqueFile(directory, displayName);
         try (InputStream input = new FileInputStream(cachedFile);
              OutputStream output = new FileOutputStream(destination)) {
-            copy(input, output, Long.MAX_VALUE);
+            BoundedStreams.copy(input, output, Long.MAX_VALUE, "Export is too large");
         }
         MediaScannerConnection.scanFile(
                 activity,
@@ -241,40 +238,6 @@ final class ExportPublisher {
         return AndroidStorageContract.safeImageName(requestedName, mimeType);
     }
 
-    private static void copy(InputStream input, OutputStream output, long maximumBytes)
-            throws Exception {
-        byte[] buffer = new byte[1024 * 1024];
-        long copied = 0;
-        while (true) {
-            int count = input.read(buffer);
-            if (count < 0) {
-                break;
-            }
-            if (count == 0) {
-                // Some ContentProvider streams are allowed to make no
-                // progress. A one-byte read either advances or reaches EOF,
-                // avoiding an unbounded zero-byte loop.
-                int value = input.read();
-                if (value < 0) {
-                    break;
-                }
-                copied = checkedCopyLength(copied, 1, maximumBytes);
-                output.write(value);
-                continue;
-            }
-            copied = checkedCopyLength(copied, count, maximumBytes);
-            output.write(buffer, 0, count);
-        }
-    }
-
-    private static long checkedCopyLength(long copied, int count, long maximumBytes) {
-        if (count < 0 || copied > maximumBytes - count) {
-            throw new IllegalStateException(
-                    "The document exceeds the " + maximumBytes + "-byte import limit");
-        }
-        return copied + count;
-    }
-
     boolean onRequestPermissionsResult(
             int requestCode,
             String[] permissions,
@@ -282,24 +245,41 @@ final class ExportPublisher {
         if (requestCode != WRITE_EXPORT_PERMISSION) {
             return false;
         }
-        String cachedPath = pendingExportPath;
-        String displayName = pendingExportName;
-        String mimeType = pendingExportMimeType;
-        pendingExportPath = null;
-        pendingExportName = null;
-        pendingExportMimeType = null;
+        PendingLegacyExport pending = pendingLegacyExport.getAndSet(null);
         if (grantResults.length > 0
                 && grantResults[0] == PackageManager.PERMISSION_GRANTED
-                && cachedPath != null) {
-            startPublishThread(cachedPath, displayName, normalizeExportMimeType(mimeType));
+                && pending != null) {
+            startPublishThread(
+                    pending.cachedPath,
+                    pending.displayName,
+                    normalizeExportMimeType(pending.mimeType));
         } else {
-            if (cachedPath != null) {
-                new File(cachedPath).delete();
+            if (pending != null) {
+                deleteCachedExport(pending.cachedPath);
             }
             callbacks.onExportPublished(
                     "",
                     "Storage permission is required to export on Android 8 and 9");
         }
         return true;
+    }
+
+    private static void deleteCachedExport(String cachedPath) {
+        File cached = new File(cachedPath);
+        if (!cached.delete() && cached.exists()) {
+            cached.deleteOnExit();
+        }
+    }
+
+    private static final class PendingLegacyExport {
+        final String cachedPath;
+        final String displayName;
+        final String mimeType;
+
+        PendingLegacyExport(String cachedPath, String displayName, String mimeType) {
+            this.cachedPath = cachedPath;
+            this.displayName = displayName;
+            this.mimeType = mimeType;
+        }
     }
 }

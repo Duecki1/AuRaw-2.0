@@ -4,11 +4,6 @@ use crate::model_artifact::{
 use anyhow::Result;
 use std::path::Path;
 
-/// Shared installation policy for optional AI model artifacts.
-///
-/// Model-specific modules keep their own artifact metadata and download tuning,
-/// while verification, consent gating, progress reporting, and installation all
-/// flow through this common layer and ultimately through `model_artifact`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ModelInstallSpec {
     pub artifact: ModelArtifact,

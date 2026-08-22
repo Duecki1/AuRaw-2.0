@@ -33,9 +33,6 @@ pub(crate) fn choose_export_file_path(
     Some(path)
 }
 
-/// Keep desktop dialogs compact while constraining them to the usable viewport.
-/// Compact portrait screens additionally enable vertical scrolling so long
-/// model-download text remains reachable without extending below system bars.
 pub(crate) fn responsive_popup<'a>(
     window: eframe::egui::Window<'a>,
     ctx: &eframe::egui::Context,
@@ -77,11 +74,6 @@ fn android_overflow_button(
 ) -> eframe::egui::Response {
     use eframe::egui::{self, Align2, Sense, StrokeKind};
 
-    // Paint the small overlay directly. A normal `Button` always expands to
-    // `interact_size.y` (40 points on Android), even when placed in a 20–22
-    // point thumbnail rectangle. That made the visual cover most of the mask
-    // preview and disagree with its layout bounds. The invisible hit target
-    // remains large enough for touch while the visible control stays compact.
     let button_rect = android_overflow_button_rect(anchor_rect, edge);
     let touch_edge = ui
         .spacing()
@@ -127,18 +119,8 @@ pub(crate) fn android_overflow_menu<R>(
 }
 
 pub(crate) fn mask_component_color(index: usize) -> eframe::egui::Color32 {
-    use eframe::egui::Color32;
-    const COLORS: [Color32; 8] = [
-        Color32::from_rgb(78, 163, 255),
-        Color32::from_rgb(255, 116, 102),
-        Color32::from_rgb(83, 211, 146),
-        Color32::from_rgb(242, 192, 75),
-        Color32::from_rgb(183, 124, 255),
-        Color32::from_rgb(63, 207, 220),
-        Color32::from_rgb(255, 133, 196),
-        Color32::from_rgb(180, 205, 88),
-    ];
-    COLORS[index % COLORS.len()]
+    use crate::ui::theme::MASK_COMPONENT_COLORS;
+    MASK_COMPONENT_COLORS[index % MASK_COMPONENT_COLORS.len()]
 }
 
 #[cfg(test)]

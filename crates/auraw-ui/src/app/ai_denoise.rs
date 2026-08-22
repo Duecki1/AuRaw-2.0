@@ -89,9 +89,6 @@ impl AurawApp {
             let changed = self.develop.exposure.ai_denoise_enabled;
             self.develop.exposure.ai_denoise_enabled = false;
             self.develop.target_exposure.ai_denoise_enabled = false;
-            // Bayer AI denoise now supplies the pipeline's CFA texture. A
-            // normal stage update cannot swap that immutable source texture,
-            // so disabling it must rebuild the preview from the original RAW.
             self.preview.quality_dirty = true;
             self.discard_ai_preview_caches();
             self.preview.pending_stage = None;
@@ -194,17 +191,8 @@ impl AurawApp {
             return;
         };
         raw.clear_ai_denoised_image();
-        // RawNIND's tensors and the full-resolution blended CFA have a large
-        // temporary memory peak. Release disposable preview graphs while the
-        // worker runs so Android does not retain display-sized GPU surfaces on
-        // top of that peak. Bayer inference itself no longer needs a GPU
-        // demosaic pipeline.
         #[cfg(target_os = "android")]
         {
-            // Keeping a DPI-sized preview resident alongside ONNX Runtime's
-            // tensors can exceed the mobile process budget. Retire every
-            // preview texture and rebuild it after every success, failure, or
-            // cancellation path below.
             let previous_pipeline = {
                 let mut renderer = render_state.renderer.write();
                 self.take_preview_pipeline_and_release_textures(&mut renderer)
@@ -279,9 +267,6 @@ impl AurawApp {
         self.develop.exposure.ai_denoise_enabled = true;
         self.develop.target_exposure.ai_denoise_enabled = true;
         if changed {
-            // This is the semantic toggle transaction. Persist it once here;
-            // reopening an already-enabled sidecar reaches this path with
-            // `changed == false` and therefore does not create another edit.
             self.note_edit_changed();
         }
         crate::diagnostics::record(format!(
@@ -356,10 +341,6 @@ impl AurawApp {
         if stale {
             return;
         }
-        // A model result changes the scene source. Cancellation and failure
-        // also need a rebuild on Android because start_ai_denoise deliberately
-        // released the preview. Keep this one terminal transaction for every
-        // path so the UI can never remain blank after the worker exits.
         self.preview.quality_dirty = true;
         self.discard_ai_preview_caches();
         self.preview.pending_stage = None;
@@ -431,8 +412,6 @@ impl AurawApp {
                 );
                 return;
             }
-            // The sidecar retains intent. A missing, stale, or corrupt derived
-            // cache is safely rebuilt from the original sensor mosaic.
             self.set_ai_denoise_enabled(true, frame);
         }
     }

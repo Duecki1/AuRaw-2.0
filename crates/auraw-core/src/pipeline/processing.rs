@@ -1,8 +1,6 @@
 use super::{CompactPixelMap, DenoiseQuality, ExposureParams, LoadedRaw, MaskEffect, MaskStack};
 use rayon::prelude::*;
 
-/// Earliest pipeline stage that must be executed after a parameter change.
-/// Stages are ordered from most expensive/upstream to cheapest/downstream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProcessingStage {
     Raw,
@@ -20,9 +18,6 @@ impl ProcessingStage {
     }
 }
 
-/// Returns the earliest affected stage. RAW-space controls, including global
-/// white balance, invalidate the cached demosaic result and every downstream
-/// stage. Ordinary Develop controls only invalidate the final render.
 pub fn affected_stage(before: &ExposureParams, after: &ExposureParams) -> Option<ProcessingStage> {
     if before == after {
         return None;
@@ -222,8 +217,6 @@ fn extract_padded_raster_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
     raster_with_metadata(raw, tile.padded_width, tile.padded_height, rgb, false)
 }
 
-/// Copies a rectangular RAW region while retaining camera metadata and the
-/// explicit CFA/black-level maps. Coordinates are clamped to the source image.
 pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> LoadedRaw {
     if raw.is_pre_demosaiced_raster() {
         return crop_raster(raw, x, y, width, height);
@@ -270,9 +263,6 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
-        // A lens map is normalized to the full sensor raster. A spatial crop
-        // needs an origin-aware view of that map, so do not attach the full-map
-        // normalization to cropped scratch RAWs where it would be misleading.
         lens_geometry: (x == 0 && y == 0 && width == raw.width && height == raw.height)
             .then(|| raw.lens_geometry.clone())
             .flatten(),
@@ -283,17 +273,10 @@ pub fn crop_raw(raw: &LoadedRaw, x: u32, y: u32, width: u32, height: u32) -> Loa
     }
 }
 
-/// Builds a compact RAW proxy while preserving the explicit per-pixel CFA
-/// map. Each proxy photosite averages only source samples from the same CFA
-/// plane, preventing colour-plane cross-contamination before demosaic.
 pub fn build_proxy(raw: &LoadedRaw, spec: ProxySpec) -> LoadedRaw {
     build_region_proxy(raw, 0, 0, raw.width, raw.height, spec)
 }
 
-/// Builds a proxy directly from one source region. Unlike `crop_raw` followed
-/// by `build_proxy`, this visits and allocates only the final proxy data when
-/// reduction is required, which is important for repeated zoom previews on
-/// memory-constrained phones.
 pub fn build_region_proxy(
     raw: &LoadedRaw,
     x: u32,
@@ -687,46 +670,18 @@ fn padded_tile_ai_denoised(raw: &LoadedRaw, tile: ExportTile) -> Option<super::A
     super::AiDenoisedImage::new(tile.padded_width, tile.padded_height, rgb16f).ok()
 }
 
-/// Cumulative input support of every spatial stage used by an export tile.
-/// These are deliberately separate constants: taking only the maximum stage
-/// radius is incorrect when one spatial pass consumes another pass's output.
-// Inpaint opposed reads only the local 3x3 CFA cube. Its full-image
-// chrominance offsets are calculated before export tiling begins.
 const HIGHLIGHT_RECONSTRUCTION_SUPPORT: u32 = 1;
-// Conservative bound over the complete Bayer RCD and X-Trans Markesteijn-3
-// pass chains, including their final detail-recovery neighbourhoods.
 const DEMOSAIC_CHAIN_SUPPORT: u32 = 32;
-// High-quality color denoise cascades dense B3 scales at radii 1/2/4/8 and
-// compact binomial scales at 16/32. Because each pass consumes the previous
-// scale, dependency support is 2*(1+2+4+8)+16+32 = 78 pixels.
 const COLOR_DENOISE_SUPPORT_FAST: u32 = 2;
 const COLOR_DENOISE_SUPPORT_BALANCED: u32 = 2 * (1 + 2 + 4 + 8);
 const COLOR_DENOISE_SUPPORT_HIGH: u32 = COLOR_DENOISE_SUPPORT_BALANCED + 16 + 32;
-// The edge-aware tone guide is blurred by five guide texels at desktop's 4x
-// reduction and three texels at Android's 8x reduction. Bilinear lookup can
-// reach one additional guide cell, so its raw-pixel support is 24/32.
 const TONE_GUIDE_SUPPORT: u32 = if cfg!(target_os = "android") { 32 } else { 24 };
-// Scale-aware Clarity has the widest presence footprint: the B3 kernel reaches
-// +/-2 times a step capped at 14 pixels. Texture and Dehaze remain inside it.
 const LOCAL_EFFECTS_SUPPORT: u32 = 28;
-// Neon samples an inner edge radius capped at 24 pixels and a second halo
-// radius at twice that distance.
 const NEON_SUPPORT: u32 = 48;
-// Five adjacent mask-Blur B3 stages reach +/-2*(1+1+2+3+5) reference pixels.
 const MASK_BLUR_SUPPORT: u32 = 72;
-// Lens and Tilt-Shift gather a radius of at most 48 reference pixels. Motion
-// and Radial Blur gather half of a 96-pixel trail. At the capped 3x reference
-// scale every path therefore reaches at most 144 pixels from its destination.
 const FOCUS_BLUR_SUPPORT: u32 = 144;
-// Edge Glow samples an inner radius capped at 24 pixels and an outer radius at
-// twice that distance.
 const EDGE_GLOW_SUPPORT: u32 = 48;
-// Pixelate's scale-aware 32-reference-pixel cells can reach this distance at
-// the maximum reference scale.
 const PIXELATE_SUPPORT: u32 = 96;
-// Glow cascades five B3 diffusion stages. At the capped 3x reference scale the
-// steps are 3+3+6+12+24, and each 5x5 stage reaches +/-2*step. Support therefore
-// accumulates to 96 pixels from the extracted highlight source.
 const GLOW_SUPPORT: u32 = 96;
 const COLOR_MIXER_SUPPORT: u32 = 4;
 const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_RECONSTRUCTION_SUPPORT
@@ -741,11 +696,8 @@ const EXPORT_CUMULATIVE_SUPPORT: u32 = HIGHLIGHT_RECONSTRUCTION_SUPPORT
     + GLOW_SUPPORT
     + COLOR_MIXER_SUPPORT;
 
-/// Rounded up to the 8-pixel guide/workgroup alignment.
 pub const EXPORT_TILE_HALO: u32 = EXPORT_CUMULATIVE_SUPPORT.div_ceil(8) * 8;
 
-/// Smallest safe export halo when optional spatial effects are neutral.
-/// Highlight reconstruction, demosaic, and the tone guide remain active.
 pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_RECONSTRUCTION_SUPPORT
     + DEMOSAIC_CHAIN_SUPPORT
     + TONE_GUIDE_SUPPORT
@@ -753,12 +705,6 @@ pub const MIN_EXPORT_TILE_HALO: u32 = (HIGHLIGHT_RECONSTRUCTION_SUPPORT
     .div_ceil(8)
     * 8;
 
-/// Returns the halo actually required by the current edit. Neutral global or
-/// masked spatial effects should not force every tile to process their full
-/// support radius. Light Rays samples its own full-image emission atlas, while
-/// Fog and Smoke evaluate full-image procedural coordinates; none of them need
-/// a RAW-pixel halo. This is especially important on Android, where a wide halo
-/// around a 768 px core can nearly triple the processed area.
 pub fn required_export_tile_halo(exposure: &ExposureParams, masks: &MaskStack) -> u32 {
     let mut support = HIGHLIGHT_RECONSTRUCTION_SUPPORT
         + DEMOSAIC_CHAIN_SUPPORT
@@ -853,7 +799,6 @@ impl Default for TileSpec {
             } else {
                 1024
             },
-            // Must cover every spatial operation executed inside a tile.
             halo: EXPORT_TILE_HALO,
         }
     }
@@ -925,8 +870,6 @@ impl TilePlan {
     }
 }
 
-/// Extracts a fixed-size, halo-padded RAW tile. Out-of-image samples clamp to
-/// the nearest sensor edge, allowing one reusable GPU allocation for all tiles.
 pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
     if raw.is_pre_demosaiced_raster() {
         return extract_padded_raster_tile(raw, tile);
@@ -966,8 +909,6 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
         camera_profile_source: raw.camera_profile_source.clone(),
         available_camera_profiles: raw.available_camera_profiles.clone(),
         white_balance_model: raw.white_balance_model.clone(),
-        // Export tiles use global coordinates for masks and are stitched back
-        // into one native raster before the deferred lens map is applied.
         lens_geometry: None,
         ai_denoised: std::sync::Arc::new(std::sync::RwLock::new(None)),
         opposed_chroma_cache: std::sync::Arc::clone(&raw.opposed_chroma_cache),
@@ -976,9 +917,6 @@ pub fn extract_padded_tile(raw: &LoadedRaw, tile: ExportTile) -> LoadedRaw {
     tile_raw
 }
 
-/// Reuses the allocation and metadata clones of an existing tile buffer. The
-/// hot export loop rewrites either the scene-linear raster or the sensor mosaic
-/// in place, avoiding fresh full-tile allocations for every export tile.
 pub fn extract_padded_tile_into(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mut LoadedRaw) {
     if raw.is_pre_demosaiced_raster() {
         let dimensions_changed =
@@ -1036,7 +974,6 @@ fn fill_padded_tile(raw: &LoadedRaw, tile: ExportTile, tile_raw: &mut LoadedRaw)
     }
     let width = tile.padded_width as usize;
     let height = tile.padded_height as usize;
-    // Keep the reusable tile buffer fully allocated before row slices are taken.
     tile_raw.raw_pixels.resize(width.saturating_mul(height), 0);
 
     let source_width = raw.width as i64;
@@ -1583,9 +1520,6 @@ mod tests {
 
     #[test]
     fn proxy_long_edge_does_not_drop_at_integer_scale_thresholds() {
-        // These small rasters mirror the aspect ratios and scale thresholds
-        // that previously made a 45 MP RAW produce a lower-resolution preview
-        // than a 33 MP RAW for the same max_edge request.
         let larger = build_proxy(&test_raw(82, 54), ProxySpec { max_edge: 26 });
         let smaller = build_proxy(&test_raw(70, 46), ProxySpec { max_edge: 26 });
         let portrait = build_proxy(&test_raw(54, 82), ProxySpec { max_edge: 26 });
@@ -1607,8 +1541,6 @@ mod tests {
         raw.cfa_kind = CfaKind::XTrans;
         raw.color_indices = CompactPixelMap::repeating(98, 66, 6, 6, pattern.clone());
 
-        // Six guard pixels are sufficient for a 32 px physical viewport even
-        // after the output is aligned down to a complete X-Trans period.
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 38 });
         assert!(proxy.width.max(proxy.height) >= 32);
         assert_eq!(proxy.width % 6, 0);
@@ -1635,10 +1567,6 @@ mod tests {
             .collect();
 
         let proxy = build_proxy(&raw, ProxySpec { max_edge: 60 });
-        // A 2:1 reduction maps the first six output pixels across source
-        // columns 0..12. They must retain that spatial progression. The old
-        // macrocell implementation averaged all twelve columns into every one
-        // of these samples, which is the sixfold blur seen in Fuji previews.
         assert!(proxy.raw_pixels[0] <= 200, "left sample was over-blurred");
         assert!(proxy.raw_pixels[5] >= 900, "right sample was over-blurred");
     }

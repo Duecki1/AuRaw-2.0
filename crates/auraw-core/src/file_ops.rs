@@ -25,7 +25,6 @@ pub fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
 
-    // SAFETY: both buffers are NUL-terminated and live for the duration of the call.
     let moved = unsafe {
         MoveFileExW(
             source.as_ptr(),

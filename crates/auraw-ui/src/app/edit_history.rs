@@ -35,9 +35,6 @@ impl LensEditState {
     }
 }
 
-/// CPU-side edit state only. GPU pipelines and texture handles deliberately do
-/// not participate in history; applying a snapshot goes through the normal
-/// dirty-stage and mask-atlas paths.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct MaskSelection {
     mask: Option<usize>,
@@ -61,10 +58,6 @@ impl MaskSelection {
         let Some(mask) = navigation.selected_mask else {
             return Self::default();
         };
-        // A newly-created mask/component can be selected before the new
-        // semantic snapshot is committed. It does not exist in the previous
-        // snapshot, so keep that snapshot's last valid selection instead of
-        // replacing it with invalid (or empty) navigation.
         let Some(mask_contents) = contents.masks.get(mask) else {
             return self;
         };
@@ -88,9 +81,6 @@ impl MaskSelection {
 #[derive(Clone, Debug)]
 struct EditSnapshot {
     exposure: ExposureParams,
-    /// Canonical mask contents with navigation fields cleared. Consecutive
-    /// global/lens snapshots share this allocation; only a semantic mask edit
-    /// creates a new one.
     masks: Arc<MaskStack>,
     mask_selection: MaskSelection,
     lens: LensEditState,
@@ -147,7 +137,7 @@ impl EditSnapshot {
     }
 }
 
-pub(super) struct EditHistory {
+pub(crate) struct EditHistory {
     undo: VecDeque<EditSnapshot>,
     redo: VecDeque<EditSnapshot>,
     current: EditSnapshot,
@@ -220,12 +210,6 @@ impl EditHistory {
         self.restoring_snapshot = restoring;
     }
 
-    /// Observe the final application state for a frame, but only inspect the
-    /// potentially large mask stack after an edit path signalled a change.
-    /// While a pointer or text field owns an interaction, keep the original
-    /// baseline and defer the one comparison/snapshot until release/focus
-    /// loss. A whole slider drag, curve drag, brush stroke, geometry drag, or
-    /// text rename is therefore one edit without O(mask-size) work per frame.
     pub(super) fn observe(
         &mut self,
         exposure: &ExposureParams,
@@ -257,10 +241,6 @@ impl EditHistory {
         let mask_change_pending = self.mask_interaction_pending || self.mask_change_observed;
         self.change_observed = false;
         self.mask_change_observed = false;
-        // Mask equality can walk every brush dab and cached range image. Only
-        // pay for it after a mask edit path explicitly signalled a semantic
-        // change. The length check is O(1) and preserves the normal lens-change
-        // behavior, which clears masks as part of rebuilding image geometry.
         let mask_contents_match = if self.current.masks.masks.len() != masks.masks.len() {
             false
         } else if mask_change_pending {
@@ -384,10 +364,6 @@ impl EditHistory {
 }
 
 impl AurawApp {
-    /// Signal a semantic edit after mutating CPU state. The history observer
-    /// will commit it on pointer release (or immediately for non-pointer
-    /// changes). Persistence can watch
-    /// `edit_commit_revision` and therefore never serialize every drag frame.
     pub(crate) fn note_edit_changed(&mut self) {
         self.persistence.history.note_change();
     }
@@ -399,25 +375,17 @@ impl AurawApp {
             &self.develop.lens_correction,
             &self.inpaint.edits,
         );
-        // Remove now lives at the source-scene boundary. Rebuild that scene
-        // once after a stroke/delete/clear; subsequent Develop adjustments
-        // reuse it and execute only their normal downstream stages.
         self.queue_preview_processing(ProcessingStage::Raw);
     }
-
 
     pub(crate) fn note_geometry_changed(&mut self) {
         self.develop.geometry = self.develop.geometry.sanitized();
         self.develop.geometry_revision = self.develop.geometry_revision.wrapping_add(1);
     }
 
-    /// Signal an edit that changed semantic mask contents. This separate domain
-    /// lets global and lens-only transactions share the existing mask snapshot
-    /// without scanning large brush/range-mask data.
     pub(crate) fn note_mask_edit_changed(&mut self) {
         self.persistence.history.note_mask_change();
     }
-
 
     pub(crate) fn edit_commit_revision(&self) -> u64 {
         self.persistence
@@ -427,9 +395,6 @@ impl AurawApp {
             ^ self.develop.geometry_revision.rotate_left(17)
     }
 
-    /// O(1) snapshot for persistence. Call `commit_edit_history_now` first so
-    /// the history's canonical mask contents represent the final UI value.
-    /// Navigation selection is intentionally not part of persisted edit data.
     pub(crate) fn committed_mask_state_for_persistence(&self) -> Arc<MaskStack> {
         self.persistence.history.committed_masks()
     }
@@ -449,14 +414,6 @@ impl AurawApp {
     }
 
     pub(crate) fn observe_edit_history(&mut self, ctx: &egui::Context) {
-        // History transactions follow the pointer gesture itself, not the
-        // lifetime of keyboard focus. `egui_wants_keyboard_input()` can remain
-        // true after a text field/dialog has taken focus; using it here kept
-        // subsequent mask clicks and drags in the same pending transaction,
-        // so one Undo could roll back several otherwise independent mask
-        // edits. Mask renames are only applied when their dialog is saved, so
-        // they still enter history as one discrete change without extending
-        // the transaction across unrelated edits.
         let interaction_active = ctx.input(|input| input.pointer.any_down());
         self.persistence.history.observe(
             &self.develop.exposure,
@@ -466,9 +423,6 @@ impl AurawApp {
         );
     }
 
-    /// Commit a pending slider/text/mask transaction before an explicit save
-    /// or image switch. This prevents the final value from remaining only in
-    /// the UI state while persistence snapshots the previous baseline.
     pub(crate) fn commit_edit_history_now(&mut self) {
         self.finish_mask_geometry_interaction();
         self.persistence.history.observe(
@@ -575,10 +529,6 @@ impl AurawApp {
         }
 
         if lens_changed {
-            // Lens correction rebuilds image geometry. Keep the snapshot's
-            // masks aside so the rebuild uploads the mask stack that belongs
-            // to that exact historical lens state before marking generated
-            // mask sources as needing an explicit refresh.
             self.persistence.lens_restore_masks = Some(std::mem::take(&mut self.masks.stack));
             self.mark_lens_correction_dirty();
         } else {

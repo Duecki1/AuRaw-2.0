@@ -29,9 +29,6 @@ impl Sidebar {
             return;
         }
 
-        // Portrait keeps the compact fixed tabs. Wider screens expose all
-        // mask controls as normal collapsible sections, matching the desktop
-        // adjustment sidebar while the thumbnail strip remains beside it.
         match layout {
             ScreenLayout::Vertical => Self::show_masks_vertical_details(ui, app, frame),
             ScreenLayout::Horizontal => Self::show_masks_horizontal_details(ui, app, frame),
@@ -87,10 +84,6 @@ impl Sidebar {
         let mut submask_drag = ui
             .ctx()
             .data(|data| data.get_temp::<SubmaskDragState>(Self::submask_drag_id()));
-        // Layout uses the target found on the previous frame to reserve a real
-        // card-sized insertion slot. Pointer movement schedules another frame,
-        // so this follows the before/after half of the hovered card without
-        // trying to mutate an already-built egui layout.
         let displayed_drop_target = submask_drag.as_ref().and_then(|drag| drag.drop_target);
         if let Some(drag) = &mut submask_drag {
             drag.drop_target = None;
@@ -188,9 +181,6 @@ impl Sidebar {
                         }
                     });
 
-                    // The selected group's sub-masks are inserted directly
-                    // after the parent. That means to its right in portrait
-                    // mode and directly below it in the desktop vertical strip.
                     if selected_mask_before == Some(index) {
                         ui.add_space(1.0);
                         for component_index in 0..component_count {
@@ -215,9 +205,6 @@ impl Sidebar {
                                     && drag.source_component == component_index
                             });
                             if source_is_dragging {
-                                // Do not reserve an invisible source slot: the
-                                // neighboring cards should immediately close the
-                                // gap while the floating card represents it.
                                 continue;
                             }
                             let response = Self::mask_thumbnail_card(
@@ -230,10 +217,6 @@ impl Sidebar {
                                 MaskCardSize::Submask,
                             );
                             let component_can_drag = component_count > 1;
-                            // `drag_started` only becomes true after the pointer
-                            // travels beyond egui's drag threshold. Give immediate
-                            // feedback while the primary button is merely held so
-                            // the component already feels ready to move.
                             if component_can_drag && response.is_pointer_button_down_on() {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                             }
@@ -380,9 +363,6 @@ impl Sidebar {
                     .target_loss_started
                     .get_or_insert_with(std::time::Instant::now);
                 if lost_at.elapsed() < std::time::Duration::from_millis(120) {
-                    // Crossing the small layout boundary between a placeholder
-                    // and its neighbor can produce one frame with no hit. Keep
-                    // the last slot briefly so the red preview does not flash.
                     drag.drop_target = Some(previous_target);
                     ui.ctx()
                         .request_repaint_after(std::time::Duration::from_millis(16));

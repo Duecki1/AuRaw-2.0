@@ -14,7 +14,7 @@ use crate::ui::components::adjustment_slider::{
 };
 use crate::ui::components::color_grading::color_grading_editor;
 use crate::ui::components::hsl_mixer::hsl_mixer;
-use crate::ui::components::tone_curve_editor::tone_curve_editor;
+use crate::ui::components::tone_curve_editor::{ToneCurveChannels, tone_curve_channel_editor};
 use crate::ui::layout::ScreenLayout;
 use eframe::egui::{self, Ui};
 
@@ -57,26 +57,16 @@ impl MaskCardSize {
     }
 
     fn create_button_size(self, orientation: MaskStripOrientation) -> egui::Vec2 {
-        // Menu buttons must request at least the platform interaction height.
-        // Asking for 26 points on Android still paints a 40-point control and
-        // makes the following mask card start from stale geometry.
         const THIN_EDGE: f32 = crate::ui::theme::CONTROL_HEIGHT;
         let card = self.card_size();
         match orientation {
-            // Portrait: the strip runs left-to-right, so creation controls are
-            // narrow columns that keep the full card height.
             MaskStripOrientation::Horizontal => egui::vec2(THIN_EDGE, card.y),
-            // Wider screens: the strip runs top-to-bottom, so creation controls
-            // become short rows that keep the full card width.
             MaskStripOrientation::Vertical => egui::vec2(card.x, THIN_EDGE),
         }
     }
 }
 
 impl Sidebar {
-    // 40 px tool buttons plus balanced outside breathing room. The panel frame
-    // also contributes its normal inset, so this prevents selected buttons from
-    // visually touching the rail's left/right edges.
     #[cfg(not(target_os = "android"))]
     pub(crate) const DESKTOP_TOOL_RAIL_WIDTH: f32 = 60.0;
     #[cfg(target_os = "android")]

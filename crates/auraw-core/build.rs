@@ -288,10 +288,6 @@ fn configure_desktop_libraw() {
     let target_is_macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
     let probe = |name| {
         let mut config = pkg_config::Config::new();
-        // Homebrew LibRaw's pkg-config metadata currently contains
-        // `-lstdc++`, which Apple removed in favor of libc++. Suppress the
-        // automatic cargo directives on macOS so the dependency can be
-        // translated below without affecting other desktop targets.
         config.cargo_metadata(!target_is_macos);
         config.probe(name)
     };

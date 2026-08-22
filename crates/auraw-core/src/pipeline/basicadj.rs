@@ -3,16 +3,9 @@ use super::sigmoid::SigmoidParams;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum DemosaicMode {
-    /// Reference high-detail demosaic: RCD for Bayer and Markesteijn 3-pass
-    /// for Fuji X-Trans.
     #[default]
     Reference,
-    /// Apply frequency-domain chroma suppression to the reference result.
     FrequencyDomainChroma,
-    /// Blend the high-detail result with a separate robust low-frequency
-    /// reconstruction using edge, sensor-noise, and reconstruction confidence.
-    /// The low branch is a clean-room gradient-guided alternative rather than
-    /// a direct VNG/LMMSE code port.
     Dual,
 }
 
@@ -53,9 +46,6 @@ impl HighlightReconstructionMethod {
     }
 }
 
-/// Editable point curve. Points are stored in normalized
-/// input/output coordinates and evaluated in a reversible scene-luminance
-/// shaper, so the neutral diagonal is an exact no-op for HDR scene values.
 pub const MAX_POINT_CURVE_POINTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -66,8 +56,6 @@ pub struct PointCurve {
 
 impl PointCurve {
     pub const fn linear() -> Self {
-        // The Point Curve starts with the two neutral corner endpoints.
-        // Interior control points are created explicitly by the user.
         Self {
             points: [
                 [0.0, 0.0],
@@ -89,8 +77,6 @@ impl PointCurve {
 
     pub fn is_identity(&self) -> bool {
         let len = self.len.clamp(2, MAX_POINT_CURVE_POINTS as u32) as usize;
-        // A diagonal partial-domain curve is not an identity: values before the
-        // first point and after the last point are held at the endpoint values.
         if self.points[0][0].abs() > 1e-6 || (self.points[len - 1][0] - 1.0).abs() > 1e-6 {
             return false;
         }
@@ -127,10 +113,6 @@ impl Default for PointCurve {
     }
 }
 
-/// One perceptual color-grading wheel. Hue is stored in degrees so presets
-/// and numeric entry remain intuitive; saturation and luminance use the
-/// familiar -/0..100 editing domains. A zero-saturation wheel is an exact
-/// chromatic no-op regardless of its remembered hue.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ColorGradeWheel {
     pub hue: f32,
@@ -158,8 +140,6 @@ impl ColorGradeWheel {
     }
 }
 
-/// Scene-referred four-way grading. Tonal ranges overlap smoothly in log-luminance
-/// space; `blending` controls that overlap and `balance` moves the pivot.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ColorGrading {
     pub shadows: ColorGradeWheel,
@@ -198,24 +178,13 @@ impl ColorGrading {
 
 const DARKTABLE_SIGMOID_CONTRAST_SOFT_MIN: f32 = 0.7;
 const DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX: f32 = 3.0;
-/// Kelvin limits presented by the global white-balance control. These match
-/// darktable's physical temperature control rather than exposing our internal
-/// reciprocal-temperature offset.
 pub const MIN_TEMPERATURE_KELVIN: f32 = 1_901.0;
 pub const MAX_TEMPERATURE_KELVIN: f32 = 25_000.0;
-/// Hard limits used by darktable's temperature module for its absolute tint
-/// ratio. Unlike a zero-centred creative tint control, the camera's as-shot
-/// value is normally close to (but not necessarily exactly) 1.0.
 pub const MIN_WHITE_BALANCE_TINT: f32 = 0.135;
 pub const MAX_WHITE_BALANCE_TINT: f32 = 2.326;
-/// The serialized edit remains relative to the as-shot camera neutral so a
-/// zero-valued sidecar still means "as shot" for every camera. One internal
-/// unit is one hundredth of darktable's absolute tint ratio.
 pub const WHITE_BALANCE_TINT_OFFSET_SCALE: f32 = 100.0;
 pub const GLOBAL_TINT_OFFSET_LIMIT: f32 =
     (MAX_WHITE_BALANCE_TINT - MIN_WHITE_BALANCE_TINT) * WHITE_BALANCE_TINT_OFFSET_SCALE;
-/// Maximum serialized mired displacement. This covers the complete Kelvin UI
-/// range for every as-shot neutral inside that range.
 pub const GLOBAL_TEMPERATURE_LIMIT: f32 = 500.0;
 
 pub fn temperature_kelvin_from_offset(base_kelvin: f32, offset_mired: f32) -> f32 {
@@ -242,82 +211,44 @@ pub fn white_balance_tint_offset(base_tint: f32, target_tint: f32) -> f32 {
         * WHITE_BALANCE_TINT_OFFSET_SCALE)
         .clamp(-GLOBAL_TINT_OFFSET_LIMIT, GLOBAL_TINT_OFFSET_LIMIT)
 }
-/// Extended Color Mixer hue range. Values through +/-100 retain the original
-/// response for sidecar compatibility, while the extra travel allows stronger
-/// creative shifts toward and beyond the neighbouring named hue.
 pub const HSL_HUE_LIMIT: f32 = 200.0;
-/// Whole-image and local-mask hue rotation, expressed in degrees. The signed
-/// half-turn range can reach every target hue from the source color.
 pub const HUE_ROTATION_LIMIT_DEGREES: f32 = 180.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ExposureParams {
-    /// Additional normalized sensor-space black-point correction. It is applied
-    /// per CFA plane before white balance and demosaic, and is deliberately
-    /// separate from the creative `blacks` control in the Basic panel.
-    /// Values are clamped to +/-0.25 of the metadata-calibrated sensor range.
     pub black_point: f32,
-    /// Scene-linear exposure in stops, applied before local/color processing.
     pub exposure: f32,
-    /// User-facing global contrast in the -100..100 domain. The renderer maps
-    /// it to darktable's 0.7..3.0 sigmoid middle-grey contrast slider soft
-    /// slope; zero maps to 1.5.
     #[serde(default)]
     pub contrast: f32,
-    /// darktable-compatible sigmoid scene-to-display transform.
     pub sigmoid: SigmoidParams,
-    /// Relative metadata-aware white balance. Temperature is serialized as an
-    /// internal mired displacement but presented to users in Kelvin; tint is a
-    /// relative encoding of darktable's absolute camera-derived tint ratio.
-    /// Zero preserves the as-shot neutral for both controls.
     pub temperature: f32,
     pub tint: f32,
-    /// Perceptual hue rotation in degrees. This is distinct from the
-    /// eight-channel Color Mixer and leaves lightness/chroma unchanged until
-    /// gamut compression is required.
     #[serde(default)]
     pub hue: f32,
     pub saturation: f32,
     pub vibrance: f32,
-    /// Composite luminance curve followed by independent scene-referred RGB channel curves.
     pub tone_curve: PointCurve,
     pub tone_curve_red: PointCurve,
     pub tone_curve_green: PointCurve,
     pub tone_curve_blue: PointCurve,
     pub chroma_denoise: f32,
-    /// Sensor-profiled camera-linear luminance noise reduction, 0..100.
     #[serde(default)]
     pub luminance_denoise: f32,
-    /// Detail protection for sensor-profiled denoise, 0..100. Higher values
-    /// reject cross-edge samples more aggressively.
     #[serde(default = "default_denoise_detail")]
     pub denoise_detail: f32,
-    /// Tap budget / scale count for the multiscale denoise stage.
     #[serde(default)]
     pub denoise_quality: DenoiseQuality,
-    /// Use the pinned RawNIND UtNet2 model instead of AuRaw's standard
-    /// luminance/chroma denoise path. The original standard values remain
-    /// serialized so disabling AI restores them exactly.
     #[serde(default)]
     pub ai_denoise_enabled: bool,
-    /// Demosaic finishing mode. The reference algorithm is always run first.
     pub demosaic_mode: DemosaicMode,
-    /// Detail threshold in darktable-compatible 0..100 units for dual mode.
     pub dual_threshold: f32,
-    /// Strength of the frequency-domain chroma suppression stage.
     pub frequency_chroma: f32,
     pub ca_red: f32,
     pub ca_blue: f32,
-    /// Pre-demosaic highlight-reconstruction algorithm.
     pub highlight_method: HighlightReconstructionMethod,
-    /// Raw highlight-clipping threshold used by reconstruction.
     pub highlight_clip: f32,
-    /// LCh reconstruction strength. Inpaint opposed follows darktable and
-    /// always applies its complete replacement to clipped photosites.
     pub highlight_reconstruction: f32,
 
-    // Basic tonal controls. Highlights/Whites and Shadows are scene-referred;
-    // Blacks is a view-adjacent display-linear toe/endpoint remap.
     pub highlights: f32,
     pub shadows: f32,
     pub whites: f32,
@@ -326,9 +257,6 @@ pub struct ExposureParams {
     pub clarity: f32,
     pub dehaze: f32,
 
-    // Capture sharpening with conservative, fully editable defaults.
-    // Amount is 0..150, Radius is 0.5..3.0 px at a 1080 px reference short
-    // edge, and Detail/Masking use 0..100 perceptual domains.
     #[serde(default = "default_sharpen_amount")]
     pub sharpen_amount: f32,
     #[serde(default = "default_sharpen_radius")]
@@ -338,9 +266,6 @@ pub struct ExposureParams {
     #[serde(default)]
     pub sharpen_masking: f32,
 
-    // Creative effects. Glow follows a highlight-aware, multi-scale bloom.
-    // Vignette is a post-crop, display-linear edge treatment calibrated from
-    // Lightroom's default composite shape.
     pub glow_amount: f32,
     pub glow_radius: f32,
     pub glow_threshold: f32,
@@ -350,12 +275,10 @@ pub struct ExposureParams {
     pub vignette_feather: f32,
     pub vignette_highlights: f32,
 
-    // Red, orange, yellow, green, aqua, blue, purple, magenta.
     pub hsl_hue: [f32; 8],
     pub hsl_saturation: [f32; 8],
     pub hsl_luminance: [f32; 8],
 
-    /// Perceptual four-way color grading in scene-linear Rec.2020.
     pub color_grading: ColorGrading,
 }
 
@@ -365,11 +288,6 @@ pub fn sigmoid_contrast_from_percent(contrast: f32) -> f32 {
     } else {
         0.0
     };
-    // Preserve AuRaw's centered percentage UI while matching darktable's
-    // normal sigmoid slider: -100 -> 0.7, 0 -> 1.5, +100 -> 3.0. Interpolate
-    // the slope geometrically on each side because contrast is multiplicative.
-    // Darktable's 0.1..10 hard limits remain available only through expert
-    // entry there and produced brittle, near-binary output at AuRaw's endpoint.
     let default = SigmoidParams::default().contrast;
     if amount >= 0.0 {
         default * (DARKTABLE_SIGMOID_CONTRAST_SOFT_MAX / default).powf(amount)

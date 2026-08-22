@@ -1,16 +1,9 @@
 use super::params::blur::*;
 
-/// Editable parameters for the non-destructive mask Blur effect.
-///
-/// The developed image is sampled into a temporary GPU result and blended by
-/// mask coverage. No source pixels are rewritten, so the radius and strength
-/// remain fully reversible.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct BlurEffectSettings {
-    /// Blend between the developed source and its blurred result, in percent.
     pub amount: f32,
-    /// Blur radius in reference-image pixels.
     pub radius: f32,
 }
 

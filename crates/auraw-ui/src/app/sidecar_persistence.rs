@@ -120,9 +120,6 @@ impl AurawApp {
         }
     }
 
-    /// Finalize and enqueue the old image before any per-image state is reset.
-    /// Requests own both their target and edit snapshot, so a slow completion
-    /// can never be redirected to the next RAW.
     pub(super) fn begin_sidecar_open(&mut self) -> u64 {
         self.commit_edit_history_now();
         let revision = self.edit_commit_revision();
@@ -137,9 +134,6 @@ impl AurawApp {
             job.generation == self.persistence.sidecar_generation && job.revision == revision
         }) || pending_latest;
         if self.persistence.sidecar_saved_revision != Some(revision) && !already_queued {
-            // Switching images is the one automatic retry for a previously
-            // failed latest revision. Once captured, the immutable request is
-            // safe even after the active target changes.
             self.queue_current_sidecar_save(true);
         }
         self.start_next_sidecar_save();
@@ -250,9 +244,6 @@ impl AurawApp {
             .iter()
             .any(|request| request.generation == generation && request.revision != revision);
         if stale_pending && !interaction_active {
-            // This generation already reached an earlier deadline while a
-            // worker or interaction kept it queued. Replace that snapshot
-            // with the newest committed value and preserve any explicit bit.
             self.persistence.sidecar_autosave_deadline = None;
             self.queue_current_sidecar_save(false);
             self.start_next_sidecar_save();
@@ -267,9 +258,6 @@ impl AurawApp {
             return;
         }
         if interaction_active {
-            // Keep the original deadline: a continuous sequence of edits gets
-            // persisted promptly after it becomes idle instead of restarting
-            // the full delay after every committed value.
             ctx.request_repaint_after(SIDECAR_AUTOSAVE_ACTIVE_POLL);
             return;
         }
@@ -316,9 +304,6 @@ impl AurawApp {
     ) -> Result<(), String> {
         let was_current =
             self.detach_current_android_document_for_library_action(raw_uri, display_name);
-        // The Android sidecar contains the entire edit document, including
-        // generated AI-mask data. Deleting it (rather than rewriting neutral
-        // values) makes Reset All equivalent to opening an untouched RAW.
         let result = crate::android::remove_raw_sidecar(
             &self.android.android_app,
             raw_uri,
@@ -378,9 +363,6 @@ impl AurawApp {
     }
 
     pub(super) fn detach_current_sidecar_target_for_library_action(&mut self) -> bool {
-        // Finish any immutable save request before the caller removes or
-        // replaces the files. Detaching the target then prevents autosave from
-        // recreating the deleted sidecar while the Library tab remains open.
         self.flush_sidecar_on_exit();
         let detached_generation = self.persistence.sidecar_generation;
         self.persistence.sidecar_generation = self.persistence.sidecar_generation.wrapping_add(1);
@@ -623,9 +605,6 @@ impl AurawApp {
             revision,
         };
 
-        // Explicitly saving an unchanged revision must not perform another GPU
-        // readback. The exact sidecar fingerprint makes this reuse safe even on
-        // filesystems whose modification timestamps have coarse resolution.
         match self.load_developed_thumbnail_for_target(&job.target) {
             Ok(Some(thumbnail)) => {
                 self.install_developed_thumbnail_result(&job.target, thumbnail, revision);
@@ -664,9 +643,6 @@ impl AurawApp {
                         event.job.revision,
                     ),
                     Err(error) => {
-                        // A changed sidecar is an expected race: the newer save
-                        // queues another capture. Other failures are still useful
-                        // diagnostics but should not interrupt editing.
                         if error.contains("sidecar changed") {
                             log::debug!("discarded stale developed thumbnail: {error}");
                         } else {
@@ -708,9 +684,6 @@ impl AurawApp {
             return;
         }
 
-        // Prefer the normal full-frame preview. While zoomed, edits deliberately
-        // leave that proxy pending; the current tiny navigation pipeline is still
-        // a complete adjusted full-frame image and is sufficient for a 512px card.
         let snapshot = if self.preview.pending_stage.is_none() {
             self.preview.gpu_pipeline
                 .as_ref()

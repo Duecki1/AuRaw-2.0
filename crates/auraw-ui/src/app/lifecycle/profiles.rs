@@ -177,8 +177,6 @@ impl AurawApp {
         }
 
         self.develop.selected_camera_profile = selection.clone();
-        // Only an explicit dropdown change updates the sticky default. Merely
-        // opening an edited photo never mutates this preference.
         self.preferences.last_camera_profile = selection
             .as_ref()
             .zip(self.preferences.camera_profile_folder.as_ref())

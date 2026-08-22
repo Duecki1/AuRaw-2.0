@@ -8,15 +8,8 @@ use std::{
 
 use crate::gpu_errors::GpuErrorScopes;
 
-/// Bump this when AuRaw intentionally wants to discard previously persisted
-/// pipeline cache blobs. The directory name also pins the wgpu major because
-/// PipelineCache::get_data() is an implementation-detail format and must not be
-/// assumed compatible after a wgpu upgrade.
 const AURAW_PIPELINE_CACHE_SCHEMA: &str = "wgpu29-v1";
 
-/// One application-managed wgpu/Vulkan pipeline cache plus the path used to
-/// persist it between process launches. The underlying wgpu handle is cheap to
-/// clone and can safely be shared by all RAW pipelines created from one device.
 #[derive(Clone)]
 pub struct PersistentGpuPipelineCache {
     cache: wgpu::PipelineCache,
@@ -24,10 +17,6 @@ pub struct PersistentGpuPipelineCache {
 }
 
 impl PersistentGpuPipelineCache {
-    /// Loads an adapter-specific cache blob when available and creates a fresh
-    /// cache otherwise. `pipeline_cache_key` is intentionally used as the
-    /// filename because wgpu defines it as the compatibility key for persisted
-    /// cache data.
     pub fn load_or_create(
         device: &wgpu::Device,
         adapter_info: &wgpu::AdapterInfo,
@@ -56,10 +45,6 @@ impl PersistentGpuPipelineCache {
         };
         let loaded_bytes = cache_data.as_ref().map(Vec::len).unwrap_or(0);
 
-        // SAFETY: whenever data is supplied here, it came from this app's
-        // previous `PipelineCache::get_data()` output at the adapter-specific
-        // path recommended by `wgpu::util::pipeline_cache_key`. `fallback=true`
-        // lets wgpu create an empty cache if the driver rejects stale data.
         let gpu_error_scopes = GpuErrorScopes::push(device);
         let cache = unsafe {
             device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
@@ -87,9 +72,6 @@ impl PersistentGpuPipelineCache {
         self.path.as_path()
     }
 
-    /// Persists the current driver cache atomically. A temporary sibling file
-    /// prevents a process kill during write from replacing a known-good cache
-    /// with a partial blob.
     pub fn persist(&self) -> Result<usize> {
         let Some(data) = self.cache.get_data() else {
             return Ok(0);

@@ -23,24 +23,14 @@ use std::os::unix::ffi::OsStrExt;
 const MAX_DCP_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DCP_SCAN_FILES: usize = 10_000;
 const MAX_DCP_SCAN_DEPTH: usize = 16;
-/// Calibrated rendering exposure for proprietary RAWs that provide no usable
-/// DNG BaselineExposure. The former +0.25 EV fallback left the measured Sony
-/// reference about one stop below its camera-neutral Lightroom rendition.
-/// This metadata fallback is applied exactly once, before any user Exposure
-/// edit; DNGs and DCPs with explicit baseline values remain authoritative.
 const MISSING_BASELINE_EXPOSURE_FALLBACK_EV: f32 = 1.25;
 
 fn valid_baseline_exposure(value: f32) -> Option<f32> {
-    // LibRaw initializes a missing BaselineExposure to a finite sentinel below
-    // -999 EV. Reject that sentinel and corrupt/non-finite values.
     (value.is_finite() && value > -999.0).then_some(value)
 }
 
 fn resolve_default_exposure_ev(baseline_exposure: Option<f32>, profile_offset_ev: f32) -> f32 {
     let baseline = baseline_exposure.unwrap_or(MISSING_BASELINE_EXPOSURE_FALLBACK_EV);
-    // DNG BaselineExposureOffset is a profile-specific delta to the image
-    // baseline. Combine the two named metadata terms once; never add a second
-    // renderer-only exposure constant. Keep pathological metadata bounded.
     (baseline + profile_offset_ev).clamp(-5.0, 5.0)
 }
 
@@ -67,10 +57,6 @@ const MAX_THUMBNAIL_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 #[cfg(target_os = "android")]
 const MAX_ANDROID_THUMBNAIL_FALLBACK_SENSOR_PIXELS: u64 = MAX_SENSOR_PIXELS;
 
-// Rec.2020 and the camera profiles used here are D65-referred. Normalizing
-// XYZ -> camera rows against equal-energy XYZ (1, 1, 1) makes an otherwise
-// neutral camera value warm. These coordinates make camera neutral map to
-// the Rec.2020 neutral axis instead.
 const D65_XYZ: [f32; 3] = [0.9504559, 1.0, 1.0890578];
 const XYZ_TO_REC2020: [[f32; 3]; 3] = [
     [1.7166512, -0.3556708, -0.2533663],
@@ -115,7 +101,6 @@ pub fn load_raw_file_with_profile_selection(
     let ctx = LibRawContext::new()?;
     let identify_started = Instant::now();
     check_libraw(
-        // SAFETY: `ctx.raw` is a live LibRaw handle owned by `ctx`, and `c_path` remains alive for the call.
         unsafe { ffi::libraw_open_file(ctx.raw, c_path.as_ptr()) },
         "open RAW file",
     )?;
@@ -123,7 +108,6 @@ pub fn load_raw_file_with_profile_selection(
         "LibRaw identify/open_file finished in {:.3}s",
         identify_started.elapsed().as_secs_f64()
     ));
-    // SAFETY: opening the RAW populates identity and geometry metadata.
     unsafe { validate_opened_raw_geometry(&ctx) }?;
 
     let profile_metadata_started = Instant::now();
@@ -147,7 +131,6 @@ pub fn load_raw_file_with_profile_selection(
         profile_metadata_started.elapsed().as_secs_f64()
     ));
 
-    // SAFETY: LibRaw has identified the file and iparams strings are initialized.
     let (camera_make, camera_model) = unsafe {
         let iparams = &(*ctx.raw).rawdata.iparams;
         (
@@ -236,14 +219,12 @@ pub fn load_raw_file_with_profile_selection(
         (None, None)
     };
 
-    // SAFETY: the context is valid and exclusively owned by this worker.
     let unpack_started = Instant::now();
     check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
     crate::diagnostics::record(format!(
         "LibRaw sensor unpack finished in {:.3}s",
         unpack_started.elapsed().as_secs_f64()
     ));
-    // SAFETY: unpack succeeded and the converter validates all exposed buffers.
     let materialize_started = Instant::now();
     let mut loaded = unsafe { loaded_raw_from_context(&ctx, selected_profile) }?;
     crate::diagnostics::record(format!(
@@ -262,9 +243,6 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
         .with_context(|| format!("read DCP profile {}", profile_path.display()))?
         .ok_or_else(|| anyhow!("{} is not a DNG camera profile", profile_path.display()))?;
 
-    // CameraCalibration belongs to the raw DNG, while the compatibility
-    // signature belongs to the selected profile. Carry the camera-side
-    // signature into an external profile before evaluating the matrix path.
     if let Some(raw_profile) = read_optional_profile(path) {
         selected.camera_calibration_signature = raw_profile.camera_calibration_signature;
     }
@@ -278,15 +256,10 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
     Ok(loaded)
 }
 
-/// Reads the display-oriented active image dimensions from the RAW header only.
-/// This deliberately stops after LibRaw identify/open_file, so the library can
-/// reserve stable thumbnail geometry without unpacking sensor pixels or decoding
-/// the embedded preview.
 pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW dimension input")?;
     let ctx = open_libraw(path)?;
 
-    // SAFETY: open_libraw completed identify and owns the context exclusively.
     let sizes = unsafe { &(*ctx.raw).rawdata.sizes };
     let width = u32::from(sizes.width);
     let height = u32::from(sizes.height);
@@ -295,27 +268,18 @@ pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
         "LibRaw header reports empty active dimensions"
     );
 
-    // LibRaw orientation 5/6 rotates the active image by 90/270 degrees. 180°
-    // keeps the same dimensions. Unknown orientations are left unswapped here;
-    // full RAW loading will still perform its stricter validation later.
     Ok(match sizes.flip {
         5 | 6 => [height, width],
         _ => [width, height],
     })
 }
 
-/// Loads only the camera-generated preview embedded in a RAW. This never
-/// unpacks or processes the sensor pixels, which keeps library browsing fast
-/// and bounded even for very large files.
 pub fn load_raw_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "embedded RAW thumbnail input")?;
     anyhow::ensure!(maximum_edge > 0, "thumbnail edge must be non-zero");
     load_embedded_thumbnail(path, maximum_edge)
 }
 
-/// Loads a display-ready sRGB thumbnail, preferring the embedded preview but
-/// retaining the sensor-processing fallback for non-library callers that need
-/// a thumbnail even when the camera stored no usable preview.
 pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW thumbnail input")?;
     anyhow::ensure!(maximum_edge > 0, "thumbnail edge must be non-zero");
@@ -331,14 +295,9 @@ fn open_libraw(path: &Path) -> Result<LibRawContext> {
     let c_path = path_to_libraw_cstring(path)?;
     let ctx = LibRawContext::new()?;
     check_libraw(
-        // SAFETY: `ctx.raw` is a live LibRaw handle and `c_path` remains alive for the call.
         unsafe { ffi::libraw_open_file(ctx.raw, c_path.as_ptr()) },
         "open RAW thumbnail",
     )?;
-    // Embedded preview extraction does not allocate the full active sensor.
-    // Enforce conservative header edge/overflow limits here, but leave the
-    // stricter platform pixel budget to full RAW decode and the fallback path.
-    // This lets Android show embedded previews from modern 60–100 MP cameras.
     unsafe { validate_opened_thumbnail_geometry(&ctx) }?;
     Ok(ctx)
 }
@@ -346,27 +305,19 @@ fn open_libraw(path: &Path) -> Result<LibRawContext> {
 fn load_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     let ctx = open_libraw(path)?;
     validate_embedded_thumbnail_header(&ctx)?;
-    // SAFETY: the context is live and exclusively owned by this thread.
     check_libraw(
         unsafe { ffi::libraw_unpack_thumb(ctx.raw) },
         "unpack RAW thumbnail",
     )?;
-    // `sizes.flip` describes the sensor image, but TIFF and CR3 files may store
-    // a preview with a different orientation. Resolve the preview selected by
-    // `libraw_unpack_thumb` back to its per-thumbnail metadata when available.
     let orientation = embedded_thumbnail_orientation(&ctx);
 
     let mut error = 0;
-    // SAFETY: unpack_thumb succeeded and LibRaw returns an owned allocation or null.
     let image = unsafe { ffi::libraw_dcraw_make_mem_thumb(ctx.raw, &mut error) };
     let image = ProcessedImage::new(image, error, "make in-memory RAW thumbnail")?;
-    // SAFETY: `image` owns a live LibRaw processed-image allocation.
     unsafe { thumbnail_from_processed(&image, maximum_edge, orientation) }
 }
 
 fn validate_embedded_thumbnail_header(ctx: &LibRawContext) -> Result<()> {
-    // SAFETY: `open_libraw` completed identify and owns this context
-    // exclusively. These header fields are populated before thumbnail unpack.
     let thumbnail = unsafe { &(*ctx.raw).thumbnail };
     validate_embedded_thumbnail_metadata(
         thumbnail.tformat,
@@ -392,9 +343,6 @@ fn validate_embedded_thumbnail_metadata(
 
     match format {
         ffi::LibRaw_thumbnail_formats_LIBRAW_THUMBNAIL_JPEG => {
-            // Some proprietary formats do not expose JPEG dimensions until
-            // the payload is parsed. Validate dimensions here when present;
-            // `thumbnail_from_processed` validates the JPEG header itself.
             if width != 0 || height != 0 {
                 anyhow::ensure!(
                     width > 0
@@ -435,18 +383,10 @@ fn validate_embedded_thumbnail_metadata(
 }
 
 fn load_processed_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
-    // A half-size LibRaw render still unpacks the sensor. Share the user-set
-    // heavy-thumbnail limit with edited thumbnail rebuilding so their combined
-    // CPU and memory pressure stays predictable.
     let _render_permit = crate::thumbnail_cache::acquire_rendered_thumbnail_worker();
     let ctx = open_libraw(path)?;
     #[cfg(target_os = "android")]
     {
-        // Even half-size dcraw processing first unpacks the full sensor. The
-        // worker limiter above bounds how many preview-less RAWs can take this
-        // path concurrently. Permit the same sensor safety ceiling as a normal
-        // Android RAW decode so imported modern-camera files can still receive
-        // a library preview when their embedded preview is unsupported.
         let sizes = unsafe { &(*ctx.raw).rawdata.sizes };
         let sensor_pixels = u64::from(sizes.raw_width)
             .checked_mul(u64::from(sizes.raw_height))
@@ -456,38 +396,29 @@ fn load_processed_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbna
             "embedded preview is unavailable and the {sensor_pixels}-pixel sensor exceeds the Android sensor safety limit"
         );
     }
-    // SAFETY: this context is exclusively owned and its params are initialized by libraw_init.
     unsafe {
         (*ctx.raw).params.half_size = 1;
         (*ctx.raw).params.use_camera_wb = 1;
-        (*ctx.raw).params.output_color = 1; // sRGB
+        (*ctx.raw).params.output_color = 1;
         (*ctx.raw).params.output_bps = 8;
-        // Preserve LibRaw's metadata-driven orientation. A value of zero would
-        // explicitly suppress it, while -1 asks LibRaw to use the camera value.
         (*ctx.raw).params.user_flip = -1;
     }
-    // SAFETY: the live context is used serially on this worker thread.
     check_libraw(
         unsafe { ffi::libraw_unpack(ctx.raw) },
         "unpack RAW thumbnail fallback",
     )?;
-    // SAFETY: unpack succeeded and processing uses the initialized output params above.
     check_libraw(
         unsafe { ffi::libraw_dcraw_process(ctx.raw) },
         "process RAW thumbnail fallback",
     )?;
 
     let mut error = 0;
-    // SAFETY: dcraw_process succeeded and LibRaw returns an owned allocation or null.
     let image = unsafe { ffi::libraw_dcraw_make_mem_image(ctx.raw, &mut error) };
     let image = ProcessedImage::new(image, error, "make fallback RAW thumbnail")?;
-    // dcraw_process already applies orientation.
     unsafe { thumbnail_from_processed(&image, maximum_edge, 0) }
 }
 
 fn embedded_thumbnail_orientation(ctx: &LibRawContext) -> i32 {
-    // SAFETY: callers hold a live context after open_file/unpack_thumb and only
-    // read the metadata arrays owned by that context.
     unsafe {
         let raw = &*ctx.raw;
         let selected = &raw.thumbnail;
@@ -534,8 +465,6 @@ impl ProcessedImage {
 
 impl Drop for ProcessedImage {
     fn drop(&mut self) {
-        // SAFETY: this is the allocation returned by a LibRaw make_mem call and
-        // it is released exactly once here.
         unsafe { ffi::libraw_dcraw_clear_mem(self.0) };
     }
 }
@@ -634,9 +563,6 @@ unsafe fn thumbnail_from_processed(
         format => return Err(anyhow!("unsupported LibRaw thumbnail format {format}")),
     };
 
-    // Shrink before applying mirrored/rotated orientation. Applying it to the
-    // full embedded preview creates another full-resolution allocation, which
-    // is especially costly while Android still retains a Develop pipeline.
     let mut oriented = crate::thumbnail_cache::downscale_to_fit(decoded, maximum_edge);
     let transform = match orientation {
         0 => image::metadata::Orientation::NoTransforms,
@@ -735,8 +661,6 @@ fn indexed_dcp_profiles(folder: &Path) -> Result<Arc<Vec<IndexedDcpProfile>>> {
         }
     }
 
-    // Startup prewarming and a very early RAW open can race. Serialize index
-    // construction so they never scan and parse the same profile tree twice.
     let _scan_guard = DCP_PROFILE_SCAN_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -904,9 +828,6 @@ fn find_matching_dcp_profiles(
             })
     });
 
-    // ProfileName is not guaranteed unique. Keep the friendly name when it is
-    // unique, otherwise append the filename so the editor dropdown can
-    // distinguish every camera-matched profile deterministically.
     for index in 0..matches.len() {
         let duplicate = matches.iter().enumerate().any(|(other_index, other)| {
             other_index != index && other.name.eq_ignore_ascii_case(&matches[index].name)
@@ -970,9 +891,6 @@ fn dcp_match_score(
     } else if model_key.len() >= 4 && filename.contains(model_key) {
         600
     } else if model_key.len() >= 4 && path_key.contains(model_key) {
-        // Some profile packs use generic filenames such as "Camera ST.dcp"
-        // inside a camera-model directory. The configured root may therefore
-        // contain many cameras while the parent folder provides the identity.
         550
     } else {
         return 0;
@@ -985,9 +903,6 @@ fn dcp_match_score(
     {
         score += 25;
     }
-    // When a folder contains several creative variants for one camera, prefer
-    // a neutral/default camera profile deterministically rather than a vivid or
-    // monochrome look. Exact camera metadata matching still dominates.
     if profile_name.contains("adobestandard") || filename.contains("adobestandard") {
         score += 20;
     } else if profile_name.contains("camerastandard")
@@ -1016,8 +931,6 @@ fn normalize_camera_name(value: &str) -> String {
 }
 
 fn read_optional_profile(path: &Path) -> Option<DcpProfile> {
-    // DCP tags can be embedded directly in a DNG. Treat malformed optional
-    // creative-profile metadata as non-fatal while preserving a diagnostic.
     match DcpProfile::from_path(path) {
         Ok(profile) => profile,
         Err(error) => {
@@ -1040,18 +953,12 @@ fn load_raw_file_with_selected_profile(
     let ctx = LibRawContext::new()?;
 
     check_libraw(
-        // SAFETY: `ctx.raw` is a live LibRaw handle owned by `ctx`, and `c_path` is a NUL-terminated CString that remains alive for the call.
         unsafe { ffi::libraw_open_file(ctx.raw, c_path.as_ptr()) },
         "open RAW file",
     )?;
-    // LibRaw exposes dimensions after open_file. Reject hostile geometry
-    // before unpack can allocate the full decoded sensor buffer.
-    // SAFETY: the file is open and LibRaw has initialized its size metadata; the helper only reads fields from the live context.
     unsafe { validate_opened_raw_geometry(&ctx) }?;
-    // SAFETY: `ctx.raw` is valid and exclusively used on this worker thread; LibRaw owns the decoded buffers until `ctx` is dropped.
     check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
 
-    // SAFETY: unpack succeeded, so LibRaw buffer pointers and dimensions are initialized; the converter validates all lengths before dereferencing.
     unsafe { loaded_raw_from_context(&ctx, dcp_profile) }
 }
 
@@ -1079,7 +986,6 @@ struct LibRawContext {
 
 impl LibRawContext {
     fn new() -> Result<Self> {
-        // SAFETY: LibRaw accepts a zero flags value and returns either a new owned handle or null.
         let raw = unsafe { ffi::libraw_init(0) };
         if raw.is_null() {
             Err(anyhow!("libraw_init returned null"))
@@ -1091,7 +997,6 @@ impl LibRawContext {
 
 impl Drop for LibRawContext {
     fn drop(&mut self) {
-        // SAFETY: `self.raw` is the unique handle returned by `libraw_init` and is closed exactly once here.
         unsafe {
             ffi::libraw_close(self.raw);
         }
@@ -1116,11 +1021,6 @@ unsafe fn validate_opened_thumbnail_geometry(ctx: &LibRawContext) -> Result<()> 
             .context("RAW thumbnail active pixel count overflow")?;
     }
 
-    // A few containers expose embedded-preview metadata before LibRaw has
-    // populated raw sensor geometry. That is safe for `unpack_thumb`: payload
-    // dimensions and bytes are independently bounded below. Validate sensor
-    // geometry when present, but do not reject an otherwise valid preview just
-    // because those unrelated fields are zero.
     let sensor_width = u32::from(sizes.raw_width);
     let sensor_height = u32::from(sizes.raw_height);
     if sensor_width != 0 || sensor_height != 0 {
@@ -1167,9 +1067,6 @@ unsafe fn validate_opened_raw_geometry(ctx: &LibRawContext) -> Result<()> {
         .checked_mul(std::mem::size_of::<u16>() as u64)
         .context("LibRaw sensor pitch overflow")?;
     let raw_pitch = u64::from(sizes.raw_pitch);
-    // Some LibRaw decoders leave raw_pitch at zero until unpack. The
-    // sensor pixel cap still bounds that allocation; validate a declared
-    // pitch only when the header actually supplies one.
     anyhow::ensure!(
         raw_pitch == 0 || (raw_pitch >= minimum_pitch && raw_pitch <= 1_073_741_824),
         "LibRaw header reports invalid raw pitch {raw_pitch} for width {sensor_width}"
@@ -1273,11 +1170,6 @@ unsafe fn loaded_raw_from_context(
         calibration_compatible,
     )?;
     let black_levels = canonicalize_f32x4(physical_black_levels, cfa_map);
-    // LibRaw changed `linear_max` from `long[4]` in the 0.21 series
-    // to `unsigned[4]` in newer releases. Bindgen therefore exposes it
-    // as either `[i64; 4]` or `[u32; 4]`, depending on the installed
-    // headers. Normalize both representations and reject negative or
-    // otherwise out-of-range metadata values.
     let linear_max = color.linear_max.map(normalize_libraw_linear_max);
     let white_levels = canonicalize_f32x4(
         white_levels(color.maximum, linear_max, physical_black_levels),
@@ -1441,22 +1333,18 @@ unsafe fn copy_active_pixels(request: ActivePixelCopy<'_>) -> Result<ActivePixel
         .context("reserve oriented RAW pixel buffer")?;
     pixels.resize(output_len, 0);
 
-    // Mosaic
     if flip == 0 {
         for y in 0..height {
             let raw_y = crop_y + y;
             let row_offset = raw_y
                 .checked_mul(pitch)
                 .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
-            // SAFETY: the active crop and pitch were validated above, and LibRaw keeps
-            // the decoded mosaic allocation alive and immutable for this entire call.
             let row_ptr = (raw_image as *const u8).add(row_offset) as *const u16;
             let source = std::slice::from_raw_parts(row_ptr.add(crop_x), width);
             let destination = &mut pixels[y * out_width..(y + 1) * out_width];
             destination.copy_from_slice(source);
         }
     } else {
-        // Rotation
         let raw_image_addr = raw_image as usize;
         pixels.par_chunks_mut(out_width).enumerate().try_for_each(
             |(y, destination)| -> Result<()> {
@@ -1467,8 +1355,6 @@ unsafe fn copy_active_pixels(request: ActivePixelCopy<'_>) -> Result<ActivePixel
                     let row_offset = raw_y
                         .checked_mul(pitch)
                         .ok_or_else(|| anyhow!("RAW row pointer offset overflow"))?;
-                    // SAFETY: crop bounds were validated above and LibRaw keeps
-                    // the decoded mosaic alive and immutable for this entire call.
                     let row_ptr =
                         unsafe { (raw_image_addr as *const u8).add(row_offset) as *const u16 };
                     *output = unsafe { *row_ptr.add(raw_x) };
@@ -1478,7 +1364,6 @@ unsafe fn copy_active_pixels(request: ActivePixelCopy<'_>) -> Result<ActivePixel
         )?;
     }
 
-    // Pattern
     let cfa_period = match cfa_kind {
         CfaKind::Bayer => 2usize,
         CfaKind::XTrans => 6usize,
@@ -1586,9 +1471,7 @@ fn cdesc4(iparams: &ffi::libraw_iparams_t) -> [u8; 4] {
 
 fn cfa_kind_from_filters(filters: u32) -> Result<CfaKind> {
     match filters {
-        // LibRaw reserves 9 for the Fuji 6x6 X-Trans matrix.
         9 => Ok(CfaKind::XTrans),
-        // Ordinary Bayer masks use the packed 32-bit representation.
         value if value >= 1000 => Ok(CfaKind::Bayer),
         0 => Err(anyhow!(
             "full-colour/linear RAW input is not supported by the CFA GPU pipeline"
@@ -1656,9 +1539,6 @@ fn logical_rgb_channel(cdesc: [u8; 4], cfa_channel: usize) -> Option<usize> {
         'R' | 'r' => Some(0),
         'G' | 'g' => Some(1),
         'B' | 'b' => Some(2),
-        // A NUL descriptor marks an unused physical profile row. Do not
-        // fold it into a real RGB channel, even if malformed metadata left
-        // non-zero coefficients there.
         _ => None,
     }
 }
@@ -1752,10 +1632,6 @@ fn black_pattern_dimensions(cblack: &[u32]) -> Option<(usize, usize)> {
 }
 
 fn white_levels(maximum: u32, linear_max: [u32; 4], black_levels: [f32; 4]) -> [f32; 4] {
-    // `maximum` is LibRaw's decoded white/saturation level. `linear_max`
-    // is an optional per-plane vendor "specular white" / linearity limit
-    // and is known to be invalid in some files. Use it only when it forms
-    // a sane range and does not exceed a reported shared maximum.
     let shared_fallback = (maximum != 0)
         .then_some(maximum)
         .or_else(|| linear_max.iter().copied().find(|value| *value != 0))
@@ -1777,9 +1653,6 @@ fn white_levels(maximum: u32, linear_max: [u32; 4], black_levels: [f32; 4]) -> [
 fn cam_to_working(xyz_to_cam: [[f32; 3]; 4], cdesc: [u8; 4]) -> [[f32; 4]; 3] {
     let physical = camera_to_working_physical(xyz_to_cam);
 
-    // The demosaic output is RGB, but camera profiles can contain four
-    // physical planes (normally R, G1, B, G2). Fold profile columns by
-    // cdesc only after each CFA plane has been normalized independently.
     let mut out = [[0.0; 4]; 3];
     for (physical_col, _) in cdesc.iter().enumerate() {
         let Some(rgb_col) = logical_rgb_channel(cdesc, physical_col) else {
@@ -1822,9 +1695,6 @@ fn camera_to_working_matrix(
     calibration_compatible: bool,
 ) -> Result<([[f32; 4]; 3], f32, Option<CameraWhiteBalanceModel>)> {
     let analog_balance = analog_balance_matrix(color.dng_levels.analogbalance);
-    // Prefer the profile records parsed directly from the selected DNG/DCP
-    // IFD. LibRaw remains the fallback for proprietary RAW files and DNGs
-    // whose optional profile IFD could not be read.
     let dng_profile = parsed_profile
         .and_then(|profile| {
             interpolated_parsed_dng_profile(
@@ -1851,8 +1721,6 @@ fn camera_to_working_matrix(
             profile.weight,
         )
     } else {
-        // Proprietary RAW formats generally expose LibRaw's consolidated
-        // XYZ->camera matrix rather than individual DNG tags.
         (cam_to_working(color.cam_xyz, cdesc), 0.0)
     };
 
@@ -1885,9 +1753,6 @@ fn camera_to_working_matrix(
     Ok((matrix, weight, Some(model)))
 }
 
-/// Camera multipliers for a D65 illuminant, normalized to green. RawNIND's
-/// Bayer training preprocessing uses this daylight convention independently
-/// from the photograph's as-shot white balance.
 pub(super) fn daylight_white_balance(model: &CameraWhiteBalanceModel) -> Option<[f32; 3]> {
     let xyz_to_camera = match &model.color {
         CameraColorModel::Dng {
@@ -2020,11 +1885,6 @@ pub(super) fn adjusted_white_balance_coefficients(
     temperature: f32,
     tint: f32,
 ) -> Option<[f32; 4]> {
-    // darktable's temperature module does not apply a generic RGB colour cast.
-    // It converts the absolute Kelvin/tint pair through the camera matrix into
-    // sensor-channel multipliers. Keep AuRaw's serialized values relative to
-    // the as-shot neutral, but use the same absolute controls and coefficient
-    // path for rendering.
     let (base_cct, base_tint) =
         temperature_tint_from_coefficients(model, model.base_wb).unwrap_or((model.base_cct, 1.0));
     let target_cct = temperature_kelvin_from_offset(base_cct, temperature);
@@ -2036,9 +1896,6 @@ pub(super) fn adjusted_white_balance_coefficients(
     ))
 }
 
-/// Fixed XYZ-to-camera matrix used by darktable's temperature/tint UI. The
-/// final camera transform and DNG profile blend also remain fixed while the
-/// white-balance module changes its RAW multipliers.
 fn white_balance_xyz_to_camera(model: &CameraWhiteBalanceModel) -> [[f32; 3]; 4] {
     match &model.color {
         CameraColorModel::Dng {
@@ -2060,9 +1917,6 @@ fn darktable_temperature_xyz(temperature: f32) -> Option<[f32; 3]> {
     let [x, y] = if t < 4_000.0 {
         planckian_xy(t)?
     } else {
-        // CIE D-series daylight locus. darktable synthesizes the equivalent
-        // daylight spectrum above 4000 K rather than continuing along the
-        // black-body locus, which is particularly visible beyond 8000 K.
         let x = if t <= 7_000.0 {
             -4.607e9 / t.powi(3) + 2.9678e6 / t.powi(2) + 0.09911e3 / t + 0.244_063
         } else {
@@ -2327,10 +2181,6 @@ fn interpolated_dng_profile(
         estimate_scene_cct(color, wb_coeffs, cdesc).unwrap_or_else(|| (cct0 * cct1).sqrt());
     let neutral = camera_neutral(wb_coeffs);
 
-    // DNG interpolation is linear in reciprocal correlated colour
-    // temperature. Refine the initial metadata estimate from the actual
-    // AsShotNeutral response so files without a WBCT table still select the
-    // correct profile blend.
     let mut weight = mired_interpolation_weight(scene_cct, cct0, cct1);
     for _ in 0..6 {
         let color_matrix = lerp_4x3(
@@ -2412,8 +2262,6 @@ fn dng_camera_to_working(
     let neutral = camera_neutral(neutral_wb);
 
     let camera_to_xyz_d50 = if let Some(forward) = profile.forward_matrix {
-        // DNG 1.7: FM * D * inverse(AB * CC), where D white-balances
-        // reference-camera coordinates using ReferenceNeutral.
         let inverse_abcc = invert_4x4(abcc)
             .ok_or_else(|| anyhow!("DNG AnalogBalance * CameraCalibration is singular"))?;
         let reference_neutral = multiply_4x4_vector(inverse_abcc, neutral);
@@ -2429,8 +2277,6 @@ fn dng_camera_to_working(
         }
         multiply_3x4_4x4(balanced_reference_to_xyz, inverse_abcc)
     } else {
-        // Without ForwardMatrix, invert AB*CC*CM and chromatically adapt
-        // the scene white represented by CameraNeutral to PCS D50.
         let xyz_to_camera = multiply_4x4_4x3(abcc, profile.color_matrix);
         let camera_to_xyz = pseudoinverse(xyz_to_camera);
         if camera_to_xyz
@@ -2446,9 +2292,6 @@ fn dng_camera_to_working(
         multiply_3x3_3x4(adaptation, camera_to_xyz)
     };
 
-    // DNG's PCS is D50 while the scene working space is linear Rec.2020
-    // D65. Adapt once, then factor out the white balance already applied to
-    // CFA samples on the GPU.
     const D50_TO_D65: [[f32; 3]; 3] = [
         [0.955_473_4, -0.023_098_5, 0.063_259_3],
         [-0.028_369_7, 1.009_995_5, 0.021_041_4],
@@ -2591,26 +2434,26 @@ fn estimate_scene_cct(
 
 fn calibration_illuminant_cct(illuminant: u16) -> Option<f32> {
     match illuminant {
-        1 => Some(5500.0),  // Daylight
-        2 => Some(4000.0),  // Fluorescent
-        3 => Some(2856.0),  // Tungsten
-        4 => Some(5500.0),  // Flash
-        9 => Some(5500.0),  // Fine weather
-        10 => Some(6500.0), // Cloudy weather
-        11 => Some(7500.0), // Shade
-        12 => Some(6500.0), // Daylight fluorescent
-        13 => Some(5000.0), // Day white fluorescent
-        14 => Some(4150.0), // Cool white fluorescent
-        15 => Some(3500.0), // White fluorescent
-        16 => Some(3000.0), // Warm white fluorescent
-        17 => Some(2856.0), // Standard light A
-        18 => Some(4874.0), // Standard light B
-        19 => Some(6774.0), // Standard light C
-        20 => Some(5503.0), // D55
-        21 => Some(6504.0), // D65
-        22 => Some(7504.0), // D75
-        23 => Some(5003.0), // D50
-        24 => Some(3200.0), // ISO studio tungsten
+        1 => Some(5500.0),
+        2 => Some(4000.0),
+        3 => Some(2856.0),
+        4 => Some(5500.0),
+        9 => Some(5500.0),
+        10 => Some(6500.0),
+        11 => Some(7500.0),
+        12 => Some(6500.0),
+        13 => Some(5000.0),
+        14 => Some(4150.0),
+        15 => Some(3500.0),
+        16 => Some(3000.0),
+        17 => Some(2856.0),
+        18 => Some(4874.0),
+        19 => Some(6774.0),
+        20 => Some(5503.0),
+        21 => Some(6504.0),
+        22 => Some(7504.0),
+        23 => Some(5003.0),
+        24 => Some(3200.0),
         _ => None,
     }
 }
@@ -2830,9 +2673,6 @@ fn invert_4x4(matrix: [[f32; 4]; 4]) -> Option<[[f32; 4]; 4]> {
 
 fn normalized_pseudoinverse(mut xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
     for row in &mut xyz_to_cam {
-        // Match Ansel/dcraw's normalization of XYZ -> camera after the
-        // sRGB/XYZ D65 matrix has been applied: each camera row must
-        // produce one for the D65 white point, not for equal-energy XYZ.
         let white_response = row[0] * D65_XYZ[0] + row[1] * D65_XYZ[1] + row[2] * D65_XYZ[2];
         if white_response.is_finite() && white_response.abs() > 1e-12 {
             for value in row {
@@ -2845,9 +2685,6 @@ fn normalized_pseudoinverse(mut xyz_to_cam: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
 }
 
 fn pseudoinverse(input: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
-    // Form (A^T A | I) in f64. Camera matrices are small, but doing the
-    // inversion in f32 makes near-dependent profile columns needlessly
-    // fragile and can silently force the identity colour fallback.
     let mut temp = [[0.0f64; 6]; 3];
 
     for i in 0..3 {
@@ -2908,9 +2745,6 @@ fn pseudoinverse(input: [[f32; 3]; 4]) -> [[f32; 4]; 3] {
 }
 
 fn c_array_to_string(value: &[c_char]) -> String {
-    // Fixed-size LibRaw arrays are normally NUL terminated, but treating
-    // them as an unbounded C string is undefined behaviour when malformed
-    // metadata fills the entire array. Keep conversion inside the slice.
     let bytes: Vec<u8> = value
         .iter()
         .copied()
@@ -2943,7 +2777,6 @@ fn check_libraw(err: i32, action: &str) -> Result<()> {
         return Ok(());
     }
 
-    // SAFETY: LibRaw returns a process-lifetime NUL-terminated error string for the supplied error code.
     let message = unsafe {
         let ptr = ffi::libraw_strerror(err);
         if ptr.is_null() {
@@ -2998,8 +2831,6 @@ mod tests {
         apply_resolved_default_exposure(&mut profile, Some(-0.35));
         assert!((profile.default_exposure_ev + 0.15).abs() < 1e-6);
 
-        // Re-resolving the same metadata replaces the value; it does not add
-        // the profile offset a second time.
         apply_resolved_default_exposure(&mut profile, Some(-0.35));
         assert!((profile.default_exposure_ev + 0.15).abs() < 1e-6);
     }
@@ -3115,7 +2946,6 @@ mod tests {
 
     #[test]
     fn documented_libraw_rotations_map_output_to_source_coordinates() {
-        // Source is 3x2. A 90-degree output is 2x3.
         assert_eq!(oriented_source_pos(0, 0, 3, 2, 5), (2, 0));
         assert_eq!(oriented_source_pos(1, 2, 3, 2, 5), (0, 1));
         assert_eq!(oriented_source_pos(0, 0, 3, 2, 6), (0, 1));
@@ -3124,9 +2954,6 @@ mod tests {
 
     #[test]
     fn camera_neutral_maps_to_rec2020_neutral() {
-        // Identity is a useful synthetic XYZ -> camera profile: the old
-        // row-sum normalization mapped camera (1, 1, 1) to equal-energy
-        // XYZ and therefore to a visibly warm Rec.2020 value.
         let matrix = cam_to_working(
             [
                 [1.0, 0.0, 0.0],
@@ -3181,7 +3008,6 @@ mod tests {
 
     #[test]
     fn repeating_black_pattern_uses_active_area_coordinates() {
-        // Two rows by three columns, after the four per-plane offsets.
         let cblack = [1, 2, 3, 4, 2, 3, 10, 20, 30, 40, 50, 60];
         assert_eq!(effective_black_level(64, &cblack, 2, 0, 0), 77.0);
         assert_eq!(effective_black_level(64, &cblack, 2, 4, 3), 117.0);

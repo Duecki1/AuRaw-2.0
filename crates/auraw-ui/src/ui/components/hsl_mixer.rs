@@ -7,22 +7,11 @@ use eframe::egui::{
     self, Align, Align2, Color32, FontId, Layout, RichText, Sense, Stroke, StrokeKind, Ui,
 };
 
-const CHANNELS: [(&str, Color32); 8] = [
-    ("Red", Color32::from_rgb(232, 76, 82)),
-    ("Orange", Color32::from_rgb(238, 137, 48)),
-    ("Yellow", Color32::from_rgb(224, 193, 57)),
-    ("Green", Color32::from_rgb(75, 184, 101)),
-    ("Aqua", Color32::from_rgb(52, 184, 184)),
-    ("Blue", Color32::from_rgb(73, 130, 232)),
-    ("Purple", Color32::from_rgb(153, 94, 218)),
-    ("Magenta", Color32::from_rgb(219, 79, 163)),
-];
+use crate::ui::theme::HSL_CHANNELS as CHANNELS;
 
 const SELECTOR_GAP: f32 = 4.0;
 const SELECTOR_HEIGHT: f32 = 30.0;
 
-/// Color-first HSL mixer. The selector always consumes exactly the width given
-/// to it, then exposes Hue, Saturation, and Luminance for only that color range.
 pub fn hsl_mixer(
     ui: &mut Ui,
     selected: &mut HslMixerColor,
@@ -124,8 +113,6 @@ pub fn hsl_mixer(
 
 fn selector_geometry(available_width: f32) -> (f32, f32) {
     let available_width = available_width.max(0.0);
-    // Reduce the gap as well as the buttons in pathological narrow layouts;
-    // their total can therefore never report a width larger than the sidebar.
     let gap = SELECTOR_GAP.min(available_width / 14.0);
     let width = (available_width - gap * 7.0) / 8.0;
     (width.max(0.0), gap)
