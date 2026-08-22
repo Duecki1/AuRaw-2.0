@@ -63,10 +63,78 @@ pub enum ExportPublishResult {
 
 #[derive(Debug)]
 struct DirectExportTarget {
-    file: File,
+    descriptor: TransferredFileDescriptor,
     uri: String,
     location: String,
     temp_dir: PathBuf,
+}
+
+/// An fd that Java detached from a `ParcelFileDescriptor` for native ownership.
+///
+/// Its `File` guard is the sole owner and closes the descriptor exactly once.
+/// Keeping the numeric descriptor only for `/proc/self/fd` path construction
+/// avoids exposing a raw fd as independently managed state.
+#[derive(Debug)]
+struct TransferredFileDescriptor {
+    _file: File,
+    raw_fd: i32,
+}
+
+impl TransferredFileDescriptor {
+    fn from_java(raw_fd: i32, invalid_descriptor_message: &str) -> Result<Self, String> {
+        if raw_fd < 0 {
+            return Err(invalid_descriptor_message.to_owned());
+        }
+        // SAFETY: Java detached this descriptor from ParcelFileDescriptor and
+        // transferred sole ownership to Rust. The File guard closes it exactly
+        // once, including when subsequent JNI payload validation fails.
+        let file = unsafe { File::from_raw_fd(raw_fd) };
+        Ok(Self {
+            _file: file,
+            raw_fd,
+        })
+    }
+
+    fn proc_path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.raw_fd))
+    }
+}
+
+#[derive(Debug)]
+struct PendingExportDescriptor {
+    descriptor: TransferredFileDescriptor,
+    uri: String,
+    location: String,
+}
+
+impl PendingExportDescriptor {
+    fn parse(encoded: &str) -> Result<Self, String> {
+        let mut fields = encoded.splitn(3, '\t');
+        let raw_fd = fields
+            .next()
+            .ok_or_else(|| "Android export descriptor is missing its fd".to_owned())?
+            .parse::<i32>()
+            .map_err(|error| format!("invalid Android export fd: {error}"))?;
+        let descriptor = TransferredFileDescriptor::from_java(
+            raw_fd,
+            "Android export descriptor returned a negative fd",
+        )?;
+        let uri = fields
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Android export descriptor is missing its URI".to_owned())?
+            .to_owned();
+        let location = fields
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Android export descriptor is missing its location".to_owned())?
+            .to_owned();
+        Ok(Self {
+            descriptor,
+            uri,
+            location,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -534,7 +602,10 @@ pub fn copy_library_developed_thumbnail_cache(
             storage_manager,
             jni::jni_str!("copyRawLibraryDevelopedThumbnail"),
             jni::jni_sig!((JString, JString) -> void),
-            &[JValue::Object(&source_uri), JValue::Object(&destination_uri)],
+            &[
+                JValue::Object(&source_uri),
+                JValue::Object(&destination_uri),
+            ],
         )?;
         Ok(())
     })
@@ -569,30 +640,9 @@ pub fn thumbnail_cache_size_bytes(app: &AndroidApp) -> Result<u64, String> {
 }
 
 pub fn load_library_display_dimensions(app: &AndroidApp, uri: &str) -> Result<[u32; 2], String> {
-    let uri_string = uri.to_owned();
-    let fd = with_storage_manager(app, |env, storage_manager| {
-        let uri = env.new_string(&uri_string)?;
-        env.call_method(
-            storage_manager,
-            jni::jni_str!("openRawLibraryFd"),
-            jni::jni_sig!((JString) -> i32),
-            &[JValue::Object(&uri)],
-        )?
-        .i()
-    })
-    .map_err(|error| format!("could not open Android RAW library item: {error:#}"))?;
-    if fd < 0 {
-        return Err("Android returned an invalid RAW file descriptor".to_owned());
-    }
-
-    // SAFETY: Java detached this descriptor from ParcelFileDescriptor and
-    // transferred sole ownership to Rust. `File` closes it exactly once.
-    let descriptor = unsafe { File::from_raw_fd(fd) };
-    let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
-    let result =
-        crate::pipeline::load_raw_display_dimensions(&path).map_err(|error| format!("{error:#}"));
-    drop(descriptor);
-    result
+    let descriptor = open_library_descriptor(app, uri)?;
+    crate::pipeline::load_raw_display_dimensions(&descriptor.proc_path())
+        .map_err(|error| format!("{error:#}"))
 }
 
 fn load_library_thumbnail_from_fd(
@@ -600,8 +650,17 @@ fn load_library_thumbnail_from_fd(
     uri: &str,
     maximum_edge: u32,
 ) -> Result<crate::pipeline::RawThumbnail, String> {
+    let descriptor = open_library_descriptor(app, uri)?;
+    crate::pipeline::load_raw_thumbnail(&descriptor.proc_path(), maximum_edge)
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn open_library_descriptor(
+    app: &AndroidApp,
+    uri: &str,
+) -> Result<TransferredFileDescriptor, String> {
     let uri_string = uri.to_owned();
-    let fd = with_storage_manager(app, |env, storage_manager| {
+    let raw_fd = with_storage_manager(app, |env, storage_manager| {
         let uri = env.new_string(&uri_string)?;
         env.call_method(
             storage_manager,
@@ -612,18 +671,7 @@ fn load_library_thumbnail_from_fd(
         .i()
     })
     .map_err(|error| format!("could not open Android RAW library item: {error:#}"))?;
-    if fd < 0 {
-        return Err("Android returned an invalid RAW file descriptor".to_owned());
-    }
-
-    // SAFETY: Java detached this descriptor from ParcelFileDescriptor and
-    // transferred sole ownership to Rust. `File` closes it exactly once.
-    let descriptor = unsafe { File::from_raw_fd(fd) };
-    let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
-    let result = crate::pipeline::load_raw_thumbnail(&path, maximum_edge)
-        .map_err(|error| format!("{error:#}"));
-    drop(descriptor);
-    result
+    TransferredFileDescriptor::from_java(raw_fd, "Android returned an invalid RAW file descriptor")
 }
 
 fn raw_thumbnail_cache_path(
@@ -1315,32 +1363,14 @@ pub fn prepare_direct_export(
     if encoded.is_empty() {
         return Ok(None);
     }
-    let mut fields = encoded.splitn(3, '\t');
-    let fd = fields
-        .next()
-        .ok_or_else(|| "Android export descriptor is missing its fd".to_owned())?
-        .parse::<i32>()
-        .map_err(|error| format!("invalid Android export fd: {error}"))?;
-    if fd < 0 {
-        return Err("Android export descriptor returned a negative fd".to_owned());
-    }
-    // SAFETY: Java detached this fd from ParcelFileDescriptor and transferred
-    // sole ownership to native code. Create the guard immediately so any later
-    // parse/validation error still closes the descriptor.
-    let file = unsafe { File::from_raw_fd(fd) };
-    let uri = fields
-        .next()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Android export descriptor is missing its URI".to_owned())?
-        .to_owned();
-    let location = fields
-        .next()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Android export descriptor is missing its location".to_owned())?
-        .to_owned();
-    let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
+    let PendingExportDescriptor {
+        descriptor,
+        uri,
+        location,
+    } = PendingExportDescriptor::parse(&encoded)?;
+    let path = descriptor.proc_path();
     let target = DirectExportTarget {
-        file,
+        descriptor,
         uri,
         location,
         temp_dir: temp_dir.to_path_buf(),
@@ -1375,12 +1405,12 @@ pub fn finalize_direct_export(app: &AndroidApp, path: &Path) -> Result<String, S
         .ok_or_else(|| "Android direct-export destination is no longer available".to_owned())?;
     // Close the detached fd before publishing the MediaStore row.
     let DirectExportTarget {
-        file,
+        descriptor,
         uri,
         location,
         ..
     } = target;
-    drop(file);
+    drop(descriptor);
     if let Err(error) = finish_pending_export(app, &uri, true) {
         let _ = finish_pending_export(app, &uri, false);
         return Err(error);
@@ -1394,8 +1424,10 @@ pub fn cancel_direct_export(app: &AndroidApp, path: &Path) {
         .ok()
         .and_then(|mut targets| targets.remove(path));
     if let Some(target) = target {
-        let DirectExportTarget { file, uri, .. } = target;
-        drop(file);
+        let DirectExportTarget {
+            descriptor, uri, ..
+        } = target;
+        drop(descriptor);
         if let Err(error) = finish_pending_export(app, &uri, false) {
             log::warn!("could not delete failed Android direct export: {error}");
         }
@@ -1413,8 +1445,10 @@ pub fn cancel_all_direct_exports(app: &AndroidApp) {
         })
         .unwrap_or_default();
     for target in targets {
-        let DirectExportTarget { file, uri, .. } = target;
-        drop(file);
+        let DirectExportTarget {
+            descriptor, uri, ..
+        } = target;
+        drop(descriptor);
         if let Err(error) = finish_pending_export(app, &uri, false) {
             log::warn!("could not delete failed Android direct export: {error}");
         }

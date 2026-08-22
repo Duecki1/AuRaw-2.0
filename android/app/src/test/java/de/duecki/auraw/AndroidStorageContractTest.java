@@ -7,6 +7,10 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.File;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import org.junit.Rule;
@@ -181,5 +185,52 @@ public final class AndroidStorageContractTest {
         assertEquals(
                 "summer_edit.png",
                 AndroidStorageContract.safeImageName("summer edit", "image/png"));
+    }
+
+    @Test
+    public void boundedStreamsEnforceLimitsAndRecoverFromZeroProgressReads() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        long copied = BoundedStreams.copy(
+                new ZeroProgressInputStream("raw".getBytes(StandardCharsets.UTF_8)),
+                output,
+                3,
+                "too large");
+
+        assertEquals(3, copied);
+        assertArrayEquals("raw".getBytes(StandardCharsets.UTF_8), output.toByteArray());
+
+        try {
+            BoundedStreams.copy(
+                    new ByteArrayInputStream("oversized".getBytes(StandardCharsets.UTF_8)),
+                    new ByteArrayOutputStream(),
+                    4,
+                    "too large");
+            fail("copy should reject input beyond the explicit bound");
+        } catch (StorageLimitExceededException expected) {
+            assertEquals("too large", expected.getMessage());
+        }
+    }
+
+    private static final class ZeroProgressInputStream extends InputStream {
+        private final ByteArrayInputStream delegate;
+        private boolean returnedZero;
+
+        ZeroProgressInputStream(byte[] input) {
+            delegate = new ByteArrayInputStream(input);
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (!returnedZero) {
+                returnedZero = true;
+                return 0;
+            }
+            return delegate.read(buffer, offset, length);
+        }
+
+        @Override
+        public int read() {
+            return delegate.read();
+        }
     }
 }
