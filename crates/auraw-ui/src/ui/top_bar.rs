@@ -37,11 +37,34 @@ impl TopBar {
         crate::ui::icons::phosphor_icon_button_enabled(ui, enabled, icon, size, hover_text)
     }
 
+    /// Matches the compact, always-available minimized-export affordance while
+    /// thumbnail workers decode and render the catalog in the background.
+    fn show_thumbnail_task_indicator(ui: &mut Ui, app: &AurawApp) {
+        let Some(progress) = app.library.thumbnail_background_progress() else {
+            return;
+        };
+        let fraction = progress.completed as f32 / progress.total.max(1) as f32;
+        let label = format!("Previews {}/{}", progress.completed, progress.total);
+        let response = ui.add_sized(
+            [112.0, theme::CONTROL_HEIGHT],
+            egui::ProgressBar::new(fraction)
+                .text(label)
+                .animate(!progress.paused),
+        );
+        let tooltip = if progress.paused {
+            "Thumbnail loading is paused while Develop has priority. It resumes in Library."
+        } else {
+            "Loading and rendering library thumbnails in the background."
+        };
+        response.on_hover_text(tooltip);
+    }
+
     #[cfg(target_os = "android")]
     fn show_android(ui: &mut Ui, app: &mut AurawApp, _frame: &eframe::Frame) {
         theme::prepare_toolbar(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             app.show_export_task_indicator(ui);
+            Self::show_thumbnail_task_indicator(ui, app);
 
             let save_tooltip = if app.sidecar_save_in_progress() {
                 "Saving non-destructive edits…"
@@ -104,6 +127,7 @@ impl TopBar {
         let tab_width = if compact { 72.0 } else { 82.0 };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             app.show_export_task_indicator(ui);
+            Self::show_thumbnail_task_indicator(ui, app);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add_sized(
                     [brand_width, theme::CONTROL_HEIGHT],

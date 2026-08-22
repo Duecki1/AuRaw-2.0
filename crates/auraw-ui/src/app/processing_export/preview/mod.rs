@@ -158,3 +158,37 @@ mod navigation;
 mod processing;
 mod rebuild;
 mod state;
+
+#[cfg(test)]
+mod detail_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn medium_zoom_detail_matches_the_physical_viewport_density() {
+        let visible = PreviewUvRect {
+            min: [0.25, 0.25],
+            max: [0.75, 0.75],
+        };
+        let medium = requested_detail_edge(
+            PreviewQuality::Medium,
+            [3_000, 2_000],
+            visible,
+            3_500,
+            2_344,
+            7_000,
+            4_688,
+        );
+        let low = requested_detail_edge(
+            PreviewQuality::Low,
+            [3_000, 2_000],
+            visible,
+            3_500,
+            2_344,
+            7_000,
+            4_688,
+        );
+
+        assert_eq!(medium, 3_000);
+        assert!(low < medium);
+    }
+}

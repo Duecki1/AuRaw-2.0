@@ -292,6 +292,46 @@ struct ThumbnailWorkQueue {
     initial_completed: HashSet<LibraryAssetId>,
 }
 
+/// Catalog-wide worker progress. Per-card state still drives placeholders and
+/// retries; this separate model gives the rest of the application one compact
+/// background-task signal, just like a minimized export.
+#[derive(Default)]
+struct ThumbnailBackgroundProgress {
+    generation: u64,
+    total: usize,
+    completed_assets: HashSet<LibraryAssetId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ThumbnailProgress {
+    pub(crate) completed: usize,
+    pub(crate) total: usize,
+    pub(crate) paused: bool,
+}
+
+impl ThumbnailBackgroundProgress {
+    fn begin(&mut self, generation: u64, total: usize) {
+        self.generation = generation;
+        self.total = total;
+        self.completed_assets.clear();
+    }
+
+    fn record_completion(&mut self, generation: u64, asset_id: LibraryAssetId) {
+        if self.generation == generation {
+            self.completed_assets.insert(asset_id);
+        }
+    }
+
+    fn snapshot(&self, paused: bool) -> Option<ThumbnailProgress> {
+        let completed = self.completed_assets.len().min(self.total);
+        (self.total > 0 && completed < self.total).then_some(ThumbnailProgress {
+            completed,
+            total: self.total,
+            paused,
+        })
+    }
+}
+
 impl ThumbnailWorkQueue {
     fn new(generation: u64, assets: &[LibraryAsset]) -> Self {
         Self {
@@ -616,6 +656,7 @@ pub(crate) struct LibraryState {
     generation: Arc<AtomicU64>,
     decoding_paused: Arc<AtomicBool>,
     decode_gate: Arc<RwLock<()>>,
+    thumbnail_progress: ThumbnailBackgroundProgress,
     scanning: bool,
     catalog_ready: bool,
     status: String,

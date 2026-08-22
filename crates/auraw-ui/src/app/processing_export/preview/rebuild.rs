@@ -77,6 +77,13 @@ impl AurawApp {
         }
         self.preview.viewport_pixels = viewport_pixels;
 
+        // The detail texture is sized from the physical viewport. A monitor
+        // move, DPI change, or panel resize must therefore invalidate a zoom
+        // crop even when the source UV rectangle is unchanged.
+        if self.preview.zoom > DETAIL_ZOOM_START {
+            self.note_preview_motion();
+        }
+
         if self.develop.load_receiver.is_some() {
             self.preview.quality_dirty = true;
         }
