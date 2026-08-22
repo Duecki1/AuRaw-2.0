@@ -52,6 +52,7 @@ fn high_quality_shaders_validate() {
     for (name, source) in [
         ("Bayer pass 1", SHADER_BAYER_RCD_P1),
         ("dual demosaic", SHADER_DUAL_DEMOSAIC),
+        ("X-Trans demosaic", SHADER_XTRANS_DEMOSAIC),
         ("color denoise", SHADER_COLOR_DENOISE),
         ("scene adjustments", SHADER_SCENE_ADJUSTMENTS),
     ] {
