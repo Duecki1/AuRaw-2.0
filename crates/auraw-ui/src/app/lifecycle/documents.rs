@@ -226,6 +226,7 @@ impl AurawApp {
         // receiver lets its worker dispose the result instead of installing it
         // over the newly opened RAW.
         self.preview.rebuild_receiver = None;
+        self.preview.detail_rebuild_receiver = None;
         let sidecar_generation = self.begin_sidecar_open();
         // Reuse compiled GPU programs across RAW opens; retire the old texture IDs for next-frame cleanup.
         let reusable_preview_pipeline = {

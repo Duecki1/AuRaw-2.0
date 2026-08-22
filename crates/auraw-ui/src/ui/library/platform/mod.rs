@@ -64,4 +64,3 @@ pub(super) fn android_folder_ancestors(path: &str) -> HashSet<String> {
     }
     expanded
 }
-

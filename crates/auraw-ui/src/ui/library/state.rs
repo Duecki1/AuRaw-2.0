@@ -37,6 +37,7 @@ impl LibraryState {
             generation: Arc::new(AtomicU64::new(0)),
             decoding_paused: Arc::new(AtomicBool::new(false)),
             decode_gate: Arc::new(RwLock::new(())),
+            thumbnail_progress: ThumbnailBackgroundProgress::default(),
             scanning: false,
             catalog_ready: false,
             status: "Open a folder to build your RAW library.".to_owned(),
@@ -108,6 +109,7 @@ impl LibraryState {
             generation: Arc::new(AtomicU64::new(0)),
             decoding_paused: Arc::new(AtomicBool::new(false)),
             decode_gate: Arc::new(RwLock::new(())),
+            thumbnail_progress: ThumbnailBackgroundProgress::default(),
             scanning: false,
             catalog_ready: false,
             status: String::new(),
@@ -195,6 +197,11 @@ impl LibraryState {
         self.thumbnail_workers
     }
 
+    pub(crate) fn thumbnail_background_progress(&self) -> Option<ThumbnailProgress> {
+        self.thumbnail_progress
+            .snapshot(self.decoding_paused.load(Ordering::Acquire))
+    }
+
     pub(crate) fn thumbnail_size(&self) -> LibraryThumbnailSize {
         self.thumbnail_size
     }
@@ -262,6 +269,7 @@ impl LibraryState {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.event_receiver = None;
         self.request_sender = None;
+        self.thumbnail_progress = ThumbnailBackgroundProgress::default();
         self.scanning = false;
         self.usage_clock = 0;
         for entry in &mut self.entries {
@@ -293,6 +301,7 @@ impl LibraryState {
         let (request_sender, request_receiver) = mpsc::sync_channel(MAX_PENDING_THUMBNAILS);
         self.event_receiver = Some(event_receiver);
         self.request_sender = Some(request_sender);
+        self.thumbnail_progress = ThumbnailBackgroundProgress::default();
         for entry in &mut self.entries {
             entry.thumbnail_queued = false;
             entry.thumbnail_error = None;
@@ -601,6 +610,7 @@ impl LibraryState {
                     }
                     self.scanning = false;
                     self.catalog_ready = true;
+                    self.thumbnail_progress.begin(generation, self.entries.len());
                     self.status = catalog_status(warning_count, truncated);
                 }
                 ScanEvent::Thumbnail {
@@ -609,6 +619,7 @@ impl LibraryState {
                     display_priority,
                     result,
                 } if generation == self.generation.load(Ordering::Acquire) => {
+                    self.thumbnail_progress.record_completion(generation, asset_id.clone());
                     let Some(index) = self.entry_indices.get(&asset_id).copied() else {
                         continue;
                     };
