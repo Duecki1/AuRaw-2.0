@@ -282,6 +282,7 @@ impl LibraryState {
             entry.thumbnail_retry_after = None;
             entry.thumbnail_queued = false;
             entry.developed_thumbnail = false;
+            entry.developed_thumbnail_pending = false;
             entry.last_used = 0;
         }
     }
@@ -434,8 +435,8 @@ impl LibraryState {
                             repaint,
                         },
                         thumbnail_workers,
-                        Arc::new(move |asset| {
-                            load_android_library_thumbnail(&thumbnail_app, asset)
+                        Arc::new(move |asset, stage| {
+                            load_android_library_thumbnail(&thumbnail_app, asset, stage)
                         }),
                     );
                 })
@@ -594,6 +595,7 @@ impl LibraryState {
                                     entry.asset = asset;
                                     entry.thumbnail_error = None;
                                     entry.thumbnail_queued = false;
+                                    entry.developed_thumbnail_pending = false;
                                     entry.last_used = 0;
                                     return entry;
                                 }
@@ -617,22 +619,29 @@ impl LibraryState {
                     generation,
                     asset_id,
                     display_priority,
+                    final_thumbnail,
                     result,
                 } if generation == self.generation.load(Ordering::Acquire) => {
-                    self.thumbnail_progress.record_completion(generation, asset_id.clone());
+                    if final_thumbnail {
+                        self.thumbnail_progress.record_completion(generation, asset_id.clone());
+                    }
                     let Some(index) = self.entry_indices.get(&asset_id).copied() else {
                         continue;
                     };
                     self.entries[index].thumbnail_queued = false;
                     match result {
                         Ok(loaded) => {
-                            if self.entries[index].developed_thumbnail && !loaded.developed {
+                            if self.entries[index].developed_thumbnail
+                                && !loaded.developed
+                                && !loaded.developed_render_pending
+                            {
                                 continue;
                             }
                             let LoadedLibraryThumbnail {
                                 thumbnail,
                                 resident_thumbnail,
                                 developed,
+                                developed_render_pending,
                             } = loaded;
                             let decoded_size = [thumbnail.width, thumbnail.height];
                             let install_pixels =
@@ -656,6 +665,8 @@ impl LibraryState {
                             self.entries[index].thumbnail_failures = 0;
                             self.entries[index].thumbnail_retry_after = None;
                             self.entries[index].developed_thumbnail = developed;
+                            self.entries[index].thumbnail_queued = developed_render_pending;
+                            self.entries[index].developed_thumbnail_pending = developed_render_pending;
                         }
                         Err(error) => {
                             if !self.entries[index].developed_thumbnail {
@@ -668,6 +679,7 @@ impl LibraryState {
                                     .min(THUMBNAIL_RETRY_MAX_DELAY);
                                 entry.thumbnail_error = Some(error);
                                 entry.thumbnail_retry_after = Some(Instant::now() + delay);
+                                entry.developed_thumbnail_pending = false;
                                 context.request_repaint_after(delay);
                             }
                         }

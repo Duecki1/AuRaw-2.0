@@ -21,6 +21,7 @@ impl LibraryState {
             path,
             texture: entry.texture.clone(),
             thumbnail_size: entry.thumbnail_size,
+            developed_thumbnail_pending: entry.developed_thumbnail_pending,
         })
     }
 

@@ -501,7 +501,7 @@ fn develop_pause_preserves_a_received_non_priority_thumbnail_request() {
                 repaint: eframe::egui::Context::default(),
             },
             1,
-            Arc::new(move |_| {
+            Arc::new(move |_, _| {
                 decode_started_sender.send(()).unwrap();
                 Ok(loaded_library_thumbnail(
                     RawThumbnail {
@@ -527,6 +527,7 @@ fn develop_pause_preserves_a_received_non_priority_thumbnail_request() {
             generation,
             asset_id: asset_id.clone(),
             display_priority: false,
+            stage: ThumbnailLoadStage::RawPreview,
         })
         .unwrap();
     assert!(matches!(
@@ -543,6 +544,7 @@ fn develop_pause_preserves_a_received_non_priority_thumbnail_request() {
             generation: event_generation,
             asset_id: event_asset_id,
             display_priority,
+            final_thumbnail: true,
             result: Ok(loaded),
         }) => {
             assert_eq!(event_generation, generation);
@@ -582,7 +584,7 @@ fn develop_pause_allows_display_priority_thumbnail_request() {
                 repaint: eframe::egui::Context::default(),
             },
             1,
-            Arc::new(move |_| {
+            Arc::new(move |_, _| {
                 decode_started_sender.send(()).unwrap();
                 Ok(loaded_library_thumbnail(
                     RawThumbnail {
@@ -608,6 +610,7 @@ fn develop_pause_allows_display_priority_thumbnail_request() {
             generation,
             asset_id: asset_id.clone(),
             display_priority: true,
+            stage: ThumbnailLoadStage::RawPreview,
         })
         .unwrap();
     decode_started_receiver
@@ -618,6 +621,7 @@ fn develop_pause_allows_display_priority_thumbnail_request() {
             generation: event_generation,
             asset_id: event_asset_id,
             display_priority,
+            final_thumbnail: true,
             result: Ok(loaded),
         }) => {
             assert_eq!(event_generation, generation);
@@ -660,7 +664,7 @@ fn thumbnail_workers_process_the_entire_catalog_without_view_requests() {
                 repaint: eframe::egui::Context::default(),
             },
             2,
-            Arc::new(|_| {
+            Arc::new(|_, _| {
                 Ok(loaded_library_thumbnail(
                     RawThumbnail {
                         width: 1,
@@ -684,6 +688,7 @@ fn thumbnail_workers_process_the_entire_catalog_without_view_requests() {
                 generation: 7,
                 asset_id,
                 display_priority,
+                final_thumbnail: true,
                 result: Ok(_),
             }) => {
                 assert!(!display_priority);
@@ -693,6 +698,85 @@ fn thumbnail_workers_process_the_entire_catalog_without_view_requests() {
         }
     }
     assert_eq!(loaded, expected);
+    worker.join().unwrap();
+}
+
+#[test]
+fn edited_thumbnail_workers_publish_raw_preview_before_background_development() {
+    let generation = 9;
+    let asset = test_asset("edited-preview.dng");
+    let (event_sender, event_receiver) = mpsc::sync_channel(4);
+    let (request_sender, request_receiver) = mpsc::sync_channel(1);
+    drop(request_sender);
+    let (stage_sender, stage_receiver) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        run_thumbnail_workers(
+            ThumbnailWorker {
+                assets: vec![asset],
+                warning_count: 0,
+                truncated: false,
+                generation,
+                cancellation: Arc::new(AtomicU64::new(generation)),
+                decoding_paused: Arc::new(AtomicBool::new(false)),
+                decode_gate: Arc::new(RwLock::new(())),
+                event_sender,
+                request_receiver,
+                repaint: eframe::egui::Context::default(),
+            },
+            1,
+            Arc::new(move |_, stage| {
+                stage_sender.send(stage).unwrap();
+                let thumbnail = RawThumbnail {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0, 0, 0, 255],
+                };
+                Ok(match stage {
+                    ThumbnailLoadStage::RawPreview => {
+                        loaded_library_raw_preview_pending_development(thumbnail)
+                    }
+                    ThumbnailLoadStage::DevelopedPreview => {
+                        loaded_library_thumbnail(thumbnail, true)
+                    }
+                })
+            }),
+        );
+    });
+
+    assert!(matches!(
+        event_receiver.recv_timeout(Duration::from_secs(2)),
+        Ok(ScanEvent::Catalog { generation: 9, .. })
+    ));
+    match event_receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(ScanEvent::Thumbnail {
+            final_thumbnail: false,
+            result: Ok(loaded),
+            ..
+        }) => {
+            assert!(!loaded.developed);
+            assert!(loaded.developed_render_pending);
+        }
+        _ => panic!("worker did not publish the RAW preview first"),
+    }
+    match event_receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(ScanEvent::Thumbnail {
+            final_thumbnail: true,
+            result: Ok(loaded),
+            ..
+        }) => {
+            assert!(loaded.developed);
+            assert!(!loaded.developed_render_pending);
+        }
+        _ => panic!("worker did not replace the RAW preview with its edited thumbnail"),
+    }
+    assert_eq!(
+        stage_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        ThumbnailLoadStage::RawPreview
+    );
+    assert_eq!(
+        stage_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        ThumbnailLoadStage::DevelopedPreview
+    );
     worker.join().unwrap();
 }
 
