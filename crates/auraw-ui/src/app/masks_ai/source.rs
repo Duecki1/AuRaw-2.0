@@ -142,18 +142,6 @@ impl AurawApp {
                     ));
                 }
             };
-            reference_pipeline
-                .update_inpaint_layer(
-                    &render_state.queue,
-                    self.inpaint.layer.as_ref(),
-                    0,
-                    0,
-                    raw.width,
-                    raw.height,
-                )
-                .map_err(|error| {
-                    format!("Could not prepare erased pixels for masking: {error:#}")
-                })?;
             reference_pipeline.recompute(&render_state.queue, &render_state.device, &params);
             let rgba = reference_pipeline
                 .read_output_region_blocking(

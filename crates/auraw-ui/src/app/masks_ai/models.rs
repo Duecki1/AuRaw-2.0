@@ -1,7 +1,7 @@
 use super::*;
 
 impl AurawApp {
-    fn ai_model_root(&self) -> PathBuf {
+    pub(in crate::app) fn ai_model_root(&self) -> PathBuf {
         #[cfg(not(target_os = "android"))]
         {
             auraw_ai::desktop_model_cache_root()
@@ -30,6 +30,15 @@ impl AurawApp {
 
     pub(in crate::app) fn vitmatte_model_path(&self) -> PathBuf {
         self.ai_model_root().join("vitmatte-small-composition-1k.onnx")
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(in crate::app) fn onnx_runtime_config_path() -> PathBuf {
+        let root = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .unwrap_or_else(std::env::temp_dir);
+        root.join("auraw/onnx-runtime-path")
     }
 
     #[cfg(not(target_os = "android"))]

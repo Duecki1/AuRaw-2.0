@@ -36,6 +36,52 @@ pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError>
         return invalid("lens name is unreasonably long");
     }
 
+    if edits.remove.strokes.len() > crate::pipeline::REMOVE_MAX_STROKES {
+        return invalid("sidecar contains too many Remove strokes");
+    }
+    for stroke in &edits.remove.strokes {
+        if stroke.brush.points.len() > crate::pipeline::REMOVE_MAX_POINTS_PER_STROKE {
+            return invalid("Remove stroke contains too many brush points");
+        }
+        if stroke.patches.len() > crate::pipeline::REMOVE_MAX_PATCHES_PER_STROKE {
+            return invalid("Remove stroke contains too many cached patches");
+        }
+        if stroke.brush.dilation_radius > 64 {
+            return invalid("Remove stroke dilation is unreasonably large");
+        }
+        for point in &stroke.brush.points {
+            finite("Remove brush point", &[point.x, point.y, point.radius])?;
+            bounded("Remove brush x", point.x, -1.0, 1_000_000.0)?;
+            bounded("Remove brush y", point.y, -1.0, 1_000_000.0)?;
+            bounded("Remove brush radius", point.radius, 0.0, 100_000.0)?;
+        }
+        for patch in &stroke.patches {
+            if patch.bounds.width == 0
+                || patch.bounds.height == 0
+                || patch.bounds.width > 32_768
+                || patch.bounds.height > 32_768
+            {
+                return invalid("Remove patch has invalid dimensions");
+            }
+            if patch.bounds.x.checked_add(patch.bounds.width).is_none()
+                || patch.bounds.y.checked_add(patch.bounds.height).is_none()
+            {
+                return invalid("Remove patch bounds overflow native coordinates");
+            }
+            let pixels = (patch.bounds.width as usize)
+                .checked_mul(patch.bounds.height as usize)
+                .ok_or_else(|| {
+                    SidecarError::Invalid("Remove patch dimensions overflow".to_owned())
+                })?;
+            let rgb_values = pixels.saturating_mul(3);
+            let has_scene = patch.rgb_scene16f.len() == rgb_values;
+            let has_legacy = patch.rgb_srgb16.len() == rgb_values;
+            if has_scene == has_legacy || patch.alpha.len() != pixels {
+                return invalid("Remove patch payload does not match its dimensions");
+            }
+        }
+    }
+
     let refinement = &stack.subject_refinement;
     finite(
         "subject refinement settings",
@@ -287,73 +333,6 @@ pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError>
             }
         }
     }
-    let mut inpaint_dabs = 0usize;
-    for stroke in edits.inpainting.iter() {
-        inpaint_dabs = inpaint_dabs
-            .checked_add(stroke.dabs.len())
-            .ok_or_else(|| SidecarError::Invalid("inpainting dab count overflow".to_owned()))?;
-        if inpaint_dabs > MAX_INPAINT_DABS {
-            return invalid("sidecar contains too many inpainting brush dabs");
-        }
-        if stroke.kind.requires_source() {
-            let Some(source_offset) = stroke.source_offset else {
-                return invalid("source-based inpainting stroke has no source offset");
-            };
-            finite("inpainting source offset", &source_offset)?;
-            bounded("inpainting source offset x", source_offset[0], -16.0, 16.0)?;
-            bounded("inpainting source offset y", source_offset[1], -16.0, 16.0)?;
-        } else if stroke.source_offset.is_some() {
-            return invalid("remove stroke unexpectedly contains a source offset");
-        }
-        for dab in &stroke.dabs {
-            finite(
-                "inpainting brush dab",
-                &[
-                    dab.center[0],
-                    dab.center[1],
-                    dab.opacity,
-                    dab.size,
-                    dab.feather,
-                ],
-            )?;
-            bounded("inpainting dab x", dab.center[0], -16.0, 16.0)?;
-            bounded("inpainting dab y", dab.center[1], -16.0, 16.0)?;
-            bounded("inpainting dab opacity", dab.opacity, -1.0, 1.0)?;
-            bounded("inpainting dab size", dab.size, 0.0, 16.0)?;
-            bounded("inpainting dab feather", dab.feather, 0.0, 1.0)?;
-        }
-
-        let patch = &stroke.patch;
-        if patch.source_width == 0
-            || patch.source_height == 0
-            || patch.width == 0
-            || patch.height == 0
-            || patch
-                .x
-                .checked_add(patch.width)
-                .is_none_or(|right| right > patch.source_width)
-            || patch
-                .y
-                .checked_add(patch.height)
-                .is_none_or(|bottom| bottom > patch.source_height)
-        {
-            return invalid("inpainting patch bounds are invalid");
-        }
-        if !patch.is_valid() {
-            return invalid("inpainting patch storage is invalid");
-        }
-        let [raster_width, raster_height] = patch.raster_dimensions();
-        validate_image(raster_width, raster_height, patch.mask.len(), 1)?;
-        let pixels = raster_width as usize * raster_height as usize;
-        if !patch.rgba16f.is_empty() {
-            if patch.rgba16f.len() != pixels.saturating_mul(4) {
-                return invalid("inpainting RGBA16F patch dimensions are invalid");
-            }
-        } else {
-            validate_image(raster_width, raster_height, patch.rgba.len(), 4)?;
-        }
-    }
-
     if stack.selected_mask.is_none() && stack.selected_component.is_some() {
         return invalid("a component is selected without a selected mask");
     }

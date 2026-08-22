@@ -1,3 +1,4 @@
+mod brush;
 mod crop;
 mod inpaint;
 mod masks;

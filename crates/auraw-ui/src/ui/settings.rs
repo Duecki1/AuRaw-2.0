@@ -303,10 +303,6 @@ impl Settings {
                 .checkbox(&mut settings.ai_masks, "AI masks")
                 .changed();
             changed |= ui
-                .checkbox(&mut settings.inpainting, "Inpainting")
-                .on_hover_text("Inpainting strokes and generated patch data.")
-                .changed();
-            changed |= ui
                 .checkbox(&mut settings.lens_correction, "Lens correction")
                 .on_hover_text("Lens correction enabled state and selected lens profile.")
                 .changed();
@@ -478,7 +474,7 @@ impl Settings {
                         "Use GPU acceleration when available",
                     )
                     .on_hover_text(
-                        "Allow AI masks, inpainting, and AI denoise to use a supported GPU execution provider. CPU fallback remains automatic.",
+                        "Allow AI masks and AI denoise to use a supported GPU execution provider. CPU fallback remains automatic.",
                     )
                     .changed()
                 {

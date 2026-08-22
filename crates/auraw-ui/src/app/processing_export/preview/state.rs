@@ -103,106 +103,48 @@ impl AurawApp {
         } else {
             &self.masks.stack
         };
-        let inpaint = if self.preview.original_requested {
-            None
-        } else {
-            self.inpaint.layer.as_ref()
-        };
-        let mut textures_to_retire = Vec::new();
-
-        // The main preview is the durable interactive surface. Optional zoom
-        // pipelines are caches: a failed cache upload must not make inpainting or
-        // original-preview toggling fail globally. Drop only the failed optional
-        // cache and let its normal scheduler rebuild it.
-        if let (Some(raw), Some(pipeline)) = (&self.develop.preview_raw, &self.preview.gpu_pipeline) {
-            if let Err(error) = pipeline.update_inpaint_layer(
-                &render_state.queue,
-                inpaint,
-                0,
-                0,
-                raw.width,
-                raw.height,
-            ) {
-                self.preview.original_rendered_state = None;
-                self.preview.pending_stage = Some(ProcessingStage::Output);
-                self.ui.notice = Some(
-                    "Could not update preview inpainting. The last complete preview is still shown."
-                        .to_owned(),
-                );
-                crate::diagnostics::record(format!(
-                    "main preview inpaint upload failed; rendered revision remains dirty: {error:#}"
-                ));
-                self.egui_ctx.request_repaint();
-                return;
-            }
-        }
-
-        let navigation_upload_error = self.preview.navigation.as_ref().and_then(|navigation| {
-            navigation
-                .pipeline
-                .update_inpaint_layer(
-                    &render_state.queue,
-                    inpaint,
-                    0,
-                    0,
-                    navigation.raw.width,
-                    navigation.raw.height,
-                )
-                .err()
-        });
-        if let Some(error) = navigation_upload_error {
-            crate::diagnostics::record(format!(
-                "discarding navigation preview after inpaint upload failure: {error:#}"
-            ));
-            if let Some(old) = self.preview.navigation.take() {
-                if let Some(texture_id) = old.pipeline.egui_texture_id {
-                    textures_to_retire.push(texture_id);
-                }
-            }
-            self.preview.navigation_pending_stage = Some(ProcessingStage::Output);
-        }
-
-        let detail_upload_error = self.preview.detail
-            .as_ref()
-            .filter(|detail| detail.revision == self.preview.revision)
-            .and_then(|detail| {
-                detail
-                    .pipeline
-                    .update_inpaint_layer(
-                        &render_state.queue,
-                        inpaint,
-                        detail.virtual_origin[0],
-                        detail.virtual_origin[1],
-                        detail.virtual_full_size[0],
-                        detail.virtual_full_size[1],
-                    )
-                    .err()
-            });
-        if let Some(error) = detail_upload_error {
-            crate::diagnostics::record(format!(
-                "discarding zoom detail after inpaint upload failure: {error:#}"
-            ));
-            if let Some(old) = self.preview.detail.take() {
-                if let Some(texture_id) = old.pipeline.egui_texture_id {
-                    textures_to_retire.push(texture_id);
-                }
-            }
-            self.preview.motion_at = Some(Instant::now());
-            self.preview.detail_pending_stage = Some(ProcessingStage::Output);
-            self.preview.detail_urgent = true;
-        }
-
-        if let (Some(raw), Some(pipeline)) = (&self.develop.preview_raw, &self.preview.gpu_pipeline) {
+        if let (Some(raw), Some(pipeline), Some(full_raw)) = (
+            &self.develop.preview_raw,
+            &self.preview.gpu_pipeline,
+            &self.develop.loaded_raw,
+        ) {
             let params = GpuParams::new(exposure, masks, raw)
                 .with_vignette_geometry(self.develop.geometry);
-            pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            if self.preview.original_requested {
+                pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            } else if let Err(error) = pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                full_raw,
+                exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to preview: {error:#}"));
+            }
         }
-        if let Some(navigation) = self.preview.navigation.as_ref() {
+        if let (Some(navigation), Some(full_raw)) = (
+            self.preview.navigation.as_ref(),
+            self.develop.loaded_raw.as_ref(),
+        ) {
             let params = GpuParams::new(exposure, masks, &navigation.raw)
                 .with_vignette_geometry(self.develop.geometry);
-            navigation
-                .pipeline
-                .recompute(&render_state.queue, &render_state.device, &params);
+            if self.preview.original_requested {
+                navigation.pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            } else if let Err(error) = navigation.pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &params,
+                &self.inpaint.edits,
+                full_raw,
+                exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ) {
+                self.ui.notice = Some(format!("Could not apply Remove to navigation preview: {error:#}"));
+            }
         }
         if let Some(detail) = self.preview.detail
             .as_ref()
@@ -231,14 +173,23 @@ impl AurawApp {
                     mask_region_texture_extent(mask_region, detail.pipeline.mask_atlas_edge()),
                 );
             }
-            detail
-                .pipeline
-                .recompute(&render_state.queue, &render_state.device, &params);
+            if self.preview.original_requested {
+                detail.pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            } else if let Some(full_raw) = self.develop.loaded_raw.as_ref() {
+                if let Err(error) = detail.pipeline.recompute_with_remove(
+                    &render_state.queue,
+                    &render_state.device,
+                    &params,
+                    &self.inpaint.edits,
+                    full_raw,
+                    exposure,
+                    [detail.source_origin[0] as f32, detail.source_origin[1] as f32],
+                    [detail.source_size[0] as f32, detail.source_size[1] as f32],
+                ) {
+                    self.ui.notice = Some(format!("Could not apply Remove to zoomed preview: {error:#}"));
+                }
+            }
         }
-        for texture_id in textures_to_retire {
-            self.retire_egui_texture(texture_id);
-        }
-
         self.preview.original_rendered_state = Some(requested_state);
         self.egui_ctx.request_repaint();
     }

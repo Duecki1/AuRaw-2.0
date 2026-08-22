@@ -365,7 +365,7 @@ impl Sidebar {
         if !edit(&mut candidate) {
             return false;
         }
-        if let Err(error) = crate::sidecar::preflight_mask_change(&candidate, &app.inpaint.strokes) {
+        if let Err(error) = crate::sidecar::preflight_mask_change(&candidate) {
             app.report_mask_persistence_limit(action, &error);
             return false;
         }

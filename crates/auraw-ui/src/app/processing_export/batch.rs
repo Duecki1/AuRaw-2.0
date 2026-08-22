@@ -248,9 +248,8 @@ fn prepare_desktop_library_export_item(
         Arc::clone(&original_raw)
     };
 
+    let remove = Arc::unwrap_or_clone(edits.remove);
     let mut masks = Arc::unwrap_or_clone(edits.masks);
-    let inpaint_strokes = Arc::unwrap_or_clone(edits.inpainting);
-    let inpaint = compose_inpaint_strokes(&inpaint_strokes);
     if needs_canonical_mask_source(&masks) {
         let source_raw = if raw.width.max(raw.height) <= 2048 {
             Arc::clone(&raw)
@@ -273,21 +272,6 @@ fn prepare_desktop_library_export_item(
                 job.source.display()
             )
         })?;
-        pipeline
-            .update_inpaint_layer(
-                queue,
-                inpaint.as_ref(),
-                0,
-                0,
-                source_raw.width,
-                source_raw.height,
-            )
-            .map_err(|error| {
-                format!(
-                    "{}: range-mask inpainting setup failed: {error:#}",
-                    job.source.display()
-                )
-            })?;
         pipeline.recompute(queue, device, &neutral_params);
         let rgba = pipeline
             .read_output_region_blocking(
@@ -326,7 +310,7 @@ fn prepare_desktop_library_export_item(
             geometry: edits.geometry.sanitized(),
             exposure: edits.exposure,
             masks,
-            inpaint,
+            remove,
             source_file_name,
             gpu_export_prewarm: None,
         },

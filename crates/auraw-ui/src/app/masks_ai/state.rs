@@ -358,14 +358,6 @@ impl AurawApp {
         self.ai.mask_update_failed = false;
     }
 
-    pub(crate) fn note_inpainting_changed_for_ai_masks(&mut self) {
-        let has_ranges = self.has_range_mask_targets();
-        self.invalidate_generated_mask_sources();
-        self.ai.masks_need_update = has_subject
-            || !object_targets.is_empty()
-            || has_ranges;
-    }
-
     pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
         let has_ranges = self.has_range_mask_targets();
         self.invalidate_generated_mask_sources();
@@ -432,8 +424,8 @@ impl AurawApp {
             || !object_targets.is_empty()
             || update_ranges
         {
-            // Force a new canonical source because lens correction or
-            // inpainting changed the image under content-aware masks.
+            // Force a new canonical source because lens correction changed
+            // the image under content-aware masks.
             self.masks.source_cache = None;
             self.masks.subject_cache = None;
             self.ai.object_cache = None;
@@ -480,8 +472,8 @@ impl AurawApp {
 
         if update_subject {
             let path = self.birefnet_model_path();
-            if path.is_file() {
-                self.start_subject_worker(path);
+            if crate::ai_masks::birefnet_model_is_verified(self.ai.birefnet_quality, &path) {
+                self.start_subject_worker(path, false);
             } else {
                 self.ai.subject_consent_open = true;
                 self.egui_ctx.request_repaint();
@@ -527,8 +519,9 @@ impl AurawApp {
             }
 
             let (encoder, decoder) = self.sam21_model_paths();
-            if encoder.is_file() && decoder.is_file() && self.vitmatte_model_path().is_file() {
-                self.start_object_worker(mask_index, component_index, encoder, decoder);
+            let vitmatte = self.vitmatte_model_path();
+            if crate::ai_masks::object_models_are_verified(&encoder, &decoder, &vitmatte) {
+                self.start_object_worker(mask_index, component_index, encoder, decoder, false);
             } else {
                 self.ai.object_pending_target = Some((mask_index, component_index));
                 self.ai.object_consent_open = true;

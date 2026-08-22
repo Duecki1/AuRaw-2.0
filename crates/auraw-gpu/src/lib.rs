@@ -4,9 +4,6 @@ pub use egui;
 pub use egui_wgpu;
 pub use wgpu;
 
-/// Fixed LaMa model texture extent used by GPU staging resources.
-pub const LAMA_EDGE: u32 = 512;
-
 pub mod diagnostics {
     pub use auraw_core::diagnostics::*;
 }

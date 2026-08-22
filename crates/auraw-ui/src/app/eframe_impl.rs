@@ -27,12 +27,6 @@ impl eframe::App for AurawApp {
             self.masks.thumbnail_group_textures.clear();
             self.masks.thumbnail_component_textures.clear();
             self.masks.thumbnail_component_mask = None;
-            self.inpaint.texture = None;
-            self.inpaint.texture_key = None;
-            self.inpaint.stroke_texture = None;
-            self.inpaint.stroke_texture_key = None;
-            self.inpaint.focus_texture = None;
-            self.inpaint.focus_texture_key = None;
             self.ui.notice = Some(
                 "GPU memory was exhausted. AuRaw cancelled the operation and released optional preview textures. Close other GPU-heavy apps or lower Preview Quality before retrying."
                     .to_owned(),
@@ -300,13 +294,14 @@ impl eframe::App for AurawApp {
         // borrowing other app state. Reconcile the model policy once per frame
         // as well as in the ordinary tab handlers so every way of leaving an AI
         // tool promptly releases its cached session.
-        self.sync_ai_model_cache_policy();
+        self.sync_ai_model_runtime_context();
 
         #[cfg(not(target_os = "android"))]
         if self.ui.active_tab == AppTab::Develop {
             crate::ui::library::show_library_action_overlays(ui, self, frame);
         }
 
+        self.advance_remove_worker(frame);
         self.apply_pending_lens_correction(frame);
         self.apply_pending_preview_quality(frame);
         self.sync_original_preview(frame);
@@ -324,6 +319,7 @@ impl eframe::App for AurawApp {
             || self.export.task.is_some()
             || self.export.publish_pending
             || self.preview.rebuild_receiver.is_some()
+            || self.inpaint.processing()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
         }
@@ -354,7 +350,7 @@ impl eframe::App for AurawApp {
             show_raw_drop_overlay(ui, self.library.folder());
         }
         self.show_subject_dialogs(ui.ctx());
-        self.show_inpainting_dialogs(ui.ctx());
+        self.show_remove_model_dialog(ui.ctx(), frame);
         self.show_ai_denoise_dialogs(ui.ctx(), frame);
         self.show_sidecar_save_error_dialog(ui.ctx());
         self.show_foreground_operation_dialog(ui.ctx());
@@ -376,8 +372,7 @@ impl eframe::App for AurawApp {
     }
 
     fn on_exit(&mut self) {
-        crate::ai_masks::set_model_cache_enabled(false);
-        crate::inpainting::set_model_cache_enabled(false);
+        auraw_ai::set_active_ai_context(None);
         #[cfg(target_os = "android")]
         if let Err(error) = crate::android::clear_background_task_notification(&self.android.android_app) {
             log::warn!("{error}");
