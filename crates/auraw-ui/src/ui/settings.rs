@@ -106,7 +106,7 @@ impl Settings {
             }
             ui.add(
                 egui::Label::new(
-                    "All levels follow the preview's physical screen size: Low 50%, Medium 67%, High 84%, and Max one rendered pixel per display pixel. Zoom detail keeps the same density.",
+                    "All levels follow the preview's physical screen size: Low 75%, Medium 100% (native density), High 125%, and Max 150%. Zoom detail uses the same density.",
                 )
                 .wrap(),
             );

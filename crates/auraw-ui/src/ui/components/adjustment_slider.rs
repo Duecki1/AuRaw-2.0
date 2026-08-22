@@ -872,6 +872,6 @@ mod tests {
 
         assert_eq!(camera_low, local_high);
         assert_eq!(camera_high, local_low);
-        assert_eq!(camera_neutral, egui::Color32::from_gray(202));
+        assert_eq!(camera_neutral, eframe::egui::Color32::from_gray(202));
     }
 }

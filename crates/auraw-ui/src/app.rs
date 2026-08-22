@@ -157,10 +157,12 @@ pub(crate) enum PreviewQuality {
 impl PreviewQuality {
     pub const fn pixel_scale(self) -> f32 {
         match self {
-            Self::Low => 0.50,
-            Self::Medium => 0.67,
-            Self::High => 0.84,
-            Self::Max => 1.00,
+            // Medium is the native-density baseline. Lower quality is an
+            // explicit performance trade-off rather than the default blur.
+            Self::Low => 0.75,
+            Self::Medium => 1.00,
+            Self::High => 1.25,
+            Self::Max => 1.50,
         }
     }
 
@@ -478,6 +480,24 @@ struct PreparedPreviewRebuild {
 
 enum PreviewRebuildEvent {
     Finished(Result<PreparedPreviewRebuild, String>),
+}
+
+/// CPU-only result of preparing the source region for a zoomed preview. RAW
+/// proxy construction stays off the interactive egui frame; the GPU graph is
+/// created on the render thread after this request is verified as current.
+struct PreparedPreviewDetail {
+    source_raw: Arc<LoadedRaw>,
+    revision: u64,
+    quality: PreviewQuality,
+    visible: PreviewUvRect,
+    texture_uv_rect: PreviewUvRect,
+    source_origin: [u32; 2],
+    source_size: [u32; 2],
+    raw: Arc<LoadedRaw>,
+}
+
+enum PreviewDetailRebuildEvent {
+    Finished(Result<PreparedPreviewDetail, String>),
 }
 
 enum LoadEvent {
@@ -928,6 +948,7 @@ pub(crate) struct PreviewState {
     pub(crate) detail_urgent: bool,
     pub(crate) quality_dirty: bool,
     pub(crate) rebuild_receiver: Option<mpsc::Receiver<PreviewRebuildEvent>>,
+    pub(crate) detail_rebuild_receiver: Option<mpsc::Receiver<PreviewDetailRebuildEvent>>,
     pub(crate) original_exposure: ExposureParams,
     pub(crate) original_requested: bool,
     pub(crate) original_rendered_state: Option<(bool, u64)>,
@@ -1309,9 +1330,9 @@ mod transactional_pipeline_tests {
     fn preview_quality_levels_track_physical_viewport_density() {
         assert_eq!(
             PreviewQuality::Max.proxy_edge_for_viewport([3_000, 2_000]),
-            3_006
+            4_506
         );
-        assert!(PreviewQuality::Max.detail_edge_for_viewport([3_200, 1_800]) >= 3_200 * 135 / 100);
+        assert!(PreviewQuality::Max.detail_edge_for_viewport([3_200, 1_800]) >= 3_200 * 2);
         for quality in [
             PreviewQuality::Low,
             PreviewQuality::Medium,
@@ -1323,7 +1344,7 @@ mod transactional_pipeline_tests {
     }
 
     #[test]
-    fn preview_quality_density_is_ordered_and_max_matches_physical_pixels() {
+    fn preview_quality_density_is_ordered_and_medium_matches_physical_pixels() {
         let viewport = [2_400, 1_600];
         let edges = [
             PreviewQuality::Low.proxy_edge_for_viewport(viewport),
@@ -1332,7 +1353,7 @@ mod transactional_pipeline_tests {
             PreviewQuality::Max.proxy_edge_for_viewport(viewport),
         ];
         assert!(edges.windows(2).all(|pair| pair[0] < pair[1]));
-        assert_eq!(edges[3], 2_406);
+        assert_eq!(edges[1], 2_406);
     }
 
     #[test]

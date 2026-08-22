@@ -986,4 +986,3 @@ fn run_one_thumbnail_worker(context: ThumbnailWorkerContext) {
         repaint.request_repaint();
     }
 }
-

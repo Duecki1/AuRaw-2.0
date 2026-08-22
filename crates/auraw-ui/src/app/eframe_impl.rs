@@ -107,6 +107,7 @@ impl eframe::App for AurawApp {
 
         self.poll_load_worker(frame);
         self.poll_preview_rebuild_worker(frame);
+        self.poll_preview_detail_rebuild_worker(frame);
         #[cfg(not(target_os = "android"))]
         self.sync_display_color_management(ui.ctx(), frame);
         #[cfg(not(target_os = "android"))]
@@ -322,6 +323,7 @@ impl eframe::App for AurawApp {
             || self.export.task.is_some()
             || self.export.publish_pending
             || self.preview.rebuild_receiver.is_some()
+            || self.preview.detail_rebuild_receiver.is_some()
             || self.inpaint.processing()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(80));
