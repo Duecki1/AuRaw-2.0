@@ -1,6 +1,5 @@
 package de.duecki.auraw;
 
-import android.content.ContentResolver;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
@@ -22,7 +21,6 @@ final class ProfileImporter {
     private static final int MAX_DCP_FILES = 10_000;
     private static final int MAX_DCP_TREE_DEPTH = 16;
     private static final String CAMERA_PROFILE_MIRROR_PREFIX = "camera-profiles-";
-    private static final String PICKER_PREFERENCES = "auraw-picker-locations";
     private static final String CAMERA_PROFILE_PICKER_URI_KEY = "camera-profile-tree-uri";
 
     interface Callbacks {
@@ -30,12 +28,14 @@ final class ProfileImporter {
         void onFolderPicked(String cachedPath, String displayName, int profileCount, String error);
     }
 
-    private final AuRawActivity activity;
+    private final AndroidStorageAccess storage;
     private final Callbacks callbacks;
+    private final PickerLocationStore pickerLocations;
 
-    ProfileImporter(AuRawActivity activity, Callbacks callbacks) {
-        this.activity = activity;
+    ProfileImporter(AndroidStorageAccess storage, Callbacks callbacks) {
+        this.storage = storage;
         this.callbacks = callbacks;
+        this.pickerLocations = new PickerLocationStore(storage);
     }
 
     Intent createFolderPickerIntent() {
@@ -43,7 +43,7 @@ final class ProfileImporter {
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
                 | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                 | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-        Uri initialUri = rememberedProfileFolderUri();
+        Uri initialUri = pickerLocations.readContentUri(CAMERA_PROFILE_PICKER_URI_KEY);
         if (initialUri != null) {
             intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
         }
@@ -51,10 +51,7 @@ final class ProfileImporter {
     }
 
     void clearFolderPickerLocation() {
-        activity.getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
-                .edit()
-                .remove(CAMERA_PROFILE_PICKER_URI_KEY)
-                .apply();
+        pickerLocations.clear(CAMERA_PROFILE_PICKER_URI_KEY);
     }
 
     void handleFolderPickerResult(int resultCode, Intent data) {
@@ -67,7 +64,7 @@ final class ProfileImporter {
         callbacks.onImportStarted(folderLabel);
         if ((data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
             try {
-                activity.getContentResolver().takePersistableUriPermission(
+                storage.getContentResolver().takePersistableUriPermission(
                         treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
             } catch (SecurityException ignored) {
                 // Some providers allow the current read without a persistable grant.
@@ -95,7 +92,7 @@ final class ProfileImporter {
 
     private void importCameraProfileFolder(Uri treeUri, String label) {
         File destination = new File(
-                activity.getFilesDir(),
+                storage.getFilesDir(),
                 CAMERA_PROFILE_MIRROR_PREFIX + Long.toUnsignedString(System.nanoTime()));
         try {
             if (!destination.mkdirs()) {
@@ -109,41 +106,16 @@ final class ProfileImporter {
                 throw new IllegalArgumentException(
                         "The selected folder contains no .dcp camera profiles");
             }
-            rememberProfileFolderUri(treeUri);
+            pickerLocations.writeContentUri(CAMERA_PROFILE_PICKER_URI_KEY, treeUri);
             String importedPath = destination.getAbsolutePath();
             int importedProfiles = stats.files;
-            activity.runOnUiThread(() -> callbacks.onFolderPicked(
+            storage.runOnUiThread(() -> callbacks.onFolderPicked(
                     importedPath, label, importedProfiles, ""));
         } catch (Exception error) {
             deleteDirectoryTree(destination);
             String message = error.toString();
-            activity.runOnUiThread(() -> callbacks.onFolderPicked("", label, 0, message));
+            storage.runOnUiThread(() -> callbacks.onFolderPicked("", label, 0, message));
         }
-    }
-
-    private Uri rememberedProfileFolderUri() {
-        String uriText = activity
-                .getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
-                .getString(CAMERA_PROFILE_PICKER_URI_KEY, "");
-        if (uriText == null || uriText.isEmpty()) {
-            return null;
-        }
-        try {
-            Uri uri = Uri.parse(uriText);
-            return ContentResolver.SCHEME_CONTENT.equals(uri.getScheme()) ? uri : null;
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private void rememberProfileFolderUri(Uri uri) {
-        if (uri == null || !ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
-            return;
-        }
-        activity.getSharedPreferences(PICKER_PREFERENCES, AuRawActivity.MODE_PRIVATE)
-                .edit()
-                .putString(CAMERA_PROFILE_PICKER_URI_KEY, uri.toString())
-                .apply();
     }
 
     private void copyCameraProfileTree(
@@ -164,7 +136,7 @@ final class ProfileImporter {
                 DocumentsContract.Document.COLUMN_MIME_TYPE,
                 DocumentsContract.Document.COLUMN_SIZE
         };
-        try (Cursor cursor = activity.getContentResolver().query(
+        try (Cursor cursor = storage.getContentResolver().query(
                 childrenUri, projection, null, null, null)) {
             if (cursor == null) {
                 throw new IllegalStateException("Android storage could not list the selected folder");
@@ -222,7 +194,7 @@ final class ProfileImporter {
                 Uri documentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId);
                 File output = uniqueProfileFile(destination, safeName, documentId);
                 long copied = 0L;
-                try (InputStream input = activity.getContentResolver().openInputStream(documentUri);
+                try (InputStream input = storage.getContentResolver().openInputStream(documentUri);
                      FileOutputStream stream = new FileOutputStream(output)) {
                     if (input == null) {
                         throw new IllegalStateException("Android storage returned no DCP stream");
@@ -318,7 +290,7 @@ final class ProfileImporter {
     }
 
     private String queryProfileFolderName(Uri uri) {
-        try (Cursor cursor = activity.getContentResolver().query(
+        try (Cursor cursor = storage.getContentResolver().query(
                 uri,
                 new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME},
                 null,
@@ -349,7 +321,7 @@ final class ProfileImporter {
             throw new IllegalArgumentException(
                     "Refusing to follow a camera-profile mirror symbolic link");
         }
-        File filesDirectory = activity.getFilesDir().getCanonicalFile();
+        File filesDirectory = storage.getFilesDir().getCanonicalFile();
         File mirror = requestedMirror.getCanonicalFile();
         if (!isCameraProfileMirrorName(mirror.getName())
                 || mirror.getParentFile() == null

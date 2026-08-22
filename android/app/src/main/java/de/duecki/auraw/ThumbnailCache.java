@@ -16,10 +16,10 @@ final class ThumbnailCache {
     private static final int MAX_ENTRIES = 512;
     private static final long MAX_BYTES = 128L * 1024L * 1024L;
 
-    private final AuRawActivity activity;
+    private final AndroidStorageAccess storage;
 
-    ThumbnailCache(AuRawActivity activity) {
-        this.activity = activity;
+    ThumbnailCache(AndroidStorageAccess storage) {
+        this.storage = storage;
     }
 
     String rawPath(String uriText, long bytes, long modifiedSeconds, int maximumEdge)
@@ -97,7 +97,7 @@ final class ThumbnailCache {
      * growth and app-data clearing/uninstall still removes all entries.
      */
     private File persistentDirectory() {
-        File directory = new File(activity.getNoBackupFilesDir(), "library-thumbnails");
+        File directory = new File(storage.getNoBackupFilesDir(), "library-thumbnails");
         if (!directory.isDirectory() && !directory.mkdirs()) {
             throw new IllegalStateException("Could not create the persistent thumbnail cache");
         }
@@ -105,7 +105,7 @@ final class ThumbnailCache {
     }
 
     private File legacyDirectory() {
-        return new File(activity.getCacheDir(), "library-thumbnails");
+        return new File(storage.getCacheDir(), "library-thumbnails");
     }
 
     private static void clearDirectory(File directory) {
@@ -212,38 +212,12 @@ final class ThumbnailCache {
     private static void copyFile(File source, File destination) throws Exception {
         try (FileInputStream input = new FileInputStream(source);
              FileOutputStream output = new FileOutputStream(destination)) {
-            copy(input, output);
+            BoundedStreams.copy(
+                    input,
+                    output,
+                    MAX_BYTES,
+                    "The document exceeds the " + MAX_BYTES + "-byte import limit");
             output.getFD().sync();
-        }
-    }
-
-    private static void copy(FileInputStream input, FileOutputStream output) throws Exception {
-        byte[] buffer = new byte[1024 * 1024];
-        long copied = 0L;
-        while (true) {
-            int count = input.read(buffer);
-            if (count < 0) {
-                return;
-            }
-            if (count == 0) {
-                int value = input.read();
-                if (value < 0) {
-                    return;
-                }
-                if (copied >= MAX_BYTES) {
-                    throw new IllegalStateException(
-                            "The document exceeds the " + MAX_BYTES + "-byte import limit");
-                }
-                output.write(value);
-                copied++;
-                continue;
-            }
-            if (copied > MAX_BYTES - count) {
-                throw new IllegalStateException(
-                        "The document exceeds the " + MAX_BYTES + "-byte import limit");
-            }
-            output.write(buffer, 0, count);
-            copied += count;
         }
     }
 

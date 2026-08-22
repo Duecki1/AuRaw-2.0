@@ -61,7 +61,8 @@ public final class AuRawActivity extends NativeActivity {
         // notification bridge before the other delegates so early task updates
         // cannot observe a partially initialized Activity.
         taskNotificationController = new TaskNotificationController(this);
-        storageManager = new StorageManager(this, new StorageManager.Callbacks() {
+        AndroidStorageAccess storageAccess = new ActivityStorageAccess(this);
+        storageManager = new StorageManager(storageAccess, new StorageManager.Callbacks() {
             @Override
             public void onFilePicked(
                     String cachedPath,
@@ -83,7 +84,7 @@ public final class AuRawActivity extends NativeActivity {
             }
 
         });
-        profileImporter = new ProfileImporter(this, new ProfileImporter.Callbacks() {
+        profileImporter = new ProfileImporter(storageAccess, new ProfileImporter.Callbacks() {
             @Override
             public void onImportStarted(String displayName) {
                 nativeOnCameraProfileFolderImportStarted(displayName);

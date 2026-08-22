@@ -3,8 +3,6 @@ package de.duecki.auraw;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -225,7 +223,11 @@ final class AndroidStorageContract {
         try {
             try (FileInputStream input = new FileInputStream(source);
                  FileOutputStream output = new FileOutputStream(partial)) {
-                copy(input, output, maximumBytes);
+                BoundedStreams.copy(
+                        input,
+                        output,
+                        maximumBytes,
+                        "File exceeds the allowed size");
                 output.getFD().sync();
             }
             if (!partial.renameTo(destination)) {
@@ -260,7 +262,11 @@ final class AndroidStorageContract {
         try {
             try (FileInputStream input = new FileInputStream(cached);
                  FileOutputStream output = new FileOutputStream(temporary)) {
-                copy(input, output, maximumBytes);
+                BoundedStreams.copy(
+                        input,
+                        output,
+                        maximumBytes,
+                        "File exceeds the allowed size");
                 output.getFD().sync();
             }
             try {
@@ -284,32 +290,4 @@ final class AndroidStorageContract {
         }
     }
 
-    private static void copy(InputStream input, OutputStream output, long maximumBytes)
-            throws Exception {
-        byte[] buffer = new byte[256 * 1024];
-        long total = 0L;
-        while (true) {
-            int count = input.read(buffer);
-            if (count < 0) {
-                break;
-            }
-            if (count == 0) {
-                int value = input.read();
-                if (value < 0) {
-                    break;
-                }
-                if (total >= maximumBytes) {
-                    throw new IllegalStateException("File exceeds the allowed size");
-                }
-                output.write(value);
-                total++;
-                continue;
-            }
-            if (total > maximumBytes - count) {
-                throw new IllegalStateException("File exceeds the allowed size");
-            }
-            output.write(buffer, 0, count);
-            total += count;
-        }
-    }
 }
