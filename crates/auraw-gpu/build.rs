@@ -34,6 +34,13 @@ fn main() {
         "pass3.wgsl",
         "pass4.wgsl",
         "dual_demosaic.wgsl",
+        "xtrans/seed.wgsl",
+        "xtrans/markesteijn_interpolate.wgsl",
+        "xtrans/markesteijn_refine.wgsl",
+        "xtrans/markesteijn_candidates.wgsl",
+        "xtrans/markesteijn_derivatives.wgsl",
+        "xtrans/markesteijn_homogeneity.wgsl",
+        "xtrans/markesteijn_accumulate.wgsl",
         "xtrans_demosaic.wgsl",
         "xtrans_finish.wgsl",
     ] {
