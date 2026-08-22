@@ -23,8 +23,6 @@ pub struct PickedDocument {
     pub display_name: String,
     pub library_uri: String,
     pub delete_after_decode: bool,
-    /// Keeps an Android content-provider descriptor alive while LibRaw reads
-    /// `/proc/self/fd/<n>`. Dropping the guard closes the descriptor.
     pub raw_fd_guard: Option<File>,
 }
 
@@ -69,11 +67,6 @@ struct DirectExportTarget {
     temp_dir: PathBuf,
 }
 
-/// An fd that Java detached from a `ParcelFileDescriptor` for native ownership.
-///
-/// Its `File` guard is the sole owner and closes the descriptor exactly once.
-/// Keeping the numeric descriptor only for `/proc/self/fd` path construction
-/// avoids exposing a raw fd as independently managed state.
 #[derive(Debug)]
 struct TransferredFileDescriptor {
     _file: File,
@@ -85,9 +78,6 @@ impl TransferredFileDescriptor {
         if raw_fd < 0 {
             return Err(invalid_descriptor_message.to_owned());
         }
-        // SAFETY: Java detached this descriptor from ParcelFileDescriptor and
-        // transferred sole ownership to Rust. The File guard closes it exactly
-        // once, including when subsequent JNI payload validation fails.
         let file = unsafe { File::from_raw_fd(raw_fd) };
         Ok(Self {
             _file: file,
@@ -139,8 +129,6 @@ impl PendingExportDescriptor {
 
 #[derive(Debug)]
 pub enum CameraProfileFolderResult {
-    /// Android returned a tree URI and AuRaw started mirroring its DCP files.
-    /// Keep the picker transaction pending until Picked/Failed arrives.
     ImportStarted {
         label: String,
     },
@@ -213,9 +201,6 @@ pub fn install_context(context: &egui::Context) {
     if let Ok(mut installed) = EGUI_CONTEXT.lock() {
         *installed = Some(context.clone());
     }
-    // A newly created NativeActivity owns a new Java notification controller.
-    // Do not let a deduplication record from the previous Activity suppress the
-    // first notification posted by this one.
     if let Ok(mut notification) = TASK_NOTIFICATION_STATE.lock() {
         *notification = None;
     }
@@ -307,11 +292,9 @@ pub fn clear_camera_profile_folder_picker_location(app: &AndroidApp) -> Result<(
 }
 
 pub fn open_raw_document(app: &AndroidApp) -> Result<(), String> {
-    // SAFETY: Android owns the JavaVM for the process lifetime; `JavaVM` is a non-owning handle and does not destroy the VM on drop.
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
     vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
-        // SAFETY: `raw_activity` is the live NativeActivity object for this callback; converting it to a JNI global reference extends its lifetime safely.
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
         env.call_method(
             activity,
@@ -818,8 +801,6 @@ pub fn save_developed_thumbnail_cache(
         )
     })?;
 
-    // Re-read after both files are published so a newer sidecar can never keep
-    // an older developed preview alive.
     let Some(sidecar_path) = materialize_raw_sidecar(app, raw_uri, display_name)? else {
         let _ = fs::remove_file(&cache_path);
         let _ = fs::remove_file(&fingerprint_path);
@@ -1055,9 +1036,6 @@ pub fn remove_raw_sidecar(
     })
     .map_err(|error| format!("could not reset Android RAW adjustments: {error:#}"))?;
 
-    // Developed previews are keyed by the old sidecar fingerprint. Remove
-    // both the preview and fingerprint immediately so the Library cannot show
-    // a stale grade after Reset All.
     clear_developed_thumbnail_cache(app, raw_uri);
     Ok(())
 }
@@ -1246,13 +1224,9 @@ fn with_activity<T>(
     app: &AndroidApp,
     operation: impl FnOnce(&mut jni::Env<'_>, &JObject) -> jni::errors::Result<T>,
 ) -> jni::errors::Result<T> {
-    // SAFETY: Android owns the JavaVM for the process lifetime; `JavaVM` is a
-    // non-owning handle and does not destroy the VM on drop.
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
     vm.attach_current_thread(|env| {
         let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
-        // SAFETY: this is the live NativeActivity object. A global reference
-        // keeps it valid for the duration of the attached call.
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw_activity)? };
         operation(env, activity.as_ref())
     })
@@ -1403,7 +1377,6 @@ pub fn finalize_direct_export(app: &AndroidApp, path: &Path) -> Result<String, S
         .map_err(|_| "Android direct-export state is poisoned".to_owned())?
         .remove(path)
         .ok_or_else(|| "Android direct-export destination is no longer available".to_owned())?;
-    // Close the detached fd before publishing the MediaStore row.
     let DirectExportTarget {
         descriptor,
         uri,
@@ -1588,17 +1561,12 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnFilePickedFd<'
 
             let result = if !error.is_empty() {
                 if fd >= 0 {
-                    // SAFETY: a non-negative descriptor passed to this callback has
-                    // already been detached by Java and is owned by native code.
                     drop(unsafe { File::from_raw_fd(fd) });
                 }
                 PickerResult::Failed(error)
             } else if fd < 0 {
                 PickerResult::Failed("Android returned an invalid RAW file descriptor".to_owned())
             } else {
-                // SAFETY: Java detached this descriptor specifically for Rust ownership.
-                // The File guard is carried with the picker result and remains alive until
-                // LibRaw has completed decoding `/proc/self/fd/<fd>`.
                 let guard = unsafe { File::from_raw_fd(fd) };
                 PickerResult::Picked(PickedDocument {
                     path: PathBuf::from(format!("/proc/self/fd/{fd}")),
@@ -1733,7 +1701,6 @@ pub extern "system" fn Java_de_duecki_auraw_AuRawActivity_nativeOnExportPublishe
         });
 }
 
-/// Synchronous worker API. Call from a RAW decode worker, never the Android UI thread.
 pub fn load_android(
     app: &AndroidApp,
     raw_uri: &str,
@@ -1755,7 +1722,6 @@ pub fn load_android(
     result.map(Some)
 }
 
-/// Serializes, fsyncs, and publishes a sidecar through Android MediaStore.
 pub fn save_android(
     app: &AndroidApp,
     raw_uri: &str,

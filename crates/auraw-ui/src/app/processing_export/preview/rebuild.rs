@@ -77,9 +77,6 @@ impl AurawApp {
         }
         self.preview.viewport_pixels = viewport_pixels;
 
-        // The detail texture is sized from the physical viewport. A monitor
-        // move, DPI change, or panel resize must therefore invalidate a zoom
-        // crop even when the source UV rectangle is unchanged.
         if self.preview.zoom > DETAIL_ZOOM_START {
             self.note_preview_motion();
         }
@@ -220,11 +217,6 @@ impl AurawApp {
             self.preview.program_template = Some(template.clone());
         }
 
-        // GPU objects are deliberately created here, after the CPU-only worker
-        // result has been accepted for the current document. An abandoned
-        // worker can therefore never contend with the next RAW open. Keep the
-        // current preview resident for a seamless swap whenever the budget
-        // permits it; compiled programs are reused in either path.
         let build_pipeline = || {
             if let Some(template) = program_template.as_ref() {
                 RawGpuPipeline::new_headless_reusing_program_template(
@@ -324,9 +316,6 @@ impl AurawApp {
         self.preview.gpu_pipeline = Some(pipeline);
         #[cfg(target_os = "android")]
         {
-            // Keep the mobile lens toggle cache coherent with the newly
-            // selected DPI proxy. Without this, the next lens toggle can
-            // restore the lower-resolution proxy that preceded this rebuild.
             if self.develop.lens_correction.applied {
                 if let (Some(selection), Some(full_raw), Some(preview_raw)) = (
                     self.develop.lens_correction.selected_lens(),
@@ -404,10 +393,6 @@ impl AurawApp {
         let quality = self.preview.quality;
         let ai_enabled = self.develop.exposure.ai_denoise_enabled;
 
-        // Viewport measurements often settle during the same frame in which a
-        // RAW is installed. Do not rebuild an already-sharp proxy merely because
-        // that measurement set the dirty bit. This also makes fit -> zoom -> fit
-        // a no-op for the main surface.
         let current_is_sufficient = self.develop.preview_raw
             .as_ref()
             .zip(self.preview.gpu_pipeline.as_ref())

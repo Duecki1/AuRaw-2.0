@@ -25,10 +25,6 @@ impl AurawApp {
         let rendered_content_was_current = self.preview.original_rendered_state
             == Some((self.preview.original_requested, self.preview.revision));
         self.preview.revision = self.preview.revision.wrapping_add(1);
-        // `preview_revision` also invalidates the viewport-specific detail crop,
-        // but panning and pinching do not change developed pixels. Carry the
-        // rendered-content marker forward so `sync_original_preview` does not
-        // dispatch the full RAW compute graph for every navigation sample.
         if rendered_content_was_current {
             self.preview.original_rendered_state =
                 Some((self.preview.original_requested, self.preview.revision));

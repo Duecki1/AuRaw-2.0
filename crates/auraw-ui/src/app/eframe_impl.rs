@@ -2,9 +2,6 @@ use super::*;
 
 impl AurawApp {
     fn release_optional_gpu_memory(&mut self) {
-        // Optional zoom/navigation pipelines and UI-only mask textures are
-        // safe to discard between frames. Keep the main preview alive so the
-        // user can save work or lower preview quality before retrying.
         let retired = [
             self.preview.detail
                 .take()
@@ -38,9 +35,6 @@ impl AurawApp {
         self.ai.object_cache = None;
         #[cfg(not(target_os = "android"))]
         if self.ai.gpu_acceleration {
-            // This also invalidates the cached ONNX session. If inference is
-            // still unwinding, model-runtime drops it as soon as it releases
-            // its lease instead of retaining the failed GPU allocation.
             self.set_ai_gpu_acceleration(false);
         }
         self.release_optional_gpu_memory();
@@ -63,9 +57,6 @@ impl eframe::App for AurawApp {
                     .to_owned(),
             );
         }
-        // Flush IDs retired by the previous frame before this frame emits any
-        // meshes. Freeing them later in `ui` would invalidate texture references
-        // that egui has already recorded for the pending render pass.
         self.release_retired_egui_textures(frame);
         #[cfg(not(target_os = "android"))]
         let raw_drop_hovered = ui.ctx().input(|input| !input.raw.hovered_files.is_empty());
@@ -93,8 +84,6 @@ impl eframe::App for AurawApp {
             self.poll_android_export_publish();
             if crate::android::take_back_request() {
                 if self.android_foreground_task_active() {
-                    // Long-running Android operations are modal. Ignore system
-                    // Back until the foreground task completes or is cancelled.
                     ui.ctx().request_repaint();
                 } else if self.ui.active_tab == AppTab::Library
                     && self.library.folder_sidebar_open()
@@ -201,11 +190,6 @@ impl eframe::App for AurawApp {
                                 ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH,
                                 ScreenLayout::MAX_HORIZONTAL_SIDEBAR_WIDTH,
                             );
-                            // `Panel` persists its own drag size. Feeding its
-                            // content response back into `default_size` creates
-                            // a width feedback loop: a wide child becomes the
-                            // next frame's default and the panel springs open
-                            // again after the user shrinks it.
                             egui::Panel::right("develop_sidebar_right")
                                 .resizable(true)
                                 .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
@@ -230,10 +214,6 @@ impl eframe::App for AurawApp {
                         .default_size(sidebar_size)
                         .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
 
-                    // Panel call order places the mask strip to the left of the
-                    // resizable properties panel, with the tool rail outermost.
-                    // On desktop it follows the sidebar visibility toggle so the
-                    // icon-rail button truly collapses the whole editing sidebar.
                     #[cfg(not(target_os = "android"))]
                     if self.develop_ui.sidebar_open && self.ui.sidebar_tab == SidebarTab::Masks {
                         egui::Panel::right("develop_horizontal_mask_strip")
@@ -260,10 +240,6 @@ impl eframe::App for AurawApp {
                         .default_size(sidebar_size)
                         .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
 
-                    // Panels are laid out in call order. Showing this fixed-height
-                    // panel after the resizable bottom sidebar places it directly
-                    // above that sidebar, leaving the full sidebar height available
-                    // for sliders and mask properties.
                     if self.ui.sidebar_tab == SidebarTab::Masks {
                         egui::Panel::bottom("develop_vertical_mask_strip")
                             .resizable(false)
@@ -276,10 +252,6 @@ impl eframe::App for AurawApp {
 
         #[cfg(not(target_os = "android"))]
         if self.ui.active_tab == AppTab::Develop && self.develop_ui.filmstrip_open {
-            // Side panels are installed first, so the filmstrip spans only the
-            // remaining Develop preview width and ends at the sidebar/tool-rail
-            // edge. When hidden it consumes no bottom-panel space; reopening is
-            // handled by the persistent button in the desktop tool rail.
             egui::Panel::bottom("filmstrip")
                 .resizable(false)
                 .exact_size(crate::ui::develop::FILMSTRIP_HEIGHT)
@@ -325,10 +297,6 @@ impl eframe::App for AurawApp {
                     .show(ui, |ui| Settings::show(ui, self, layout));
             }
         });
-        // Some internal library workflows assign `active_tab` directly while
-        // borrowing other app state. Reconcile the model policy once per frame
-        // as well as in the ordinary tab handlers so every way of leaving an AI
-        // tool promptly releases its cached session.
         self.sync_ai_model_runtime_context();
 
         #[cfg(not(target_os = "android"))]
@@ -361,24 +329,14 @@ impl eframe::App for AurawApp {
         }
         #[cfg(not(target_os = "android"))]
         if self.ui.desktop_picker_receiver.is_some() {
-            // Native dialogs are asynchronous. Keep the app event loop visibly
-            // alive while the operating-system picker is open.
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
         #[cfg(target_os = "android")]
         if self.ui.active_tab != AppTab::Library || self.library.folder_sidebar_open() {
-            // JNI back callbacks can arrive while NativeActivity's render loop is
-            // idle. Keep a low-frequency wake-up while an in-app Back destination
-            // exists so the request is consumed promptly on every device.
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
         #[cfg(target_os = "android")]
         if self.android.picker_pending {
-            // Android's SAF result can be followed by an asynchronous copy (DCP
-            // folders in particular may contain thousands of files). A repaint
-            // requested from the Java/JNI worker is not guaranteed to wake every
-            // vendor's NativeActivity event loop after the external picker closes,
-            // so keep a tiny polling heartbeat until the terminal result arrives.
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
         #[cfg(not(target_os = "android"))]
@@ -394,9 +352,6 @@ impl eframe::App for AurawApp {
         let edit_interaction_active = sidecar_interaction_active(ui.ctx());
         self.observe_edit_history(ui.ctx());
         self.schedule_sidecar_autosave(ui.ctx(), edit_interaction_active);
-        // Poll after edit observation so an autosave that waited behind an
-        // interaction can be coalesced to its final committed value before
-        // the next worker starts.
         self.poll_sidecar_save();
         self.poll_developed_thumbnail(frame);
         #[cfg(target_os = "android")]

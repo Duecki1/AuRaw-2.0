@@ -37,8 +37,6 @@ impl TopBar {
         crate::ui::icons::phosphor_icon_button_enabled(ui, enabled, icon, size, hover_text)
     }
 
-    /// Matches the compact, always-available minimized-export affordance while
-    /// thumbnail workers decode and render the catalog in the background.
     fn show_thumbnail_task_indicator(ui: &mut Ui, app: &AurawApp) {
         let Some(progress) = app.library.thumbnail_background_progress() else {
             return;

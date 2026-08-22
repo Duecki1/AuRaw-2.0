@@ -1,12 +1,3 @@
-//! Focused construction phases for [`RawGpuPipeline::new_internal`](super::RawGpuPipeline).
-//!
-//! Each item in this module owns exactly one phase of pipeline construction:
-//! derived geometry, GPU surfaces (textures/views/sampler), buffers, bind
-//! group layouts, bind groups, shader loading, and compute-pass assembly.
-//! The orchestrator in [`super`] calls them in the original inline order so
-//! allocation sequence, wgpu object labels, pass ordering, and program-index
-//! bookkeeping remain byte-for-byte identical to the previous monolithic
-//! constructor.
 
 use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
@@ -45,21 +36,11 @@ pub(super) fn compute_derived_geometry(
     let image_workgroups = dispatch_for_extent(raw.width, raw.height);
     let tone_workgroups = dispatch_for_extent(tone_size.width, tone_size.height);
 
-    // A full-frame mask atlas cannot add spatial detail beyond the image
-    // it masks. Capping it to the current proxy avoids reserving a 2048²
-    // texture for every layer of an 800px preview (and, importantly, for
-    // the tiny startup prewarm pipeline). Explicit detail/export atlases
-    // keep their caller-selected resolution.
     let mask_atlas_edge = config
         .mask_atlas_edge_override
         .unwrap_or_else(|| interactive_mask_atlas_edge(raw.width, raw.height))
         .clamp(64, export_mask_atlas_edge_limit());
     let mask_layer_capacity = if config.mask_atlas_edge_override.is_some() {
-        // Viewport detail and export both use explicit atlas sizes and can
-        // allocate exactly the layers they will sample. This is what makes
-        // a dense cropped detail atlas affordable alongside the main
-        // preview; the ordinary full-frame interactive pipeline keeps all
-        // 32 slots so adding common masks remains instant.
         (params.scene_tone.mask_counts[0] as usize).clamp(1, MAX_LOCAL_MASKS)
     } else {
         MAX_LOCAL_MASKS
@@ -79,7 +60,6 @@ pub(super) fn compute_derived_geometry(
     }
 }
 
-/// Every GPU texture, texture view, and sampler one pipeline instance owns.
 pub(super) struct PipelineSurfaces {
     pub(super) raw_texture: wgpu::Texture,
     pub(super) color_texture: wgpu::Texture,
@@ -114,8 +94,6 @@ pub(super) struct PipelineSurfaces {
     pub(super) mask_sampler: wgpu::Sampler,
 }
 
-/// Creates all textures, views, and the local-mask sampler. Returns whether an
-/// AI-denoised scene-linear raster was uploaded into the scene texture.
 pub(super) fn create_pipeline_surfaces(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -144,7 +122,6 @@ pub(super) fn create_pipeline_surfaces(
     let color_texture = create_color_texture(device, queue, raw);
     let black_texture = create_black_texture(device, queue, raw);
 
-    // All demosaic stages sample this canonical reconstructed CFA.
     let reconstructed_raw_texture = create_processing_texture(
         device,
         size,
@@ -153,8 +130,6 @@ pub(super) fn create_pipeline_surfaces(
         "auraw reconstructed raw CFA",
     );
 
-    // Shared demosaic work surfaces. Bayer dual mode and X-Trans reuse
-    // these after highlight reconstruction has written the canonical CFA.
     let highlight_work_a = create_float_work_texture(
         device,
         size,
@@ -168,9 +143,6 @@ pub(super) fn create_pipeline_surfaces(
         "auraw highlight work B",
     );
 
-    // Preserve a scene-linear camera-RGB result between demosaic and the
-    // display pass. This lets local controls read true
-    // RGB neighbourhoods instead of raw Bayer samples.
     let scene_texture = create_demosaic_texture(
         device,
         size,
@@ -179,10 +151,6 @@ pub(super) fn create_pipeline_surfaces(
     );
     let has_ai_scene = upload_ai_scene_texture(queue, &scene_texture, demosaic_format, raw)?;
 
-    // The final creative result is tone-mapped into display-linear Rec.2020
-    // before any output transfer function is applied. Export reads this
-    // surface so resizing happens after demosaic/tone processing and before
-    // sRGB encoding.
     let display_linear_texture =
         create_demosaic_texture(device, size, work_format, "auraw display-linear Rec.2020");
 
@@ -210,9 +178,6 @@ pub(super) fn create_pipeline_surfaces(
         tone_format,
         "auraw adaptive tone guide B",
     );
-    // The ordinary full-frame interactive pipeline reserves all 32 layers
-    // so masks can be added without rebuilding it. Explicit-edge detail and
-    // export pipelines allocate only the layers they actually sample.
     let mask_texture = create_processing_texture_array(
         device,
         mask_atlas_edge,
@@ -222,10 +187,6 @@ pub(super) fn create_pipeline_surfaces(
         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         "auraw normalized local-mask atlas",
     );
-    // Light Rays needs the same full-image emission field in the fit
-    // preview, zoom-detail crops, and independently processed export tiles.
-    // A compact dedicated atlas is sufficient because shafts intentionally
-    // integrate and soften their source over a long distance.
     let light_rays_mask_texture = create_processing_texture_array(
         device,
         LIGHT_RAYS_MASK_ATLAS_EDGE,
@@ -235,9 +196,6 @@ pub(super) fn create_pipeline_surfaces(
         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         "auraw full-image Light Rays emission atlas",
     );
-    // Do not upload an all-zero atlas here. With 32 supported layers that would
-    // create a very large temporary CPU allocation. Every active layer is uploaded
-    // before the first recompute, and shaders never sample layers beyond mask_counts.x.
 
     let out_view = default_texture_view(&out_texture);
     let display_linear_view = default_texture_view(&display_linear_texture);
@@ -311,8 +269,6 @@ pub(super) fn create_pipeline_surfaces(
     ))
 }
 
-/// Every persistent GPU buffer one pipeline instance owns, plus the validated
-/// profile-buffer accounting values used by later uploads.
 pub(super) struct PipelineBuffers {
     pub(super) profile_buffer: wgpu::Buffer,
     pub(super) output_lut_offset_bytes: u64,
@@ -389,8 +345,6 @@ pub(super) fn create_pipeline_buffers(
     }
 }
 
-/// Every group-0 bind group layout of the pass graph, plus the shared
-/// scene-tone/effects layouts bound as groups 1 and 2 by every dispatch.
 pub(super) struct BindGroupLayouts {
     pub(super) bgl_scene_tone: wgpu::BindGroupLayout,
     pub(super) bgl_effects: wgpu::BindGroupLayout,
@@ -434,9 +388,6 @@ pub(super) fn create_bind_group_layouts(
         texture_entry(19, wgpu::TextureSampleType::Float { filterable: false }),
     ];
 
-    // Groups 1 and 2 are intentionally identical for every compute
-    // pipeline. Reusing them across passes isolates scene-tone and effects
-    // updates from the camera/raw resource bind groups in group 0.
     let bgl_scene_tone = program_template
         .map(|template| template.pipelines[0].get_bind_group_layout(1))
         .unwrap_or_else(|| {
@@ -580,10 +531,6 @@ pub(super) fn create_bind_group_layouts(
         )
     });
 
-    // X-Trans Markesteijn-3 uses the two highlight work textures as
-    // derivative scratch after highlight reconstruction has finalized.
-    // This retains the reference eight-direction homogeneity stages without
-    // allocating eight full-resolution RGB candidate images.
     let bgl_xtrans_derivatives = (matches!(cfa_kind, CfaKind::XTrans)
         .then(|| reused_layout(demosaic_start_for_programs + 4))
         .flatten())
@@ -843,10 +790,6 @@ pub(super) fn create_bind_group_layouts(
                 wgpu::StorageTextureAccess::WriteOnly,
             ),
             texture_entry(26, wgpu::TextureSampleType::Float { filterable: false }),
-            // The final DCP/view shoulder reads the cached scene percentiles
-            // to choose a headroom-aware highlight knee. Keep binding 16 in
-            // this entry point's layout even though earlier adjustment passes
-            // already bind the same tone-statistics buffer independently.
             storage_buffer_entry(16, true),
             storage_buffer_entry(20, true),
             texture_array_entry(27, wgpu::TextureSampleType::Float { filterable: true }),
@@ -887,8 +830,6 @@ pub(super) fn create_bind_group_layouts(
     }
 }
 
-/// Every group-0 bind group of the pass graph, plus the shared scene-tone and
-/// effects bind groups dispatched as groups 1 and 2 with every pass.
 pub(super) struct BindGroups {
     pub(super) scene_tone_bind_group: wgpu::BindGroup,
     pub(super) effects_bind_group: wgpu::BindGroup,
@@ -1200,8 +1141,6 @@ pub(super) fn create_bind_groups(
                 ],
             )
         };
-    // Six passes end back in scene_texture. Disabled Fast/Balanced scales
-    // are explicit copies so every quality setting has identical parity.
     let bg_color_denoise = [
         make_color_denoise_bind_group("bg color denoise scale 1", scene_view, tex1_view),
         make_color_denoise_bind_group("bg color denoise scale 2", tex1_view, tex2_view),
@@ -1323,9 +1262,6 @@ pub(super) fn create_bind_groups(
     let bg_adjust_effects_copy =
         make_adjust_effects_bind_group("bg scene effects copy", tex2_view, tex1_view);
 
-    // Mask Blur diffuses the completed local-effects image through five
-    // adjacent scales. It ends in tex2 and keeps tex1 available until the
-    // chain has fully incorporated mask coverage and Amount.
     let make_mask_blur_bind_group =
         |label: &str, read_view: &wgpu::TextureView, write_view: &wgpu::TextureView| {
             create_bind_group(
@@ -1353,10 +1289,6 @@ pub(super) fn create_bind_groups(
     let bg_mask_blur_4 =
         make_mask_blur_bind_group("bg mask Blur diffusion 4", display_linear_view, tex2_view);
 
-    // Glow is extracted from the completed local-effects image in tex1.
-    // Five adjacent B3-spline diffusion stages then ping-pong through tex2
-    // and the display-linear surface. The latter is safe scratch here: the
-    // final render overwrites it only after the creative composite.
     let make_glow_prepare_bind_group =
         |label: &str, source: &wgpu::TextureView, extracted: &wgpu::TextureView| {
             create_bind_group(
@@ -1400,9 +1332,6 @@ pub(super) fn create_bind_groups(
     let bg_glow_blur_4 =
         make_glow_blur_bind_group("bg Glow diffusion 4", tex2_view, display_linear_view);
 
-    // When mask Blur ran first, tex2 contains the new creative base. Glow
-    // uses tex1/display-linear as scratch so that base remains available
-    // for the final creative composite.
     let bg_glow_prepare_after_blur = make_glow_prepare_bind_group(
         "bg Glow source extraction after mask Blur",
         tex2_view,
@@ -1434,10 +1363,6 @@ pub(super) fn create_bind_groups(
         display_linear_view,
     );
 
-    // The creative pass keeps the untouched local-effects result in tex1,
-    // composites the final Glow diffusion from display_linear and writes
-    // the result into tex2. The post-crop vignette is applied later in the
-    // always-dispatched display-linear view pass.
     let make_adjust_creative_bind_group =
         |label: &str, input: &wgpu::TextureView, output: &wgpu::TextureView| {
             create_bind_group(
@@ -1535,9 +1460,6 @@ pub(super) fn create_bind_groups(
     }
 }
 
-/// Format-specialized WGSL sources and their compiled modules. Every field is
-/// `None` when a reusable program template supplies already-compiled
-/// pipelines, mirroring the original lazy `load_shader` behaviour.
 pub(super) struct ShaderSet {
     pub(super) highlight_module: Option<wgpu::ShaderModule>,
     pub(super) bayer_rcd_p1_module: Option<wgpu::ShaderModule>,
@@ -1560,8 +1482,6 @@ pub(super) fn load_shader_set(
     demosaic_format: wgpu::TextureFormat,
     work_format: wgpu::TextureFormat,
 ) -> Result<ShaderSet> {
-    // Storage texture declarations are format-specific in the demosaic and
-    // scene shaders. Highlight reconstruction writes its fixed R32F CFA.
     let bayer_rcd_p1 = work_shader_source(SHADER_BAYER_RCD_P1, demosaic_format)
         .context("specialize Bayer RCD pass 1 work format")?;
     let bayer_rcd_p2 = work_shader_source(SHADER_BAYER_RCD_P2, demosaic_format)
@@ -1592,9 +1512,6 @@ pub(super) fn load_shader_set(
                 .expect("shader manager exists without a program template")
                 .create_shader_module(device, label, source, file_name)
         };
-    // One validated Naga module per WGSL entrypoint source. Entry-point
-    // pipelines below share these modules instead of recompiling the same
-    // source for every pass.
     let mut load_shader = |label: &'static str, source: &str, file_name: &str| {
         if has_program_template {
             Ok(None)
@@ -1685,8 +1602,6 @@ pub(super) fn load_shader_set(
     })
 }
 
-/// Pass-graph index bookkeeping stored on the finished pipeline so stage
-/// encoders can dispatch exact sub-ranges without rebuilding bind groups.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct StageIndices {
     pub(super) tone_prepare_pass_index: usize,
@@ -1718,9 +1633,6 @@ pub(super) struct AssembledPasses {
     pub(super) indices: StageIndices,
 }
 
-/// Clones already-compiled pipelines from a program template or compiles new
-/// ones, assigning each pass a monotonically increasing program index that
-/// matches the template's pass order exactly.
 struct PassAssembler<'a> {
     device: &'a wgpu::Device,
     program_template: Option<&'a RawGpuProgramTemplate>,
@@ -1885,7 +1797,6 @@ pub(super) fn assemble_passes(
 
     let mut passes = Vec::with_capacity(expected_pass_count(cfa_kind));
 
-    // Reconstruct clipped photosites before every demosaic path.
     passes.push(assembler.make_pass(
         highlight_module.as_ref(),
         "highlight_reconstruct",
@@ -1895,9 +1806,6 @@ pub(super) fn assemble_passes(
     ));
 
     let demosaic_start_index = passes.len();
-    // Build the high-detail reference first. The robust low-frequency
-    // branch is represented by two real full-frame buffers, but its two
-    // dispatches are skipped at encode time unless Dual mode is selected.
     match cfa_kind {
         CfaKind::Bayer => passes.extend([
             assembler.make_pass(
@@ -2027,9 +1935,6 @@ pub(super) fn assemble_passes(
     }
     let color_denoise_end_index = passes.len();
 
-    // Analyze the unexposed scene at reduced resolution. The guide is
-    // bilateral and the histogram reduction emits robust tonal anchors.
-    // recompute() clears the histogram immediately before this pass.
     let tone_prepare_pass_index = passes.len();
     passes.extend([
         assembler.make_pass(
@@ -2204,9 +2109,6 @@ pub(super) fn assemble_passes(
         ),
     ]);
 
-    // These variants reuse the same compiled pipelines with bind groups
-    // that follow tex2 as the creative base after mask Blur. Keeping them
-    // outside `passes` avoids duplicating programs in reusable templates.
     let post_blur_glow_passes = vec![
         Pass {
             pipeline: passes[glow_prepare_pass_index].pipeline.clone(),

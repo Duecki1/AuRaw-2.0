@@ -73,6 +73,7 @@ const THUMBNAIL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_PROXY_EDGE: u32 = 1024;
 pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 8;
+#[cfg(target_os = "android")]
 pub(crate) const MAX_ANDROID_THUMBNAIL_WORKERS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -149,8 +150,6 @@ pub(crate) fn maximum_thumbnail_worker_count() -> usize {
     platform::maximum_thumbnail_worker_count()
 }
 
-/// Stable identity for a Library asset. Identity is intentionally storage-shaped,
-/// while all selection and action logic operates on this common type.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum LibraryAssetId {
     #[cfg(not(target_os = "android"))]
@@ -159,7 +158,6 @@ pub(crate) enum LibraryAssetId {
     Android(String),
 }
 
-/// Opaque location understood only by the active platform storage backend.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum LibraryLocator {
     #[cfg(not(target_os = "android"))]
@@ -172,11 +170,9 @@ pub(crate) enum LibraryLocator {
 pub(crate) struct LibraryAssetMetadata {
     pub(crate) bytes: u64,
     pub(crate) dimensions_hint: Option<[u32; 2]>,
-    /// Unix timestamp seconds when the backend can provide one. Zero means unknown.
     pub(crate) modified_seconds: u64,
 }
 
-/// One asset model shared by desktop and Android Library code.
 #[derive(Clone, Debug)]
 pub(crate) struct LibraryAsset {
     pub(crate) id: LibraryAssetId,
@@ -241,10 +237,12 @@ impl LibraryAsset {
     }
 }
 
+#[cfg(any(target_os = "android", test))]
 fn library_import_fab_rect(bounds: egui::Rect) -> egui::Rect {
     crate::ui::theme::floating_action_rect(bounds)
 }
 
+#[cfg(any(target_os = "android", test))]
 fn library_import_icon() -> &'static str {
     egui_phosphor::regular::PLUS
 }
@@ -261,8 +259,6 @@ pub(crate) struct LibraryEntry {
     thumbnail_retry_after: Option<Instant>,
     thumbnail_queued: bool,
     developed_thumbnail: bool,
-    // The card is deliberately showing the camera/RAW preview while the
-    // adjusted replacement is rendered by a thumbnail worker.
     developed_thumbnail_pending: bool,
     last_used: u64,
 }
@@ -305,9 +301,6 @@ struct ThumbnailWorkQueue {
     developed_queued: HashSet<LibraryAssetId>,
 }
 
-/// Catalog-wide worker progress. Per-card state still drives placeholders and
-/// retries; this separate model gives the rest of the application one compact
-/// background-task signal, just like a minimized export.
 #[derive(Default)]
 struct ThumbnailBackgroundProgress {
     generation: u64,
@@ -393,9 +386,6 @@ impl ThumbnailWorkQueue {
             self.background.push_back(ThumbnailRequest {
                 generation,
                 asset_id,
-                // The embedded RAW preview was already delivered. Rendering
-                // edits remains ordinary background work so Develop keeps
-                // priority over it.
                 display_priority: false,
                 stage: ThumbnailLoadStage::DevelopedPreview,
             });

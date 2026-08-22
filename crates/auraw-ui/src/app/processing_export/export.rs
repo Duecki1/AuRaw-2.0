@@ -773,15 +773,10 @@ impl AurawApp {
         self.develop_ui.white_balance_picker_active = false;
         self.develop_ui.white_balance_picker_drag = None;
 
-        // Highlight reconstruction is an application-level processing preference,
-        // not a Develop adjustment.
         self.develop.exposure.highlight_method = previous.highlight_method;
         self.develop.exposure.highlight_clip = previous.highlight_clip;
         self.develop.exposure.highlight_reconstruction = previous.highlight_reconstruction;
 
-        // Demosaic selection is likewise a raw-processing preference rather
-        // than a Develop adjustment. Resetting exposure/tone controls must not
-        // silently change the reconstruction algorithm.
         self.develop.exposure.demosaic_mode = previous.demosaic_mode;
         self.develop.exposure.dual_threshold = previous.dual_threshold;
         self.develop.exposure.frequency_chroma = previous.frequency_chroma;

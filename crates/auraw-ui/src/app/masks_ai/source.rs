@@ -15,17 +15,6 @@ impl AurawApp {
             .as_ref()
             .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
 
-        // The expanded processing graph does not always leave enough GPU budget
-        // for a second full RawGpuPipeline. Render the canonical unedited source
-        // through the already-resident preview graph, read it back, then restore
-        // the current edited preview before this UI frame is painted. This is
-        // also the path used while reconstructing saved range-mask sources
-        // during image load.
-        //
-        // Desktop previews may use a monitor ICC transform, while mask models
-        // require the canonical sRGB rendition produced by a fresh pipeline.
-        // Install sRGB before the reference render and restore the monitor
-        // transform before recomputing the visible edited preview.
         #[cfg(not(target_os = "android"))]
         pipeline
             .reset_display_to_srgb(&render_state.queue)
@@ -44,9 +33,6 @@ impl AurawApp {
             pipeline.height,
         );
 
-        // `recompute` updates the complete graph, so restore exactly the state
-        // the user should see even when the readback failed. A failure must not
-        // leave the preview displaying the neutral AI-mask rendition.
         let restore_params = if self.preview.original_requested {
             GpuParams::new(&self.preview.original_exposure, &reference_masks, raw)
                 .with_vignette_geometry(self.develop.geometry)
@@ -108,10 +94,6 @@ impl AurawApp {
             let reference_exposure = ExposureParams::scene_referred_default();
             let reference_masks = MaskStack::default();
             let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
-            // This graph renders an unmasked reference image for inference;
-            // reserving the normal 32-layer 2048px editing atlas wastes 256
-            // MiB and can reject an otherwise valid 4K capture on a 1.5 GiB
-            // GPU budget. An explicit atlas allocates one tiny unused layer.
             let reference_pipeline_result =
                 RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
                 &render_state.device,

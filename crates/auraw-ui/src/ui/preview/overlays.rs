@@ -25,10 +25,6 @@ pub(super) fn overlay_raster_region(
     let region_width = source_end_x - source_x;
     let region_height = source_end_y - source_y;
 
-    // Match the physical viewport density while zoomed, but never invent more
-    // samples than the source region contains. Unlike the old fixed 512 px
-    // full-frame overlay, this gives a small visible crop its native source
-    // resolution and keeps a narrow brush stroke on the correct row/column.
     let visible_width = source_x1.saturating_sub(source_x0).max(1) as f32;
     let visible_height = source_y1.saturating_sub(source_y0).max(1) as f32;
     let scale_x = (preview_rect.width().max(1.0) * pixels_per_point / visible_width).min(1.0);
@@ -93,8 +89,6 @@ pub(super) fn group_coverage_rgba(
         .get(mask_index)
         .map_or(0, |mask| mask.components.len());
 
-    // combined coverage, weighted red, green, blue, and total color weight.
-    // Keeping these together avoids allocating one full image per component.
     let mut composite = vec![[0.0_f32; 5]; final_coverage.len()];
     let mut has_component = false;
 
@@ -158,9 +152,6 @@ pub(super) fn group_coverage_rgba(
                     pixel[3] *= source;
                     pixel[4] *= source;
 
-                    // An intersection belongs visually to both operands. Give
-                    // the intersecting component an equal contribution in the
-                    // portion of the group mask that survives it.
                     let contribution = pixel[0];
                     pixel[1] += rgb[0] * contribution;
                     pixel[2] += rgb[1] * contribution;
@@ -171,7 +162,7 @@ pub(super) fn group_coverage_rgba(
         }
     }
 
-    let fallback = Color32::from_rgb(78, 163, 255);
+    let fallback = crate::ui::theme::MASK_ADD;
     let mut rgba = Vec::with_capacity(final_coverage.len() * 4);
     for (alpha, pixel) in final_coverage.into_iter().zip(composite) {
         let (red, green, blue) = if pixel[4] > f32::EPSILON {
@@ -188,10 +179,6 @@ pub(super) fn group_coverage_rgba(
     rgba
 }
 
-/// Converts a brush tool size into the image-relative radius captured by a dab.
-///
-/// Tool sizes are defined at fit zoom (1x). Screen-relative mode compensates
-/// for preview zoom, while image-relative mode preserves the source footprint.
 pub(super) fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32, image_relative: bool) -> f32 {
     let tool_size = tool_size.max(0.0);
     if image_relative {

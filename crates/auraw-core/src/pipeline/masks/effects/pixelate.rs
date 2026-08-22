@@ -1,12 +1,9 @@
 use super::params::pixelate::*;
 
-/// Editable parameters for the non-destructive mask Pixelate effect.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct PixelateEffectSettings {
-    /// Blend between the developed source and the pixelated result, in percent.
     pub amount: f32,
-    /// Square cell size in reference-image pixels.
     pub block_size: f32,
 }
 

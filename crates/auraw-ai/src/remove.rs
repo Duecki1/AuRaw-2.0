@@ -237,7 +237,6 @@ fn infer_crop(
             image_values[index] = pixel[0].clamp(0.0, 1.0);
             image_values[plane + index] = pixel[1].clamp(0.0, 1.0);
             image_values[plane * 2 + index] = pixel[2].clamp(0.0, 1.0);
-            // Big-LaMa/IOPaint polarity: 1 means the pixel is inpainted.
             mask_values[index] = if resized_mask.get_pixel(x, y)[0] >= 128 {
                 1.0
             } else {
@@ -313,10 +312,6 @@ fn infer_crop(
 
     let mut output_interleaved = vec![0.0f32; plane * 3];
     for index in 0..plane {
-        // Carve's fixed-shape fp32 export deliberately bakes the final *255
-        // into the ONNX graph. Inputs are still RGB / 255 in [0, 1], but the
-        // ONNX output tensor is RGB in [0, 255]. Convert it back to normalized
-        // photographic RGB before high-quality resize/compositing.
         output_interleaved[index * 3] = (output_values[index] / 255.0).clamp(0.0, 1.0);
         output_interleaved[index * 3 + 1] =
             (output_values[plane + index] / 255.0).clamp(0.0, 1.0);
@@ -391,8 +386,6 @@ fn build_cached_patch(
         for x in 0..crop.width {
             let binary = binary_mask.get_pixel(x, y)[0];
             let soft = blurred.get_pixel(x, y)[0];
-            // Feather inward only. The dilated binary model mask defines the
-            // entire editable region; original pixels outside it stay exact.
             let base_alpha = if binary != 0 { soft } else { 0 };
             let alpha = apply_tile_transition(
                 base_alpha,
@@ -445,8 +438,6 @@ fn build_cached_patch(
             );
             let binary = binary_mask.get_pixel(x, y)[0];
             let soft = blurred.get_pixel(x, y)[0];
-            // Feather inward only. The feather is composited at the scene
-            // boundary now, before any mutable Develop adjustment.
             let base_alpha = if binary != 0 { soft } else { 0 };
             let coverage = apply_tile_transition(
                 base_alpha,
@@ -485,12 +476,6 @@ fn apply_tile_transition(
     let global_x = crop.x.saturating_add(local_x);
     let global_y = crop.y.saturating_add(local_y);
 
-    // Large Remove masks use overlapping target cores inside larger context
-    // crops. Process tiles left-to-right/top-to-bottom and feather only the
-    // leading internal target edges. Earlier tiles therefore remain full
-    // coverage underneath while the new inference transitions in, avoiding
-    // both hard tile seams and alpha holes. Real user-mask/image boundaries
-    // are controlled only by the inward mask feather above.
     let span = (planned.target.width.min(planned.target.height) as f32 * 0.20)
         .clamp(24.0, 96.0);
     let smooth = |distance: f32| {
@@ -505,9 +490,6 @@ fn apply_tile_transition(
         weight = weight.min(smooth(global_y as f32 + 0.5 - planned.target.y as f32));
     }
 
-    // These arguments make the intended native-image boundary contract
-    // explicit and guard future planning changes from producing out-of-image
-    // target coordinates.
     if global_x >= image_width || global_y >= image_height {
         return 0;
     }

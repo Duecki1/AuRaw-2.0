@@ -97,8 +97,6 @@ impl Sidebar {
             app.finish_mask_geometry_interaction();
             app.mark_mask_geometry_dirty(mask_index);
         } else if !ui.input(|input| input.pointer.primary_down()) {
-            // The last value of a drag may arrive in the frame after its final
-            // movement. Commit it as soon as the pointer is released.
             app.finish_mask_geometry_interaction();
         }
     }

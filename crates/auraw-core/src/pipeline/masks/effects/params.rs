@@ -1,8 +1,3 @@
-//! Shared metadata for editable mask-effect parameters.
-//!
-//! These specs are intentionally small and static. They feed defaults, UI
-//! controls, sidecar validation, and GPU safety clamps without introducing a
-//! runtime parameter registry or changing serialization.
 
 use std::ops::RangeInclusive;
 

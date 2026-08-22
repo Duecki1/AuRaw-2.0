@@ -1,4 +1,3 @@
-//! AuRaw ONNX Runtime bindings and model-specific inference pipelines.
 
 pub mod diagnostics {
     pub use auraw_core::diagnostics::*;

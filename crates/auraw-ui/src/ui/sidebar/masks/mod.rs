@@ -18,8 +18,6 @@ pub(super) fn mask_creation_icon() -> &'static str {
 
 fn mask_strip_scroll_source() -> egui::scroll_area::ScrollSource {
     if cfg!(target_os = "android") {
-        // Force content-drag scrolling for touch and stylus input. Card widgets
-        // intentionally use click-only sense on Android so they cannot steal it.
         egui::scroll_area::ScrollSource::ALL
     } else {
         egui::scroll_area::ScrollSource::default()

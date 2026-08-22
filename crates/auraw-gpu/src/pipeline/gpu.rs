@@ -36,15 +36,12 @@ pub(super) const LIGHT_RAYS_MASK_ATLAS_EDGE: u32 = if cfg!(target_os = "android"
 } else {
     512
 };
-// The public ABI marker retains the historical monolithic payload size while
-// the runtime uses independently allocated stage uniforms.
 const GPU_PARAMS_ABI_SIZE_BYTES: u32 = 1_072;
 const CAMERA_UNIFORMS_SIZE_BYTES: u32 = 368;
 const SCENE_TONE_UNIFORMS_SIZE_BYTES: u32 = 768;
 const EFFECTS_UNIFORMS_SIZE_BYTES: u32 = 208;
 const GPU_STAGE_UNIFORM_SIZE_BYTES: u32 =
     CAMERA_UNIFORMS_SIZE_BYTES + SCENE_TONE_UNIFORMS_SIZE_BYTES + EFFECTS_UNIFORMS_SIZE_BYTES;
-// Resource accounting rounds each independently allocated buffer to 256 bytes.
 const GPU_STAGE_UNIFORM_ALLOCATION_BYTES: u64 = 512 + 768 + 256;
 const MASK_DATA_SIZE_BYTES: u64 = (std::mem::size_of::<MaskData>() * MAX_LOCAL_MASKS) as u64;
 const WORK_FORMAT_MARKER: &str = "rgba16float /* AURAW_WORK_FORMAT */";
@@ -148,9 +145,7 @@ const COLOR_DENOISE_ENTRY_POINTS: [&str; 6] = [
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProcessingQuality {
-    /// Half-float image intermediates for lower memory use and faster previews.
     Preview,
-    /// Full-float demosaic, scene, and highlight-reconstruction intermediates.
     #[default]
     High,
 }
@@ -160,8 +155,6 @@ fn expected_pass_count(cfa_kind: CfaKind) -> usize {
         CfaKind::Bayer => 6,
         CfaKind::XTrans => 10,
     };
-    // One highlight reconstruction pass, demosaic, six colour-denoise scales,
-    // four tone-analysis passes, and eighteen adjustment/output passes.
     1 + demosaic_passes + COLOR_DENOISE_ENTRY_POINTS.len() + 4 + 18
 }
 
@@ -296,8 +289,6 @@ struct SceneToneUniforms {
     grade_highlights: [f32; 4],
     grade_global: [f32; 4],
     grade_options: [f32; 4],
-    // WGSL mat3x3 uniform columns have a 16-byte stride. The fourth value in
-    // every Rust column is explicit padding and is ignored by the shader.
     rec2020_to_xyz: [[f32; 4]; 3],
     xyz_to_rec2020: [[f32; 4]; 3],
     xyz_to_bradford: [[f32; 4]; 3],
@@ -484,9 +475,6 @@ fn pack_view_color_options(grading: crate::pipeline::ColorGrading, hue: f32) -> 
 fn canonicalize_green_noise(mut coefficients: [f32; 4], green2_present: bool) -> [f32; 4] {
     if green2_present {
         let green = 0.5 * (coefficients[1] + coefficients[3]);
-        // Keep both green slots canonical. The dual-demosaic shader averages
-        // G1/G2 once; retaining the original G2 in alpha would bias the result
-        // to 25% G1 / 75% G2 after a second average.
         coefficients[1] = green;
         coefficients[3] = green;
     }
@@ -767,8 +755,6 @@ fn pack_effect_mask(mask: &LocalMask) -> Option<MaskData> {
 
 fn pack_adjustment_mask(mask: &LocalMask) -> MaskData {
     let adjustment = mask.adjustments;
-    // Non-adjustment effect types retain adjustment values for reversible UI
-    // switching, but only the Adjustment variant is allowed to apply them.
     let adjustment_enabled = mask.enabled && mask.effect.uses_adjustments();
     let has_hsl = adjustment.has_color_mixer();
     let curve_flags = adjustment.curve_feature_flags();
@@ -854,8 +840,6 @@ fn pack_camera_params(ctx: &GpuParamContext<'_>) -> CameraUniforms {
         profile_layout.hue_sat_2
     );
     let highlight_method = if raw.is_pre_demosaiced_raster() {
-        // Highlight reconstruction is a sensor/CFA operation. A rendered
-        // TIFF already supplies RGB scene values, including any HDR headroom.
         0.0
     } else {
         shader_highlight_method(raw.cfa_kind, exposure.highlight_method)
@@ -961,8 +945,6 @@ fn pack_scene_tone_params(ctx: &GpuParamContext<'_>) -> SceneToneUniforms {
     let mut sigmoid_params = exposure.sigmoid;
     sigmoid_params.contrast = sigmoid_contrast_from_percent(exposure.contrast);
     let sigmoid = sigmoid_coefficients(sigmoid_params);
-    // Sigmoid is the single view transform, so Contrast changes its
-    // middle-grey slope without switching view operators.
     let (hsl_hue_0, hsl_hue_1) = split_eight(exposure.hsl_hue);
     let (hsl_saturation_0, hsl_saturation_1) = split_eight(exposure.hsl_saturation);
     let (hsl_luminance_0, hsl_luminance_1) = split_eight(exposure.hsl_luminance);
@@ -1056,10 +1038,6 @@ fn pack_effect_params(ctx: &GpuParamContext<'_>, mask_data: &[MaskData]) -> Effe
         full_height,
         ..
     } = ctx.tile;
-    // Global and masked Glow share one linear diffusion chain. Using the
-    // widest active request preserves every halo's support while avoiding
-    // another full-resolution texture stack for a non-destructive local
-    // effect.
     let local_glow_radius = mask_data
         .iter()
         .filter(|mask| {
@@ -1154,11 +1132,6 @@ impl GpuParams {
         let center_u = (crop[0] + crop[2]) * 0.5;
         let center_v = (crop[1] + crop[3]) * 0.5;
 
-        // Match GeometryInverseMap / preview geometry exactly: forward mapping
-        // is quarter-turn * rotation * shear * flip. Convert source-normalized
-        // deltas directly into final-frame normalized deltas so the shader can
-        // evaluate the vignette before geometry resampling without baking it
-        // into the source image's orientation.
         let fx = if geometry.flip_horizontal { -1.0 } else { 1.0 };
         let fy = if geometry.flip_vertical { -1.0 } else { 1.0 };
         let shx = geometry.horizontal_transform.to_radians().tan();
@@ -1210,14 +1183,8 @@ impl GpuParams {
         self
     }
 
-    /// Maps the normalized local-mask atlas to a source-image sub-rectangle.
-    /// Coordinates are packed as UNORM16 pairs into fields that were already
-    /// reserved in the GPU ABI, giving sub-pixel precision on ordinary RAWs
-    /// without growing the scene-tone uniform block.
     pub fn with_mask_uv_rect(mut self, rect: [f32; 4]) -> Self {
         self.set_mask_uv_rect(rect);
-        // All atlas texels are valid. This sentinel avoids coupling ordinary
-        // callers to a pipeline's texture dimensions.
         self.scene_tone.mask_counts[3] = u32::MAX;
         self
     }
@@ -1257,14 +1224,6 @@ impl GpuParams {
     }
 
     fn needs_intermediate_adjustment_passes(&self) -> bool {
-        // Saturation and Vibrance live in apply_scene_effects_node alongside the
-        // presence controls. They must therefore keep the intermediate passes
-        // enabled even when Texture, Clarity, Dehaze, and Glow are all neutral.
-        // Vignette runs in the always-dispatched display-linear view pass.
-        // Capture sharpening now lives in the always-run pre-tone sharpen/tone
-        // pass and must not force these later optional passes.
-        // Omitting Saturation/Vibrance here made both global color
-        // sliders a no-op.
         let global_effects = self.scene_tone.saturation.abs() > 1e-6
             || self.scene_tone.vibrance.abs() > 1e-6
             || self.effects.presence[..3]
@@ -1295,12 +1254,6 @@ impl GpuParams {
                 return true;
             }
 
-            // The local tone shader is physically part of the optional
-            // intermediate chain. Keep that chain scheduled when any control
-            // handled by apply_local_scene_tone_node is active. Exposure is
-            // already applied by prepare_scene_node, Blacks is deferred to the
-            // display-linear view node, and local mixer/grading run in the
-            // always-dispatched view pass, so none of those need this gate.
             let tone = local.adjust_0[1..].iter().any(|value| value.abs() > 1e-6);
             let white_balance = local.adjust_1[0].abs() > 1e-6
                 || local.adjust_1[2].abs() > 1e-6
@@ -1375,7 +1328,6 @@ pub struct RawGpuProgramTemplate {
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
 }
 
-/// Prewarm state.
 #[derive(Default)]
 pub struct GpuProgramPrewarm {
     result: Mutex<Option<std::result::Result<Arc<RawGpuProgramTemplate>, String>>>,
@@ -1414,9 +1366,6 @@ impl GpuProgramPrewarm {
     }
 }
 
-/// A GPU-resident snapshot of the global tone-analysis anchors from a
-/// full-frame preview pipeline. Local context renders can inherit these
-/// anchors without reading them back to the CPU.
 pub struct ToneStatisticsSnapshot {
     buffer: wgpu::Buffer,
 }
@@ -1485,13 +1434,9 @@ pub struct RawGpuPipeline {
     out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
-    // Declared last so GPU textures/buffers are dropped before process-wide
-    // admission capacity is returned.
     _gpu_budget_reservation: GpuBudgetReservation,
 }
 
-/// A cheap, thread-safe handle to one completed display output. Reading it on
-/// a worker keeps thumbnail cache refreshes off the render thread.
 #[derive(Clone)]
 pub struct GpuOutputSnapshot {
     texture: wgpu::Texture,
@@ -1569,8 +1514,6 @@ impl RawGpuPipeline {
                 }
             }
             Err(_) => {
-                // A poisoned cache must not prevent rendering. Fall back to a
-                // complete upload while preserving the stage-specific buffers.
                 queue.write_buffer(&self.camera_uniforms_buffer, 0, params.camera_bytes());
                 queue.write_buffer(
                     &self.scene_tone_uniforms_buffer,
@@ -1605,11 +1548,6 @@ impl RawGpuPipeline {
         }
     }
 
-    /// Compiles the complete interactive preview compute program set against a
-    /// tiny synthetic RAW. The returned pipeline is only a program template:
-    /// later real RAWs allocate their own textures/bind groups while cloning
-    /// these already-compiled compute pipeline handles. This keeps startup
-    /// prewarming independent of image resolution and has no effect on output.
     pub fn prewarm_preview_template(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1634,10 +1572,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Compiles the complete full-quality export compute program set against a
-    /// tiny synthetic RAW. The returned pipeline is retained only as a program
-    /// template, allowing tiled export to clone already-compiled pipeline
-    /// handles while allocating its own image-sized resources and mask atlas.
     pub fn prewarm_export_program_template_with_cache(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1805,9 +1739,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Creates a headless pipeline with an explicit normalized-mask atlas edge.
-    /// Full-quality export uses a larger atlas than the interactive preview so
-    /// fine mask edges are not limited to preview resolution.
     pub fn new_headless_with_quality_and_mask_edge(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1831,10 +1762,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Allocates a new set of textures and bind groups while reusing the
-    /// already-compiled compute programs from another pipeline with the same
-    /// CFA family and processing quality. This avoids recompiling the complete
-    /// RAW pipeline whenever the zoomed preview moves to a new crop.
     pub fn new_headless_reusing_programs(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1857,9 +1784,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Reuses compiled programs while allocating a smaller local-mask atlas.
-    /// This is intended for the very-low-resolution full-frame navigation proxy,
-    /// where a 2048px atlas would cost more CPU/GPU work than the image itself.
     pub fn new_headless_reusing_programs_with_mask_edge(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1885,8 +1809,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Allocates export-sized resources while cloning compute pipelines from a
-    /// lightweight startup-prewarmed program template.
     pub fn new_headless_reusing_program_template_with_mask_edge(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1911,9 +1833,6 @@ impl RawGpuPipeline {
         })
     }
 
-    /// Reuses an owned program template for a normal interactive preview.
-    /// Keeping this template separate from image-sized textures lets preview
-    /// surfaces be replaced without recompiling the complete shader graph.
     pub fn new_headless_reusing_program_template(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1989,16 +1908,8 @@ impl RawGpuPipeline {
         let gpu_budget_reservation =
             GpuBudgetReservation::acquire(&resource_plan, gpu_working_set_limit_bytes())?;
 
-        // wgpu's create_* methods do not return allocation errors. Capture the
-        // complete construction sequence so a driver OOM becomes this
-        // constructor's Result instead of reaching wgpu's fatal default handler.
         let gpu_error_scopes = GpuErrorScopes::push(device);
 
-        // Admission succeeds before the first device allocation, including all
-        // other live main/detail/navigation/headless pipelines in this process. Every persistent
-        // allocation below has a corresponding named entry in `resource_plan`;
-        // on-demand conversion/readback peaks and the 20% safety margin are also
-        // reserved before construction begins.
         let ai_image = raw.ai_denoised_image();
         let ai_cfa = params
             .uses_ai_denoise()
@@ -2124,8 +2035,6 @@ impl RawGpuPipeline {
             out_texture: surfaces.out_texture,
             _out_view: surfaces.out_view,
             pipeline_cache,
-            // Declared last so GPU textures/buffers are dropped before process-wide
-            // admission capacity is returned.
             _gpu_budget_reservation: gpu_budget_reservation,
         };
         if let Err(error) = gpu_error_scopes.finish("create RAW GPU pipeline") {
@@ -2137,11 +2046,6 @@ impl RawGpuPipeline {
         Ok(pipeline)
     }
 
-    /// Uploads one normalized, anti-aliased local-mask layer as IEEE-754 half
-    /// floats. Subject / Not Subject refinement is already composited by the
-    /// core rasterizer before this upload, so the atlas remains the single mask
-    /// source consumed by preview and export shaders. Export can allocate a
-    /// larger atlas for higher spatial fidelity.
     pub fn update_mask_layer(
         &self,
         queue: &wgpu::Queue,
@@ -2291,9 +2195,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Uploads full-image mask coverage used only as the Light Rays emission
-    /// field. Its fixed normalized resolution deliberately does not change for
-    /// zoom-detail or tiled-export pipelines, preventing view-dependent rays.
     pub fn update_light_rays_mask_layers(
         &self,
         queue: &wgpu::Queue,
@@ -2325,10 +2226,6 @@ impl RawGpuPipeline {
         self.mask_layer_capacity
     }
 
-    /// Whether this image-sized graph already contains every immutable AI
-    /// source texture needed for the requested state. Bayer AI output replaces
-    /// the mosaic upload and therefore must match exactly. X-Trans uses a
-    /// separate scene texture which may safely remain resident while disabled.
     pub const fn immutable_ai_source_matches(&self, cfa_kind: CfaKind, enabled: bool) -> bool {
         match cfa_kind {
             CfaKind::Bayer => self.has_ai_cfa == enabled,
@@ -2336,8 +2233,6 @@ impl RawGpuPipeline {
         }
     }
 
-    /// Registers a headless pipeline's output texture with egui after the
-    /// expensive GPU setup has completed on a worker thread.
     pub fn register_egui_texture(
         &mut self,
         device: &wgpu::Device,
@@ -2353,9 +2248,6 @@ impl RawGpuPipeline {
         texture_id
     }
 
-    /// Updates the preview/display transform from an RGB ICC profile. Desktop
-    /// builds accept matrix-shaper and LUT/CLUT profiles through LCMS2, then
-    /// upload the sampled 3D LUT without rebuilding pipelines or bind groups.
     pub fn set_display_icc_profile(
         &self,
         queue: &wgpu::Queue,
@@ -2366,8 +2258,6 @@ impl RawGpuPipeline {
         self.write_output_transform(queue, &transform)
     }
 
-    /// Alias for export-oriented callers that use the same managed output
-    /// transform as the live preview.
     pub fn set_output_icc_profile(
         &self,
         queue: &wgpu::Queue,
@@ -2405,9 +2295,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Compatibility entry point that executes the complete pipeline. New UI
-    /// code should prefer `dispatch_stage` so cached upstream results survive
-    /// ordinary Develop adjustments.
     pub fn recompute(&self, queue: &wgpu::Queue, device: &wgpu::Device, params: &GpuParams) {
         self.upload_params(queue, params);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2424,8 +2311,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Dispatches exactly one dependency stage. GPU submission is asynchronous;
-    /// callers can spread Raw -> Tone -> Output across event-loop iterations.
     pub fn dispatch_stage(
         &self,
         queue: &wgpu::Queue,
@@ -2454,9 +2339,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Replaces the sensor textures of a fixed-size headless pipeline so one
-    /// allocation and one set of compiled compute pipelines can process every
-    /// export tile.
     pub fn upload_raw_tile(&self, queue: &wgpu::Queue, raw: &LoadedRaw) -> Result<()> {
         if raw.width != self.width || raw.height != self.height {
             return Err(anyhow!(
@@ -2511,7 +2393,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Clears the reusable histogram before a full-resolution tiled analysis.
     pub fn begin_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw export tone histogram clear"),
@@ -2520,9 +2401,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Dispatches one ordinary processing stage and restores cached Remove
-    /// scene patches immediately after RAW reconstruction when necessary.
-    /// Output-only slider changes therefore never touch the Remove cache.
     pub fn dispatch_stage_with_remove(
         &self,
         queue: &wgpu::Queue,
@@ -2580,7 +2458,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Captures the current global tone anchors without a CPU readback.
     pub fn snapshot_tone_statistics(
         &self,
         device: &wgpu::Device,
@@ -2606,7 +2483,6 @@ impl RawGpuPipeline {
         ToneStatisticsSnapshot { buffer }
     }
 
-    /// Copies a saved full-frame tone snapshot into this crop/detail pipeline.
     pub fn inherit_tone_statistics_snapshot(
         &self,
         queue: &wgpu::Queue,
@@ -2626,10 +2502,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Copies the full-frame adaptive tone anchors into a crop/detail pipeline.
-    /// Spatial guides remain crop-local, but global percentiles (including the
-    /// Dehaze ambient-light anchor) must not change while the user pans or
-    /// zooms. Call this after the detail Tone stage and before its Output stage.
     pub fn inherit_tone_statistics(
         &self,
         queue: &wgpu::Queue,
@@ -2649,9 +2521,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Demosaics one native-resolution tile and adds only its non-halo core to
-    /// the shared export histogram. The bounds in `params` prevent duplicated
-    /// halo pixels from biasing the full-image percentiles.
     pub fn accumulate_export_tone_tile(
         &self,
         queue: &wgpu::Queue,
@@ -2671,9 +2540,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Export tone-analysis variant that restores Remove at the scene boundary
-    /// before the histogram/guide sees the tile. The histogram itself is still
-    /// accumulated exactly once per native core by the bounds in `params`.
     pub fn accumulate_export_tone_tile_with_remove(
         &self,
         queue: &wgpu::Queue,
@@ -2709,7 +2575,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Reduces the histogram accumulated from every native-resolution core.
     pub fn finish_export_tone_analysis(&self, queue: &wgpu::Queue, device: &wgpu::Device) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw export tone histogram reduction"),
@@ -2722,9 +2587,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Executes one export tile using the full-resolution histogram cached by
-    /// `finish_export_tone_analysis`. The tile still builds its own halo-aware
-    /// tone guide; skipping reduction keeps the global statistics unchanged.
     pub fn dispatch_export_tile(
         &self,
         queue: &wgpu::Queue,
@@ -2746,10 +2608,6 @@ impl RawGpuPipeline {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Executes one full-resolution export tile with cached Remove patches
-    /// restored between RAW reconstruction and all tone/creative adjustments.
-    /// Big-LaMa is never called here; export consumes the same scene cache as
-    /// preview.
     pub fn dispatch_export_tile_with_remove(
         &self,
         queue: &wgpu::Queue,
@@ -2786,8 +2644,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Copies an RGBA8 output sub-rectangle to CPU memory. This method blocks
-    /// only the export worker thread; the interactive UI remains responsive.
     pub fn read_output_region_blocking(
         &self,
         device: &wgpu::Device,
@@ -2810,9 +2666,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Queues a display-linear RGBA32F copy and immediately returns a mapped
-    /// readback handle. Export can submit the next tile before waiting on this
-    /// handle, overlapping GPU work with CPU readback/encoding.
     pub fn begin_display_linear_region_readback(
         &self,
         device: &wgpu::Device,
@@ -2840,9 +2693,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Copies a post-tone-map, display-linear Rec.2020 sub-rectangle as
-    /// tightly packed RGB32F. High-quality export uses this surface so any
-    /// resize occurs before the output transfer function and after demosaic.
     pub fn read_display_linear_region_blocking(
         &self,
         device: &wgpu::Device,
@@ -2870,11 +2720,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Reinstalls cached Remove patches at the source-scene boundary after a
-    /// RAW-stage refresh. Ordinary Develop slider changes only rerun Output, so
-    /// this upload is skipped entirely and the already patched scene texture is
-    /// reused. `source_origin`/`source_size` map this pipeline (full proxy, zoom
-    /// crop, or export tile) back into native source-image coordinates.
     pub fn upload_remove_scene_patches(
         &self,
         queue: &wgpu::Queue,
@@ -2939,11 +2784,6 @@ impl RawGpuPipeline {
                             let source_scene = canonical_remove_scene_to_pipeline_scene(
                                 source_raw, exposure, canonical,
                             );
-                            // Fitted/detail previews are commonly pre-demosaiced
-                            // Rec.2020 rasters even when the document source is a
-                            // sensor RAW. Native export tiles remain camera RGB.
-                            // Convert the canonical patch into the scene space
-                            // expected by this concrete pipeline before upload.
                             let scene = if self.has_raster_scene {
                                 pipeline_scene_to_working_rec2020(source_raw, source_scene)
                             } else {
@@ -3040,7 +2880,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    /// Reads the demosaiced scene as RGB32F after the raw stage.
     pub fn read_scene_texture_blocking(
         &self,
         device: &wgpu::Device,
@@ -3062,9 +2901,6 @@ impl RawGpuPipeline {
         )
     }
 
-    /// Runs only RAW reconstruction and returns its white-balanced camera-RGB
-    /// boundary. RawNIND's linear Rec.2020 variant uses this for non-Bayer
-    /// sensors before converting into the model's declared colour space.
     pub fn render_camera_scene_blocking(
         &self,
         device: &wgpu::Device,
@@ -3087,9 +2923,6 @@ impl RawGpuPipeline {
 
     fn encode_raw_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
         if self.has_raster_scene {
-            // Pre-demosaiced TIFFs are uploaded directly at the scene-linear
-            // Rec.2020 boundary. Retain the shared post-demosaic chroma filter
-            // when requested, but never execute CFA reconstruction shaders.
             if params.camera.chroma_denoise > 1e-6 {
                 self.encode_pass_range(
                     encoder,
@@ -3100,9 +2933,6 @@ impl RawGpuPipeline {
             return;
         }
         if self.has_ai_scene && params.uses_ai_denoise() {
-            // The RawNIND result was uploaded directly into the camera-RGB
-            // scene boundary. Tone analysis and the complete output stage,
-            // including capture sharpening, still execute normally.
             return;
         }
         self.encode_pass(encoder, 0);
@@ -3130,9 +2960,6 @@ impl RawGpuPipeline {
 
     fn encode_output_stage(&self, encoder: &mut wgpu::CommandEncoder, params: &GpuParams) {
         self.encode_pass(encoder, self.adjustment_prepare_pass_index);
-        // Capture sharpening and tone finalization are always required: when
-        // optional presence/creative effects are neutral this pass already
-        // writes the final adjustment image into tex2 for the render pass.
         self.encode_pass(encoder, self.adjustment_tone_pass_index);
         let blur_active = params.needs_blur_passes();
         if params.needs_intermediate_adjustment_passes() {
@@ -3147,9 +2974,6 @@ impl RawGpuPipeline {
                         self.mask_blur_end_index,
                     );
                 } else {
-                    // Lens, Motion, Radial, and Tilt-Shift all finish in the
-                    // first gather pass, which already writes the tex2 base
-                    // consumed by every post-blur binding variant.
                     self.encode_pass(encoder, self.mask_blur_start_index);
                 }
             }

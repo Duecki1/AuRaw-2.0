@@ -296,11 +296,6 @@ pub(super) fn read_rgba32_texture_region_rgb_blocking(
     let [width, height] = region.extent;
     let label = region.label;
 
-    // WebGPU adapters commonly expose a 256 MiB max_buffer_size. A large
-    // full-resolution RGBA32F readback can legitimately exceed that even though
-    // the texture itself is valid (for example, ~19.3 MP × RGBA32F is ~295 MiB).
-    // Read the texture in bounded horizontal strips so no single MAP_READ buffer
-    // can approach the device limit.
     let rows_per_chunk = rgba32_readback_rows_per_chunk(width)?;
     let capacity = usize::try_from(width)
         .ok()

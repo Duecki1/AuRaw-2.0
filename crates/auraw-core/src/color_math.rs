@@ -1,4 +1,3 @@
-//! Shared color math.
 
 fn mul3(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {
     [
@@ -52,7 +51,6 @@ fn oklab_to_linear_srgb(lab: [f32; 3]) -> [f32; 3] {
     )
 }
 
-/// Convert scene-linear D65 Rec.2020 RGB to OKLab.
 pub fn rec2020_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
     linear_srgb_to_oklab(mul3(
         [
@@ -64,7 +62,6 @@ pub fn rec2020_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
     ))
 }
 
-/// Convert OKLab to scene-linear D65 Rec.2020 RGB.
 pub fn rec2020_from_oklab(lab: [f32; 3]) -> [f32; 3] {
     mul3(
         [

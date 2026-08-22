@@ -1,32 +1,11 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-/*
- * darktable sigmoid coefficient calculation, ported from
- * darktable 5.6.0 src/iop/sigmoid.c.
- *
- * Copyright (C) 2020-2026 darktable developers.
- * Copyright (C) 2026 AuRaw contributors (Rust port).
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- */
 
 pub const MIDDLE_GREY: f32 = 0.1845;
-// Preserve the established darktable 5.6 default film power (1.4909091 for a
-// UI contrast of 1.5) while evaluating the slope analytically. The former
-// finite-difference calculation implicitly supplied this small calibration,
-// but became numerically unstable for steep valid curves.
 const CONTRAST_SLOPE_CALIBRATION: f32 = 0.9939394;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum SigmoidColorProcessing {
-    /// darktable default: apply the sigmoid per channel, then restore hue
-    /// according to `hue_preservation`.
     #[default]
     PerChannel,
-    /// Map luminance while preserving RGB ratios until the output gamut
-    /// boundary.
     RgbRatio,
 }
 
@@ -50,12 +29,9 @@ impl SigmoidColorProcessing {
 pub struct SigmoidParams {
     pub contrast: f32,
     pub skew: f32,
-    /// Percent of reference white, matching darktable's UI domain.
     pub display_white_target: f32,
-    /// Percent of reference white, matching darktable's UI domain.
     pub display_black_target: f32,
     pub color_processing: SigmoidColorProcessing,
-    /// Percent, matching darktable's UI domain.
     pub hue_preservation: f32,
 }
 
@@ -76,9 +52,6 @@ impl Default for SigmoidParams {
 pub struct SigmoidCoefficients {
     pub white_target: f32,
     pub black_target: f32,
-    /// Base-2 logarithm of darktable's paper-exposure coefficient. Keeping the
-    /// value in log space prevents valid high-contrast/low-white combinations
-    /// from overflowing before the shader can evaluate the curve.
     pub paper_exposure: f32,
     pub film_fog: f32,
     pub film_power: f32,
@@ -103,8 +76,6 @@ fn generalized_loglogistic_sigmoid(
         f32::NEG_INFINITY
     };
     let log2_ratio = log2_film_response - log2_paper_exposure;
-    // Stable base-2 logistic. Evaluating F / (P + F) directly makes both F and
-    // P overflow for perfectly valid steep curves, producing infinity/infinity.
     let ratio = if log2_ratio >= 0.0 {
         1.0 / (1.0 + (-log2_ratio).exp2())
     } else {
@@ -194,10 +165,6 @@ fn coefficients_are_valid(coefficients: SigmoidCoefficients) -> bool {
         && (grey - MIDDLE_GREY).abs() <= 5e-3
 }
 
-/// Exact coefficient construction used by darktable 5.6.0's `commit_params`
-/// for valid UI values. Corrupt/non-finite preset values are sanitized, and a
-/// known-good curve is used if the constructed coefficients violate the curve
-/// invariants required by the shader.
 pub fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
     let defaults = SigmoidParams::default();
     let contrast = finite_or(params.contrast, defaults.contrast).clamp(0.1, 10.0);
@@ -210,12 +177,6 @@ pub fn coefficients(params: SigmoidParams) -> SigmoidCoefficients {
         (0.01 * finite_or(params.hue_preservation, defaults.hue_preservation)).clamp(0.0, 1.0);
     let color_processing = params.color_processing.shader_value();
 
-    // For y = magnitude * logistic(F/P)^paper_power with
-    // F = (fog + x)^film_power, the analytic slope is
-    // y * paper_power * (1 - ratio) * film_power / (fog + x).
-    // The reference curve has y=ratio=x, unit paper power, and zero fog.
-    // Avoiding the old +/-1e-6 finite difference is important at the extreme
-    // UI settings, where subtractive error was amplified into film_power.
     let ref_slope = contrast * CONTRAST_SLOPE_CALIBRATION * (1.0 - MIDDLE_GREY);
 
     let paper_power = 5.0f32.powf(-skew);

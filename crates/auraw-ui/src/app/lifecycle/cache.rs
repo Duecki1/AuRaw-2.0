@@ -31,8 +31,6 @@ impl AurawApp {
         let previous = self.develop.exposure;
         let mut exposure = ExposureParams::scene_referred_default();
 
-        // Every newly opened RAW starts with inpaint opposed. Threshold and
-        // LCh strength remain application-level expert preferences.
         exposure.highlight_clip = previous.highlight_clip;
         exposure.highlight_reconstruction = previous.highlight_reconstruction;
         exposure.demosaic_mode = previous.demosaic_mode;
@@ -84,9 +82,6 @@ impl AurawApp {
             return;
         };
 
-        // The selected Library card is usually already resident. Polling also
-        // picks up a request that was already in flight when the RAW was opened.
-        // A cache miss never queues another sensor decode beside the real load.
         self.library.poll(context);
         if self.develop_ui.loading_thumbnail.texture.is_none() {
             if let Some((texture, size)) = self

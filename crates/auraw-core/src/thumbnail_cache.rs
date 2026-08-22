@@ -162,9 +162,6 @@ pub fn load_jpeg(path: &Path, maximum_edge: u32) -> Result<Option<RawThumbnail>,
         return Ok(None);
     }
 
-    // Inspect the JPEG header before any pixel allocation. Cache files, including
-    // legacy sibling caches, are untrusted and may contain a tiny compressed
-    // payload advertising hostile dimensions.
     let dimensions = image::ImageReader::with_format(
         match fs::File::open(path) {
             Ok(file) => std::io::BufReader::new(file),
@@ -425,8 +422,6 @@ fn desktop_raw_thumbnail_fingerprint_path(raw_path: &Path) -> PathBuf {
     desktop_cache_path_for_raw(raw_path, RAW_THUMBNAIL_FINGERPRINT_SUFFIX)
 }
 
-/// Returns AuRaw's private per-user thumbnail-cache root. Library previews are
-/// deliberately never written beside a user's photos.
 #[cfg(not(target_os = "android"))]
 pub fn desktop_app_cache_root() -> PathBuf {
     desktop_platform_cache_root().join("auraw")
@@ -437,9 +432,6 @@ pub fn desktop_thumbnail_cache_root() -> PathBuf {
     desktop_app_cache_root().join(DESKTOP_THUMBNAIL_CACHE_DIR)
 }
 
-/// Removes every generated library preview. Both unedited RAW thumbnails and
-/// edited renditions live below this private, app-owned directory and can be
-/// rebuilt from the RAW plus its sidecar.
 #[cfg(not(target_os = "android"))]
 pub fn clear_desktop_thumbnail_cache() -> Result<(), String> {
     let root = desktop_thumbnail_cache_root();
@@ -538,9 +530,6 @@ fn desktop_platform_cache_root() -> PathBuf {
     std::env::temp_dir()
 }
 
-/// Maps a RAW path to an opaque file inside AuRaw's private cache. Hashing the
-/// complete absolute/canonical path prevents equal filenames in different
-/// libraries from colliding without exposing the user's folder structure.
 #[cfg(not(target_os = "android"))]
 pub fn desktop_cache_path_for_raw(raw_path: &Path, suffix: &str) -> PathBuf {
     let identity = fs::canonicalize(raw_path).unwrap_or_else(|_| {
@@ -616,7 +605,6 @@ fn desktop_raw_stamp(raw_path: &Path) -> Result<String, String> {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    // Cache version
     let generation = if raw_path
         .extension()
         .and_then(|extension| extension.to_str())

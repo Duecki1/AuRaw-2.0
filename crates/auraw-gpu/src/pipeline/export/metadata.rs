@@ -1,4 +1,3 @@
-//! Export metadata encoding shared by PNG, JPEG, and TIFF output.
 
 use super::*;
 
@@ -260,9 +259,6 @@ fn encode_ifd_block(entries: &[ExifEntry], ifd_offset: u32) -> Vec<u8> {
     directory
 }
 
-/// Builds a compact, standards-shaped TIFF/EXIF payload used by both JPEG's
-/// APP1 segment and PNG's eXIf chunk. The output pixels have already been
-/// physically oriented, so Orientation is always normalized to 1.
 pub(super) fn build_exif_payload(
     metadata: &ExportMetadata,
     output_width: u32,
@@ -383,8 +379,6 @@ pub(super) fn build_exif_payload(
     ifd0_entries.sort_by_key(|entry| entry.tag);
     exif_entries.sort_by_key(|entry| entry.tag);
 
-    // Adding the ExifIFD pointer changes IFD0's directory length, so include a
-    // placeholder before calculating the nested IFD's final TIFF-relative offset.
     ifd0_entries.push(ExifEntry {
         tag: 0x8769,
         value: ExifValue::Long(0),

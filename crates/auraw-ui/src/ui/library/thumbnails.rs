@@ -11,9 +11,6 @@ impl LibraryState {
             return;
         };
 
-        // A full GPU texture needs no work. A resident fallback remains visible
-        // while we opportunistically queue the full thumbnail again, so revisiting
-        // an evicted card never falls back to the loading placeholder.
         if entry.texture.is_some() && !entry.texture_is_resident || entry.thumbnail_queued {
             return;
         }
@@ -112,10 +109,6 @@ impl LibraryState {
             return;
         }
 
-        // A reset removes the developed cache, so the next valid result is an
-        // unedited RAW thumbnail. Clear the developed marker immediately;
-        // otherwise poll_events treats that RAW result as a stale downgrade and
-        // can leave the card blank after its old texture is evicted.
         entry.texture = None;
         entry.resident_thumbnail = None;
         entry.texture_is_resident = false;
@@ -191,12 +184,6 @@ impl LibraryState {
         if texture_count <= limit {
             return;
         }
-        // Never evict thumbnails that are currently visible or inside the preload
-        // margin. On a desktop resize/fullscreen transition the number of active
-        // thumbnails can temporarily exceed the nominal cache limit. Evicting by
-        // LRU alone would repeatedly remove the first (top) visible rows because
-        // they are touched first every frame, making them oscillate between the
-        // texture and the "Loading preview…" placeholder.
         let protected_texture_count = protected_indices
             .iter()
             .filter(|&&index| {
@@ -221,8 +208,6 @@ impl LibraryState {
         for (_, index) in candidates.into_iter().take(texture_count - effective_limit) {
             self.entries[index].texture = None;
             self.entries[index].texture_is_resident = false;
-            // Keep decoded dimensions and a bounded resident pixel fallback after GPU
-            // eviction. Returning to this card can rebuild a texture synchronously.
         }
     }
 
@@ -273,9 +258,6 @@ impl LibraryState {
 }
 
 pub(super) fn new_library_entry(asset: LibraryAsset) -> LibraryEntry {
-    // Keep gallery geometry immutable for the lifetime of the catalog entry.
-    // Header probing supplies the real display ratio for normal supported RAWs;
-    // 3:2 is only a last-resort fallback when metadata cannot be inspected.
     let layout_size = Some(asset.metadata.dimensions_hint.unwrap_or([3, 2]));
     LibraryEntry {
         asset,
@@ -345,9 +327,6 @@ pub(super) fn compare_library_names(left: &LibraryAsset, right: &LibraryAsset) -
         .then_with(|| left.id.cmp(&right.id))
 }
 
-pub(super) fn library_modified_key(asset: &LibraryAsset) -> u64 {
-    asset.metadata.modified_seconds
-}
 
 pub(super) fn make_resident_thumbnail(thumbnail: &RawThumbnail) -> RawThumbnail {
     if thumbnail.width <= RESIDENT_THUMBNAIL_EDGE && thumbnail.height <= RESIDENT_THUMBNAIL_EDGE {
@@ -493,9 +472,6 @@ pub(super) fn render_uncached_developed_thumbnail(
     let loaded_sidecar = match crate::sidecar::load_desktop(path) {
         Ok(Some(sidecar)) => sidecar,
         Ok(None) => return Ok(None),
-        // Match RAW opening: malformed edit JSON is recoverable. Returning
-        // None lets the library use its normal cached/embedded RAW thumbnail
-        // instead of leaving the card without any preview.
         Err(crate::sidecar::SidecarError::Invalid(error)) => {
             log::warn!(
                 "ignoring invalid sidecar while rendering library thumbnail for {}: {error}",
@@ -516,14 +492,8 @@ pub(super) fn render_uncached_developed_thumbnail(
     let sidecar_fingerprint = crate::sidecar::desktop_sidecar_fingerprint(path)?
         .ok_or_else(|| "edit sidecar disappeared before thumbnail rendering".to_owned())?;
 
-    // Edited rebuilds and preview-less RAW fallbacks share the same user-set
-    // concurrency budget because both unpack full sensors. The headless GPU
-    // phase below remains serialized on its device while RAW preparation for
-    // other edited cards can proceed concurrently.
     let _render_permit = crate::thumbnail_cache::acquire_rendered_thumbnail_worker();
 
-    // A different worker may have completed the cache while this request was
-    // waiting for a rendered-thumbnail permit.
     if let Some(thumbnail) = crate::sidecar::load_developed_thumbnail_cache(path, maximum_edge)? {
         let cached_edge = thumbnail.width.max(thumbnail.height);
         let minimum_edge = maximum_edge.saturating_mul(3) / 4;
@@ -671,9 +641,6 @@ pub(crate) fn load_desktop_reference_preview(
         return Err("reference preview edge must be non-zero".to_owned());
     }
 
-    // Preserve developed edits when a sidecar exists. The reference request is
-    // allowed to ask for a larger render than the 512 px catalog card;
-    // `render_uncached_developed_thumbnail` regenerates an undersized cache.
     match render_uncached_developed_thumbnail(path, maximum_edge) {
         Ok(Some(thumbnail)) => return Ok(thumbnail),
         Ok(None) => {}
@@ -685,16 +652,10 @@ pub(crate) fn load_desktop_reference_preview(
         }
     }
 
-    // Unedited references use the same RAW preview loader as the catalog but
-    // at a much larger edge. Most cameras embed a full-resolution JPEG; when
-    // they do not, the loader retains its LibRaw processed fallback.
     load_raw_thumbnail(path, maximum_edge)
         .map_err(|error| format!("could not render reference preview: {error:#}"))
 }
 
-/// Loads only an already-rendered desktop thumbnail. This deliberately avoids
-/// the embedded-preview and sensor-decode fallbacks used to populate Library
-/// cards, so it is safe to run alongside the full RAW open worker.
 #[cfg(not(target_os = "android"))]
 pub(crate) fn load_desktop_cached_thumbnail(
     path: &Path,
@@ -730,20 +691,12 @@ pub(super) fn load_desktop_library_thumbnail(
                 ),
             }
 
-            // Keep the first visible card as cheap as every other RAW: a
-            // filesystem existence check decides whether the background stage
-            // should inspect/render its edits. Parsing mask-heavy sidecars is
-            // deliberately deferred until after the embedded RAW preview is
-            // already on screen.
             let render_developed = crate::sidecar::sidecar_path_for_raw(path).is_file();
             return load_desktop_raw_library_thumbnail(path, render_developed);
         }
         ThumbnailLoadStage::DevelopedPreview => {
             match render_uncached_developed_thumbnail(path, THUMBNAIL_EDGE) {
                 Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
-                // The sidecar may have been removed or reset between loading
-                // the RAW preview and this background job. Keep that RAW
-                // preview instead of leaving a card in a permanent spinner.
                 Ok(None) => return load_desktop_raw_library_thumbnail(path, false),
                 Err(error) => {
                     return Err(format!(
@@ -776,9 +729,6 @@ fn load_desktop_raw_library_thumbnail(
         ),
     }
 
-    // Prefer the camera-generated JPEG/bitmap, but a missing or unsupported
-    // embedded preview must never make an otherwise valid RAW card permanent.
-    // `load_raw_thumbnail` falls back to LibRaw's half-size sensor render.
     let thumbnail = load_raw_thumbnail(path, THUMBNAIL_EDGE)
         .map_err(|error| format!("could not render a RAW preview: {error:#}"))?;
     if let Err(error) = crate::thumbnail_cache::save_desktop_raw_thumbnail(path, &thumbnail) {
@@ -821,11 +771,6 @@ pub(super) fn load_android_library_thumbnail(
         modified_seconds,
         THUMBNAIL_EDGE,
     )?;
-    // Android cannot headlessly rebuild all adjustments while browsing the
-    // library, but geometry is cheap and important for composition. Apply the
-    // saved crop/orientation even when a developed cache has not been captured
-    // yet; opening/saving the image later replaces this with the fully developed
-    // geometry-aware thumbnail.
     if let Ok(Some(sidecar)) = crate::sidecar::load_android(app, uri, display_name) {
         thumbnail =
             crate::pipeline::transform_thumbnail_geometry(&thumbnail, sidecar.edits.geometry);
@@ -949,10 +894,6 @@ fn run_one_thumbnail_worker(context: ThumbnailWorkerContext) {
         let (request, initial_background) = match received {
             Ok(request) => (request, false),
             Err(mpsc::TryRecvError::Empty) => {
-                // Develop pauses catalog-wide background decoding, but visible
-                // filmstrip/reference requests still arrive through the explicit
-                // request channel. Do not let workers get stuck holding ordinary
-                // background entries while those display-priority requests wait.
                 if decoding_paused.load(Ordering::Acquire) {
                     std::thread::sleep(THUMBNAIL_PAUSE_POLL_INTERVAL);
                     continue;
@@ -994,10 +935,6 @@ fn run_one_thumbnail_worker(context: ThumbnailWorkerContext) {
             continue;
         }
         let result = loop {
-            // Ordinary catalog requests remain paused in Develop. Explicit
-            // display-priority requests (filmstrip/reference) may proceed, but
-            // still take the shared decode gate so an active full RAW open keeps
-            // exclusive priority and the application's peak memory stays bounded.
             while decoding_paused.load(Ordering::Acquire) && !request.display_priority {
                 if cancellation.load(Ordering::Acquire) != generation {
                     return;
@@ -1042,9 +979,6 @@ fn run_one_thumbnail_worker(context: ThumbnailWorkerContext) {
         {
             break;
         }
-        // Publish the visible RAW preview before another worker can claim the
-        // developed stage. Otherwise its completion could arrive first and a
-        // stale RAW event would briefly replace the finished card.
         if queue_developed_preview {
             work_queue
                 .lock()

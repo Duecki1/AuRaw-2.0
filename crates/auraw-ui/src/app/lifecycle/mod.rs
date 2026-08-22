@@ -159,9 +159,6 @@ pub(super) fn spawn_gpu_preview_prewarm(
                 Err(error) => crate::diagnostics::record(error),
             }
 
-            // Deliver the compiled template immediately. Cache serialization is
-            // intentionally done afterwards so a RAW open waiting on prewarm
-            // never pays filesystem write latency.
             let _ = sender.send(result);
             repaint.request_repaint();
 

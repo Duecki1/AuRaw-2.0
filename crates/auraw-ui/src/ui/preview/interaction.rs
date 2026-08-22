@@ -217,4 +217,3 @@ pub(super) fn begin_mask_drag(
         _ => None,
     }
 }
-

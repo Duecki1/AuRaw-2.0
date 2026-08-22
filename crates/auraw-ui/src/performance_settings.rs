@@ -19,8 +19,6 @@ pub(crate) struct PerformanceSettings {
     pub library_sort_order: crate::ui::library::LibrarySortOrder,
     #[serde(default)]
     pub preview_quality: crate::app::PreviewQuality,
-    /// Keep newly painted brush dabs fixed to the source image instead of
-    /// compensating for preview zoom to maintain a constant screen footprint.
     #[serde(default)]
     pub image_relative_brush_size: bool,
     #[serde(default)]
@@ -32,16 +30,10 @@ pub(crate) struct PerformanceSettings {
     pub camera_profile_mode: CameraProfileMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_profile_folder: Option<PathBuf>,
-    /// Human-readable source shown in Settings. Android stores a private mirror
-    /// path in `camera_profile_folder`, while this keeps the selected SAF tree name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_profile_folder_label: Option<String>,
-    /// When enabled and no explicit folder is configured, desktop builds probe
-    /// Adobe Camera Raw's standard CameraProfiles installation locations.
     #[serde(default = "default_camera_profile_auto_detect")]
     pub camera_profile_auto_detect: bool,
-    /// Last manually chosen external DCP, stored relative to the configured
-    /// profile root. New RAWs without a sidecar may inherit this choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_camera_profile: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
@@ -58,8 +50,6 @@ pub(crate) struct PerformanceSettings {
     #[cfg(not(target_os = "android"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_library_folder: Option<PathBuf>,
-    /// Folder selected inside `last_library_folder`'s hierarchy. Keeping this
-    /// separate preserves the top-level tree while reopening its last view.
     #[cfg(not(target_os = "android"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_library_selected_folder: Option<PathBuf>,
@@ -149,11 +139,6 @@ impl PerformanceSettings {
     pub fn sanitized(mut self) -> Self {
         let loaded_version = self.version;
         self.version = SETTINGS_VERSION;
-        // Copy/paste categories were introduced with version 3. Version 4
-        // made lens correction opt-in. Version 6 separates
-        // geometry, camera profiles, and AI masks from their former combined
-        // categories. Preserve the user's old Masks choice for the new AI mask
-        // category while applying the requested geometry/profile defaults.
         if loaded_version < 4 {
             self.adjustment_copy_settings.lens_correction = false;
         }
@@ -248,9 +233,6 @@ pub fn desktop_path() -> Option<PathBuf> {
     base.map(|base| base.join("auraw").join("performance.json"))
 }
 
-/// Adobe's documented Camera Raw camera-profile install roots. AuRaw only
-/// auto-selects an existing directory; recursive DCP discovery remains in the
-/// RAW loader so manually installed camera subfolders work too.
 #[cfg(not(target_os = "android"))]
 pub fn detected_adobe_camera_profile_folder() -> Option<PathBuf> {
     adobe_camera_profile_candidates()
@@ -528,6 +510,5 @@ mod tests {
             assert_eq!(settings.preview_quality, expected);
         }
     }
-
 
 }

@@ -7,9 +7,6 @@ use wgpu::util::DeviceExt;
 const MAX_UPLOAD_SCRATCH_BYTES: usize = 8 * 1024 * 1024;
 
 std::thread_local! {
-    // Queue::write_texture copies the supplied bytes before returning, so these
-    // bounded per-thread staging vectors can be safely reused for every tile.
-    // This removes repeated multi-megabyte allocations from tiled export.
     static BLACK_UPLOAD_SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static COLOR_UPLOAD_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
@@ -23,8 +20,6 @@ pub(super) fn tone_analysis_scale() -> u32 {
 }
 
 pub(super) fn tone_guide_format() -> wgpu::TextureFormat {
-    // The guide is reduced-resolution, so R32Float costs little even on
-    // Android and avoids optional R16Float storage-texture support.
     wgpu::TextureFormat::R32Float
 }
 
@@ -87,11 +82,6 @@ pub(super) struct GpuBudgetReservation {
 
 impl GpuBudgetReservation {
     pub(super) fn acquire(plan: &GpuResourcePlan, limit: u64) -> Result<Self> {
-        // Validate one pipeline's complete persistent + temporary peak, but only
-        // reserve its persistent allocation in the process-wide total. Charging
-        // every live preview for its mutually exclusive readback peak
-        // made the main, navigation, and detail previews exceed the budget before
-        // zoom could create its first crop.
         validate_gpu_resource_plan(plan, limit)?;
         let bytes = plan.persistent_gpu_bytes;
         reserve_gpu_bytes(&RESERVED_GPU_BYTES, limit, bytes).map_err(|used| {
@@ -342,7 +332,6 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
         aligned_buffer_bytes(TONE_STATS_SIZE_BYTES)?,
     );
 
-    // Full-resolution scene/display readback is chunked to keep transient memory bounded.
     let rgba32_readback = aligned_copy_buffer_bytes(input.width, input.height, 16)?
         .min(MAX_RGBA32_READBACK_CHUNK_BYTES);
     let rgba8_readback = aligned_copy_buffer_bytes(input.width, input.height, 4)?;
@@ -354,7 +343,6 @@ pub(super) fn build_gpu_resource_plan(input: GpuResourcePlanInput) -> Result<Gpu
         readback_peak,
     );
 
-    // Raw compact-map expansion retains bounded thread-local scratch vectors.
     let upload_scratch_bytes = u64::try_from(MAX_UPLOAD_SCRATCH_BYTES)
         .map_err(|_| anyhow!("upload scratch size does not fit in u64"))?;
     push_entry(
@@ -986,9 +974,6 @@ pub(super) fn validate_raw(raw: &LoadedRaw) -> Result<()> {
         ));
     }
 
-    // Compact calibration maps repeat exactly. Validate one joint period rather
-    // than walking tens of millions of logical pixels on every pipeline build.
-    // Dense/non-periodic fallbacks still validate the full image.
     let period_width = joint_period(
         raw.color_indices.storage_width(),
         raw.black_levels_per_pixel.storage_width(),
@@ -1380,21 +1365,19 @@ mod resource_plan_tests {
             export.quality = ProcessingQuality::High;
             export.tone_scale = 8;
             export.mask_atlas_edge = MASK_ATLAS_EDGE_EXPORT_ANDROID;
-            // Six layers reproduce the 48 MiB mask atlas from the failing S25
-            // export while keeping the test independent of a particular RAW.
             export.mask_layers = 6;
             build_gpu_resource_plan(export).unwrap()
         };
 
         let default_android_tile = plan_for_core(768);
-        let enlarged_tile = plan_for_core(1024);
+        let oversized_tile = plan_for_core(1536);
         assert!(validate_gpu_resource_plan(
             &default_android_tile,
             ANDROID_GPU_WORKING_SET_LIMIT_BYTES
         )
         .is_ok());
         assert!(
-            validate_gpu_resource_plan(&enlarged_tile, ANDROID_GPU_WORKING_SET_LIMIT_BYTES)
+            validate_gpu_resource_plan(&oversized_tile, ANDROID_GPU_WORKING_SET_LIMIT_BYTES)
                 .is_err()
         );
     }

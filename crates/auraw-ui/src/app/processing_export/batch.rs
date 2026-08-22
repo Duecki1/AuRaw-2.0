@@ -18,8 +18,6 @@ pub(in crate::app) fn batch_export_overall_fraction(
         return 1.0;
     }
 
-    // Tile completion only covers rendering/readback. Encoding, metadata writing,
-    // publication, and final rename still have to finish before the image counts.
     let current_fraction = if has_current {
         tile_progress
             .and_then(|(tiles_done, tiles_total)| {
@@ -59,7 +57,7 @@ struct DesktopLibraryExportContext {
 }
 
 #[cfg(not(target_os = "android"))]
-pub(in crate::app) fn spawn_desktop_library_batch_export(
+fn spawn_desktop_library_batch_export(
     request: DesktopLibraryBatchExportRequest,
 ) -> mpsc::Receiver<LibraryBatchExportEvent> {
     let DesktopLibraryBatchExportRequest {
@@ -112,9 +110,6 @@ pub(in crate::app) fn spawn_desktop_library_batch_export(
 
                 let cancelled = context.cancellation.load(Ordering::Acquire);
                 if !cancelled || item_result.is_ok() {
-                    // A cancellation request can arrive just after the current
-                    // image was published. Count that image, but do not report a
-                    // cooperative cancellation result as an export failure.
                     let error = (!cancelled)
                         .then(|| item_result.err())
                         .flatten()
@@ -353,29 +348,6 @@ impl AurawApp {
         );
     }
 
-    pub(in crate::app) fn request_library_batch_export_cancellation(&mut self) -> bool {
-        self.cancel_export_task();
-        if let Some(batch) = self.export.batch.as_mut() {
-            batch.cancel_requested = true;
-            batch.pending.clear();
-            batch.current.is_none()
-        } else {
-            false
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub(crate) fn cancel_library_batch_export(&mut self) {
-        self.request_library_batch_export_cancellation();
-    }
-
-    #[cfg(target_os = "android")]
-    pub(crate) fn cancel_library_batch_export(&mut self) {
-        if self.request_library_batch_export_cancellation() {
-            self.finish_library_batch_export();
-        }
-    }
-
     #[cfg(target_os = "android")]
     pub(crate) fn start_android_library_exports(
         &mut self,
@@ -419,10 +391,6 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub(in crate::app) fn start_next_library_export(&mut self, _frame: &eframe::Frame) {
-        // Android's batch path must use the SAF document bridge. Once the user
-        // enters Develop, do not replace that interactive document with the next
-        // batch item. The current export may finish; remaining items resume when
-        // the user returns to Library.
         if self.ui.active_tab == AppTab::Develop {
             if let Some(task) = self.export.task.as_mut() {
                 if task.kind == ExportTaskKind::LibraryBatch {
@@ -746,8 +714,6 @@ impl AurawApp {
         _success: bool,
         _frame: &eframe::Frame,
     ) {
-        // Desktop batch export owns a separate decode/export worker and never
-        // consumes the document opened in Develop.
     }
 
     #[cfg(target_os = "android")]
