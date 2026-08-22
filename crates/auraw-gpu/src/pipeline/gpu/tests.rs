@@ -1,9 +1,8 @@
 use super::{
-    pack_effect_mask, pack_local_point_curve, pack_point_curve,
-    processing_work_format, shader_manager::ShaderManager,
-    work_shader_source, ProcessingQuality, SHADER_BAYER_RCD_P1, SHADER_BAYER_RCD_P2,
-    SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4, SHADER_COLOR_DENOISE, SHADER_CREATIVE_EFFECTS,
-    SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_SCENE_ADJUSTMENTS,
+    pack_effect_mask, pack_local_point_curve, pack_point_curve, processing_work_format,
+    shader_manager::ShaderManager, work_shader_source, ProcessingQuality, SHADER_BAYER_RCD_P1,
+    SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4, SHADER_COLOR_DENOISE,
+    SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_SCENE_ADJUSTMENTS,
     SHADER_TONE_ANALYSIS, SHADER_VIEW_TRANSFORM, SHADER_XTRANS_DEMOSAIC, SHADER_XTRANS_FINISH,
 };
 use crate::pipeline::{LocalMask, MaskEffect, MaskKind, PointCurve};
@@ -98,7 +97,10 @@ fn mask_effect_packing_preserves_shader_id_activity_and_clamps() {
     assert_eq!(packed.metadata[0], 1);
     assert_eq!(packed.metadata[1], 1);
     assert_eq!(packed.metadata[2], 0);
-    assert_eq!(packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT, MaskEffect::Blur.shader_id());
+    assert_eq!(
+        packed.metadata[3] >> super::MASK_EFFECT_ID_SHIFT,
+        MaskEffect::Blur.shader_id()
+    );
     assert_eq!(packed.adjust_0, [100.0, 16.0, 0.0, 0.0]);
 
     mask.enabled = false;

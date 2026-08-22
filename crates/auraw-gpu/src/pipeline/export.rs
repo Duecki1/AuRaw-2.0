@@ -2,10 +2,10 @@ use super::geometry::GeometryInverseMap;
 use super::{
     export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into, mask_atlas_edge,
     required_export_tile_halo, CfaKind, ExposureParams, GeometryTransform, GpuParams,
-    GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack,
-    NativeRect, ProcessingQuality, ProcessingStage, RawGpuPipeline, RawGpuProgramTemplate,
-    RemoveEditState, TilePlan, TileSpec, ToneStatisticsSnapshot, EXPORT_TILE_HALO,
-    MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
+    GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack, NativeRect,
+    ProcessingQuality, ProcessingStage, RawGpuPipeline, RawGpuProgramTemplate, RemoveEditState,
+    TilePlan, TileSpec, ToneStatisticsSnapshot, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    MIN_EXPORT_TILE_HALO,
 };
 use crate::file_ops::replace_file;
 use anyhow::{Context, Result};
@@ -645,12 +645,8 @@ fn run_export_worker(
     let (output_width, output_height) = job
         .settings
         .checked_output_dimensions(geometry_width, geometry_height)?;
-    let tile_spec = resolved_export_tile_spec(
-        job.tile_spec,
-        &job.exposure,
-        &job.masks,
-        job.raw.width,
-    )?;
+    let tile_spec =
+        resolved_export_tile_spec(job.tile_spec, &job.exposure, &job.masks, job.raw.width)?;
 
     let color_settings = match format {
         ExportFormat::Jpeg => {

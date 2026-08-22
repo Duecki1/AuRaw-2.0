@@ -263,7 +263,11 @@ fn encode_ifd_block(entries: &[ExifEntry], ifd_offset: u32) -> Vec<u8> {
 /// Builds a compact, standards-shaped TIFF/EXIF payload used by both JPEG's
 /// APP1 segment and PNG's eXIf chunk. The output pixels have already been
 /// physically oriented, so Orientation is always normalized to 1.
-pub(super) fn build_exif_payload(metadata: &ExportMetadata, output_width: u32, output_height: u32) -> Vec<u8> {
+pub(super) fn build_exif_payload(
+    metadata: &ExportMetadata,
+    output_width: u32,
+    output_height: u32,
+) -> Vec<u8> {
     let mut ifd0_entries = vec![
         ExifEntry {
             tag: 0x0100,

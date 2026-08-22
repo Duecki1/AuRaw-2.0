@@ -846,30 +846,21 @@ pub(super) fn dispatch_compute(
     pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
 }
 
-pub(super) fn buffer_binding(
-    binding: u32,
-    buffer: &wgpu::Buffer,
-) -> wgpu::BindGroupEntry<'_> {
+pub(super) fn buffer_binding(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: buffer.as_entire_binding(),
     }
 }
 
-pub(super) fn texture_binding(
-    binding: u32,
-    view: &wgpu::TextureView,
-) -> wgpu::BindGroupEntry<'_> {
+pub(super) fn texture_binding(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: wgpu::BindingResource::TextureView(view),
     }
 }
 
-pub(super) fn sampler_binding(
-    binding: u32,
-    sampler: &wgpu::Sampler,
-) -> wgpu::BindGroupEntry<'_> {
+pub(super) fn sampler_binding(binding: u32, sampler: &wgpu::Sampler) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: wgpu::BindingResource::Sampler(sampler),
@@ -1361,8 +1352,6 @@ mod resource_plan_tests {
             (16 * 8 * 8) + (8 * 4 * 8)
         );
     }
-
-
 
     #[test]
     fn resource_plan_rejects_arithmetic_overflow() {
