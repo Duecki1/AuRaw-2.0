@@ -1,34 +1,65 @@
 use super::*;
 
+impl AurawApp {
+    fn release_optional_gpu_memory(&mut self) {
+        // Optional zoom/navigation pipelines and UI-only mask textures are
+        // safe to discard between frames. Keep the main preview alive so the
+        // user can save work or lower preview quality before retrying.
+        let retired = [
+            self.preview.detail
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+            self.preview.navigation
+                .take()
+                .and_then(|preview| preview.pipeline.egui_texture_id),
+        ];
+        for texture_id in retired.into_iter().flatten() {
+            self.retire_egui_texture(texture_id);
+        }
+        self.preview.detail_rebuild_receiver = None;
+        self.preview.detail_pending_stage = None;
+        self.preview.navigation_pending_stage = None;
+        self.preview.detail_urgent = false;
+        self.preview.zoom = 1.0;
+        self.preview.center = [0.5, 0.5];
+        self.masks.overlay_texture = None;
+        self.masks.overlay_texture_key = None;
+        self.masks.thumbnail_group_textures.clear();
+        self.masks.thumbnail_component_textures.clear();
+        self.masks.thumbnail_component_mask = None;
+    }
+
+    fn stop_ai_after_gpu_memory_failure(&mut self) {
+        self.cancel_foreground_operation();
+        if self.ai.mask_update_active {
+            self.cancel_ai_mask_update();
+        }
+        self.masks.source_cache = None;
+        self.ai.object_cache = None;
+        #[cfg(not(target_os = "android"))]
+        if self.ai.gpu_acceleration {
+            // This also invalidates the cached ONNX session. If inference is
+            // still unwinding, model-runtime drops it as soon as it releases
+            // its lease instead of retaining the failed GPU allocation.
+            self.set_ai_gpu_acceleration(false);
+        }
+        self.release_optional_gpu_memory();
+    }
+}
+
 impl eframe::App for AurawApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if auraw_gpu::take_gpu_out_of_memory() {
-            // Optional zoom/navigation pipelines and UI-only mask textures are
-            // safe to discard between frames. Keep the main preview alive so
-            // the user can save work or lower preview quality before retrying.
-            let retired = [
-                self.preview.detail
-                    .take()
-                    .and_then(|preview| preview.pipeline.egui_texture_id),
-                self.preview.navigation
-                    .take()
-                    .and_then(|preview| preview.pipeline.egui_texture_id),
-            ];
-            for texture_id in retired.into_iter().flatten() {
-                self.retire_egui_texture(texture_id);
-            }
-            self.preview.detail_pending_stage = None;
-            self.preview.navigation_pending_stage = None;
-            self.preview.detail_urgent = false;
-            self.preview.zoom = 1.0;
-            self.preview.center = [0.5, 0.5];
-            self.masks.overlay_texture = None;
-            self.masks.overlay_texture_key = None;
-            self.masks.thumbnail_group_textures.clear();
-            self.masks.thumbnail_component_textures.clear();
-            self.masks.thumbnail_component_mask = None;
+        if auraw_ai::take_ai_gpu_memory_failure() {
+            self.stop_ai_after_gpu_memory_failure();
             self.ui.notice = Some(
-                "GPU memory was exhausted. AuRaw cancelled the operation and released optional preview textures. Close other GPU-heavy apps or lower Preview Quality before retrying."
+                "An AI model ran out of GPU memory. Its job was stopped, GPU AI was disabled, and optional preview textures were released. You can re-enable GPU AI in Settings after reducing Subject mask quality."
+                    .to_owned(),
+            );
+        }
+        if auraw_gpu::take_gpu_out_of_memory() {
+            self.stop_ai_after_gpu_memory_failure();
+            self.ui.notice = Some(
+                "GPU memory was exhausted. AuRaw stopped AI work, disabled GPU AI, and released optional preview textures. Close other GPU-heavy apps or lower Preview Quality before retrying."
                     .to_owned(),
             );
         }

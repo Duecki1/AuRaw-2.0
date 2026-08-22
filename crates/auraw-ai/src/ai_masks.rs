@@ -96,6 +96,14 @@ impl BiRefNetQuality {
         }
     }
 
+    /// Medium and High BiRefNet have fixed 2K-class transformer inputs. Their
+    /// activation peaks can consume several GiB, which is unsafe beside the
+    /// interactive wgpu renderer even when the model itself fits in VRAM.
+    /// Keep them on CPU; Low remains available for GPU acceleration.
+    pub const fn requires_cpu_to_protect_interactive_gpu(self) -> bool {
+        matches!(self, Self::Medium | Self::High)
+    }
+
     pub const fn model(self) -> BiRefNetModelSpec {
         match self {
             Self::Low => BiRefNetModelSpec {
@@ -118,7 +126,7 @@ impl BiRefNetQuality {
                 cache_filename: "birefnet-lite-2k.onnx",
                 input_width: 1440,
                 input_height: 2560,
-                explanation: "Lite-2K at its native 2560 x 1440 tensor. More boundary detail with a 331 MB download.",
+                explanation: "Lite-2K at its native 2560 x 1440 tensor. More boundary detail with a 331 MB download; runs on CPU to keep the interactive GPU stable.",
             },
             Self::High => BiRefNetModelSpec {
                 checkpoint: "BiRefNet HR",
@@ -129,7 +137,7 @@ impl BiRefNetQuality {
                 cache_filename: "birefnet-hr.onnx",
                 input_width: 2048,
                 input_height: 2048,
-                explanation: "The dedicated BiRefNet HR checkpoint at 2048 x 2048. Best fine-detail quality; a 1.10 GB download with the highest memory use.",
+                explanation: "The dedicated BiRefNet HR checkpoint at 2048 x 2048. Best fine-detail quality; a 1.10 GB download with the highest memory use. It runs on CPU to keep the interactive GPU stable.",
             },
         }
     }
@@ -572,10 +580,15 @@ fn infer_subject(
     ))
     .context("create BiRefNet input tensor")?;
 
+    let subject_session_options = if quality.requires_cpu_to_protect_interactive_gpu() {
+        SessionOptions::new("BiRefNet").cpu_only()
+    } else {
+        SessionOptions::new("BiRefNet")
+    };
     let (output_width, output_height, logits) = with_model_session(
         subject_model_id(quality),
         model_path,
-        SessionOptions::new("BiRefNet"),
+        subject_session_options,
         mask_model_retention(true),
         |session| run_subject_session(session, input, model.input_width, model.input_height),
     )?;
@@ -1189,6 +1202,13 @@ mod tests {
         assert_ne!(medium.sha256_hex, high.sha256_hex);
         assert_ne!(low.cache_filename, medium.cache_filename);
         assert_ne!(medium.cache_filename, high.cache_filename);
+    }
+
+    #[test]
+    fn high_resolution_subject_models_preserve_interactive_gpu_headroom() {
+        assert!(!BiRefNetQuality::Low.requires_cpu_to_protect_interactive_gpu());
+        assert!(BiRefNetQuality::Medium.requires_cpu_to_protect_interactive_gpu());
+        assert!(BiRefNetQuality::High.requires_cpu_to_protect_interactive_gpu());
     }
 
     #[test]
