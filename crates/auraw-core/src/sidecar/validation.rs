@@ -48,6 +48,24 @@ pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError>
         if stroke.brush.dilation_radius > 64 {
             return invalid("Remove stroke dilation is unreasonably large");
         }
+        if let Some(retouch) = stroke.retouch {
+            finite(
+                "retouch stroke settings",
+                &[
+                    retouch.source[0],
+                    retouch.source[1],
+                    retouch.destination[0],
+                    retouch.destination[1],
+                    retouch.hardness,
+                    retouch.opacity,
+                ],
+            )?;
+            for value in retouch.source.into_iter().chain(retouch.destination) {
+                bounded("retouch source or destination", value, -1.0, 1_000_000.0)?;
+            }
+            bounded("retouch hardness", retouch.hardness, 0.0, 1.0)?;
+            bounded("retouch opacity", retouch.opacity, 0.0, 1.0)?;
+        }
         for point in &stroke.brush.points {
             finite("Remove brush point", &[point.x, point.y, point.radius])?;
             bounded("Remove brush x", point.x, -1.0, 1_000_000.0)?;

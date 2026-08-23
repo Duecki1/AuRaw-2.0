@@ -7,7 +7,7 @@ use crate::app::{
 use crate::pipeline::{
     BrushDab, BrushMode, GeometryTransform, LensGeometryMap, MaskCombineMode, MaskGeometry,
     MaskKind,
-    ObjectStroke,
+    ObjectStroke, RetouchStroke,
 };
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui};

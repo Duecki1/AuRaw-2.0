@@ -6,6 +6,7 @@ use super::desktop::{
 };
 use crate::pipeline::{
     MaskKind, NativeRect, RemoveBrushPoint, RemoveBrushStroke, RemovePatch, RemoveStroke,
+    RetouchAlignment, RetouchStroke, RetouchTool,
 };
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
@@ -326,6 +327,14 @@ fn sidecar_round_trip_preserves_edit_state() {
             vec![255, 96],
         )
         .unwrap()],
+        retouch: Some(RetouchStroke {
+            tool: RetouchTool::Heal,
+            alignment: RetouchAlignment::Aligned,
+            source: [900.0, 700.0],
+            destination: [1234.0, 987.0],
+            hardness: 0.5,
+            opacity: 0.8,
+        }),
     });
     let encoded = encode(edits.clone()).unwrap();
     let loaded = decode(&encoded).unwrap();

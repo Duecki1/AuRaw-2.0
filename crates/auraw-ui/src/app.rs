@@ -16,10 +16,10 @@ use crate::pipeline::{
     MaskRgbImage,
     MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
     RawGpuProgramTemplate, RemoveBrushPoint, RemoveBrushStroke, RemoveEditState,
-    SubjectRefinement, TiledExportJob, TileSpec, EXPORT_TILE_HALO,
+    RetouchAlignment, RetouchStroke, RetouchTool, SubjectRefinement, TiledExportJob, TileSpec, EXPORT_TILE_HALO,
     MAX_LOCAL_MASKS,
 };
-use crate::remove::{spawn_remove, RemoveEvent, RemoveRequest};
+use crate::remove::{spawn_remove, spawn_retouch, RemoveEvent, RemoveRequest, RetouchRequest};
 use crate::sidecar::{
     AdjustmentCopySettings, AdjustmentPasteMode, EditState as SidecarEditState,
     LensEditState as SidecarLensEditState,
@@ -301,6 +301,34 @@ pub enum SidebarTab {
     Masks,
     Inpainting,
     Export,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum InpaintTool {
+    #[default]
+    Remove,
+    Clone,
+    Heal,
+}
+
+impl InpaintTool {
+    pub(crate) const ALL: [Self; 3] = [Self::Remove, Self::Clone, Self::Heal];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Remove => "Remove",
+            Self::Clone => "Clone",
+            Self::Heal => "Heal",
+        }
+    }
+
+    pub(crate) const fn retouch(self) -> Option<RetouchTool> {
+        match self {
+            Self::Remove => None,
+            Self::Clone => Some(RetouchTool::Clone),
+            Self::Heal => Some(RetouchTool::Heal),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1080,11 +1108,19 @@ pub(crate) struct PersistenceState {
 }
 
 pub(crate) struct InpaintState {
+    pub(crate) tool: InpaintTool,
     pub(crate) brush_size: f32,
+    pub(crate) brush_hardness: f32,
+    pub(crate) brush_opacity: f32,
+    pub(crate) alignment: RetouchAlignment,
+    pub(crate) source_point: Option<[f32; 2]>,
+    pub(crate) source_pick_active: bool,
+    pub(crate) aligned_offset: Option<[f32; 2]>,
     pub(crate) edits: Arc<RemoveEditState>,
     pub(crate) active_points: Vec<RemoveBrushPoint>,
     pub(crate) last_brush_uv: Option<[f32; 2]>,
     pub(crate) pending_brush: Option<RemoveBrushStroke>,
+    pub(crate) pending_retouch: Option<RetouchStroke>,
     pub(crate) model_consent_open: bool,
     pub(crate) receiver: Option<mpsc::Receiver<RemoveEvent>>,
     pub(crate) cancellation: Option<Arc<AtomicBool>>,

@@ -7,6 +7,64 @@ pub const REMOVE_MAX_STROKES: usize = 512;
 pub const REMOVE_MAX_POINTS_PER_STROKE: usize = 65_536;
 pub const REMOVE_MAX_PATCHES_PER_STROKE: usize = 256;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetouchTool {
+    #[default]
+    Clone,
+    Heal,
+}
+
+impl RetouchTool {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Clone => "Clone",
+            Self::Heal => "Heal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetouchAlignment {
+    #[default]
+    None,
+    Aligned,
+    Registered,
+    Fixed,
+}
+
+impl RetouchAlignment {
+    pub const ALL: [Self; 4] = [
+        Self::None,
+        Self::Aligned,
+        Self::Registered,
+        Self::Fixed,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Aligned => "Aligned",
+            Self::Registered => "Registered",
+            Self::Fixed => "Fixed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RetouchStroke {
+    pub tool: RetouchTool,
+    pub alignment: RetouchAlignment,
+    /// Native-image source point selected by the user.
+    pub source: [f32; 2],
+    /// First native-image destination point in this stroke.
+    pub destination: [f32; 2],
+    /// GIMP-style hard-center fraction. The remaining radius is feathered.
+    pub hardness: f32,
+    pub opacity: f32,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RemoveBrushPoint {
     pub x: f32,
@@ -138,6 +196,8 @@ pub struct RemoveStroke {
     pub brush: RemoveBrushStroke,
     #[serde(default)]
     pub patches: Vec<RemovePatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retouch: Option<RetouchStroke>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
