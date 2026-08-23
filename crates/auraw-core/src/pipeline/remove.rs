@@ -1,6 +1,6 @@
 use super::{ExposureParams, LoadedRaw};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub const BIG_LAMA_INPUT_EDGE: u32 = 512;
 pub const REMOVE_MAX_STROKES: usize = 512;
@@ -116,10 +116,21 @@ pub struct RemoveContextCrop {
     pub target: NativeRect,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RemovePatchSidecarCache {
+    pub fingerprint: u64,
+    pub rgb_png: Arc<[u8]>,
+    pub alpha_png: Arc<[u8]>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemovePatch {
     pub bounds: NativeRect,
-    #[serde(default, with = "arc_u16_le_base64")]
+    #[serde(
+        default,
+        with = "arc_u16_le_base64",
+        skip_serializing_if = "arc_u16_is_empty"
+    )]
     pub rgb_scene16f: Arc<[u16]>,
     #[serde(
         default,
@@ -127,12 +138,31 @@ pub struct RemovePatch {
         skip_serializing_if = "arc_u16_is_empty"
     )]
     pub rgb_srgb16: Arc<[u16]>,
-    #[serde(with = "arc_u8_base64")]
+    #[serde(
+        default,
+        with = "arc_u8_base64",
+        skip_serializing_if = "arc_u8_is_empty"
+    )]
     pub alpha: Arc<[u8]>,
+    #[serde(skip)]
+    pub(crate) sidecar_cache: Arc<OnceLock<RemovePatchSidecarCache>>,
 }
 
 fn arc_u16_is_empty(values: &Arc<[u16]>) -> bool {
     values.is_empty()
+}
+
+fn arc_u8_is_empty(values: &Arc<[u8]>) -> bool {
+    values.is_empty()
+}
+
+impl PartialEq for RemovePatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.bounds == other.bounds
+            && self.rgb_scene16f == other.rgb_scene16f
+            && self.rgb_srgb16 == other.rgb_srgb16
+            && self.alpha == other.alpha
+    }
 }
 
 impl RemovePatch {
@@ -158,6 +188,7 @@ impl RemovePatch {
             rgb_scene16f: Arc::from(rgb_scene16f),
             rgb_srgb16: Arc::from([]),
             alpha: Arc::from(alpha),
+            sidecar_cache: Arc::default(),
         })
     }
 
@@ -183,6 +214,7 @@ impl RemovePatch {
             rgb_scene16f: Arc::from([]),
             rgb_srgb16: Arc::from(rgb_srgb16),
             alpha: Arc::from(alpha),
+            sidecar_cache: Arc::default(),
         })
     }
 
@@ -799,8 +831,8 @@ mod tests {
         };
         let mask = rasterize_remove_brush(64, 48, &brush).unwrap();
         assert!(mask.pixels.iter().all(|value| *value == 0 || *value == 255));
-        assert!(mask.pixels.iter().any(|value| *value == 255));
-        assert!(mask.pixels.iter().any(|value| *value == 0));
+        assert!(mask.pixels.contains(&255));
+        assert!(mask.pixels.contains(&0));
     }
 
     #[test]
