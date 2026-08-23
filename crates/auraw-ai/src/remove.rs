@@ -4,12 +4,12 @@ use crate::model_install::ModelInstallSpec;
 use crate::model_runtime::{with_model_session, AiModel, AiRuntimeContext, ModelRetention};
 use crate::pipeline::{
     adaptive_remove_dilation, pipeline_scene_to_canonical_remove_scene,
-    pipeline_scene_to_working_rec2020, plan_remove_context_crops, rasterize_remove_brush,
+    pipeline_scene_to_working_rec2020, plan_remove_context_crop, rasterize_remove_brush,
     remove_model_srgb_to_canonical_scene, remove_model_view_gain, remove_scene_to_model_srgb,
     render_remove_scene_crop, working_rec2020_to_canonical_remove_scene, DevelopedCropJob,
     ExposureParams, GeometryTransform, GpuProgramPrewarm, LoadedRaw, MaskStack, NativeRect,
-    RemoveBrushStroke, RemoveContextCrop, RemoveEditState, RemoveMask, RemovePatch, RemoveStroke,
-    RetouchAlignment, RetouchStroke, RetouchTool, ToneStatisticsSnapshot, BIG_LAMA_INPUT_EDGE,
+    RemoveBrushStroke, RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, RetouchAlignment,
+    RetouchStroke, RetouchTool, ToneStatisticsSnapshot, BIG_LAMA_INPUT_EDGE,
 };
 use crate::ModelDownloadProgress;
 use anyhow::{Context, Result};
@@ -168,63 +168,45 @@ fn run_remove(request: RemoveRequest, events: &mpsc::Sender<RemoveEvent>) -> Res
     }
     let mask = rasterize_remove_brush(request.raw.width, request.raw.height, &brush)
         .context("Remove brush produced no native image mask")?;
-    let crops = plan_remove_context_crops(request.raw.width, request.raw.height, &mask);
-    anyhow::ensure!(
-        !crops.is_empty(),
-        "Remove mask produced no local context crops"
-    );
+    let crop = plan_remove_context_crop(request.raw.width, request.raw.height, &mask)
+        .context("Remove mask produced no context crop")?;
+    ensure_not_cancelled(&request.cancellation)?;
+    let scene = render_remove_scene_crop(DevelopedCropJob {
+        device: request.device.clone(),
+        queue: request.queue.clone(),
+        raw: Arc::clone(&request.raw),
+        geometry: request.geometry,
+        exposure: request.exposure,
+        masks: request.masks.clone(),
+        remove: request.existing,
+        crop,
+        tone_statistics: request.tone_statistics.clone(),
+        program_prewarm: request.program_prewarm.clone(),
+    })
+    .with_context(|| {
+        format!(
+            "render native scene Remove context {}x{} at {},{}",
+            crop.width, crop.height, crop.x, crop.y
+        )
+    })?;
+    ensure_not_cancelled(&request.cancellation)?;
 
-    let mut working = request.existing;
-    let mut patches = Vec::with_capacity(crops.len());
-    for (index, planned) in crops.iter().copied().enumerate() {
-        ensure_not_cancelled(&request.cancellation)?;
-        let scene = render_remove_scene_crop(DevelopedCropJob {
-            device: request.device.clone(),
-            queue: request.queue.clone(),
-            raw: Arc::clone(&request.raw),
-            geometry: request.geometry,
-            exposure: request.exposure,
-            masks: request.masks.clone(),
-            remove: working.clone(),
-            crop: planned.context,
-            tone_statistics: request.tone_statistics.clone(),
-            program_prewarm: request.program_prewarm.clone(),
-        })
-        .with_context(|| {
-            format!(
-                "render native scene Remove context {}x{} at {},{}",
-                planned.context.width, planned.context.height, planned.context.x, planned.context.y
-            )
-        })?;
-        ensure_not_cancelled(&request.cancellation)?;
-
-        let patch = infer_crop(
-            &request.model_path,
-            planned,
-            request.raw.width,
-            request.raw.height,
-            &request.raw,
-            &request.exposure,
-            &scene,
-            &mask,
-        )?;
-        let partial = RemoveStroke {
-            brush: brush.clone(),
-            patches: vec![patch.clone()],
-            retouch: None,
-            opacity: request.opacity,
-        };
-        working.strokes.push(partial);
-        patches.push(patch);
-        let _ = events.send(RemoveEvent::Processing {
-            completed: index + 1,
-            total: crops.len(),
-        });
-    }
+    let patch = infer_crop(
+        &request.model_path,
+        crop,
+        &request.raw,
+        &request.exposure,
+        &scene,
+        &mask,
+    )?;
+    let _ = events.send(RemoveEvent::Processing {
+        completed: 1,
+        total: 1,
+    });
 
     Ok(RemoveStroke {
         brush,
-        patches,
+        patches: vec![patch],
         retouch: None,
         opacity: request.opacity,
     })
@@ -850,15 +832,12 @@ fn gimp_heal_laplace_loop(
 
 fn infer_crop(
     model_path: &Path,
-    planned: RemoveContextCrop,
-    image_width: u32,
-    image_height: u32,
+    crop: NativeRect,
     raw: &LoadedRaw,
     exposure: &ExposureParams,
     scene: &[f32],
     mask: &RemoveMask,
 ) -> Result<RemovePatch> {
-    let crop = planned.context;
     let expected = crop.width as usize * crop.height as usize * 3;
     anyhow::ensure!(
         scene.len() == expected,
@@ -879,8 +858,7 @@ fn infer_crop(
         BIG_LAMA_INPUT_EDGE,
         FilterType::Lanczos3,
     );
-    let source_mask = crop_binary_mask(crop, mask, planned.target);
-    let blend_mask = crop_binary_mask(crop, mask, crop);
+    let source_mask = crop_binary_mask(crop, mask);
     let resized_mask = image::imageops::resize(
         &source_mask,
         BIG_LAMA_INPUT_EDGE,
@@ -979,24 +957,19 @@ fn infer_crop(
         image::imageops::resize(&model_output, crop.width, crop.height, FilterType::Lanczos3);
 
     build_cached_patch(
-        planned,
-        mask.bounds,
-        image_width,
-        image_height,
+        crop,
         raw,
         exposure,
         scene,
         view_gain,
         &restored,
         &source_mask,
-        &blend_mask,
     )
 }
 
-fn crop_binary_mask(crop: NativeRect, mask: &RemoveMask, target: NativeRect) -> GrayImage {
+fn crop_binary_mask(crop: NativeRect, mask: &RemoveMask) -> GrayImage {
     let mut out = GrayImage::new(crop.width, crop.height);
-    let active = mask.bounds.intersect(target);
-    if let Some(intersection) = active.and_then(|active| crop.intersect(active)) {
+    if let Some(intersection) = mask.bounds.intersect(crop) {
         for y in intersection.y..intersection.bottom() {
             for x in intersection.x..intersection.right() {
                 if mask.contains_global(x, y) {
@@ -1009,22 +982,17 @@ fn crop_binary_mask(crop: NativeRect, mask: &RemoveMask, target: NativeRect) -> 
 }
 
 fn build_cached_patch(
-    planned: RemoveContextCrop,
-    mask_bounds: NativeRect,
-    image_width: u32,
-    image_height: u32,
+    crop: NativeRect,
     raw: &LoadedRaw,
     exposure: &ExposureParams,
     source_scene: &[f32],
     view_gain: f32,
     restored: &Rgb32FImage,
     binary_mask: &GrayImage,
-    blend_mask: &GrayImage,
 ) -> Result<RemovePatch> {
-    let crop = planned.context;
-    let scale = crop.width as f32 / BIG_LAMA_INPUT_EDGE as f32;
+    let scale = crop.width.max(crop.height) as f32 / BIG_LAMA_INPUT_EDGE as f32;
     let sigma = (1.25 * scale).clamp(1.25, 5.0);
-    let blurred = image::imageops::blur(blend_mask, sigma);
+    let blurred = image::imageops::blur(binary_mask, sigma);
     let mut left = crop.width;
     let mut top = crop.height;
     let mut right = 0u32;
@@ -1033,16 +1001,7 @@ fn build_cached_patch(
         for x in 0..crop.width {
             let binary = binary_mask.get_pixel(x, y)[0];
             let soft = blurred.get_pixel(x, y)[0];
-            let base_alpha = if binary != 0 { soft } else { 0 };
-            let alpha = apply_tile_transition(
-                base_alpha,
-                planned,
-                mask_bounds,
-                image_width,
-                image_height,
-                x,
-                y,
-            );
+            let alpha = if binary != 0 { soft } else { 0 };
             if alpha >= 2 {
                 left = left.min(x);
                 top = top.min(y);
@@ -1085,16 +1044,7 @@ fn build_cached_patch(
             );
             let binary = binary_mask.get_pixel(x, y)[0];
             let soft = blurred.get_pixel(x, y)[0];
-            let base_alpha = if binary != 0 { soft } else { 0 };
-            let coverage = apply_tile_transition(
-                base_alpha,
-                planned,
-                mask_bounds,
-                image_width,
-                image_height,
-                x,
-                y,
-            );
+            let coverage = if binary != 0 { soft } else { 0 };
             let mix = coverage as f32 / 255.0;
             for channel in 0..3 {
                 let value = source[channel] * (1.0 - mix) + generated[channel] * mix;
@@ -1109,41 +1059,6 @@ fn build_cached_patch(
         }
     }
     RemovePatch::new_scene(bounds, rgb16f, alpha).map_err(anyhow::Error::msg)
-}
-
-fn apply_tile_transition(
-    alpha: u8,
-    planned: RemoveContextCrop,
-    mask_bounds: NativeRect,
-    image_width: u32,
-    image_height: u32,
-    local_x: u32,
-    local_y: u32,
-) -> u8 {
-    if alpha == 0 {
-        return 0;
-    }
-    let crop = planned.context;
-    let global_x = crop.x.saturating_add(local_x);
-    let global_y = crop.y.saturating_add(local_y);
-
-    let span = (planned.target.width.min(planned.target.height) as f32 * 0.20).clamp(24.0, 96.0);
-    let smooth = |distance: f32| {
-        let t = (distance / span).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
-    let mut weight = 1.0f32;
-    if planned.target != crop && planned.target.x > mask_bounds.x {
-        weight = weight.min(smooth(global_x as f32 + 0.5 - planned.target.x as f32));
-    }
-    if planned.target != crop && planned.target.y > mask_bounds.y {
-        weight = weight.min(smooth(global_y as f32 + 0.5 - planned.target.y as f32));
-    }
-
-    if global_x >= image_width || global_y >= image_height {
-        return 0;
-    }
-    (alpha as f32 * weight).round().clamp(0.0, 255.0) as u8
 }
 
 #[cfg(test)]
@@ -1261,24 +1176,16 @@ mod tests {
             }
         }
         let restored = Rgb32FImage::from_pixel(64, 64, Rgb([0.4, 0.5, 0.6]));
-        let planned = RemoveContextCrop {
-            context: crop,
-            target: crop,
-        };
         let raw = LoadedRaw::from_scene_linear_rec2020(1, 1, vec![0.18, 0.18, 0.18]).unwrap();
         let exposure = ExposureParams::default();
         let source_scene = vec![0.18f32; 64 * 64 * 3];
         let patch = build_cached_patch(
-            planned,
             crop,
-            1_000,
-            1_000,
             &raw,
             &exposure,
             &source_scene,
             1.0,
             &restored,
-            &binary,
             &binary,
         )
         .unwrap();
@@ -1287,35 +1194,6 @@ mod tests {
         assert_eq!(patch.bounds.right(), crop.x + 46);
         assert_eq!(patch.bounds.bottom(), crop.y + 44);
         assert!(patch.alpha.iter().all(|alpha| *alpha > 0));
-    }
-
-    #[test]
-    fn large_tile_model_mask_is_limited_to_target_core() {
-        let mask = RemoveMask {
-            bounds: NativeRect {
-                x: 0,
-                y: 0,
-                width: 1024,
-                height: 1024,
-            },
-            pixels: vec![255; 1024 * 1024],
-        };
-        let crop = NativeRect {
-            x: 0,
-            y: 0,
-            width: 1024,
-            height: 1024,
-        };
-        let target = NativeRect {
-            x: 0,
-            y: 0,
-            width: 512,
-            height: 512,
-        };
-        let source = crop_binary_mask(crop, &mask, target);
-        assert_eq!(source.get_pixel(100, 100)[0], 255);
-        assert_eq!(source.get_pixel(700, 100)[0], 0);
-        assert_eq!(source.get_pixel(100, 700)[0], 0);
     }
 
     #[test]
@@ -1335,7 +1213,7 @@ mod tests {
             width: 80,
             height: 80,
         };
-        let source = crop_binary_mask(crop, &mask, crop);
+        let source = crop_binary_mask(crop, &mask);
         let resized = image::imageops::resize(
             &source,
             BIG_LAMA_INPUT_EDGE,

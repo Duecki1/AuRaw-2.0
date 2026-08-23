@@ -5,15 +5,25 @@ impl Sidebar {
         _layout: ScreenLayout,
         _frame: &eframe::Frame,
     ) {
+        let active_tool = app.inpaint.tool;
+        let active_stroke_count = app
+            .inpaint
+            .edits
+            .strokes
+            .iter()
+            .filter(|stroke| {
+                active_tool.matches_stroke_tool(stroke.retouch.map(|retouch| retouch.tool))
+            })
+            .count();
         crate::ui::theme::toolbar_row(ui, |ui| {
             ui.strong("Inpainting");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let clear = crate::ui::icons::phosphor_icon_button_enabled(
                     ui,
-                    !app.inpaint.edits.strokes.is_empty() && !app.inpaint.processing(),
+                    active_stroke_count != 0 && !app.inpaint.processing(),
                     egui_phosphor::regular::TRASH,
                     crate::ui::theme::toolbar_icon_size(),
-                    "Clear all inpainting strokes",
+                    &format!("Clear all {} strokes", active_tool.label()),
                 );
                 if clear.clicked() {
                     app.clear_inpainting_tool();
@@ -30,10 +40,13 @@ impl Sidebar {
                 }
             });
             if app.inpaint.tool != previous_tool {
+                app.finish_inpaint_stroke_opacity_edit();
                 app.inpaint.active_points.clear();
                 app.inpaint.last_brush_uv = None;
                 app.inpaint.source_pick_active = false;
                 app.inpaint.aligned_offset = None;
+                app.inpaint.hovered_stroke = None;
+                app.inpaint.selected_stroke = None;
             }
             ui.add_space(8.0);
             let help = match app.inpaint.tool {
@@ -166,24 +179,37 @@ impl Sidebar {
         });
 
         ui.add_space(crate::ui::theme::CARD_GAP);
-        crate::ui::theme::section_card(ui, "Inpainting strokes", |ui| {
+        let history_title = format!("{} stroke history", app.inpaint.tool.label());
+        crate::ui::theme::section_card(ui, &history_title, |ui| {
             app.inpaint.hovered_stroke = None;
             let mut delete_stroke = None;
-            if app.inpaint.edits.strokes.is_empty() {
+            let visible_strokes = app
+                .inpaint
+                .edits
+                .strokes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, stroke)| {
+                    app.inpaint
+                        .tool
+                        .matches_stroke_tool(stroke.retouch.map(|retouch| retouch.tool))
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            if visible_strokes.is_empty() {
                 ui.label(
-                    egui::RichText::new("No inpainting strokes yet.")
+                    egui::RichText::new(format!(
+                        "No {} strokes yet.",
+                        app.inpaint.tool.label()
+                    ))
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 );
             } else {
-                for index in (0..app.inpaint.edits.strokes.len()).rev() {
+                for (history_index, index) in visible_strokes.iter().copied().enumerate().rev() {
                     let stroke = &app.inpaint.edits.strokes[index];
                     let points = stroke.brush.points.len();
                     let patches = stroke.patches.len();
-                    let tool = stroke
-                        .retouch
-                        .map(|retouch| retouch.tool.label())
-                        .unwrap_or("Remove");
                     crate::ui::theme::toolbar_row(ui, |ui| {
                         let selected = app.inpaint.selected_stroke == Some(index);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -201,9 +227,8 @@ impl Sidebar {
                             let stroke_response = crate::ui::theme::navigation_row(
                                 ui,
                                 format!(
-                                    "◎  {} {}  ·  {} points · {} patch{}",
-                                    tool,
-                                    index + 1,
+                                    "◎  Stroke {}  ·  {} points · {} patch{}",
+                                    history_index + 1,
                                     points,
                                     patches,
                                     if patches == 1 { "" } else { "es" }
@@ -231,26 +256,32 @@ impl Sidebar {
                 .inpaint
                 .selected_stroke
                 .and_then(|index| {
-                    app.inpaint
-                        .edits
-                        .strokes
-                        .get(index)
-                        .map(|stroke| (index, stroke))
+                    visible_strokes
+                        .iter()
+                        .position(|visible| *visible == index)
+                        .and_then(|history_index| {
+                            app.inpaint
+                                .edits
+                                .strokes
+                                .get(index)
+                                .map(|stroke| (index, history_index, stroke))
+                        })
                 })
-                .map(|(index, stroke)| {
+                .map(|(index, history_index, stroke)| {
                     (
                         index,
+                        history_index,
                         stroke.opacity,
                         stroke
                             .retouch
                             .map(|retouch| 1.0 - retouch.hardness.clamp(0.0, 1.0)),
                     )
                 });
-            if let Some((index, mut opacity, feather)) = selected_settings {
+            if let Some((index, history_index, mut opacity, feather)) = selected_settings {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(6.0);
-                ui.strong(format!("Selected stroke {}", index + 1));
+                ui.strong(format!("Selected stroke {}", history_index + 1));
                 if let Some(feather) = feather {
                     ui.label(
                         egui::RichText::new(format!("Recorded feather: {:.0}%", feather * 100.0))
