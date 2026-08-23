@@ -1,11 +1,69 @@
 use super::{ExposureParams, LoadedRaw};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub const BIG_LAMA_INPUT_EDGE: u32 = 512;
 pub const REMOVE_MAX_STROKES: usize = 512;
 pub const REMOVE_MAX_POINTS_PER_STROKE: usize = 65_536;
 pub const REMOVE_MAX_PATCHES_PER_STROKE: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetouchTool {
+    #[default]
+    Clone,
+    Heal,
+}
+
+impl RetouchTool {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Clone => "Clone",
+            Self::Heal => "Heal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetouchAlignment {
+    #[default]
+    None,
+    Aligned,
+    Registered,
+    Fixed,
+}
+
+impl RetouchAlignment {
+    pub const ALL: [Self; 4] = [
+        Self::None,
+        Self::Aligned,
+        Self::Registered,
+        Self::Fixed,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Aligned => "Aligned",
+            Self::Registered => "Registered",
+            Self::Fixed => "Fixed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RetouchStroke {
+    pub tool: RetouchTool,
+    pub alignment: RetouchAlignment,
+    /// Native-image source point selected by the user.
+    pub source: [f32; 2],
+    /// First native-image destination point in this stroke.
+    pub destination: [f32; 2],
+    /// GIMP-style hard-center fraction. The remaining radius is feathered.
+    pub hardness: f32,
+    pub opacity: f32,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RemoveBrushPoint {
@@ -58,10 +116,21 @@ pub struct RemoveContextCrop {
     pub target: NativeRect,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RemovePatchSidecarCache {
+    pub fingerprint: u64,
+    pub rgb_png: Arc<[u8]>,
+    pub alpha_png: Arc<[u8]>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemovePatch {
     pub bounds: NativeRect,
-    #[serde(default, with = "arc_u16_le_base64")]
+    #[serde(
+        default,
+        with = "arc_u16_le_base64",
+        skip_serializing_if = "arc_u16_is_empty"
+    )]
     pub rgb_scene16f: Arc<[u16]>,
     #[serde(
         default,
@@ -69,12 +138,31 @@ pub struct RemovePatch {
         skip_serializing_if = "arc_u16_is_empty"
     )]
     pub rgb_srgb16: Arc<[u16]>,
-    #[serde(with = "arc_u8_base64")]
+    #[serde(
+        default,
+        with = "arc_u8_base64",
+        skip_serializing_if = "arc_u8_is_empty"
+    )]
     pub alpha: Arc<[u8]>,
+    #[serde(skip)]
+    pub(crate) sidecar_cache: Arc<OnceLock<RemovePatchSidecarCache>>,
 }
 
 fn arc_u16_is_empty(values: &Arc<[u16]>) -> bool {
     values.is_empty()
+}
+
+fn arc_u8_is_empty(values: &Arc<[u8]>) -> bool {
+    values.is_empty()
+}
+
+impl PartialEq for RemovePatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.bounds == other.bounds
+            && self.rgb_scene16f == other.rgb_scene16f
+            && self.rgb_srgb16 == other.rgb_srgb16
+            && self.alpha == other.alpha
+    }
 }
 
 impl RemovePatch {
@@ -100,6 +188,7 @@ impl RemovePatch {
             rgb_scene16f: Arc::from(rgb_scene16f),
             rgb_srgb16: Arc::from([]),
             alpha: Arc::from(alpha),
+            sidecar_cache: Arc::default(),
         })
     }
 
@@ -125,6 +214,7 @@ impl RemovePatch {
             rgb_scene16f: Arc::from([]),
             rgb_srgb16: Arc::from(rgb_srgb16),
             alpha: Arc::from(alpha),
+            sidecar_cache: Arc::default(),
         })
     }
 
@@ -138,6 +228,8 @@ pub struct RemoveStroke {
     pub brush: RemoveBrushStroke,
     #[serde(default)]
     pub patches: Vec<RemovePatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retouch: Option<RetouchStroke>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -739,8 +831,8 @@ mod tests {
         };
         let mask = rasterize_remove_brush(64, 48, &brush).unwrap();
         assert!(mask.pixels.iter().all(|value| *value == 0 || *value == 255));
-        assert!(mask.pixels.iter().any(|value| *value == 255));
-        assert!(mask.pixels.iter().any(|value| *value == 0));
+        assert!(mask.pixels.contains(&255));
+        assert!(mask.pixels.contains(&0));
     }
 
     #[test]

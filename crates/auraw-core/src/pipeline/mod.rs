@@ -58,7 +58,8 @@ pub use remove::{
     plan_remove_context_crops, rasterize_remove_brush, remove_model_srgb_to_canonical_scene,
     remove_model_view_gain, remove_scene_to_model_srgb, remove_scene_white_balance,
     working_rec2020_to_canonical_remove_scene, NativeRect, RemoveBrushPoint, RemoveBrushStroke,
-    RemoveContextCrop, RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, BIG_LAMA_INPUT_EDGE,
+    RemoveContextCrop, RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, RetouchAlignment,
+    RetouchStroke, RetouchTool, BIG_LAMA_INPUT_EDGE,
     REMOVE_MAX_PATCHES_PER_STROKE,
     REMOVE_MAX_POINTS_PER_STROKE, REMOVE_MAX_STROKES,
 };

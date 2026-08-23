@@ -6,9 +6,13 @@ impl InpaintState {
             cancellation.store(true, std::sync::atomic::Ordering::Release);
         }
         self.edits = Arc::new(RemoveEditState::default());
+        self.source_point = None;
+        self.source_pick_active = false;
+        self.aligned_offset = None;
         self.active_points.clear();
         self.last_brush_uv = None;
         self.pending_brush = None;
+        self.pending_retouch = None;
         self.model_consent_open = false;
         self.receiver = None;
         self.processing_label = None;
@@ -32,8 +36,10 @@ impl AurawApp {
         }
         self.inpaint.receiver = None;
         self.inpaint.pending_brush = None;
+        self.inpaint.pending_retouch = None;
         self.inpaint.model_consent_open = false;
         self.inpaint.active_points.clear();
+        self.inpaint.source_pick_active = false;
         self.inpaint.last_brush_uv = None;
         self.inpaint.processing_label = None;
         self.inpaint.edits = edits;
@@ -47,9 +53,11 @@ impl AurawApp {
         }
         self.inpaint.receiver = None;
         self.inpaint.pending_brush = None;
+        self.inpaint.pending_retouch = None;
         self.inpaint.model_consent_open = false;
         self.inpaint.processing_label = None;
         self.inpaint.active_points.clear();
+        self.inpaint.source_pick_active = false;
         self.inpaint.last_brush_uv = None;
     }
 
@@ -119,6 +127,7 @@ impl AurawApp {
             cancellation: Arc::clone(&cancellation),
         };
         self.inpaint.pending_brush = Some(brush);
+        self.inpaint.pending_retouch = None;
         self.inpaint.processing_label = Some("Preparing local context…".to_owned());
         self.inpaint.cancellation = Some(cancellation);
         self.inpaint.receiver = Some(spawn_remove(request));
@@ -140,9 +149,50 @@ impl AurawApp {
             let _ = self.start_remove_request(frame, existing, brush, false);
         } else {
             self.inpaint.pending_brush = Some(brush);
+            self.inpaint.pending_retouch = None;
             self.inpaint.model_consent_open = true;
             self.egui_ctx.request_repaint();
         }
+    }
+
+    pub(crate) fn start_retouch_worker(
+        &mut self,
+        frame: &eframe::Frame,
+        brush: RemoveBrushStroke,
+        retouch: RetouchStroke,
+    ) {
+        if self.inpaint.processing() || brush.points.is_empty() {
+            return;
+        }
+        let Some(raw) = self.develop.loaded_raw.as_ref().cloned() else {
+            self.ui.notice = Some("Open a RAW image before using retouch brushes.".to_owned());
+            return;
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            self.ui.notice = Some("GPU rendering is unavailable for retouch brushes.".to_owned());
+            return;
+        };
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let request = RetouchRequest {
+            device: render_state.device.clone(),
+            queue: render_state.queue.clone(),
+            raw,
+            geometry: self.develop.geometry.sanitized(),
+            exposure: self.develop.exposure,
+            masks: self.masks.stack.clone(),
+            existing: self.inpaint.edits.as_ref().clone(),
+            brush: brush.clone(),
+            retouch,
+            tone_statistics: None,
+            program_prewarm: self.export.gpu_prewarm.clone(),
+            cancellation: Arc::clone(&cancellation),
+        };
+        self.inpaint.pending_brush = Some(brush);
+        self.inpaint.pending_retouch = Some(retouch);
+        self.inpaint.processing_label = Some(format!("Applying {} locally…", retouch.tool.label()));
+        self.inpaint.cancellation = Some(cancellation);
+        self.inpaint.receiver = Some(spawn_retouch(request));
+        self.egui_ctx.request_repaint_after(Duration::from_millis(16));
     }
 
     pub(crate) fn show_remove_model_dialog(
@@ -211,6 +261,7 @@ impl AurawApp {
                 if ui.button("Cancel").clicked() {
                     self.inpaint.model_consent_open = false;
                     self.inpaint.pending_brush = None;
+                    self.inpaint.pending_retouch = None;
                     self.inpaint.last_brush_uv = None;
                 }
             });
@@ -255,14 +306,19 @@ impl AurawApp {
                     self.inpaint.receiver = None;
                     self.inpaint.cancellation = None;
                     let pending_brush = self.inpaint.pending_brush.take();
+                    let pending_retouch = self.inpaint.pending_retouch.take();
                     self.inpaint.processing_label = None;
                     match result {
                         Ok(stroke) => {
+                            let applied_tool = stroke
+                                .retouch
+                                .map(|retouch| retouch.tool.label())
+                                .unwrap_or("Remove");
                             Arc::make_mut(&mut self.inpaint.edits).strokes.push(stroke);
                             self.inpaint.selected_stroke = None;
                             self.inpaint.hovered_stroke = None;
                             self.note_remove_edit_changed();
-                            self.ui.notice = Some("Remove applied.".to_owned());
+                            self.ui.notice = Some(format!("{applied_tool} applied."));
                         }
                         Err(error) => {
                             if error.contains("consent to its download again") {
@@ -273,9 +329,12 @@ impl AurawApp {
                                         .to_owned(),
                                 );
                             } else if !error.contains("cancelled") {
-                                self.ui.notice = Some(format!("Remove failed: {error}"));
-                                crate::diagnostics::record(format!("Big-LaMa Remove failed: {error}"));
-                                log::error!("Big-LaMa Remove failed: {error}");
+                                let tool = pending_retouch
+                                    .map(|retouch| retouch.tool.label())
+                                    .unwrap_or("Remove");
+                                self.ui.notice = Some(format!("{tool} failed: {error}"));
+                                crate::diagnostics::record(format!("{tool} failed: {error}"));
+                                log::error!("{tool} failed: {error}");
                             }
                         }
                     }
