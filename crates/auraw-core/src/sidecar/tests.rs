@@ -1,15 +1,15 @@
-use super::*;
 #[cfg(not(target_os = "android"))]
 use super::desktop::{
     developed_thumbnail_fingerprint_path_for_raw,
     legacy_developed_thumbnail_fingerprint_path_for_raw, legacy_developed_thumbnail_path_for_raw,
 };
+use super::*;
+#[cfg(not(target_os = "android"))]
+use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
     MaskKind, NativeRect, RemoveBrushPoint, RemoveBrushStroke, RemovePatch, RemoveStroke,
     RetouchAlignment, RetouchStroke, RetouchTool,
 };
-#[cfg(not(target_os = "android"))]
-use crate::pipeline::RawThumbnail;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn sample_edits() -> EditState {
@@ -334,7 +334,9 @@ fn sidecar_round_trip_preserves_edit_state() {
             destination: [1234.0, 987.0],
             hardness: 0.5,
             opacity: 0.8,
+            baked_opacity: None,
         }),
+        opacity: 0.8,
     });
     let encoded = encode(edits.clone()).unwrap();
     let loaded = decode(&encoded).unwrap();
@@ -381,7 +383,9 @@ fn retouch_patches_are_deduplicated_and_png_compressed() {
             destination: [40.0, 80.0],
             hardness: 0.5,
             opacity: 1.0,
+            baked_opacity: None,
         }),
+        opacity: 1.0,
     });
 
     let encoded = encode(edits.clone()).unwrap();
@@ -422,6 +426,55 @@ fn retouch_patches_are_deduplicated_and_png_compressed() {
 }
 
 #[test]
+fn schema_fifteen_retouch_opacity_migrates_to_live_stroke_metadata() {
+    let mut edits = sample_edits();
+    Arc::make_mut(&mut edits.remove).strokes.push(RemoveStroke {
+        brush: RemoveBrushStroke::default(),
+        patches: vec![RemovePatch::new_scene(
+            NativeRect {
+                x: 4,
+                y: 8,
+                width: 1,
+                height: 1,
+            },
+            vec![
+                half::f16::from_f32(0.2).to_bits(),
+                half::f16::from_f32(0.3).to_bits(),
+                half::f16::from_f32(0.4).to_bits(),
+            ],
+            vec![255],
+        )
+        .unwrap()],
+        retouch: Some(RetouchStroke {
+            tool: RetouchTool::Heal,
+            alignment: RetouchAlignment::Aligned,
+            source: [2.0, 3.0],
+            destination: [4.0, 8.0],
+            hardness: 0.25,
+            opacity: 0.6,
+            baked_opacity: None,
+        }),
+        opacity: 0.6,
+    });
+    let encoded = encode(edits).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    legacy["schema_version"] = serde_json::json!(15);
+    legacy
+        .pointer_mut("/edits/remove/strokes/0")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("opacity");
+
+    let loaded = decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let stroke = &loaded.edits.remove.strokes[0];
+    assert!(loaded.migrated);
+    assert_eq!(stroke.opacity, 0.6);
+    assert_eq!(stroke.retouch.unwrap().baked_opacity, Some(0.6));
+    assert!((stroke.composite_opacity() - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
 fn schema_fourteen_inline_retouch_patch_is_still_supported() {
     let patch = RemovePatch::new(
         NativeRect {
@@ -439,6 +492,7 @@ fn schema_fourteen_inline_retouch_patch_is_still_supported() {
         brush: RemoveBrushStroke::default(),
         patches: vec![patch],
         retouch: None,
+        opacity: 1.0,
     });
     let legacy = SidecarDocument {
         format: SIDECAR_FORMAT.to_owned(),

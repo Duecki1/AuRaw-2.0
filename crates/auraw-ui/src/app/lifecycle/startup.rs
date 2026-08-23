@@ -174,6 +174,7 @@ impl AurawApp {
                 processing_label: None,
                 hovered_stroke: None,
                 selected_stroke: None,
+                stroke_opacity_edit_pending: false,
             },
             export: ExportState {
                 gpu_prewarm: None,
@@ -444,6 +445,7 @@ impl AurawApp {
                 processing_label: None,
                 hovered_stroke: None,
                 selected_stroke: None,
+                stroke_opacity_edit_pending: false,
             },
             export: ExportState {
                 gpu_prewarm: Some(gpu_export_prewarm),

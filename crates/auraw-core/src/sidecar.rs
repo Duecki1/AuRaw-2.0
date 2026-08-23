@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 15;
-pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0006;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 16;
+pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0007;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg";
@@ -303,6 +303,16 @@ fn synchronize_subject_refinement(edits: &mut EditState) {
     let refinement = refinement.filter(|refinement| !refinement.is_empty());
     Arc::make_mut(&mut edits.masks).subject_refinement = refinement.clone().unwrap_or_default();
     edits.subject_refinement = refinement;
+}
+
+fn migrate_legacy_retouch_opacity(edits: &mut EditState) {
+    for stroke in &mut Arc::make_mut(&mut edits.remove).strokes {
+        if let Some(retouch) = &mut stroke.retouch {
+            let opacity = retouch.opacity.clamp(0.0, 1.0);
+            stroke.opacity = opacity;
+            retouch.baked_opacity = Some(opacity);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -1124,6 +1134,9 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
         )?;
     } else if !document.remove_assets.is_empty() || !document.remove_asset_refs.is_empty() {
         return invalid("legacy sidecar unexpectedly contains current retouch assets");
+    }
+    if original_schema < 16 {
+        migrate_legacy_retouch_opacity(&mut document.edits);
     }
 
     synchronize_subject_refinement(&mut document.edits);

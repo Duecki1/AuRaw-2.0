@@ -18,6 +18,7 @@ impl InpaintState {
         self.processing_label = None;
         self.hovered_stroke = None;
         self.selected_stroke = None;
+        self.stroke_opacity_edit_pending = false;
     }
 
     pub(crate) fn processing(&self) -> bool {
@@ -45,6 +46,7 @@ impl AurawApp {
         self.inpaint.edits = edits;
         self.inpaint.hovered_stroke = None;
         self.inpaint.selected_stroke = None;
+        self.inpaint.stroke_opacity_edit_pending = false;
     }
 
     pub(crate) fn cancel_remove_processing(&mut self) {
@@ -62,6 +64,7 @@ impl AurawApp {
     }
 
     pub(crate) fn clear_inpainting_tool(&mut self) {
+        self.finish_inpaint_stroke_opacity_edit();
         self.cancel_remove_processing();
         if self.inpaint.edits.strokes.is_empty() {
             return;
@@ -74,6 +77,7 @@ impl AurawApp {
     }
 
     pub(crate) fn delete_inpaint_stroke(&mut self, index: usize) {
+        self.finish_inpaint_stroke_opacity_edit();
         self.cancel_remove_processing();
         if index >= self.inpaint.edits.strokes.len() {
             return;
@@ -83,6 +87,36 @@ impl AurawApp {
         self.inpaint.selected_stroke = None;
         self.note_remove_edit_changed();
         self.egui_ctx.request_repaint();
+    }
+
+    pub(crate) fn set_inpaint_stroke_opacity(&mut self, index: usize, opacity: f32) {
+        if self.inpaint.processing() || !opacity.is_finite() {
+            return;
+        }
+        let opacity = opacity.clamp(0.0, 1.0);
+        let Some(current) = self.inpaint.edits.strokes.get(index) else {
+            return;
+        };
+        if (current.opacity - opacity).abs() <= f32::EPSILON {
+            return;
+        }
+        let Some(stroke) = Arc::make_mut(&mut self.inpaint.edits)
+            .strokes
+            .get_mut(index)
+        else {
+            return;
+        };
+        stroke.opacity = opacity;
+        self.inpaint.stroke_opacity_edit_pending = true;
+        self.queue_preview_processing(ProcessingStage::Raw);
+        self.egui_ctx.request_repaint();
+    }
+
+    pub(crate) fn finish_inpaint_stroke_opacity_edit(&mut self) {
+        if !std::mem::take(&mut self.inpaint.stroke_opacity_edit_pending) {
+            return;
+        }
+        self.note_remove_edit_changed();
     }
 
     fn start_remove_request(
@@ -118,6 +152,7 @@ impl AurawApp {
             masks: self.masks.stack.clone(),
             existing,
             brush: brush.clone(),
+            opacity: self.inpaint.brush_opacity,
             model_path: self.big_lama_model_path(),
             allow_download,
             runtime_path,
@@ -131,7 +166,8 @@ impl AurawApp {
         self.inpaint.processing_label = Some("Preparing local context…".to_owned());
         self.inpaint.cancellation = Some(cancellation);
         self.inpaint.receiver = Some(spawn_remove(request));
-        self.egui_ctx.request_repaint_after(Duration::from_millis(30));
+        self.egui_ctx
+            .request_repaint_after(Duration::from_millis(30));
         true
     }
 
@@ -192,14 +228,11 @@ impl AurawApp {
         self.inpaint.processing_label = Some(format!("Applying {} locally…", retouch.tool.label()));
         self.inpaint.cancellation = Some(cancellation);
         self.inpaint.receiver = Some(spawn_retouch(request));
-        self.egui_ctx.request_repaint_after(Duration::from_millis(16));
+        self.egui_ctx
+            .request_repaint_after(Duration::from_millis(16));
     }
 
-    pub(crate) fn show_remove_model_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        frame: &eframe::Frame,
-    ) {
+    pub(crate) fn show_remove_model_dialog(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if !self.inpaint.model_consent_open {
             return;
         }
@@ -277,7 +310,8 @@ impl AurawApp {
         }
         if events.is_empty() {
             if self.inpaint.receiver.is_some() {
-                self.egui_ctx.request_repaint_after(Duration::from_millis(50));
+                self.egui_ctx
+                    .request_repaint_after(Duration::from_millis(50));
             }
             return;
         }
