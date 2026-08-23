@@ -35,12 +35,7 @@ pub enum RetouchAlignment {
 }
 
 impl RetouchAlignment {
-    pub const ALL: [Self; 4] = [
-        Self::None,
-        Self::Aligned,
-        Self::Registered,
-        Self::Fixed,
-    ];
+    pub const ALL: [Self; 4] = [Self::None, Self::Aligned, Self::Registered, Self::Fixed];
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -63,6 +58,10 @@ pub struct RetouchStroke {
     /// GIMP-style hard-center fraction. The remaining radius is feathered.
     pub hardness: f32,
     pub opacity: f32,
+    /// Opacity that was already baked into patches written before sidecar schema 16.
+    /// New patches keep opacity live and leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baked_opacity: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -223,13 +222,43 @@ impl RemovePatch {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RemoveStroke {
     pub brush: RemoveBrushStroke,
     #[serde(default)]
     pub patches: Vec<RemovePatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retouch: Option<RetouchStroke>,
+    #[serde(default = "default_remove_stroke_opacity")]
+    pub opacity: f32,
+}
+
+impl Default for RemoveStroke {
+    fn default() -> Self {
+        Self {
+            brush: RemoveBrushStroke::default(),
+            patches: Vec::new(),
+            retouch: None,
+            opacity: 1.0,
+        }
+    }
+}
+
+const fn default_remove_stroke_opacity() -> f32 {
+    1.0
+}
+
+impl RemoveStroke {
+    /// Live blend factor for this cached stroke. Retouch patches written before
+    /// schema 16 already contain their creation opacity, so they use a ratio.
+    pub fn composite_opacity(&self) -> f32 {
+        let opacity = self.opacity.clamp(0.0, 1.0);
+        match self.retouch.and_then(|retouch| retouch.baked_opacity) {
+            Some(baked) if baked > f32::EPSILON => opacity / baked,
+            Some(_) => 0.0,
+            None => opacity,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -404,21 +433,19 @@ pub fn plan_remove_context_crops(
         while core_x < mask.bounds.right() {
             let core_w = core_edge.min(mask.bounds.right() - core_x);
             let core_h = core_edge.min(mask.bounds.bottom() - core_y);
-            if mask_region_has_pixels(mask, NativeRect {
-                x: core_x,
-                y: core_y,
-                width: core_w,
-                height: core_h,
-            }) {
+            if mask_region_has_pixels(
+                mask,
+                NativeRect {
+                    x: core_x,
+                    y: core_y,
+                    width: core_w,
+                    height: core_h,
+                },
+            ) {
                 let center_x = core_x + core_w / 2;
                 let center_y = core_y + core_h / 2;
-                let context = square_inside_image(
-                    image_width,
-                    image_height,
-                    center_x,
-                    center_y,
-                    max_context,
-                );
+                let context =
+                    square_inside_image(image_width, image_height, center_x, center_y, max_context);
                 let planned = RemoveContextCrop {
                     context,
                     target: NativeRect {
@@ -450,10 +477,7 @@ fn tile_count_for_span(span: u32, core_edge: u32, stride: u32) -> usize {
     if span <= core_edge {
         return 1;
     }
-    1usize.saturating_add(
-        span.saturating_sub(core_edge)
-            .div_ceil(stride.max(1)) as usize,
-    )
+    1usize.saturating_add(span.saturating_sub(core_edge).div_ceil(stride.max(1)) as usize)
 }
 
 fn mask_region_has_pixels(mask: &RemoveMask, rect: NativeRect) -> bool {
@@ -503,10 +527,8 @@ pub fn remove_scene_white_balance(raw: &LoadedRaw, exposure: &ExposureParams) ->
     if raw.is_pre_demosaiced_raster() {
         return [1.0; 3];
     }
-    let (wb, _, _) = raw.adjusted_white_balance_and_camera_transform(
-        exposure.temperature,
-        exposure.tint,
-    );
+    let (wb, _, _) =
+        raw.adjusted_white_balance_and_camera_transform(exposure.temperature, exposure.tint);
     let green = 0.5 * (wb[1] + wb[3]);
     [wb[0].max(1e-8), green.max(1e-8), wb[2].max(1e-8)]
 }
@@ -660,7 +682,13 @@ pub fn composite_remove_edits_into_linear_region(
     }
     for stroke in &edits.strokes {
         for patch in &stroke.patches {
-            composite_patch_into_linear_region(patch, region, rgb);
+            composite_patch_into_linear_region_with_opacity(
+                patch,
+                region,
+                rgb,
+                stroke.composite_opacity(),
+                stroke.retouch.is_some(),
+            );
         }
     }
 }
@@ -669,6 +697,16 @@ pub fn composite_patch_into_linear_region(
     patch: &RemovePatch,
     region: NativeRect,
     rgb: &mut [f32],
+) {
+    composite_patch_into_linear_region_with_opacity(patch, region, rgb, 1.0, false);
+}
+
+fn composite_patch_into_linear_region_with_opacity(
+    patch: &RemovePatch,
+    region: NativeRect,
+    rgb: &mut [f32],
+    opacity: f32,
+    baked_retouch_coverage: bool,
 ) {
     if patch.has_scene_pixels() {
         return;
@@ -683,7 +721,16 @@ pub fn composite_patch_into_linear_region(
             let patch_x = (x - patch.bounds.x) as usize;
             let region_x = (x - region.x) as usize;
             let patch_index = patch_y * patch.bounds.width as usize + patch_x;
-            let alpha = patch.alpha[patch_index] as f32 / 255.0;
+            let coverage = patch.alpha[patch_index] as f32 / 255.0;
+            let alpha = if baked_retouch_coverage {
+                if coverage > 0.0 {
+                    opacity
+                } else {
+                    0.0
+                }
+            } else {
+                coverage * opacity
+            };
             if alpha <= 0.0 {
                 continue;
             }
@@ -726,8 +773,7 @@ fn perceptual_gamut_compress(rgb: [f32; 3]) -> [f32; 3] {
     if min >= 0.0 && max <= 1.0 {
         return rgb;
     }
-    let luma = (rgb[0] * 0.212_672_9 + rgb[1] * 0.715_152_2 + rgb[2] * 0.072_175)
-        .clamp(0.0, 1.0);
+    let luma = (rgb[0] * 0.212_672_9 + rgb[1] * 0.715_152_2 + rgb[2] * 0.072_175).clamp(0.0, 1.0);
     let mut scale: f32 = 1.0;
     for value in rgb {
         let delta = value - luma;
@@ -959,9 +1005,54 @@ mod tests {
         );
         for pixel in 0..9 {
             if pixel != 4 {
-                assert_eq!(&rgb[pixel * 3..pixel * 3 + 3], &before[pixel * 3..pixel * 3 + 3]);
+                assert_eq!(
+                    &rgb[pixel * 3..pixel * 3 + 3],
+                    &before[pixel * 3..pixel * 3 + 3]
+                );
             }
         }
         assert_ne!(&rgb[12..15], &before[12..15]);
+    }
+
+    #[test]
+    fn stroke_opacity_is_live_for_remove_and_current_retouch_patches() {
+        let remove = RemoveStroke {
+            opacity: 0.35,
+            ..RemoveStroke::default()
+        };
+        assert_eq!(remove.composite_opacity(), 0.35);
+
+        let retouch = RemoveStroke {
+            opacity: 0.4,
+            retouch: Some(RetouchStroke {
+                tool: RetouchTool::Clone,
+                alignment: RetouchAlignment::Aligned,
+                source: [0.0; 2],
+                destination: [0.0; 2],
+                hardness: 0.5,
+                opacity: 0.8,
+                baked_opacity: None,
+            }),
+            ..RemoveStroke::default()
+        };
+        assert_eq!(retouch.composite_opacity(), 0.4);
+    }
+
+    #[test]
+    fn legacy_retouch_uses_opacity_ratio_to_preserve_its_baked_patch() {
+        let stroke = RemoveStroke {
+            opacity: 0.4,
+            retouch: Some(RetouchStroke {
+                tool: RetouchTool::Heal,
+                alignment: RetouchAlignment::Aligned,
+                source: [0.0; 2],
+                destination: [0.0; 2],
+                hardness: 0.5,
+                opacity: 0.8,
+                baked_opacity: Some(0.8),
+            }),
+            ..RemoveStroke::default()
+        };
+        assert!((stroke.composite_opacity() - 0.5).abs() < f32::EPSILON);
     }
 }

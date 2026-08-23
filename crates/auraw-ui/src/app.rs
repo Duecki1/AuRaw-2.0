@@ -1117,6 +1117,7 @@ pub(crate) struct InpaintState {
     pub(crate) processing_label: Option<String>,
     pub(crate) hovered_stroke: Option<usize>,
     pub(crate) selected_stroke: Option<usize>,
+    pub(crate) stroke_opacity_edit_pending: bool,
 }
 
 #[cfg(target_os = "android")]

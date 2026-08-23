@@ -99,6 +99,7 @@ pub fn render_remove_scene_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
     pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
     pipeline.upload_remove_scene_patches(
         &job.queue,
+        &job.device,
         &job.remove,
         &job.raw,
         &job.exposure,

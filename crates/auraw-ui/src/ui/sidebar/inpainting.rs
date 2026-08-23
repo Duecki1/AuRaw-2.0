@@ -110,15 +110,13 @@ impl Sidebar {
                 } else {
                     "Source not set · Ctrl/right-click the image"
                 };
-                ui.label(
-                    egui::RichText::new(source_status)
-                        .small()
-                        .color(if app.inpaint.source_point.is_some() {
-                            ui.visuals().weak_text_color()
-                        } else {
-                            ui.visuals().warn_fg_color
-                        }),
-                );
+                ui.label(egui::RichText::new(source_status).small().color(
+                    if app.inpaint.source_point.is_some() {
+                        ui.visuals().weak_text_color()
+                    } else {
+                        ui.visuals().warn_fg_color
+                    },
+                ));
             }
         });
 
@@ -135,25 +133,28 @@ impl Sidebar {
                     Some("Brush stays the same size on screen; zoom in for a smaller, more precise native-image footprint."),
                 );
                 if app.inpaint.tool.retouch().is_some() {
-                    adjustment_slider(
+                    let mut feather = 1.0 - app.inpaint.brush_hardness;
+                    if adjustment_slider(
                         ui,
-                        "Hardness",
-                        &mut app.inpaint.brush_hardness,
+                        "Feather",
+                        &mut feather,
                         0.0..=1.0,
                         2,
                         0.01,
-                        Some("The hard center paints fully; the outer radius is smoothly feathered."),
-                    );
-                    adjustment_slider(
-                        ui,
-                        "Opacity",
-                        &mut app.inpaint.brush_opacity,
-                        0.01..=1.0,
-                        2,
-                        0.01,
-                        Some("Overall strength of the clone or heal stroke."),
-                    );
+                        Some("Width of the soft outer edge as a fraction of the brush radius."),
+                    ) {
+                        app.inpaint.brush_hardness = 1.0 - feather;
+                    }
                 }
+                adjustment_slider(
+                    ui,
+                    "Opacity",
+                    &mut app.inpaint.brush_opacity,
+                    0.01..=1.0,
+                    2,
+                    0.01,
+                    Some("Initial strength of each new Remove, Clone, or Heal stroke."),
+                );
             });
             if let Some(status) = app.inpaint.processing_label.as_deref() {
                 ui.add_space(8.0);
@@ -226,13 +227,67 @@ impl Sidebar {
                     });
                 }
             }
+            let selected_settings = app
+                .inpaint
+                .selected_stroke
+                .and_then(|index| {
+                    app.inpaint
+                        .edits
+                        .strokes
+                        .get(index)
+                        .map(|stroke| (index, stroke))
+                })
+                .map(|(index, stroke)| {
+                    (
+                        index,
+                        stroke.opacity,
+                        stroke
+                            .retouch
+                            .map(|retouch| 1.0 - retouch.hardness.clamp(0.0, 1.0)),
+                    )
+                });
+            if let Some((index, mut opacity, feather)) = selected_settings {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.strong(format!("Selected stroke {}", index + 1));
+                if let Some(feather) = feather {
+                    ui.label(
+                        egui::RichText::new(format!("Recorded feather: {:.0}%", feather * 100.0))
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                }
+                let changed = ui
+                    .add_enabled_ui(!app.inpaint.processing(), |ui| {
+                        adjustment_slider(
+                            ui,
+                            "Opacity",
+                            &mut opacity,
+                            0.0..=1.0,
+                            2,
+                            0.01,
+                            Some("Non-destructively changes this stored stroke without rerunning its model or heal solver."),
+                        )
+                    })
+                    .inner;
+                if changed {
+                    app.set_inpaint_stroke_opacity(index, opacity);
+                }
+            }
             if let Some(index) = delete_stroke {
                 app.delete_inpaint_stroke(index);
+            }
+            if !ui.input(|input| input.pointer.any_down()) {
+                app.finish_inpaint_stroke_opacity_edit();
             }
 
             if app.preview.gpu_pipeline.is_none() {
                 ui.add_space(8.0);
-                ui.colored_label(ui.visuals().warn_fg_color, "Open a RAW image to use inpainting tools.");
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Open a RAW image to use inpainting tools.",
+                );
             }
         });
     }

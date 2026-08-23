@@ -1,19 +1,17 @@
 use crate::execution_provider::SessionOptions;
-use crate::model_runtime::{
-    with_model_session, AiModel, AiRuntimeContext, ModelRetention,
-};
 use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
 use crate::model_install::ModelInstallSpec;
-use crate::ModelDownloadProgress;
+use crate::model_runtime::{with_model_session, AiModel, AiRuntimeContext, ModelRetention};
 use crate::pipeline::{
-    adaptive_remove_dilation, pipeline_scene_to_canonical_remove_scene, plan_remove_context_crops,
-    rasterize_remove_brush, remove_model_srgb_to_canonical_scene, remove_model_view_gain,
-    remove_scene_to_model_srgb, render_remove_scene_crop, DevelopedCropJob, ExposureParams,
-    GeometryTransform, GpuProgramPrewarm, LoadedRaw, MaskStack, NativeRect, RemoveBrushStroke,
-    RemoveContextCrop, RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, RetouchAlignment,
-    RetouchStroke, RetouchTool, ToneStatisticsSnapshot, BIG_LAMA_INPUT_EDGE,
-    pipeline_scene_to_working_rec2020, working_rec2020_to_canonical_remove_scene,
+    adaptive_remove_dilation, pipeline_scene_to_canonical_remove_scene,
+    pipeline_scene_to_working_rec2020, plan_remove_context_crops, rasterize_remove_brush,
+    remove_model_srgb_to_canonical_scene, remove_model_view_gain, remove_scene_to_model_srgb,
+    render_remove_scene_crop, working_rec2020_to_canonical_remove_scene, DevelopedCropJob,
+    ExposureParams, GeometryTransform, GpuProgramPrewarm, LoadedRaw, MaskStack, NativeRect,
+    RemoveBrushStroke, RemoveContextCrop, RemoveEditState, RemoveMask, RemovePatch, RemoveStroke,
+    RetouchAlignment, RetouchStroke, RetouchTool, ToneStatisticsSnapshot, BIG_LAMA_INPUT_EDGE,
 };
+use crate::ModelDownloadProgress;
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, GrayImage, ImageBuffer, Luma, Rgb, Rgb32FImage};
 use ort::value::Tensor;
@@ -66,6 +64,7 @@ pub struct RemoveRequest {
     pub masks: MaskStack,
     pub existing: RemoveEditState,
     pub brush: RemoveBrushStroke,
+    pub opacity: f32,
     pub model_path: PathBuf,
     pub allow_download: bool,
     pub runtime_path: Option<PathBuf>,
@@ -170,7 +169,10 @@ fn run_remove(request: RemoveRequest, events: &mpsc::Sender<RemoveEvent>) -> Res
     let mask = rasterize_remove_brush(request.raw.width, request.raw.height, &brush)
         .context("Remove brush produced no native image mask")?;
     let crops = plan_remove_context_crops(request.raw.width, request.raw.height, &mask);
-    anyhow::ensure!(!crops.is_empty(), "Remove mask produced no local context crops");
+    anyhow::ensure!(
+        !crops.is_empty(),
+        "Remove mask produced no local context crops"
+    );
 
     let mut working = request.existing;
     let mut patches = Vec::with_capacity(crops.len());
@@ -191,10 +193,7 @@ fn run_remove(request: RemoveRequest, events: &mpsc::Sender<RemoveEvent>) -> Res
         .with_context(|| {
             format!(
                 "render native scene Remove context {}x{} at {},{}",
-                planned.context.width,
-                planned.context.height,
-                planned.context.x,
-                planned.context.y
+                planned.context.width, planned.context.height, planned.context.x, planned.context.y
             )
         })?;
         ensure_not_cancelled(&request.cancellation)?;
@@ -213,6 +212,7 @@ fn run_remove(request: RemoveRequest, events: &mpsc::Sender<RemoveEvent>) -> Res
             brush: brush.clone(),
             patches: vec![patch.clone()],
             retouch: None,
+            opacity: request.opacity,
         };
         working.strokes.push(partial);
         patches.push(patch);
@@ -226,6 +226,7 @@ fn run_remove(request: RemoveRequest, events: &mpsc::Sender<RemoveEvent>) -> Res
         brush,
         patches,
         retouch: None,
+        opacity: request.opacity,
     })
 }
 
@@ -278,8 +279,8 @@ fn run_retouch(request: RetouchRequest) -> Result<RemoveStroke> {
         let destination_scene = render(destination_bounds, destination_working.clone())
             .context("render retouch destination")?;
         ensure_not_cancelled(&request.cancellation)?;
-        let source_scene = render(source_bounds, source_snapshot.clone())
-            .context("render retouch source")?;
+        let source_scene =
+            render(source_bounds, source_snapshot.clone()).context("render retouch source")?;
         ensure_not_cancelled(&request.cancellation)?;
         let patch = build_retouch_patch(
             &request.raw,
@@ -296,6 +297,7 @@ fn run_retouch(request: RetouchRequest) -> Result<RemoveStroke> {
             brush: chunk,
             patches: vec![patch.clone()],
             retouch: Some(request.retouch),
+            opacity: request.retouch.opacity,
         });
         patches.push(patch);
     }
@@ -303,6 +305,7 @@ fn run_retouch(request: RetouchRequest) -> Result<RemoveStroke> {
         brush: request.brush,
         patches,
         retouch: Some(request.retouch),
+        opacity: request.retouch.opacity,
     })
 }
 
@@ -457,136 +460,184 @@ fn build_retouch_patch(
         "Retouch destination has an invalid RGB length"
     );
     anyhow::ensure!(
-        source_scene.len()
-            == source_bounds.width as usize * source_bounds.height as usize * 3,
+        source_scene.len() == source_bounds.width as usize * source_bounds.height as usize * 3,
         "Retouch source has an invalid RGB length"
     );
 
     let width = destination_bounds.width as usize;
     let height = destination_bounds.height as usize;
-    let mut mask = vec![0.0f32; pixels];
-    let mut fixed_source_coordinates =
-        (retouch.alignment == RetouchAlignment::Fixed).then(|| vec![[0.0f32; 2]; pixels]);
-    rasterize_retouch_mask(
-        destination_bounds,
-        brush,
-        retouch.hardness.clamp(0.0, 1.0),
-        &mut mask,
-        fixed_source_coordinates.as_deref_mut(),
-        retouch.source,
-    );
-    let opacity = retouch.opacity.clamp(0.0, 1.0);
-    for value in &mut mask {
-        *value *= opacity;
-    }
-
+    let hardness = retouch.hardness.clamp(0.0, 1.0);
     let offset = retouch_source_offset(retouch);
-    let mut sampled_source = vec![[0.0f32; 3]; pixels];
-    for y in 0..height {
-        for x in 0..width {
-            let index = y * width + x;
-            let destination_x = destination_bounds.x as f32 + x as f32 + 0.5;
-            let destination_y = destination_bounds.y as f32 + y as f32 + 0.5;
-            let source_position = fixed_source_coordinates
-                .as_ref()
-                .map(|coordinates| {
-                    if mask[index] > 0.0 {
-                        coordinates[index]
-                    } else {
-                        nearest_fixed_source_position(
-                            [destination_x, destination_y],
-                            brush,
-                            retouch.source,
-                        )
-                    }
-                })
-                .unwrap_or([destination_x + offset[0], destination_y + offset[1]]);
-            match sample_scene_bilinear(source_scene, source_bounds, source_position) {
-                Some(rgb) => sampled_source[index] = rgb,
-                None if mask[index] > 0.0 => mask[index] = 0.0,
-                None => {}
-            }
-        }
-    }
-    anyhow::ensure!(mask.iter().any(|value| *value > 0.0), "Retouch source does not overlap the brush");
-
-    let mut output_scene = destination_scene.to_vec();
-    match retouch.tool {
+    let mut stroke_coverage = vec![0.0f32; pixels];
+    let output = match retouch.tool {
         RetouchTool::Clone => {
-            for index in 0..pixels {
-                let alpha = mask[index];
-                if alpha <= 0.0 {
-                    continue;
+            let mut output_scene = destination_scene.to_vec();
+            for (dab_index, point) in brush.points.iter().enumerate() {
+                if dab_index % 16 == 0 {
+                    ensure_not_cancelled(cancellation)?;
                 }
-                for channel in 0..3 {
-                    let destination = destination_scene[index * 3 + channel];
-                    output_scene[index * 3 + channel] =
-                        destination + (sampled_source[index][channel] - destination) * alpha;
+                let Some([left, top, right, bottom]) =
+                    retouch_dab_bounds(destination_bounds, *point)
+                else {
+                    continue;
+                };
+                for y in top..bottom {
+                    let destination_y = destination_bounds.y as f32 + y as f32 + 0.5;
+                    for x in left..right {
+                        let destination_x = destination_bounds.x as f32 + x as f32 + 0.5;
+                        let coverage = retouch_brush_coverage(
+                            destination_x - point.x,
+                            destination_y - point.y,
+                            point.radius.max(0.5),
+                            hardness,
+                        );
+                        if coverage <= 0.0 {
+                            continue;
+                        }
+                        let source_position = retouch_dab_source_position(
+                            [destination_x, destination_y],
+                            *point,
+                            retouch,
+                            offset,
+                        );
+                        let Some(source) =
+                            sample_scene_bilinear(source_scene, source_bounds, source_position)
+                        else {
+                            continue;
+                        };
+                        let index = y * width + x;
+                        for channel in 0..3 {
+                            let destination = output_scene[index * 3 + channel];
+                            output_scene[index * 3 + channel] =
+                                destination + (source[channel] - destination) * coverage;
+                        }
+                        stroke_coverage[index] = stroke_coverage[index].max(coverage);
+                    }
                 }
             }
+            output_scene
         }
         RetouchTool::Heal => {
-            let mut difference = vec![0.0f32; pixels * 3 + 3];
-            for index in 0..pixels {
-                let destination = pipeline_scene_to_working_rec2020(
-                    raw,
-                    [
-                        destination_scene[index * 3],
-                        destination_scene[index * 3 + 1],
-                        destination_scene[index * 3 + 2],
-                    ],
-                )
-                .map(perceptual_encode_signed);
-                let source = pipeline_scene_to_working_rec2020(raw, sampled_source[index])
-                    .map(perceptual_encode_signed);
-                for channel in 0..3 {
-                    difference[index * 3 + channel] = destination[channel] - source[channel];
+            // GIMP solves and composites every dab independently. Solving one
+            // large Poisson field for the whole stroke smears texture along the
+            // stroke and produces noticeably flatter results.
+            let mut output_working = destination_scene
+                .chunks_exact(3)
+                .map(|pixel| pipeline_scene_to_working_rec2020(raw, [pixel[0], pixel[1], pixel[2]]))
+                .collect::<Vec<_>>();
+            for point in &brush.points {
+                ensure_not_cancelled(cancellation)?;
+                let Some([left, top, right, bottom]) =
+                    retouch_dab_bounds(destination_bounds, *point)
+                else {
+                    continue;
+                };
+                let dab_width = right - left;
+                let dab_height = bottom - top;
+                let dab_pixels = dab_width * dab_height;
+                let mut difference = vec![0.0f32; dab_pixels * 3 + 3];
+                let mut source_perceptual = vec![[0.0f32; 3]; dab_pixels];
+                let mut dab_coverage = vec![0.0f32; dab_pixels];
+                let mut binary_mask = vec![false; dab_pixels];
+                let mut source_rect_is_valid = true;
+
+                for local_y in 0..dab_height {
+                    let y = top + local_y;
+                    let destination_y = destination_bounds.y as f32 + y as f32 + 0.5;
+                    for local_x in 0..dab_width {
+                        let x = left + local_x;
+                        let destination_x = destination_bounds.x as f32 + x as f32 + 0.5;
+                        let local_index = local_y * dab_width + local_x;
+                        let source_position = retouch_dab_source_position(
+                            [destination_x, destination_y],
+                            *point,
+                            retouch,
+                            offset,
+                        );
+                        let Some(source_scene_pixel) =
+                            sample_scene_bilinear(source_scene, source_bounds, source_position)
+                        else {
+                            source_rect_is_valid = false;
+                            continue;
+                        };
+                        let source = pipeline_scene_to_working_rec2020(raw, source_scene_pixel)
+                            .map(perceptual_encode_signed);
+                        source_perceptual[local_index] = source;
+                        let destination =
+                            output_working[y * width + x].map(perceptual_encode_signed);
+                        for channel in 0..3 {
+                            difference[local_index * 3 + channel] =
+                                destination[channel] - source[channel];
+                        }
+                        let coverage = retouch_brush_coverage(
+                            destination_x - point.x,
+                            destination_y - point.y,
+                            point.radius.max(0.5),
+                            hardness,
+                        );
+                        dab_coverage[local_index] = coverage;
+                        binary_mask[local_index] = coverage > 0.0;
+                    }
                 }
-            }
-            let binary_mask = mask.iter().map(|value| *value > 0.0).collect::<Vec<_>>();
-            gimp_heal_laplace_loop(
-                &mut difference,
-                width,
-                height,
-                &binary_mask,
-                cancellation,
-            )?;
-            for index in 0..pixels {
-                let alpha = mask[index];
-                if alpha <= 0.0 {
+                // GIMP skips a dab when its source rectangle falls off-canvas,
+                // instead of solving it against synthetic edge pixels.
+                if !source_rect_is_valid || !binary_mask.iter().any(|value| *value) {
                     continue;
                 }
-                let destination = pipeline_scene_to_working_rec2020(
-                    raw,
-                    [
-                        destination_scene[index * 3],
-                        destination_scene[index * 3 + 1],
-                        destination_scene[index * 3 + 2],
-                    ],
-                );
-                let source = pipeline_scene_to_working_rec2020(raw, sampled_source[index])
-                    .map(perceptual_encode_signed);
-                let healed: [f32; 3] = std::array::from_fn(|channel| {
-                    perceptual_decode_signed(source[channel] + difference[index * 3 + channel])
-                });
-                let blended: [f32; 3] = std::array::from_fn(|channel| {
-                    destination[channel] + (healed[channel] - destination[channel]) * alpha
-                });
-                let canonical = working_rec2020_to_canonical_remove_scene(raw, exposure, blended);
-                for channel in 0..3 {
-                    output_scene[index * 3 + channel] = canonical[channel];
+                gimp_heal_laplace_loop(
+                    &mut difference,
+                    dab_width,
+                    dab_height,
+                    &binary_mask,
+                    cancellation,
+                )?;
+                for local_y in 0..dab_height {
+                    let y = top + local_y;
+                    for local_x in 0..dab_width {
+                        let local_index = local_y * dab_width + local_x;
+                        let coverage = dab_coverage[local_index];
+                        if coverage <= 0.0 {
+                            continue;
+                        }
+                        let x = left + local_x;
+                        let index = y * width + x;
+                        let source = source_perceptual[local_index];
+                        let healed: [f32; 3] = std::array::from_fn(|channel| {
+                            perceptual_decode_signed(
+                                source[channel] + difference[local_index * 3 + channel],
+                            )
+                        });
+                        for channel in 0..3 {
+                            let destination = output_working[index][channel];
+                            output_working[index][channel] =
+                                destination + (healed[channel] - destination) * coverage;
+                        }
+                        stroke_coverage[index] = stroke_coverage[index].max(coverage);
+                    }
                 }
             }
+            output_working
+                .into_iter()
+                .flat_map(|working| {
+                    working_rec2020_to_canonical_remove_scene(raw, exposure, working)
+                })
+                .collect()
         }
-    }
+    };
 
+    anyhow::ensure!(
+        stroke_coverage.iter().any(|value| *value > 0.0),
+        "Retouch source does not overlap the brush"
+    );
+
+    let output_is_canonical = retouch.tool == RetouchTool::Heal;
     let mut left = width;
     let mut top = height;
     let mut right = 0usize;
     let mut bottom = 0usize;
     for y in 0..height {
         for x in 0..width {
-            if mask[y * width + x] > 0.0 {
+            if stroke_coverage[y * width + x] > 0.0 {
                 left = left.min(x);
                 top = top.min(y);
                 right = right.max(x + 1);
@@ -594,7 +645,10 @@ fn build_retouch_patch(
             }
         }
     }
-    anyhow::ensure!(right > left && bottom > top, "Retouch brush has no coverage");
+    anyhow::ensure!(
+        right > left && bottom > top,
+        "Retouch brush has no coverage"
+    );
     let patch_bounds = NativeRect {
         x: destination_bounds.x + left as u32,
         y: destination_bounds.y + top as u32,
@@ -606,20 +660,20 @@ fn build_retouch_patch(
     for y in top..bottom {
         for x in left..right {
             let index = y * width + x;
-            let canonical = if retouch.tool == RetouchTool::Heal {
+            let canonical = if output_is_canonical {
                 [
-                    output_scene[index * 3],
-                    output_scene[index * 3 + 1],
-                    output_scene[index * 3 + 2],
+                    output[index * 3],
+                    output[index * 3 + 1],
+                    output[index * 3 + 2],
                 ]
             } else {
                 pipeline_scene_to_canonical_remove_scene(
                     raw,
                     exposure,
                     [
-                        output_scene[index * 3],
-                        output_scene[index * 3 + 1],
-                        output_scene[index * 3 + 2],
+                        output[index * 3],
+                        output[index * 3 + 1],
+                        output[index * 3 + 2],
                     ],
                 )
             };
@@ -627,71 +681,41 @@ fn build_retouch_patch(
                 let finite = if value.is_finite() { value } else { 0.0 };
                 rgb16f.push(half::f16::from_f32(finite.clamp(-65_504.0, 65_504.0)).to_bits());
             }
-            alpha.push((mask[index] * 255.0).ceil().clamp(0.0, 255.0) as u8);
+            alpha.push(if stroke_coverage[index] > 0.0 { 255 } else { 0 });
         }
     }
     RemovePatch::new_scene(patch_bounds, rgb16f, alpha).map_err(anyhow::Error::msg)
 }
 
-fn nearest_fixed_source_position(
-    destination: [f32; 2],
-    brush: &RemoveBrushStroke,
-    source: [f32; 2],
-) -> [f32; 2] {
-    let nearest = brush.points.iter().min_by(|left, right| {
-        let left_distance = (destination[0] - left.x).hypot(destination[1] - left.y);
-        let right_distance = (destination[0] - right.x).hypot(destination[1] - right.y);
-        left_distance.total_cmp(&right_distance)
-    });
-    nearest.map_or(source, |point| {
-        [
-            source[0] + destination[0] - point.x,
-            source[1] + destination[1] - point.y,
-        ]
-    })
+fn retouch_dab_bounds(
+    bounds: NativeRect,
+    point: crate::pipeline::RemoveBrushPoint,
+) -> Option<[usize; 4]> {
+    let radius = point.radius.max(0.5);
+    let left = (point.x - radius - bounds.x as f32).floor().max(0.0) as usize;
+    let top = (point.y - radius - bounds.y as f32).floor().max(0.0) as usize;
+    let right = (point.x + radius - bounds.x as f32)
+        .ceil()
+        .clamp(0.0, bounds.width as f32) as usize;
+    let bottom = (point.y + radius - bounds.y as f32)
+        .ceil()
+        .clamp(0.0, bounds.height as f32) as usize;
+    (right > left && bottom > top).then_some([left, top, right, bottom])
 }
 
-fn rasterize_retouch_mask(
-    bounds: NativeRect,
-    brush: &RemoveBrushStroke,
-    hardness: f32,
-    mask: &mut [f32],
-    mut fixed_source_coordinates: Option<&mut [[f32; 2]]>,
-    fixed_source: [f32; 2],
-) {
-    let width = bounds.width as usize;
-    for point in &brush.points {
-        let radius = point.radius.max(0.5);
-        let left = (point.x - radius - bounds.x as f32).floor().max(0.0) as usize;
-        let top = (point.y - radius - bounds.y as f32).floor().max(0.0) as usize;
-        let right = (point.x + radius - bounds.x as f32)
-            .ceil()
-            .clamp(0.0, bounds.width as f32) as usize;
-        let bottom = (point.y + radius - bounds.y as f32)
-            .ceil()
-            .clamp(0.0, bounds.height as f32) as usize;
-        for y in top..bottom {
-            let native_y = bounds.y as f32 + y as f32 + 0.5;
-            for x in left..right {
-                let native_x = bounds.x as f32 + x as f32 + 0.5;
-                let coverage = retouch_brush_coverage(
-                    native_x - point.x,
-                    native_y - point.y,
-                    radius,
-                    hardness,
-                );
-                let index = y * width + x;
-                if coverage > mask[index] {
-                    mask[index] = coverage;
-                    if let Some(coordinates) = fixed_source_coordinates.as_deref_mut() {
-                        coordinates[index] = [
-                            fixed_source[0] + native_x - point.x,
-                            fixed_source[1] + native_y - point.y,
-                        ];
-                    }
-                }
-            }
-        }
+fn retouch_dab_source_position(
+    destination: [f32; 2],
+    point: crate::pipeline::RemoveBrushPoint,
+    retouch: RetouchStroke,
+    offset: [f32; 2],
+) -> [f32; 2] {
+    if retouch.alignment == RetouchAlignment::Fixed {
+        [
+            retouch.source[0] + destination[0] - point.x,
+            retouch.source[1] + destination[1] - point.y,
+        ]
+    } else {
+        [destination[0] + offset[0], destination[1] + offset[1]]
     }
 }
 
@@ -790,7 +814,9 @@ fn gimp_heal_laplace_loop(
                     if !mask[index] {
                         continue;
                     }
-                    let degree = 4 - usize::from(x == 0) - usize::from(x + 1 == width)
+                    let degree = 4
+                        - usize::from(x == 0)
+                        - usize::from(x + 1 == width)
                         - usize::from(y == 0)
                         - usize::from(y + 1 == height);
                     for channel in 0..3 {
@@ -808,8 +834,7 @@ fn gimp_heal_laplace_loop(
                             neighbors += pixels[(index + width) * 3 + channel];
                         }
                         let location = index * 3 + channel;
-                        let residual =
-                            degree as f32 * w * pixels[location] - w * neighbors;
+                        let residual = degree as f32 * w * pixels[location] - w * neighbors;
                         pixels[location] -= residual;
                         error += residual * residual;
                     }
@@ -927,17 +952,11 @@ fn infer_crop(
                         .context("read Big-LaMa output tensor")?;
                     anyhow::ensure!(
                         shape.as_ref()
-                            == [
-                                1,
-                                3,
-                                BIG_LAMA_INPUT_EDGE as i64,
-                                BIG_LAMA_INPUT_EDGE as i64,
-                            ],
+                            == [1, 3, BIG_LAMA_INPUT_EDGE as i64, BIG_LAMA_INPUT_EDGE as i64,],
                         "unexpected Big-LaMa output shape {shape:?}"
                     );
                     anyhow::ensure!(
-                        values.len() == plane * 3
-                            && values.iter().all(|value| value.is_finite()),
+                        values.len() == plane * 3 && values.iter().all(|value| value.is_finite()),
                         "Big-LaMa output tensor is invalid"
                     );
                     Ok(values.to_vec())
@@ -949,23 +968,15 @@ fn infer_crop(
     let mut output_interleaved = vec![0.0f32; plane * 3];
     for index in 0..plane {
         output_interleaved[index * 3] = (output_values[index] / 255.0).clamp(0.0, 1.0);
-        output_interleaved[index * 3 + 1] =
-            (output_values[plane + index] / 255.0).clamp(0.0, 1.0);
+        output_interleaved[index * 3 + 1] = (output_values[plane + index] / 255.0).clamp(0.0, 1.0);
         output_interleaved[index * 3 + 2] =
             (output_values[plane * 2 + index] / 255.0).clamp(0.0, 1.0);
     }
-    let model_output: Rgb32FImage = ImageBuffer::from_raw(
-        BIG_LAMA_INPUT_EDGE,
-        BIG_LAMA_INPUT_EDGE,
-        output_interleaved,
-    )
-    .context("construct Big-LaMa output image")?;
-    let restored = image::imageops::resize(
-        &model_output,
-        crop.width,
-        crop.height,
-        FilterType::Lanczos3,
-    );
+    let model_output: Rgb32FImage =
+        ImageBuffer::from_raw(BIG_LAMA_INPUT_EDGE, BIG_LAMA_INPUT_EDGE, output_interleaved)
+            .context("construct Big-LaMa output image")?;
+    let restored =
+        image::imageops::resize(&model_output, crop.width, crop.height, FilterType::Lanczos3);
 
     build_cached_patch(
         planned,
@@ -1087,7 +1098,11 @@ fn build_cached_patch(
             let mix = coverage as f32 / 255.0;
             for channel in 0..3 {
                 let value = source[channel] * (1.0 - mix) + generated[channel] * mix;
-                let finite = if value.is_finite() { value } else { source[channel] };
+                let finite = if value.is_finite() {
+                    value
+                } else {
+                    source[channel]
+                };
                 rgb16f.push(half::f16::from_f32(finite.clamp(-65_504.0, 65_504.0)).to_bits());
             }
             alpha.push(coverage);
@@ -1112,8 +1127,7 @@ fn apply_tile_transition(
     let global_x = crop.x.saturating_add(local_x);
     let global_y = crop.y.saturating_add(local_y);
 
-    let span = (planned.target.width.min(planned.target.height) as f32 * 0.20)
-        .clamp(24.0, 96.0);
+    let span = (planned.target.width.min(planned.target.height) as f32 * 0.20).clamp(24.0, 96.0);
     let smooth = |distance: f32| {
         let t = (distance / span).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
@@ -1152,18 +1166,11 @@ mod tests {
         difference[(4 * 3)..(4 * 3 + 3)].fill(1.0);
         let mut mask = vec![false; 9];
         mask[4] = true;
-        gimp_heal_laplace_loop(
-            &mut difference,
-            3,
-            3,
-            &mask,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
+        gimp_heal_laplace_loop(&mut difference, 3, 3, &mask, &AtomicBool::new(false)).unwrap();
         assert!(difference[12..15].iter().all(|value| value.abs() < 1e-4));
     }
 
-    fn uniform_retouch_patch(tool: RetouchTool) -> RemovePatch {
+    fn uniform_retouch_patch(tool: RetouchTool, opacity: f32) -> RemovePatch {
         let raw = LoadedRaw::from_scene_linear_rec2020(8, 4, vec![0.2; 8 * 4 * 3]).unwrap();
         let destination_bounds = NativeRect {
             x: 4,
@@ -1198,7 +1205,8 @@ mod tests {
                 source: [1.5, 1.5],
                 destination: [5.5, 1.5],
                 hardness: 1.0,
-                opacity: 1.0,
+                opacity,
+                baked_opacity: None,
             },
             &AtomicBool::new(false),
         )
@@ -1207,7 +1215,7 @@ mod tests {
 
     #[test]
     fn clone_copies_source_scene_pixels() {
-        let patch = uniform_retouch_patch(RetouchTool::Clone);
+        let patch = uniform_retouch_patch(RetouchTool::Clone, 1.0);
         let maximum = patch
             .rgb_scene16f
             .iter()
@@ -1218,13 +1226,24 @@ mod tests {
 
     #[test]
     fn heal_preserves_uniform_destination_light_and_color() {
-        let patch = uniform_retouch_patch(RetouchTool::Heal);
+        let patch = uniform_retouch_patch(RetouchTool::Heal, 1.0);
         let maximum = patch
             .rgb_scene16f
             .iter()
             .map(|bits| half::f16::from_bits(*bits).to_f32())
             .fold(0.0f32, f32::max);
         assert!((maximum - 0.2).abs() < 0.002);
+    }
+
+    #[test]
+    fn retouch_opacity_is_live_instead_of_baked_into_cached_pixels() {
+        for tool in [RetouchTool::Clone, RetouchTool::Heal] {
+            assert_eq!(
+                uniform_retouch_patch(tool, 0.2),
+                uniform_retouch_patch(tool, 1.0),
+                "{tool:?} cached different pixels at different live opacities"
+            );
+        }
     }
 
     #[test]
@@ -1323,6 +1342,8 @@ mod tests {
             BIG_LAMA_INPUT_EDGE,
             FilterType::Nearest,
         );
-        assert!(resized.pixels().all(|pixel| pixel[0] == 0 || pixel[0] == 255));
+        assert!(resized
+            .pixels()
+            .all(|pixel| pixel[0] == 0 || pixel[0] == 255));
     }
 }

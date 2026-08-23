@@ -183,6 +183,30 @@ const SHADER_MASK_RADIAL_BLUR: &str = include_str!("../shaders/mask_effects/radi
 const SHADER_MASK_TILT_SHIFT: &str = include_str!("../shaders/mask_effects/tilt_shift.wgsl");
 const SHADER_CREATIVE_EFFECTS: &str = include_str!("../shaders/creative_effects.wgsl");
 const SHADER_VIEW_TRANSFORM: &str = include_str!("../shaders/view_transform.wgsl");
+const SHADER_REMOVE_COMPOSITE: &str = r#"
+struct RemoveCompositeParams {
+    origin: vec2<u32>,
+    extent: vec2<u32>,
+};
+
+@group(0) @binding(0) var scene_input: texture_2d<f32>;
+@group(0) @binding(1) var patch_input: texture_2d<f32>;
+@group(0) @binding(2) var scene_output: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
+@group(0) @binding(3) var<uniform> params: RemoveCompositeParams;
+
+@compute @workgroup_size(8, 8)
+fn composite_remove_patch(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.extent.x || id.y >= params.extent.y) {
+        return;
+    }
+    let location = params.origin + id.xy;
+    let coordinates = vec2<i32>(location);
+    let base = textureLoad(scene_input, coordinates, 0);
+    let cached = textureLoad(patch_input, coordinates, 0);
+    let blended = base.rgb + (cached.rgb - base.rgb) * cached.a;
+    textureStore(scene_output, coordinates, vec4<f32>(blended, 1.0));
+}
+"#;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -1309,6 +1333,13 @@ struct UploadedStageUniforms {
     effects: EffectsUniforms,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct RemoveCompositeParams {
+    origin: [u32; 2],
+    extent: [u32; 2],
+}
+
 struct Pass {
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
@@ -1381,6 +1412,9 @@ pub struct RawGpuPipeline {
     effects_uniforms_buffer: wgpu::Buffer,
     scene_tone_bind_group: wgpu::BindGroup,
     effects_bind_group: wgpu::BindGroup,
+    remove_composite_pipeline: wgpu::ComputePipeline,
+    remove_composite_bind_group: wgpu::BindGroup,
+    remove_composite_params_buffer: wgpu::Buffer,
     uploaded_stage_uniforms: Mutex<UploadedStageUniforms>,
     mask_data_buffer: wgpu::Buffer,
     tone_histogram_buffer: wgpu::Buffer,
@@ -1435,6 +1469,64 @@ pub struct RawGpuPipeline {
     _out_view: wgpu::TextureView,
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
     _gpu_budget_reservation: GpuBudgetReservation,
+}
+
+fn create_remove_composite_program(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    scene_view: &wgpu::TextureView,
+    patch_view: &wgpu::TextureView,
+    output_view: &wgpu::TextureView,
+) -> Result<(wgpu::ComputePipeline, wgpu::BindGroup, wgpu::Buffer)> {
+    let layout = create_bind_group_layout(
+        device,
+        "auraw Remove composite layout",
+        &[
+            texture_entry(0, wgpu::TextureSampleType::Float { filterable: false }),
+            texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
+            storage_texture_entry(2, format, wgpu::StorageTextureAccess::WriteOnly),
+            buffer_entry(3),
+        ],
+    );
+    let params_buffer = create_initialized_buffer(
+        device,
+        "auraw Remove composite parameters",
+        bytemuck::bytes_of(&RemoveCompositeParams {
+            origin: [0; 2],
+            extent: [0; 2],
+        }),
+        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    );
+    let bind_group = create_bind_group(
+        device,
+        "auraw Remove composite bind group",
+        &layout,
+        &[
+            texture_binding(0, scene_view),
+            texture_binding(1, patch_view),
+            texture_binding(2, output_view),
+            buffer_binding(3, &params_buffer),
+        ],
+    );
+    let source = work_shader_source(SHADER_REMOVE_COMPOSITE, format)?;
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("auraw Remove composite shader"),
+        source: wgpu::ShaderSource::Wgsl(source),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("auraw Remove composite pipeline layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = create_compute_pipeline(
+        device,
+        "auraw Remove composite pipeline",
+        &pipeline_layout,
+        &module,
+        "composite_remove_patch",
+        None,
+    );
+    Ok((pipeline, bind_group, params_buffer))
 }
 
 #[derive(Clone)]
@@ -1966,6 +2058,17 @@ impl RawGpuPipeline {
         let egui_texture_id = renderer.as_deref_mut().map(|renderer| {
             renderer.register_native_texture(device, &surfaces.out_view, wgpu::FilterMode::Linear)
         });
+        let (
+            remove_composite_pipeline,
+            remove_composite_bind_group,
+            remove_composite_params_buffer,
+        ) = create_remove_composite_program(
+            device,
+            geometry.demosaic_format,
+            &surfaces.scene_view,
+            &surfaces.tex1_view,
+            &surfaces.tex2_view,
+        )?;
 
         let pipeline = Self {
             egui_texture_id,
@@ -1978,6 +2081,9 @@ impl RawGpuPipeline {
             effects_uniforms_buffer: buffers.effects_uniforms_buffer,
             scene_tone_bind_group: groups.scene_tone_bind_group,
             effects_bind_group: groups.effects_bind_group,
+            remove_composite_pipeline,
+            remove_composite_bind_group,
+            remove_composite_params_buffer,
             uploaded_stage_uniforms: Mutex::new(UploadedStageUniforms {
                 camera: params.camera,
                 scene_tone: params.scene_tone,
@@ -2417,6 +2523,7 @@ impl RawGpuPipeline {
         if stage == ProcessingStage::Raw {
             self.upload_remove_scene_patches(
                 queue,
+                device,
                 edits,
                 source_raw,
                 exposure,
@@ -2720,9 +2827,11 @@ impl RawGpuPipeline {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upload_remove_scene_patches(
         &self,
         queue: &wgpu::Queue,
+        device: &wgpu::Device,
         edits: &RemoveEditState,
         source_raw: &LoadedRaw,
         exposure: &ExposureParams,
@@ -2739,6 +2848,10 @@ impl RawGpuPipeline {
         }
 
         for stroke in &edits.strokes {
+            let opacity = stroke.composite_opacity();
+            if opacity.abs() <= f32::EPSILON {
+                continue;
+            }
             for patch in &stroke.patches {
                 let left = (((patch.bounds.x as f32 - source_origin[0]) * scale_x).floor() as i64)
                     .clamp(0, self.width as i64) as u32;
@@ -2754,127 +2867,132 @@ impl RawGpuPipeline {
                     continue;
                 }
 
-                for y in top..bottom {
+                let output_width = right - left;
+                let output_height = bottom - top;
+                let sample = |x: u32, y: u32| {
                     let native_y = source_origin[1] + (y as f32 + 0.5) / scale_y;
                     let local_y = native_y - patch.bounds.y as f32 - 0.5;
-                    let mut x = left;
-                    while x < right {
-                        while x < right {
-                            let native_x = source_origin[0] + (x as f32 + 0.5) / scale_x;
-                            let local_x = native_x - patch.bounds.x as f32 - 0.5;
-                            if remove_patch_coverage(patch, local_x, local_y) != 0 {
-                                break;
-                            }
-                            x += 1;
-                        }
-                        if x >= right {
-                            break;
-                        }
-                        let run_start = x;
-                        let mut samples = Vec::new();
-                        while x < right {
-                            let native_x = source_origin[0] + (x as f32 + 0.5) / scale_x;
-                            let local_x = native_x - patch.bounds.x as f32 - 0.5;
-                            if remove_patch_coverage(patch, local_x, local_y) == 0 {
-                                break;
-                            }
-                            let canonical = sample_remove_patch_scene(
-                                patch, local_x, local_y, source_raw, exposure,
-                            );
-                            let source_scene = canonical_remove_scene_to_pipeline_scene(
-                                source_raw, exposure, canonical,
-                            );
-                            let scene = if self.has_raster_scene {
-                                pipeline_scene_to_working_rec2020(source_raw, source_scene)
-                            } else {
-                                source_scene
-                            };
-                            samples.push(scene);
-                            x += 1;
-                        }
-                        if samples.is_empty() {
-                            continue;
-                        }
-                        let run_width = samples.len() as u32;
-                        match self.scene_format {
-                            wgpu::TextureFormat::Rgba16Float => {
-                                let mut rgba = Vec::<u16>::with_capacity(samples.len() * 4);
-                                for rgb in samples {
-                                    for value in rgb {
-                                        let finite = if value.is_finite() { value } else { 0.0 };
-                                        rgba.push(
-                                            half::f16::from_f32(finite.clamp(-65_504.0, 65_504.0))
-                                                .to_bits(),
-                                        );
-                                    }
-                                    rgba.push(half::f16::ONE.to_bits());
+                    let native_x = source_origin[0] + (x as f32 + 0.5) / scale_x;
+                    let local_x = native_x - patch.bounds.x as f32 - 0.5;
+                    if remove_patch_coverage(patch, local_x, local_y) == 0 {
+                        return [0.0; 4];
+                    }
+                    let canonical =
+                        sample_remove_patch_scene(patch, local_x, local_y, source_raw, exposure);
+                    let source_scene =
+                        canonical_remove_scene_to_pipeline_scene(source_raw, exposure, canonical);
+                    let scene = if self.has_raster_scene {
+                        pipeline_scene_to_working_rec2020(source_raw, source_scene)
+                    } else {
+                        source_scene
+                    };
+                    [scene[0], scene[1], scene[2], opacity]
+                };
+                let upload_origin = wgpu::Origin3d {
+                    x: left,
+                    y: top,
+                    z: 0,
+                };
+                let upload_extent = wgpu::Extent3d {
+                    width: output_width,
+                    height: output_height,
+                    depth_or_array_layers: 1,
+                };
+                match self.scene_format {
+                    wgpu::TextureFormat::Rgba16Float => {
+                        let mut rgba = Vec::<u16>::with_capacity(
+                            output_width as usize * output_height as usize * 4,
+                        );
+                        for y in top..bottom {
+                            for x in left..right {
+                                for value in sample(x, y) {
+                                    let finite = if value.is_finite() { value } else { 0.0 };
+                                    rgba.push(
+                                        half::f16::from_f32(finite.clamp(-65_504.0, 65_504.0))
+                                            .to_bits(),
+                                    );
                                 }
-                                queue.write_texture(
-                                    wgpu::TexelCopyTextureInfo {
-                                        texture: &self.scene_texture,
-                                        mip_level: 0,
-                                        origin: wgpu::Origin3d {
-                                            x: run_start,
-                                            y,
-                                            z: 0,
-                                        },
-                                        aspect: wgpu::TextureAspect::All,
-                                    },
-                                    bytemuck::cast_slice(&rgba),
-                                    wgpu::TexelCopyBufferLayout {
-                                        offset: 0,
-                                        bytes_per_row: Some(run_width * 8),
-                                        rows_per_image: Some(1),
-                                    },
-                                    wgpu::Extent3d {
-                                        width: run_width,
-                                        height: 1,
-                                        depth_or_array_layers: 1,
-                                    },
-                                );
-                            }
-                            wgpu::TextureFormat::Rgba32Float => {
-                                let mut rgba = Vec::<f32>::with_capacity(samples.len() * 4);
-                                for rgb in samples {
-                                    rgba.extend(rgb.map(|value| {
-                                        if value.is_finite() {
-                                            value
-                                        } else {
-                                            0.0
-                                        }
-                                    }));
-                                    rgba.push(1.0);
-                                }
-                                queue.write_texture(
-                                    wgpu::TexelCopyTextureInfo {
-                                        texture: &self.scene_texture,
-                                        mip_level: 0,
-                                        origin: wgpu::Origin3d {
-                                            x: run_start,
-                                            y,
-                                            z: 0,
-                                        },
-                                        aspect: wgpu::TextureAspect::All,
-                                    },
-                                    bytemuck::cast_slice(&rgba),
-                                    wgpu::TexelCopyBufferLayout {
-                                        offset: 0,
-                                        bytes_per_row: Some(run_width * 16),
-                                        rows_per_image: Some(1),
-                                    },
-                                    wgpu::Extent3d {
-                                        width: run_width,
-                                        height: 1,
-                                        depth_or_array_layers: 1,
-                                    },
-                                );
-                            }
-                            format => {
-                                return Err(anyhow!("unsupported Remove scene format {format:?}"));
                             }
                         }
+                        queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &self._tex1,
+                                mip_level: 0,
+                                origin: upload_origin,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            bytemuck::cast_slice(&rgba),
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(output_width * 8),
+                                rows_per_image: Some(output_height),
+                            },
+                            upload_extent,
+                        );
+                    }
+                    wgpu::TextureFormat::Rgba32Float => {
+                        let mut rgba = Vec::<f32>::with_capacity(
+                            output_width as usize * output_height as usize * 4,
+                        );
+                        for y in top..bottom {
+                            for x in left..right {
+                                rgba.extend(sample(x, y));
+                            }
+                        }
+                        queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &self._tex1,
+                                mip_level: 0,
+                                origin: upload_origin,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            bytemuck::cast_slice(&rgba),
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(output_width * 16),
+                                rows_per_image: Some(output_height),
+                            },
+                            upload_extent,
+                        );
+                    }
+                    format => {
+                        return Err(anyhow!("unsupported Remove scene format {format:?}"));
                     }
                 }
+                queue.write_buffer(
+                    &self.remove_composite_params_buffer,
+                    0,
+                    bytemuck::bytes_of(&RemoveCompositeParams {
+                        origin: [left, top],
+                        extent: [output_width, output_height],
+                    }),
+                );
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("auraw Remove patch composite encoder"),
+                });
+                dispatch_compute(
+                    &mut encoder,
+                    "auraw Remove patch composite",
+                    &self.remove_composite_pipeline,
+                    &[&self.remove_composite_bind_group],
+                    dispatch_for_extent(output_width, output_height),
+                );
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self._tex2,
+                        mip_level: 0,
+                        origin: upload_origin,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.scene_texture,
+                        mip_level: 0,
+                        origin: upload_origin,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    upload_extent,
+                );
+                queue.submit(Some(encoder.finish()));
             }
         }
         Ok(())

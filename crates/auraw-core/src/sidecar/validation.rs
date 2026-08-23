@@ -39,6 +39,8 @@ pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError>
         return invalid("sidecar contains too many Remove strokes");
     }
     for stroke in &edits.remove.strokes {
+        finite("Remove stroke opacity", &[stroke.opacity])?;
+        bounded("Remove stroke opacity", stroke.opacity, 0.0, 1.0)?;
         if stroke.brush.points.len() > crate::pipeline::REMOVE_MAX_POINTS_PER_STROKE {
             return invalid("Remove stroke contains too many brush points");
         }
@@ -60,6 +62,10 @@ pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError>
                     retouch.opacity,
                 ],
             )?;
+            if let Some(baked_opacity) = retouch.baked_opacity {
+                finite("legacy retouch opacity", &[baked_opacity])?;
+                bounded("legacy retouch opacity", baked_opacity, 0.0, 1.0)?;
+            }
             for value in retouch.source.into_iter().chain(retouch.destination) {
                 bounded("retouch source or destination", value, -1.0, 1_000_000.0)?;
             }
@@ -634,7 +640,11 @@ fn validate_smoke_effect(smoke: &crate::pipeline::SmokeEffectSettings) -> Result
         ],
         &smoke.color,
     )?;
-    validate_effect_color(crate::pipeline::MaskEffect::Smoke, smoke::COLOR, smoke.color)
+    validate_effect_color(
+        crate::pipeline::MaskEffect::Smoke,
+        smoke::COLOR,
+        smoke.color,
+    )
 }
 
 fn validate_glow_effect(glow: &crate::pipeline::GlowEffectSettings) -> Result<(), SidecarError> {

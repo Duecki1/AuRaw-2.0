@@ -1,5 +1,5 @@
-use super::brush::{sample_brush_stroke, STANDARD_BRUSH_MINIMUM_SPACING_FRACTION};
 use super::super::*;
+use super::brush::{sample_brush_stroke, STANDARD_BRUSH_MINIMUM_SPACING_FRACTION};
 
 impl Preview {
     pub(in crate::ui::preview) fn handle_inpaint_interaction(
@@ -23,14 +23,15 @@ impl Preview {
         let pointer = response
             .interact_pointer_pos()
             .filter(|position| preview_rect.contains(*position));
-        let (primary_is_down, primary_released, set_source_modifier, secondary_is_down) = ui.input(|input| {
-            (
-                input.pointer.primary_down(),
-                input.pointer.primary_released(),
-                input.modifiers.command || input.modifiers.ctrl,
-                input.pointer.secondary_down(),
-            )
-        });
+        let (primary_is_down, primary_released, set_source_modifier, secondary_is_down) =
+            ui.input(|input| {
+                (
+                    input.pointer.primary_down(),
+                    input.pointer.primary_released(),
+                    input.modifiers.command || input.modifiers.ctrl,
+                    input.pointer.secondary_down(),
+                )
+            });
         let primary_down =
             pointer.is_some() && response.is_pointer_button_down_on() && primary_is_down;
 
@@ -95,20 +96,20 @@ impl Preview {
             ) else {
                 return;
             };
-            let radius_native =
-                stroke.dab_size * source_width.min(source_height).max(1) as f32;
+            let radius_native = stroke.dab_size * source_width.min(source_height).max(1) as f32;
             let mut changed = false;
             for &sample_uv in &stroke.samples {
-                if app.inpaint.active_points.len()
-                    >= crate::pipeline::REMOVE_MAX_POINTS_PER_STROKE
+                if app.inpaint.active_points.len() >= crate::pipeline::REMOVE_MAX_POINTS_PER_STROKE
                 {
                     break;
                 }
-                app.inpaint.active_points.push(crate::pipeline::RemoveBrushPoint {
-                    x: sample_uv[0] * source_width as f32,
-                    y: sample_uv[1] * source_height as f32,
-                    radius: radius_native,
-                });
+                app.inpaint
+                    .active_points
+                    .push(crate::pipeline::RemoveBrushPoint {
+                        x: sample_uv[0] * source_width as f32,
+                        y: sample_uv[1] * source_height as f32,
+                        radius: radius_native,
+                    });
                 changed = true;
             }
             if changed {
@@ -131,9 +132,10 @@ impl Preview {
                 dilation_radius: 0,
             };
             if let Some(tool) = app.inpaint.tool.retouch() {
-                let destination = brush.points.first().map_or([0.0; 2], |point| {
-                    [point.x.floor(), point.y.floor()]
-                });
+                let destination = brush
+                    .points
+                    .first()
+                    .map_or([0.0; 2], |point| [point.x.floor(), point.y.floor()]);
                 let selected_source = app.inpaint.source_point.unwrap_or(destination);
                 let source = match app.inpaint.alignment {
                     crate::pipeline::RetouchAlignment::Aligned => {
@@ -158,6 +160,7 @@ impl Preview {
                         destination,
                         hardness: app.inpaint.brush_hardness,
                         opacity: app.inpaint.brush_opacity,
+                        baked_opacity: None,
                     },
                 );
             } else {
@@ -210,7 +213,12 @@ impl Preview {
                     source_width,
                     source_height,
                     retouch.source,
-                    stroke.brush.points.first().map(|point| point.radius).unwrap_or(1.0),
+                    stroke
+                        .brush
+                        .points
+                        .first()
+                        .map(|point| point.radius)
+                        .unwrap_or(1.0),
                     crate::ui::theme::inpaint_stroke_highlight(),
                 );
             }
@@ -290,7 +298,10 @@ impl Preview {
                 dab_size * app.inpaint.brush_hardness,
                 64,
             );
-            painter.add(Shape::line(inner, Stroke::new(1.0, Color32::from_white_alpha(145))));
+            painter.add(Shape::line(
+                inner,
+                Stroke::new(1.0, Color32::from_white_alpha(145)),
+            ));
         }
 
         if let Some(selected_source) = app.inpaint.source_point {
