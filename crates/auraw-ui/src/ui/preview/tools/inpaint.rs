@@ -188,11 +188,14 @@ impl Preview {
             .and_then(|raw| raw.lens_geometry.as_deref());
         let painter = ui.painter_at(preview_rect);
 
-        let highlighted = app
-            .inpaint
-            .hovered_stroke
-            .or(app.inpaint.selected_stroke)
-            .and_then(|index| app.inpaint.edits.strokes.get(index));
+        let highlighted = if app.inpaint.stroke_opacity_edit_pending {
+            None
+        } else {
+            app.inpaint
+                .hovered_stroke
+                .or(app.inpaint.selected_stroke)
+                .and_then(|index| app.inpaint.edits.strokes.get(index))
+        };
         if let Some(stroke) = highlighted {
             paint_remove_brush_geometry(
                 &painter,

@@ -109,12 +109,6 @@ impl NativeRect {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RemoveContextCrop {
-    pub context: NativeRect,
-    pub target: NativeRect,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RemovePatchSidecarCache {
     pub fingerprint: u64,
@@ -384,115 +378,37 @@ fn paint_disc(pixels: &mut [u8], bounds: NativeRect, center_x: f32, center_y: f3
     }
 }
 
-pub fn plan_remove_context_crops(
+/// Chooses the sole native context for one Big-LaMa stroke. This deliberately
+/// never tiles: every stroke is resized into one model input and inferred once.
+pub fn plan_remove_context_crop(
     image_width: u32,
     image_height: u32,
     mask: &RemoveMask,
-) -> Vec<RemoveContextCrop> {
+) -> Option<NativeRect> {
     if image_width == 0 || image_height == 0 || mask.is_empty() {
-        return Vec::new();
+        return None;
     }
     let shortest = image_width.min(image_height).max(1);
-    let max_context = (BIG_LAMA_INPUT_EDGE * 2).min(shortest).max(1);
     let mask_edge = mask.bounds.width.max(mask.bounds.height).max(1);
     let desired = mask_edge.saturating_mul(3).max(384).min(shortest);
-    if desired <= max_context || mask_edge <= max_context / 2 {
-        let context = square_inside_image(
+    if mask_edge <= shortest {
+        return Some(square_inside_image(
             image_width,
             image_height,
             mask.bounds.x + mask.bounds.width / 2,
             mask.bounds.y + mask.bounds.height / 2,
-            desired.min(max_context),
-        );
-        return vec![RemoveContextCrop {
-            context,
-            target: context,
-        }];
+            desired,
+        ));
     }
-
-    let mut core_edge = (max_context / 2).max(96);
-    let max_core_edge = (max_context * 3 / 4).max(core_edge);
-    loop {
-        let overlap = (core_edge / 4).max(24);
-        let stride = core_edge.saturating_sub(overlap).max(1);
-        let tiles_x = tile_count_for_span(mask.bounds.width, core_edge, stride);
-        let tiles_y = tile_count_for_span(mask.bounds.height, core_edge, stride);
-        if tiles_x.saturating_mul(tiles_y) <= REMOVE_MAX_PATCHES_PER_STROKE
-            || core_edge >= max_core_edge
-        {
-            break;
-        }
-        core_edge = core_edge.saturating_add(32).min(max_core_edge);
-    }
-    let overlap = (core_edge / 4).max(24);
-    let stride = core_edge.saturating_sub(overlap).max(1);
-    let mut crops = Vec::new();
-    let mut core_y = mask.bounds.y;
-    while core_y < mask.bounds.bottom() {
-        let mut core_x = mask.bounds.x;
-        while core_x < mask.bounds.right() {
-            let core_w = core_edge.min(mask.bounds.right() - core_x);
-            let core_h = core_edge.min(mask.bounds.bottom() - core_y);
-            if mask_region_has_pixels(
-                mask,
-                NativeRect {
-                    x: core_x,
-                    y: core_y,
-                    width: core_w,
-                    height: core_h,
-                },
-            ) {
-                let center_x = core_x + core_w / 2;
-                let center_y = core_y + core_h / 2;
-                let context =
-                    square_inside_image(image_width, image_height, center_x, center_y, max_context);
-                let planned = RemoveContextCrop {
-                    context,
-                    target: NativeRect {
-                        x: core_x,
-                        y: core_y,
-                        width: core_w,
-                        height: core_h,
-                    },
-                };
-                if !crops.contains(&planned) {
-                    crops.push(planned);
-                }
-            }
-            if core_x.saturating_add(core_w) >= mask.bounds.right() {
-                break;
-            }
-            core_x = core_x.saturating_add(stride);
-        }
-        let core_h = core_edge.min(mask.bounds.bottom() - core_y);
-        if core_y.saturating_add(core_h) >= mask.bounds.bottom() {
-            break;
-        }
-        core_y = core_y.saturating_add(stride);
-    }
-    crops
-}
-
-fn tile_count_for_span(span: u32, core_edge: u32, stride: u32) -> usize {
-    if span <= core_edge {
-        return 1;
-    }
-    1usize.saturating_add(span.saturating_sub(core_edge).div_ceil(stride.max(1)) as usize)
-}
-
-fn mask_region_has_pixels(mask: &RemoveMask, rect: NativeRect) -> bool {
-    let Some(intersection) = mask.bounds.intersect(rect) else {
-        return false;
-    };
-    for y in intersection.y..intersection.bottom() {
-        let row = (y - mask.bounds.y) as usize * mask.bounds.width as usize;
-        for x in intersection.x..intersection.right() {
-            if mask.pixels[row + (x - mask.bounds.x) as usize] != 0 {
-                return true;
-            }
-        }
-    }
-    false
+    // A square crop cannot contain a mask spanning more than the image's
+    // shortest edge. Use the complete image in that uncommon case; Big-LaMa
+    // still receives exactly one resized 512x512 input and runs once.
+    Some(NativeRect {
+        x: 0,
+        y: 0,
+        width: image_width,
+        height: image_height,
+    })
 }
 
 fn square_inside_image(
@@ -892,16 +808,14 @@ mod tests {
             dilation_radius: 4,
         };
         let mask = rasterize_remove_brush(7000, 6000, &brush).unwrap();
-        let crops = plan_remove_context_crops(7000, 6000, &mask);
-        assert_eq!(crops.len(), 1);
-        assert_eq!(crops[0].context.width, crops[0].context.height);
-        assert!(crops[0].context.width >= 900);
-        assert!(crops[0].context.width <= BIG_LAMA_INPUT_EDGE * 2);
-        assert_eq!(crops[0].target, crops[0].context);
+        let crop = plan_remove_context_crop(7000, 6000, &mask).unwrap();
+        assert_eq!(crop.width, crop.height);
+        assert!(crop.width >= 900);
+        assert_eq!(crop.intersect(mask.bounds), Some(mask.bounds));
     }
 
     #[test]
-    fn large_mask_uses_overlapping_local_crops() {
+    fn large_mask_uses_one_context_containing_the_entire_stroke() {
         let mut points = Vec::new();
         for x in (1000..4000).step_by(120) {
             points.push(RemoveBrushPoint {
@@ -915,17 +829,13 @@ mod tests {
             dilation_radius: 5,
         };
         let mask = rasterize_remove_brush(7000, 6000, &brush).unwrap();
-        let crops = plan_remove_context_crops(7000, 6000, &mask);
-        assert!(crops.len() > 1);
-        assert!(crops.iter().all(|crop| {
-            crop.context.width == crop.context.height
-                && crop.context.width <= BIG_LAMA_INPUT_EDGE * 2
-                && crop.target.width < crop.context.width
-        }));
+        let crop = plan_remove_context_crop(7000, 6000, &mask).unwrap();
+        assert_eq!(crop.width, crop.height);
+        assert_eq!(crop.intersect(mask.bounds), Some(mask.bounds));
     }
 
     #[test]
-    fn huge_contiguous_mask_keeps_unmasked_context_per_tile() {
+    fn huge_contiguous_mask_still_uses_one_context() {
         let mask = RemoveMask {
             bounds: NativeRect {
                 x: 1000,
@@ -935,17 +845,13 @@ mod tests {
             },
             pixels: vec![255; 3000 * 2200],
         };
-        let crops = plan_remove_context_crops(7000, 6000, &mask);
-        assert!(crops.len() > 1);
-        assert!(crops.iter().all(|crop| {
-            crop.target.width < crop.context.width
-                && crop.target.height < crop.context.height
-                && crop.context.intersect(crop.target) == Some(crop.target)
-        }));
+        let crop = plan_remove_context_crop(7000, 6000, &mask).unwrap();
+        assert_eq!(crop.width, crop.height);
+        assert_eq!(crop.intersect(mask.bounds), Some(mask.bounds));
     }
 
     #[test]
-    fn full_large_image_stays_within_patch_cap() {
+    fn full_image_mask_uses_the_full_image_once() {
         let mask = RemoveMask {
             bounds: NativeRect {
                 x: 0,
@@ -955,9 +861,16 @@ mod tests {
             },
             pixels: vec![255; 7000 * 6000],
         };
-        let crops = plan_remove_context_crops(7000, 6000, &mask);
-        assert!(!crops.is_empty());
-        assert!(crops.len() <= REMOVE_MAX_PATCHES_PER_STROKE);
+        let crop = plan_remove_context_crop(7000, 6000, &mask).unwrap();
+        assert_eq!(
+            crop,
+            NativeRect {
+                x: 0,
+                y: 0,
+                width: 7000,
+                height: 6000,
+            }
+        );
     }
 
     #[test]

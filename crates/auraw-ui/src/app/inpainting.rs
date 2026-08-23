@@ -66,10 +66,19 @@ impl AurawApp {
     pub(crate) fn clear_inpainting_tool(&mut self) {
         self.finish_inpaint_stroke_opacity_edit();
         self.cancel_remove_processing();
-        if self.inpaint.edits.strokes.is_empty() {
+        let tool = self.inpaint.tool;
+        if !self
+            .inpaint
+            .edits
+            .strokes
+            .iter()
+            .any(|stroke| tool.matches_stroke_tool(stroke.retouch.map(|retouch| retouch.tool)))
+        {
             return;
         }
-        Arc::make_mut(&mut self.inpaint.edits).strokes.clear();
+        Arc::make_mut(&mut self.inpaint.edits)
+            .strokes
+            .retain(|stroke| !tool.matches_stroke_tool(stroke.retouch.map(|retouch| retouch.tool)));
         self.inpaint.hovered_stroke = None;
         self.inpaint.selected_stroke = None;
         self.note_remove_edit_changed();
@@ -329,12 +338,8 @@ impl AurawApp {
                         (fraction * 100.0).clamp(0.0, 100.0)
                     ));
                 }
-                RemoveEvent::Processing { completed, total } => {
-                    self.inpaint.processing_label = Some(if total <= 1 {
-                        "Applying Big-LaMa…".to_owned()
-                    } else {
-                        format!("Applying Big-LaMa… {completed}/{total} local crops")
-                    });
+                RemoveEvent::Processing { .. } => {
+                    self.inpaint.processing_label = Some("Applying Big-LaMa…".to_owned());
                 }
                 RemoveEvent::Finished(result) => {
                     self.inpaint.receiver = None;

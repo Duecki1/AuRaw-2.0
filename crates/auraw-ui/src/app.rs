@@ -328,6 +328,15 @@ impl InpaintTool {
             Self::Heal => Some(RetouchTool::Heal),
         }
     }
+
+    pub(crate) const fn matches_stroke_tool(self, retouch: Option<RetouchTool>) -> bool {
+        matches!(
+            (self, retouch),
+            (Self::Remove, None)
+                | (Self::Clone, Some(RetouchTool::Clone))
+                | (Self::Heal, Some(RetouchTool::Heal))
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
