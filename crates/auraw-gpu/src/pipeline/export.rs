@@ -1,11 +1,11 @@
 use super::geometry::GeometryInverseMap;
 use super::{
-    export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into, mask_atlas_edge,
-    required_export_tile_halo, CfaKind, ExposureParams, GeometryTransform, GpuParams,
-    GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack, NativeRect,
-    ProcessingQuality, ProcessingStage, RawGpuPipeline, RawGpuProgramTemplate, RemoveEditState,
-    TilePlan, TileSpec, ToneStatisticsSnapshot, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
-    MIN_EXPORT_TILE_HALO,
+    build_region_proxy, export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into,
+    mask_atlas_edge, required_export_tile_halo, CfaKind, ExposureParams, GeometryTransform,
+    GpuParams, GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack,
+    NativeRect, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
+    RawGpuProgramTemplate, RemoveEditState, TilePlan, TileSpec, ToneStatisticsSnapshot,
+    EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
 };
 use crate::file_ops::replace_file;
 use anyhow::{Context, Result};
@@ -25,6 +25,135 @@ pub enum ExportFormat {
     Png,
     Jpeg,
     Tiff,
+}
+
+/// One developed scene crop rendered at a bounded working resolution.
+///
+/// `width` and `height` describe `pixels`; the pixels still cover the complete
+/// native crop supplied to [`render_remove_scene_crop_resized`].
+pub struct ResizedRemoveSceneCrop {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<f32>,
+}
+
+/// Renders a complete native Remove crop through one bounded GPU pipeline.
+///
+/// This is intentionally separate from [`render_remove_scene_crop`]: Big-LaMa
+/// uses the bounded path, while Clone and Heal retain their native-resolution
+/// source and destination renders.
+pub fn render_remove_scene_crop_resized(
+    job: DevelopedCropJob,
+    maximum_edge: u32,
+) -> Result<ResizedRemoveSceneCrop> {
+    anyhow::ensure!(maximum_edge > 0, "Remove working edge is zero");
+    anyhow::ensure!(
+        job.crop.width > 0 && job.crop.height > 0,
+        "Remove crop is empty"
+    );
+    anyhow::ensure!(
+        job.crop.right() <= job.raw.width && job.crop.bottom() <= job.raw.height,
+        "Remove crop lies outside the native source image"
+    );
+
+    let working_raw = build_region_proxy(
+        &job.raw,
+        job.crop.x,
+        job.crop.y,
+        job.crop.width,
+        job.crop.height,
+        ProxySpec {
+            max_edge: maximum_edge,
+        },
+    );
+    anyhow::ensure!(
+        working_raw.width <= maximum_edge && working_raw.height <= maximum_edge,
+        "Remove working scene {}x{} exceeds the {}px edge limit",
+        working_raw.width,
+        working_raw.height,
+        maximum_edge
+    );
+
+    // Express image-global shader coordinates in the same reduced coordinate
+    // system as the working RAW. Existing Remove patches are uploaded below
+    // using their native crop mapping, so their placement remains exact.
+    let scale_x = f64::from(working_raw.width) / f64::from(job.crop.width);
+    let scale_y = f64::from(working_raw.height) / f64::from(job.crop.height);
+    let full_width = (f64::from(job.raw.width) * scale_x)
+        .round()
+        .clamp(f64::from(working_raw.width), f64::from(u32::MAX)) as u32;
+    let full_height = (f64::from(job.raw.height) * scale_y)
+        .round()
+        .clamp(f64::from(working_raw.height), f64::from(u32::MAX)) as u32;
+    let origin_x = (f64::from(job.crop.x) * scale_x)
+        .round()
+        .clamp(0.0, f64::from(i32::MAX)) as i32;
+    let origin_y = (f64::from(job.crop.y) * scale_y)
+        .round()
+        .clamp(0.0, f64::from(i32::MAX)) as i32;
+
+    let empty_masks = MaskStack::default();
+    let mask_edge = mask_atlas_edge();
+    let params = GpuParams::new_for_tile(
+        &job.exposure,
+        &empty_masks,
+        &working_raw,
+        origin_x,
+        origin_y,
+        full_width,
+        full_height,
+    );
+    let template = job
+        .program_prewarm
+        .as_deref()
+        .and_then(|prewarm| prewarm.wait().ok());
+    let pipeline = if let Some(template) = template.as_deref() {
+        RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
+            &job.device,
+            &job.queue,
+            &working_raw,
+            &params,
+            ProcessingQuality::High,
+            template,
+            mask_edge,
+        )
+        .or_else(|_| {
+            RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+                &job.device,
+                &job.queue,
+                &working_raw,
+                &params,
+                ProcessingQuality::High,
+                mask_edge,
+            )
+        })?
+    } else {
+        RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+            &job.device,
+            &job.queue,
+            &working_raw,
+            &params,
+            ProcessingQuality::High,
+            mask_edge,
+        )?
+    };
+
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
+    pipeline.upload_remove_scene_patches(
+        &job.queue,
+        &job.device,
+        &job.remove,
+        &job.raw,
+        &job.exposure,
+        [job.crop.x as f32, job.crop.y as f32],
+        [job.crop.width as f32, job.crop.height as f32],
+    )?;
+    let pixels = pipeline.read_scene_texture_blocking(&job.device, &job.queue)?;
+    Ok(ResizedRemoveSceneCrop {
+        width: working_raw.width,
+        height: working_raw.height,
+        pixels,
+    })
 }
 
 pub fn render_remove_scene_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {

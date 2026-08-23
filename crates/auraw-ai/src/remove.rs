@@ -6,10 +6,11 @@ use crate::pipeline::{
     adaptive_remove_dilation, pipeline_scene_to_canonical_remove_scene,
     pipeline_scene_to_working_rec2020, plan_remove_context_crop, rasterize_remove_brush,
     remove_model_srgb_to_canonical_scene, remove_model_view_gain, remove_scene_to_model_srgb,
-    render_remove_scene_crop, working_rec2020_to_canonical_remove_scene, DevelopedCropJob,
-    ExposureParams, GeometryTransform, GpuProgramPrewarm, LoadedRaw, MaskStack, NativeRect,
-    RemoveBrushStroke, RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, RetouchAlignment,
-    RetouchStroke, RetouchTool, ToneStatisticsSnapshot, BIG_LAMA_INPUT_EDGE,
+    render_remove_scene_crop, render_remove_scene_crop_resized,
+    working_rec2020_to_canonical_remove_scene, DevelopedCropJob, ExposureParams,
+    GeometryTransform, GpuProgramPrewarm, LoadedRaw, MaskStack, NativeRect, RemoveBrushStroke,
+    RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, ResizedRemoveSceneCrop,
+    RetouchAlignment, RetouchStroke, RetouchTool, ToneStatisticsSnapshot, BIG_LAMA_INPUT_EDGE,
 };
 use crate::ModelDownloadProgress;
 use anyhow::{Context, Result};
@@ -171,22 +172,25 @@ fn run_remove(request: RemoveRequest, events: &mpsc::Sender<RemoveEvent>) -> Res
     let crop = plan_remove_context_crop(request.raw.width, request.raw.height, &mask)
         .context("Remove mask produced no context crop")?;
     ensure_not_cancelled(&request.cancellation)?;
-    let scene = render_remove_scene_crop(DevelopedCropJob {
-        device: request.device.clone(),
-        queue: request.queue.clone(),
-        raw: Arc::clone(&request.raw),
-        geometry: request.geometry,
-        exposure: request.exposure,
-        masks: request.masks.clone(),
-        remove: request.existing,
-        crop,
-        tone_statistics: request.tone_statistics.clone(),
-        program_prewarm: request.program_prewarm.clone(),
-    })
+    let scene = render_remove_scene_crop_resized(
+        DevelopedCropJob {
+            device: request.device.clone(),
+            queue: request.queue.clone(),
+            raw: Arc::clone(&request.raw),
+            geometry: request.geometry,
+            exposure: request.exposure,
+            masks: request.masks.clone(),
+            remove: request.existing,
+            crop,
+            tone_statistics: request.tone_statistics.clone(),
+            program_prewarm: request.program_prewarm.clone(),
+        },
+        BIG_LAMA_INPUT_EDGE,
+    )
     .with_context(|| {
         format!(
-            "render native scene Remove context {}x{} at {},{}",
-            crop.width, crop.height, crop.x, crop.y
+            "render bounded Big-LaMa scene for native context {}x{} at {},{}",
+            crop.width, crop.height, crop.x, crop.y,
         )
     })?;
     ensure_not_cancelled(&request.cancellation)?;
@@ -835,22 +839,29 @@ fn infer_crop(
     crop: NativeRect,
     raw: &LoadedRaw,
     exposure: &ExposureParams,
-    scene: &[f32],
+    scene: &ResizedRemoveSceneCrop,
     mask: &RemoveMask,
 ) -> Result<RemovePatch> {
-    let expected = crop.width as usize * crop.height as usize * 3;
     anyhow::ensure!(
-        scene.len() == expected,
+        scene.width <= BIG_LAMA_INPUT_EDGE && scene.height <= BIG_LAMA_INPUT_EDGE,
+        "Big-LaMa working scene {}x{} exceeds {}px",
+        scene.width,
+        scene.height,
+        BIG_LAMA_INPUT_EDGE,
+    );
+    let expected = scene.width as usize * scene.height as usize * 3;
+    anyhow::ensure!(
+        scene.pixels.len() == expected,
         "scene Remove crop has an invalid RGB length"
     );
 
-    let view_gain = remove_model_view_gain(raw, scene);
+    let view_gain = remove_model_view_gain(raw, &scene.pixels);
     let mut srgb = Vec::with_capacity(expected);
-    for pixel in scene.chunks_exact(3) {
+    for pixel in scene.pixels.chunks_exact(3) {
         let converted = remove_scene_to_model_srgb(raw, [pixel[0], pixel[1], pixel[2]], view_gain);
         srgb.extend_from_slice(&converted);
     }
-    let source: Rgb32FImage = ImageBuffer::from_raw(crop.width, crop.height, srgb)
+    let source: Rgb32FImage = ImageBuffer::from_raw(scene.width, scene.height, srgb)
         .context("construct developed Remove crop")?;
     let resized = image::imageops::resize(
         &source,
@@ -953,16 +964,17 @@ fn infer_crop(
     let model_output: Rgb32FImage =
         ImageBuffer::from_raw(BIG_LAMA_INPUT_EDGE, BIG_LAMA_INPUT_EDGE, output_interleaved)
             .context("construct Big-LaMa output image")?;
-    let restored =
-        image::imageops::resize(&model_output, crop.width, crop.height, FilterType::Lanczos3);
+    let source_scene: Rgb32FImage =
+        ImageBuffer::from_raw(scene.width, scene.height, scene.pixels.clone())
+            .context("construct bounded Big-LaMa source scene")?;
 
     build_cached_patch(
         crop,
         raw,
         exposure,
-        scene,
+        &source_scene,
         view_gain,
-        &restored,
+        &model_output,
         &source_mask,
     )
 }
@@ -985,9 +997,9 @@ fn build_cached_patch(
     crop: NativeRect,
     raw: &LoadedRaw,
     exposure: &ExposureParams,
-    source_scene: &[f32],
+    source_scene: &Rgb32FImage,
     view_gain: f32,
-    restored: &Rgb32FImage,
+    model_output: &Rgb32FImage,
     binary_mask: &GrayImage,
 ) -> Result<RemovePatch> {
     let scale = crop.width.max(crop.height) as f32 / BIG_LAMA_INPUT_EDGE as f32;
@@ -1025,22 +1037,22 @@ fn build_cached_patch(
     let mut alpha = Vec::with_capacity(pixels);
     for y in top..bottom {
         for x in left..right {
-            let pixel: &Rgb<f32> = restored.get_pixel(x, y);
+            let u = (x as f32 + 0.5) / crop.width.max(1) as f32;
+            let v = (y as f32 + 0.5) / crop.height.max(1) as f32;
+            let pixel: Rgb<f32> = image::imageops::sample_bilinear(model_output, u, v)
+                .context("sample upscaled Big-LaMa output")?;
             let generated = remove_model_srgb_to_canonical_scene(
                 raw,
                 exposure,
                 [pixel[0], pixel[1], pixel[2]],
                 view_gain,
             );
-            let source_index = (y as usize * crop.width as usize + x as usize) * 3;
+            let source_pixel: Rgb<f32> = image::imageops::sample_bilinear(source_scene, u, v)
+                .context("sample bounded Big-LaMa source scene")?;
             let source = pipeline_scene_to_canonical_remove_scene(
                 raw,
                 exposure,
-                [
-                    source_scene[source_index],
-                    source_scene[source_index + 1],
-                    source_scene[source_index + 2],
-                ],
+                [source_pixel[0], source_pixel[1], source_pixel[2]],
             );
             let binary = binary_mask.get_pixel(x, y)[0];
             let soft = blurred.get_pixel(x, y)[0];
@@ -1175,10 +1187,10 @@ mod tests {
                 binary.put_pixel(x, y, Luma([255]));
             }
         }
-        let restored = Rgb32FImage::from_pixel(64, 64, Rgb([0.4, 0.5, 0.6]));
+        let restored = Rgb32FImage::from_pixel(16, 16, Rgb([0.4, 0.5, 0.6]));
         let raw = LoadedRaw::from_scene_linear_rec2020(1, 1, vec![0.18, 0.18, 0.18]).unwrap();
         let exposure = ExposureParams::default();
-        let source_scene = vec![0.18f32; 64 * 64 * 3];
+        let source_scene = Rgb32FImage::from_pixel(8, 8, Rgb([0.18, 0.18, 0.18]));
         let patch = build_cached_patch(
             crop,
             &raw,
