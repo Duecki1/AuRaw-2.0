@@ -34,15 +34,16 @@ edition = "2021"
 rust-version = "1.92.0"
 authors = ["Duecki <dueckis@dueckis.de>"]
 license = "GPL-3.0-or-later"
-repository = "https://github.com/duecki/AuRaw"
+repository = "https://github.com/Duecki1/AuRaw-2.0"
+readme = "README.md"
 
 [workspace.dependencies]
-auraw-core = { path = "crates/auraw-core" }
-auraw-gpu = { path = "crates/auraw-gpu" }
-auraw-ai = { path = "crates/auraw-ai" }
-auraw-ui = { path = "crates/auraw-ui" }
-auraw-ffi = { path = "crates/auraw-ffi" }
-auraw-cli = { path = "crates/auraw-cli" }
+auraw-core = { version = "2.0.0", path = "crates/auraw-core" }
+auraw-gpu = { version = "2.0.0", path = "crates/auraw-gpu" }
+auraw-ai = { version = "2.0.0", path = "crates/auraw-ai" }
+auraw-ui = { version = "2.0.0", path = "crates/auraw-ui" }
+auraw-ffi = { version = "2.0.0", path = "crates/auraw-ffi" }
+auraw-cli = { version = "2.0.0", path = "crates/auraw-cli" }
 
 anyhow = "1.0"
 base64 = "0.22"

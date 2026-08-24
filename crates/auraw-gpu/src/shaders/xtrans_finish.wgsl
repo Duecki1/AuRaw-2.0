@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 Markesteijn and dual demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// Credits include Frank Markesteijn, Ingo Weyrich, and Hanno Schwalm.
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 #import auraw::noise as Noise
 #import auraw::noise_ca_finish as NoiseCaFinish

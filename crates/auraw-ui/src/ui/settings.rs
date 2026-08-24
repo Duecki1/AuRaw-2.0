@@ -5,6 +5,13 @@ use crate::ui::layout::ScreenLayout;
 use crate::ui::library::maximum_thumbnail_worker_count;
 use eframe::egui::{self, Ui};
 
+const PROJECT_NOTICE: &str = include_str!("../../../../NOTICE.md");
+const PROJECT_LICENSE: &str = include_str!("../../../../COPYING");
+const PROJECT_LICENSE_ID: &str = env!("CARGO_PKG_LICENSE");
+const PROJECT_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+const THIRD_PARTY_NOTICES: &str = include_str!("../../../../THIRD_PARTY_NOTICES.md");
+const RUST_DEPENDENCY_LICENSES: &str = include_str!("../../../../THIRD_PARTY_LICENSES.md");
+
 pub struct Settings;
 
 fn diagnostics_snapshot_with_ai_backends() -> String {
@@ -598,6 +605,54 @@ impl Settings {
 
         ui.add_space(8.0);
         Self::group(ui, content_width, |ui| {
+            ui.heading("Legal & attributions");
+            ui.strong(format!("AuRaw {}", env!("CARGO_PKG_VERSION")));
+            ui.label("Copyright (C) 2026 Duecki and AuRaw contributors");
+            ui.label(format!("Licensed under {PROJECT_LICENSE_ID}."));
+            ui.hyperlink_to("Project source and license", PROJECT_REPOSITORY);
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    "Adapted code, bundled data and native libraries retain their upstream notices. Optional AI models retain their separately listed terms. Resolved Rust crates and bundled fonts/icons are listed with their complete license texts below.",
+                )
+                .wrap(),
+            );
+
+            crate::ui::theme::action_row(ui, |ui| {
+                if ui.button("Copy all legal text").clicked() {
+                    let legal_text = format!(
+                        "{PROJECT_NOTICE}\n\n{PROJECT_LICENSE}\n\n{THIRD_PARTY_NOTICES}\n\n{RUST_DEPENDENCY_LICENSES}"
+                    );
+                    #[cfg(target_os = "android")]
+                    match app.copy_text_to_clipboard("AuRaw legal notices", &legal_text) {
+                        Ok(()) => crate::diagnostics::record(
+                            "AuRaw legal notices copied to Android clipboard",
+                        ),
+                        Err(error) => crate::diagnostics::record(format!(
+                            "Android legal-notice clipboard copy failed: {error}"
+                        )),
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    ui.ctx().copy_text(legal_text);
+                }
+            });
+
+            egui::CollapsingHeader::new("Project notice")
+                .default_open(false)
+                .show(ui, |ui| Self::legal_text(ui, PROJECT_NOTICE, 8));
+            egui::CollapsingHeader::new("GNU GPL v3 or later")
+                .default_open(false)
+                .show(ui, |ui| Self::legal_text(ui, PROJECT_LICENSE, 16));
+            egui::CollapsingHeader::new("Adapted source, data, native libraries, and AI models")
+                .default_open(false)
+                .show(ui, |ui| Self::legal_text(ui, THIRD_PARTY_NOTICES, 18));
+            egui::CollapsingHeader::new("Rust dependencies, fonts, and icons")
+                .default_open(false)
+                .show(ui, |ui| Self::legal_text(ui, RUST_DEPENDENCY_LICENSES, 18));
+        });
+
+        ui.add_space(8.0);
+        Self::group(ui, content_width, |ui| {
             ui.heading("Diagnostics");
             ui.add(
                 egui::Label::new(
@@ -736,5 +791,16 @@ impl Settings {
             ui.set_max_width(inner_width);
             contents(ui);
         });
+    }
+
+    fn legal_text(ui: &mut Ui, text: &str, rows: usize) {
+        let mut view = text;
+        ui.add(
+            egui::TextEdit::multiline(&mut view)
+                .font(egui::TextStyle::Monospace)
+                .interactive(false)
+                .desired_rows(rows)
+                .desired_width(f32::INFINITY),
+        );
     }
 }

@@ -858,12 +858,11 @@ fn disabled_index_rendering_still_reuses_a_fresh_edited_thumbnail() {
     fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"saved edits").unwrap();
     install_test_developed_thumbnail(&raw);
 
-    let loaded = load_desktop_library_thumbnail(
-        &test_asset(raw),
-        ThumbnailLoadStage::RawPreview,
-        false,
-    )
-    .expect("a fresh edited thumbnail should remain usable when index rendering is disabled");
+    let loaded =
+        load_desktop_library_thumbnail(&test_asset(raw), ThumbnailLoadStage::RawPreview, false)
+            .expect(
+                "a fresh edited thumbnail should remain usable when index rendering is disabled",
+            );
 
     assert!(loaded.developed);
     assert!(!loaded.developed_thumbnail_stale);

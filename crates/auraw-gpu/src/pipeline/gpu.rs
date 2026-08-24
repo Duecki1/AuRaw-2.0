@@ -1792,9 +1792,25 @@ impl RawGpuPipeline {
         })
     }
 
-    pub fn output_snapshot(&self) -> GpuOutputSnapshot {
+    pub fn output_snapshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> GpuOutputSnapshot {
+        let texture = create_processing_texture(
+            device,
+            texture_size(self.width, self.height),
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            "auraw output snapshot",
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw output snapshot encoder"),
+        });
+        encoder.copy_texture_to_texture(
+            copy_texture(&self.out_texture),
+            copy_texture(&texture),
+            texture_size(self.width, self.height),
+        );
+        queue.submit(Some(encoder.finish()));
         GpuOutputSnapshot {
-            texture: self.out_texture.clone(),
+            texture,
             width: self.width,
             height: self.height,
         }

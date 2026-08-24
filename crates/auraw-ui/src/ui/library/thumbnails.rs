@@ -640,7 +640,7 @@ pub(super) fn render_uncached_developed_thumbnail(
         GpuParams::new(&edits.exposure, &masks, &preview_raw).with_vignette_geometry(geometry);
     pipeline.recompute(&gpu.queue, &gpu.device, &params);
     let thumbnail = pipeline
-        .output_snapshot()
+        .output_snapshot(&gpu.device, &gpu.queue)
         .read_thumbnail_blocking(&gpu.device, &gpu.queue, maximum_edge)
         .map_err(|error| format!("could not read edited thumbnail pixels: {error:#}"))?;
     let thumbnail = crate::pipeline::transform_thumbnail_geometry_with_lens(

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 Markesteijn X-Trans demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// Markesteijn algorithm credit: Frank Markesteijn (via dcraw and darktable).
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 
 @group(0) @binding(27) var mark_drv_0_3_read: texture_2d<f32>;

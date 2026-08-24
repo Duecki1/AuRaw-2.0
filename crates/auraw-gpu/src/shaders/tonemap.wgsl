@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 sigmoid code.
+// Copyright (C) 2020-2026 darktable developers.
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 #import auraw::tone_common as ToneCommon
-
-// GPL-3.0-or-later; ported from darktable 5.6.0 sigmoid code.
-// Copyright (C) 2020-2026 darktable developers.
-// Copyright (C) 2026 AuRaw contributors (WGSL port).
 
 @group(0) @binding(16) var<storage, read> tone_stats: ToneCommon::ToneStats;
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;

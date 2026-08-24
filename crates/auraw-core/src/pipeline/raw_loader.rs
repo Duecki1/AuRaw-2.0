@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Highlight reconstruction includes adaptations from darktable 5.6.0.
+// Copyright (C) 2010-2026 darktable developers.
+// Copyright (C) 2026 AuRaw contributors (Rust adaptation).
+
 use super::basicadj::{
     temperature_kelvin_from_offset, temperature_offset_from_kelvin, white_balance_tint_from_offset,
     white_balance_tint_offset, ExposureParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT,

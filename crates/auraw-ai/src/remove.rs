@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The heal solver includes an adaptation of GIMP 3.0.4 app/paint/gimpheal.c.
+// Copyright the GIMP contributors.
+// Copyright (C) 2026 AuRaw contributors (Rust adaptation).
+
 use crate::execution_provider::SessionOptions;
 use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
 use crate::model_install::ModelInstallSpec;
