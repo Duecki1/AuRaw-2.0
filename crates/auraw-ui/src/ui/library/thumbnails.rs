@@ -703,15 +703,13 @@ pub(super) fn load_desktop_library_thumbnail(
     };
     match stage {
         ThumbnailLoadStage::RawPreview => {
-            if render_edited_thumbnails_during_indexing {
-                match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
-                    Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
-                    Ok(None) => {}
-                    Err(error) => log::warn!(
-                        "could not use developed thumbnail cache for {}: {error}",
-                        path.display()
-                    ),
-                }
+            match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
+                Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
+                Ok(None) => {}
+                Err(error) => log::warn!(
+                    "could not use developed thumbnail cache for {}: {error}",
+                    path.display()
+                ),
             }
 
             let has_edits = crate::sidecar::sidecar_path_for_raw(path).is_file();
@@ -787,15 +785,12 @@ pub(super) fn load_android_library_thumbnail(
     let display_name = asset.display_name.as_str();
     let bytes = asset.metadata.bytes;
     let modified_seconds = asset.metadata.modified_seconds;
-    if render_edited_thumbnails_during_indexing {
-        match crate::android::load_developed_thumbnail_cache(app, uri, display_name, THUMBNAIL_EDGE)
-        {
-            Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
-            Ok(None) => {}
-            Err(error) => log::warn!(
-                "could not use Android developed-thumbnail cache for {display_name}: {error}"
-            ),
-        }
+    match crate::android::load_developed_thumbnail_cache(app, uri, display_name, THUMBNAIL_EDGE) {
+        Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
+        Ok(None) => {}
+        Err(error) => log::warn!(
+            "could not use Android developed-thumbnail cache for {display_name}: {error}"
+        ),
     }
     let mut thumbnail = crate::android::load_library_thumbnail(
         app,
