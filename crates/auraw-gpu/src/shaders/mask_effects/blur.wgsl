@@ -1,8 +1,3 @@
-// Progressive, scale-aware diffusion for the non-destructive mask Blur
-// effect. Each stage reads the previous stage's complete image, so every
-// source pixel reaches its neighbors through a continuous B3-spline kernel.
-// This avoids the repeated detail and woven pattern produced by sampling a
-// handful of isolated points at a large radius.
 
 const MASK_BLUR_STAGE_COUNT: u32 = 5u;
 
@@ -74,11 +69,6 @@ fn apply_mask_blur_stage(
         let amount = clamp(primary.x / 100.0, 0.0, 1.0) * coverage;
         if amount <= 1e-6 { continue; }
 
-        // Allocate the requested final Amount across only the active stages.
-        // Their retained-source products therefore remain 1 - Amount instead
-        // of applying the full slider value five times. Keep a tiny retained
-        // fraction at the endpoint so a newly entering radius stage fades in
-        // continuously instead of 0^epsilon making it instantly opaque.
         let mix_sum = mask_blur_stage_mix_sum(primary.y);
         let stage_share = stage_mix / max(mix_sum, 1e-6);
         let distributed_amount = min(amount, 0.995);
@@ -91,9 +81,6 @@ fn apply_mask_blur_stage(
         rgb = mix(source_rgb, mask_blur_diffused_at(pos, stage), combined_amount);
     }
 
-    // The aperture and path gathers are intentionally evaluated once at the
-    // first stage. The remaining passes run only when an ordinary progressive
-    // Blur mask is also active in the same stack.
     if stage != 0u {
         return rgb;
     }

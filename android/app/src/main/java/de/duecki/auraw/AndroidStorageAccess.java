@@ -5,14 +5,6 @@ import android.content.SharedPreferences;
 
 import java.io.File;
 
-/**
- * Minimal Android platform surface required by storage-oriented delegates.
- *
- * <p>Keeping this dependency narrow lets storage code be exercised with a
- * controlled implementation and prevents it from accumulating Activity/UI
- * responsibilities. JNI still reaches the same delegates through
- * {@link AuRawActivity}; this is an internal dependency-injection boundary.
- */
 interface AndroidStorageAccess {
     ContentResolver getContentResolver();
 
@@ -31,7 +23,6 @@ interface AndroidStorageAccess {
     void runOnUiThread(Runnable action);
 }
 
-/** Activity-backed production implementation of {@link AndroidStorageAccess}. */
 final class ActivityStorageAccess implements AndroidStorageAccess {
     private final AuRawActivity activity;
 

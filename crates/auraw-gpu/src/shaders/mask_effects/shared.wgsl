@@ -1,6 +1,5 @@
-// Helpers shared by non-destructive mask effects. These identifiers mirror the
-// stable values assigned by MaskEffect::shader_id on the Rust side.
 
+// These values must match MaskEffect::shader_id on the Rust side.
 const MASK_EFFECT_NEON_ID: u32 = 1u;
 const MASK_EFFECT_GLOW_ID: u32 = 2u;
 const MASK_EFFECT_LIGHT_RAYS_ID: u32 = 3u;

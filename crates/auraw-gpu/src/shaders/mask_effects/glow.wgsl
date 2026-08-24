@@ -1,7 +1,3 @@
-// Non-destructive mask Glow helpers. The mask is sampled only while building
-// the emission source and its hot core. The shared creative Glow pass diffuses
-// that source and composites the result without masking it again, allowing the
-// halo to spread naturally into surrounding pixels.
 
 fn mask_glow_active() -> bool {
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);

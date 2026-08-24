@@ -27,8 +27,6 @@ pub enum ExportFormat {
     Tiff,
 }
 
-/// One developed scene crop rendered at a bounded working resolution.
-///
 /// `width` and `height` describe `pixels`; the pixels still cover the complete
 /// native crop supplied to [`render_remove_scene_crop_resized`].
 pub struct ResizedRemoveSceneCrop {
@@ -38,10 +36,6 @@ pub struct ResizedRemoveSceneCrop {
 }
 
 /// Renders a complete native Remove crop through one bounded GPU pipeline.
-///
-/// This is intentionally separate from [`render_remove_scene_crop`]: Big-LaMa
-/// uses the bounded path, while Clone and Heal retain their native-resolution
-/// source and destination renders.
 pub fn render_remove_scene_crop_resized(
     job: DevelopedCropJob,
     maximum_edge: u32,

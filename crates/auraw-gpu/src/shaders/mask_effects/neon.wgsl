@@ -1,8 +1,3 @@
-// A scene-linear, scale-aware Neon effect. It derives edge energy from the
-// current developed image and returns a new working-space value. This file is
-// appended to creative_effects.wgsl and deliberately reuses its imported
-// Common, Color, and SceneAdjustments modules. Source pixels are never modified
-// or baked into the edit.
 
 fn log_luminance_at(pos: vec2<i32>) -> f32 {
     return log2(max(Common::safe_luma(SceneAdjustments::adjustment_base_at(pos)), 1e-6));
@@ -44,8 +39,6 @@ fn apply_neon(
     let inner_radius = SceneAdjustments::presence_step(edge_width, 24);
     let outer_radius = min(inner_radius * 2, 48);
 
-    // Detail lowers the detection threshold; the broader second sample gives
-    // Glow a halo without introducing a separate destructive blur layer.
     let threshold = mix(0.22, 0.018, detail);
     let inner_energy = sobel_edge_energy(pos, inner_radius);
     let outer_energy = sobel_edge_energy(pos, outer_radius);

@@ -1,8 +1,6 @@
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 
-// Shared Markesteijn candidate construction used by directional derivatives
-// and final homogeneity accumulation.
 @group(0) @binding(9) var markesteijn_base_read: texture_2d<f32>;
 
 const MARKESTEIJN3_MARGIN: i32 = 17;
@@ -74,17 +72,10 @@ fn mark_candidate(pos: vec2<i32>, index: u32) -> vec3<f32> {
     let backward = mark_load(pos - direction);
     let backward2 = mark_load(pos - 2 * direction);
 
-    // Markesteijn keeps opposite one-sided estimates as separate candidates.
-    // A cubic one-sided prediction is anchored by the opposite neighbor to
-    // prevent ringing while preserving a meaningful d / d+4 pair.
     let one_sided = forward + 0.5 * (center - forward2);
     let opposite_anchor = backward + 0.5 * (center - backward2);
     var candidate = 0.75 * one_sided + 0.25 * opposite_anchor;
 
-    // Reconstruct missing components as directional color differences around
-    // the candidate green. This follows the red/blue interpolation principle
-    // in the reference implementation and is less sensitive to luminance edges
-    // than interpolating RGB components independently.
     let g = candidate.g;
     let grad_forward = vec3<f32>(1e-5) + abs(forward - forward2);
     let grad_backward = vec3<f32>(1e-5) + abs(backward - backward2);
@@ -102,7 +93,6 @@ fn mark_candidate(pos: vec2<i32>, index: u32) -> vec3<f32> {
     let span = max(bounds[1] - bounds[0], vec3<f32>(1e-5));
     candidate = clamp(candidate, bounds[0] - 0.125 * span, bounds[1] + 0.125 * span);
 
-    // Preserve the sensor sample exactly at every refinement and candidate.
     let measured_channel = RawSampling::color_at(pos);
     candidate = mark_set_component(
         candidate,
@@ -113,15 +103,11 @@ fn mark_candidate(pos: vec2<i32>, index: u32) -> vec3<f32> {
 }
 
 fn mark_yuv(rgb: vec3<f32>) -> vec3<f32> {
-    // darktable uses a perceptual YPbPr/YUV-like space for directional
-    // derivatives; these coefficients keep the same luma/chroma separation.
     let y = 0.2627 * rgb.r + 0.6780 * rgb.g + 0.0593 * rgb.b;
     return vec3<f32>(y, 0.56433 * (rgb.b - y), 0.67815 * (rgb.r - y));
 }
 
 fn mark_border_rgb(pos: vec2<i32>) -> vec3<f32> {
-    // Bounded 5x5 per-channel interpolation for the 17-pixel exterior. The
-    // measured photosite value is restored after interpolation.
     var sum = vec3<f32>(0.0);
     var weight_sum = vec3<f32>(0.0);
     for (var dy = -2; dy <= 2; dy = dy + 1) {

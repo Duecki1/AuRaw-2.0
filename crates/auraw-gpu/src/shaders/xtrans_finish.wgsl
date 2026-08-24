@@ -2,11 +2,6 @@
 #import auraw::noise as Noise
 #import auraw::noise_ca_finish as NoiseCaFinish
 
-// Grouped X-Trans finishing/FDC stage. Mode 0 keeps the Markesteijn-3 result. Mode 1
-// preserves its luminance while rejecting chroma energy at the 6x6 X-Trans
-// carrier frequencies. Mode 2 blends the Markesteijn reference with a separate
-// robust CFA reconstruction using a noise-adjusted, Gaussian-smoothed Scharr
-// detail signal plus low-branch support/coherence confidence.
 @group(0) @binding(26) var mark_high_read: texture_2d<f32>;
 @group(0) @binding(10) var xtrans_scene_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 @group(0) @binding(23) var xtrans_dual_low_read: texture_2d<f32>;
@@ -72,8 +67,6 @@ fn xt_frequency_uv(pos: vec2<i32>) -> vec2<f32> {
     var carrier_antidiag = vec4<f32>(0.0);
     var carrier_weight = 0.0;
 
-    // A 13x13 analysis window matches the support of darktable's FDC filters.
-    // Triangular apodization suppresses ringing at the window boundary.
     for (var dy = -6; dy <= 6; dy = dy + 1) {
         let wy = f32(7 - abs(dy));
         let py = xt_phase6(dy);
@@ -146,9 +139,6 @@ fn xt_reference_false_color_guard(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
 
 fn xt_frequency_chroma(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     let uv0 = xt_frequency_uv(pos);
-    // The reference FDC path applies a five-sample cross median to remove
-    // textile outliers. Neighbor samples use the high-detail chroma to avoid
-    // repeating five 13x13 transforms per output pixel.
     let uvn = xt_uv(xt_high(pos + vec2<i32>(0, -1)));
     let uvs = xt_uv(xt_high(pos + vec2<i32>(0,  1)));
     let uvw = xt_uv(xt_high(pos + vec2<i32>(-1, 0)));
@@ -222,8 +212,6 @@ fn xt_dual_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32 {
     return clamp(1.0 - low_confidence * (1.0 - high_confidence), 0.0, 1.0);
 }
 
-// Adapter used by the reusable noise/CA composition module. xt_high clamps
-// coordinates while sampling the final Markesteijn reference texture.
 override fn NoiseCaFinish::finish_reference_at(pos: vec2<i32>) -> vec3<f32> {
     return xt_high(pos);
 }

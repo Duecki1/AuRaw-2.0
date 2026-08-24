@@ -1,7 +1,6 @@
 #import auraw::common as Common
 #import auraw::noise as Noise
 
-// Color denoise
 
 @group(0) @binding(11) var color_denoise_read: texture_2d<f32>;
 @group(0) @binding(10) var color_denoise_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
@@ -47,15 +46,12 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     let center_variance = Noise::nr_component_variance(center);
     let detail = clamp(Common::camera_uniforms.noise_options.y, 0.0, 1.0);
     let requested = clamp(Common::camera_uniforms.chroma_denoise, 0.0, 1.0);
-    // Variance
     let guide_variance_scale = exp2(-f32(scale));
-    // Edges
     let signal_guide_sigma = mix(10.0, 5.5, detail);
     let opponent_noise_deadzone = mix(12.0, 6.0, detail);
     let opponent_edge_slope = mix(0.28, 0.52, detail);
     let center_opponents = Noise::nr_opponents(center);
     let center_opponent_variance = Noise::nr_opponent_variance(center);
-    // Kernel
     let compact = scale >= 4;
     let extent = select(2, 1, compact);
     var opponent_sum = vec2<f32>(0.0);
@@ -107,7 +103,6 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
         Noise::nr_opponent_variance(center) * guide_variance_scale,
     );
 
-    // Threshold
     let threshold_strength = mix(3.1, 1.35, detail)
         * color_denoise_scale_gain(scale)
         * requested;
@@ -115,13 +110,11 @@ fn color_denoise_apply(pos: vec2<i32>, radius: i32, scale: i32) -> vec3<f32> {
     let normalized_magnitude = length(normalized_detail);
     let soft_retained =
         max(1.0 - threshold_strength / max(normalized_magnitude, 1e-6), 0.0);
-    // Features
     let feature_retention = smoothstep(
         mix(9.0, 5.0, detail),
         mix(18.0, 10.0, detail),
         normalized_magnitude,
     );
-    // Saturation
     let relative_chroma =
         length(center_opponents) / max(abs(center_signal), 0.02);
     let saturated_feature = smoothstep(0.15, 0.35, relative_chroma)

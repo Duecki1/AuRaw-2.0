@@ -13,7 +13,6 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 
-/** Platform-independent storage rules shared by Android production code and JVM tests. */
 final class AndroidStorageContract {
     static final String RAW_LIBRARY_DIRECTORY_NAME = ".library";
 
@@ -49,7 +48,6 @@ final class AndroidStorageContract {
         return name;
     }
 
-    /** Resolves an AuRaw-owned relative folder without permitting path traversal. */
     static File libraryFolder(File canonicalLibrary, String relativePath) throws Exception {
         String relative = relativePath == null ? "" : relativePath.trim();
         File root = canonicalLibrary.getCanonicalFile();
@@ -211,10 +209,8 @@ final class AndroidStorageContract {
                 Files.move(source.toPath(), destination.toPath());
                 return;
             } catch (Exception ignored) {
-                // Fall through to bounded copy for filesystems without a reliable move.
             }
         } catch (Exception ignored) {
-            // Fall through to bounded copy for filesystems without a reliable move.
         }
 
         File partial = new File(

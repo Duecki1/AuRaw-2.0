@@ -3,7 +3,6 @@ package de.duecki.auraw;
 import android.content.ContentResolver;
 import android.net.Uri;
 
-/** Persists only valid content-provider picker locations for SAF reopen hints. */
 final class PickerLocationStore {
     private static final String PREFERENCES = "auraw-picker-locations";
 

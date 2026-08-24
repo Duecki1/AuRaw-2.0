@@ -1,6 +1,3 @@
-// Shared data for image-adaptive tonal controls. The histogram is calculated
-// from unexposed scene-linear luminance, so the Exposure slider remains a true
-// exposure control instead of being normalized away by the analysis pass.
 const SCENE_MIDDLE_GREY: f32 = 0.1845;
 const DISPLAY_MIDDLE_GREY: f32 = 0.1845;
 
@@ -9,12 +6,9 @@ const TONE_EV_MIN: f32 = -16.0;
 const TONE_EV_MAX: f32 = 12.0;
 const TONE_EV_RANGE: f32 = TONE_EV_MAX - TONE_EV_MIN;
 
-// As in common.wgsl, exported composable-module struct members must not end
-// in a digit or Naga's WGSL writeback will substitute their identifiers.
+// Naga rewrites exported identifiers ending in digits.
 struct ToneStats {
-    // 0.5%, 5%, 50%, 95% scene-luminance percentiles in EV.
     percentiles_0_field: vec4<f32>,
-    // 99.5%, robust dynamic range, sampled-pixel count, reserved.
     percentiles_1_field: vec4<f32>,
 }
 

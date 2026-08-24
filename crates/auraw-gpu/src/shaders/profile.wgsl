@@ -1,9 +1,6 @@
 #import auraw::common as Common
 #import auraw::color as Color
 
-// DNG Camera Profile creative stages and the ICC-managed display/output LUT.
-// Data is packed as vec4 entries so one read-only storage buffer can carry
-// dual-illuminant HueSat maps, LookTable data, a tone-curve LUT, and output LUT.
 @group(0) @binding(20) var<storage, read> profile_data: array<vec4<f32>>;
 
 const REC2020_TO_PROPHOTO: mat3x3<f32> = mat3x3<f32>(
@@ -18,9 +15,6 @@ const PROPHOTO_TO_REC2020: mat3x3<f32> = mat3x3<f32>(
     vec3<f32>(-0.14310526, -0.01068580,  1.03537324),
 );
 
-// Luminance coefficients induced by REC2020_TO_PROPHOTO. Passing this lightness
-// to the shared gamut projection keeps profile lookup preparation neutral-axis
-// preserving instead of flooring ProPhoto channels independently.
 const PROPHOTO_LUMA: vec3<f32> = vec3<f32>(0.26828944, 0.71515419, 0.01656066);
 
 fn profile_srgb_encode_value(value: f32) -> f32 {
@@ -83,7 +77,6 @@ fn profile_hsv_to_rgb(hsv: vec3<f32>) -> vec3<f32> {
 }
 
 fn profile_map_index(map_info: vec4<u32>, h: u32, s: u32, v: u32) -> u32 {
-    // DNG storage order: value outermost, hue next, saturation innermost.
     return map_info.w + (v * map_info.x + h) * map_info.y + s;
 }
 
@@ -132,10 +125,6 @@ fn apply_profile_hsv_map(rgb_rec2020: vec3<f32>, map_info: vec4<u32>, encoding: 
     if map_info.x == 0u || map_info.y == 0u || map_info.z == 0u {
         return rgb_rec2020;
     }
-    // DCP tables are defined on a bounded domain, but hard-clipping scene-
-    // linear highlights before table lookup destroys exposure headroom. Scale
-    // over-range RGB into the table domain, apply the profile adjustment, then
-    // restore the scale. Values already in [0, 1] are bit-for-bit unchanged.
     let profile_signed = REC2020_TO_PROPHOTO * rgb_rec2020;
     let profile_linear = Color::gamut_project_nonnegative(profile_signed, dot(profile_signed, PROPHOTO_LUMA));
     let profile_headroom = max(
@@ -145,9 +134,6 @@ fn apply_profile_hsv_map(rgb_rec2020: vec3<f32>, map_info: vec4<u32>, encoding: 
     let profile_rgb = profile_linear / profile_headroom;
     var hsv = profile_rgb_to_hsv(profile_rgb);
 
-    // For standard-dynamic-range DCPs, the encoding tags apply only to the
-    // HSV value coordinate. Encoding RGB before the HSV conversion changes
-    // hue and saturation and is not the DNG-defined operation.
     let encode_value = encoding == 1u && map_info.z > 1u;
     if encode_value {
         hsv.z = profile_srgb_encode_value(hsv.z);
@@ -181,9 +167,6 @@ fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
     if encode_value {
         hsv.z = profile_srgb_encode_value(hsv.z);
     }
-    // DNG dual-illuminant profile tables are interpolated entrywise. Sampling
-    // each endpoint and mixing the adjustment is equivalent for the tables'
-    // trilinear interpolation, while retaining the endpoints for live WB.
     let weight = clamp(bitcast<f32>(Common::camera_uniforms.profile_flags.w), 0.0, 1.0);
     let adjustment = mix(
         profile_map_sample(Common::camera_uniforms.profile_hue_sat, hsv),
@@ -199,10 +182,6 @@ fn apply_profile_hue_sat(rgb: vec3<f32>) -> vec3<f32> {
     return PROPHOTO_TO_REC2020 * profile_hsv_to_rgb(hsv) * profile_headroom;
 }
 
-// Render-graph domain wrappers. The low-level DCP helpers above retain their
-// file-format names, while these functions state the stage contract used by
-// the renderer: HueSatMap is camera characterization, LookTable is an optional
-// scene look, and ProfileToneCurve belongs to the view transform.
 fn apply_camera_characterization(rgb: vec3<f32>) -> vec3<f32> {
     return apply_profile_hue_sat(rgb);
 }
@@ -239,11 +218,6 @@ fn apply_profile_tone_curve(rgb_rec2020: vec3<f32>) -> vec3<f32> {
         return rgb_rec2020;
     }
 
-    // Match the DNG reference RGB-tone operation instead of applying the
-    // spline independently to R, G and B. Adobe maps the minimum and maximum
-    // channel through the curve, then places the middle channel at the same
-    // relative position between them. That preserves the profile's hue
-    // relationships while still applying its intended contrast curve.
     let prophoto_signed = REC2020_TO_PROPHOTO * rgb_rec2020;
     let prophoto_linear = Color::gamut_project_nonnegative(prophoto_signed, dot(prophoto_signed, PROPHOTO_LUMA));
     let profile_headroom = max(
@@ -277,30 +251,16 @@ fn output_lut_fetch(r: u32, g: u32, b: u32) -> vec3<f32> {
 }
 
 fn map_output_lut_input_rec2020(rgb: vec3<f32>) -> vec3<f32> {
-    // The LUT already covers every in-cube Rec.2020 value, including exact
-    // primaries and cube edges. Gamut-map only values that cannot be indexed
-    // directly; otherwise an identity-like LUT would not be an identity at
-    // its corners.
     if Color::rgb_is_unit(rgb) {
         return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     return Color::perceptual_gamut_compress_unit_rec2020(rgb);
 }
 
-// ICC output contract shared with `IccOutputTransform::transform_rgb`:
-//   input: display-linear D65 Rec.2020, potentially outside the unit cube;
-//   pre-LUT policy: one perceptual projection into unit Rec.2020;
-//   coordinates: sign-preserving sRGB shaper followed by unit clamping;
-//   interpolation: trilinear with R-fastest storage and clamped cube edges;
-//   output: encoded destination-device RGB supplied by the LUT.
-// The sampled output is not linear sRGB and must not be passed through a
-// linear-light gamut operation after lookup.
 fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
+    // ICC LUT output is destination-encoded; never apply an sRGB transfer afterward.
     let lut_info = Common::camera_uniforms.output_lut;
     if lut_info.x < 2u || lut_info.y < 2u || lut_info.z < 2u {
-        // The no-LUT fallback is explicitly linear Rec.2020 -> linear sRGB,
-        // followed by sRGB-domain gamut mapping and encoding. Unlike the ICC
-        // LUT path below, this branch really does operate in linear sRGB.
         let output_linear = Common::REC2020_TO_SRGB * rgb;
         let mapped = Color::perceptual_gamut_compress_unit_srgb(output_linear);
         return Color::srgb_oetf(mapped);
@@ -311,8 +271,6 @@ fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
         profile_srgb_encode_value(mapped.g),
         profile_srgb_encode_value(mapped.b),
     );
-    // Numerical guard for LUT indexing only; gamut mapping has already been
-    // performed above, so this does not alter the scene/display RGB path.
     let lookup_coordinate = clamp(shaped, vec3<f32>(0.0), vec3<f32>(1.0));
     let coordinate = lookup_coordinate
         * vec3<f32>(f32(lut_info.x - 1u), f32(lut_info.y - 1u), f32(lut_info.z - 1u));
@@ -331,8 +289,5 @@ fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
 
     let low_z = mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y);
     let high_z = mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y);
-    // LUT entries are already encoded destination-device RGB. Return the
-    // trilinear result verbatim; interpreting it as linear sRGB corrupts valid
-    // destination primaries and makes preview disagree with CPU export.
     return mix(low_z, high_z, f.z);
 }

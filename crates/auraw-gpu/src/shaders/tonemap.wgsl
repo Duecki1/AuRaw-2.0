@@ -1,19 +1,15 @@
 #import auraw::common as Common
 #import auraw::tone_common as ToneCommon
 
-// darktable sigmoid display transform, ported from darktable 5.6.0
-// src/iop/sigmoid.c and data/kernels/sigmoid.cl.
+// GPL-3.0-or-later; ported from darktable 5.6.0 sigmoid code.
 // Copyright (C) 2020-2026 darktable developers.
 // Copyright (C) 2026 AuRaw contributors (WGSL port).
-// GPL-3.0-or-later.
 
 @group(0) @binding(16) var<storage, read> tone_stats: ToneCommon::ToneStats;
 @group(0) @binding(17) var tone_guide_tex: texture_2d<f32>;
 
-// Sigmoid
 
 fn adaptive_tone_user_exposure_ev() -> f32 {
-    // Exposure
     return clamp(bitcast<f32>(Common::camera_uniforms.user_exposure_bits), -5.0, 5.0);
 }
 
@@ -36,14 +32,12 @@ fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
                 textureLoad(tone_guide_tex, p10, 0).x, fraction.x);
     let b = mix(textureLoad(tone_guide_tex, p01, 0).x,
                 textureLoad(tone_guide_tex, p11, 0).x, fraction.x);
-    // Guide
     return mix(a, b, fraction.y) + adaptive_tone_user_exposure_ev();
 }
 
 fn tone_percentiles() -> ToneCommon::TonePercentiles {
     let p0 = tone_stats.percentiles_0_field;
     let p1 = tone_stats.percentiles_1_field;
-    // Follow
     let guide_follow = adaptive_tone_user_exposure_ev() * 0.35;
     return ToneCommon::TonePercentiles(
         p0.x + guide_follow,
@@ -58,7 +52,6 @@ fn tone_percentiles() -> ToneCommon::TonePercentiles {
 fn basic_low_tone_control(value: f32) -> f32 {
     let normalized = clamp(value / 100.0, -1.0, 1.0);
     let magnitude = abs(normalized);
-    // Shape
     let shaped = magnitude * (1.45 - 0.45 * magnitude);
     return sign(normalized) * shaped;
 }
@@ -70,7 +63,6 @@ fn adaptive_low_tone_ev(rgb: vec3<f32>, pos: vec2<i32>, guide_ev: f32) -> f32 {
         ToneCommon::TONE_EV_MAX,
     );
     let mismatch = abs(pixel_ev - guide_ev);
-    // Bound
     let bounded_guide_ev = pixel_ev + clamp(guide_ev - pixel_ev, -1.25, 0.75);
     let guide_weight = mix(0.42, 0.22, smoothstep(0.50, 3.00, mismatch));
     return mix(pixel_ev, bounded_guide_ev, guide_weight);
@@ -81,7 +73,6 @@ fn adaptive_tone_masks(
     high_ev: f32,
     percentiles: ToneCommon::TonePercentiles,
 ) -> vec4<f32> {
-    // Masks
     let black_fade_end = min(percentiles.p50_field - 0.55, percentiles.p05_field + 3.35);
     let black_mask = 1.0 - ToneCommon::tone_smoothstep(
         percentiles.p005_field - 0.75,
@@ -115,7 +106,6 @@ fn basic_shadow_offset_ev(
         return 0.0;
     }
 
-    // Shadows
     let lower = percentiles.p05_field - 0.90;
     let upper = percentiles.p50_field + 1.35;
     let monotone_limit = 0.64 * max(upper - lower, 0.25);
@@ -132,10 +122,6 @@ fn basic_positive_whites_offset_ev(
         return 0.0;
     }
 
-    // The 16-bit reference endpoint is a broad but restrained hump: nearly
-    // neutral in the bottom decile, strongest from upper midtones into diffuse
-    // white, then rolling away from the clipped endpoint. The previous 20%
-    // floor and 2.35 EV request turned Whites into a second Exposure control.
     let rise = ToneCommon::tone_smoothstep(
         percentiles.p05_field - 0.15,
         percentiles.p50_field + 0.55,
@@ -166,8 +152,6 @@ fn apply_local_basic_tone_values_with_low_strength(
     let shadows = basic_low_tone_control(shadows_value)
         * clamp(low_tone_strength, 0.0, 1.0);
     let whites = clamp(whites_value / 100.0, -1.0, 1.0);
-    // Blacks is a display-linear toe applied after the view transform.
-    // Never spend Blacks authority in scene-linear tone processing.
     if max(max(abs(highlights), abs(shadows)), abs(whites)) < 1e-6 {
         return rgb;
     }
@@ -178,7 +162,6 @@ fn apply_local_basic_tone_values_with_low_strength(
     let masks = adaptive_tone_masks(low_ev, guide_ev, percentiles);
 
     let shadow_ev = basic_shadow_offset_ev(shadows, masks.y, percentiles);
-    // Highlights peak in the top decile while staying gentle below the median.
     let highlight_mask = 0.10 + 0.90 * ToneCommon::tone_smoothstep(
         percentiles.p50_field - 0.35,
         percentiles.p95_field + 0.45,
@@ -223,9 +206,6 @@ fn apply_local_basic_tone(rgb: vec3<f32>, pos: vec2<i32>) -> vec3<f32> {
     );
 }
 
-// Local masks retain a bounded scene-EV contrast operator because a view
-// transform cannot be varied per pixel without breaking display mapping.
-// Global Basic Contrast is the actual sigmoid middle-grey slope instead.
 fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let amount = clamp(value / 100.0, -1.0, 1.0);
     if abs(amount) < 1e-6 {
@@ -237,12 +217,6 @@ fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let contrast_pivot_ev = tone_percentiles().p50_field + 0.12;
     let relative_ev = scene_ev - contrast_pivot_ev;
 
-    // Contrast is a protected S-curve in scene EV rather than a global EV
-    // multiplier. Near middle grey the exponential responses are steep, so
-    // the slider changes midtone slope decisively. Toward the ends they
-    // asymptotically cap the displacement. The 16-bit endpoint has a decisive
-    // black-end anchor but a protected highlight shoulder; the inverse endpoint
-    // remains gentler on both sides to retain a strict monotonicity margin.
     let toe_distance_ev = max(-relative_ev, 0.0);
     let shoulder_distance_ev = max(relative_ev, 0.0);
     let toe_midtone_width_ev = 1.65;
@@ -254,17 +228,11 @@ fn apply_mask_contrast_value(rgb: vec3<f32>, value: f32) -> vec3<f32> {
     let signed_protected_shape =
         shoulder_response * shoulder_endpoint - toe_response * toe_endpoint;
 
-    // At -100 the minimum derivative is still positive on both sides of the
-    // pivot: 1 - 1.70*ln(2)/1.65 = 0.286 in the toe and
-    // 1 - 0.95*ln(2)/1.85 = 0.644 in the shoulder.
     let adjusted_ev = scene_ev + amount * signed_protected_shape;
     let adjusted_luminance = ToneCommon::SCENE_MIDDLE_GREY * exp2(adjusted_ev);
     return rgb * clamp(adjusted_luminance / luminance, 0.0, 64.0);
 }
 
-// Curve 0 is the composite luminance curve; 1, 2 and 3 are R, G and B.
-// The point curves are evaluated with monotone cubic Hermite interpolation,
-// preventing ringing around steep user edits while retaining endpoint control.
 fn tone_curve_point(curve: u32, index: u32) -> vec2<f32> {
     if curve == 1u {
         switch index {
@@ -387,14 +355,7 @@ fn point_curve_value(curve: u32, input: f32) -> f32 {
 
 const SCENE_CURVE_DECODE_MAX: f32 = 32768.0;
 const SCENE_CURVE_WORK_MAX: f32 = 60000.0;
-// Bound the scene-domain derivative at a curve's black endpoint. The value is
-// deliberately generous for creative curves, but it keeps the first
-// representable half-float signed input from becoming a multi-thousand-unit
-// false-colour jump near the upper endpoint.
 const SCENE_CURVE_ZERO_SLOPE_MAX: f32 = 1048576.0;
-// Begin a C1 Hermite shoulder at an exactly representable f32 coordinate. The
-// scene start and tangent are derived from the rational branch using the same
-// f32 constants, so the join matches in both value and first derivative.
 const SCENE_CURVE_SHOULDER_ENCODE_START: f32 = 0.9999915361404419;
 const SCENE_CURVE_SHOULDER_WIDTH: f32 =
     1.0 - SCENE_CURVE_SHOULDER_ENCODE_START;
@@ -433,15 +394,8 @@ fn scene_curve_decode(value: f32) -> f32 {
 }
 
 fn scene_curve_encode(value: f32) -> f32 {
-    // Invert the finite shoulder only for extreme scene values. Eight bisection
-    // steps resolve more finely than one encoded f32 step in this interval and
-    // preserve the identity curve to the precision available near 1.0.
     let positive = clamp(value, 0.0, SCENE_CURVE_DECODE_MAX);
     if positive <= SCENE_CURVE_SHOULDER_START {
-        // Float32 rounding at the scene-domain join can otherwise advance the
-        // rational inverse one encoded step into the shoulder. Clamp the
-        // branch to the exact shoulder coordinate so decode(encode(y)) remains
-        // monotonic across the join.
         return min(
             positive / (positive + ToneCommon::SCENE_MIDDLE_GREY),
             SCENE_CURVE_SHOULDER_ENCODE_START,
@@ -468,9 +422,6 @@ fn scene_curve_encode(value: f32) -> f32 {
 }
 
 fn scene_curve_decode_slope_scale(encoded_endpoint: f32) -> f32 {
-    // Return d(scene output) / d(scene input) per unit encoded-curve tangent.
-    // scene_curve_encode'(0) is 1 / ToneCommon::SCENE_MIDDLE_GREY. The scale is C1 at the
-    // shoulder join and falls smoothly to zero at an endpoint of 1.0.
     let bounded = clamp(encoded_endpoint, 0.0, 1.0);
     if bounded != encoded_endpoint {
         return 0.0;
@@ -512,10 +463,6 @@ fn clamp_scene_curve_value(value: f32) -> f32 {
 }
 
 fn limit_scene_curve_rgb_ratio_preserving(value: vec3<f32>) -> vec3<f32> {
-    // Composite curves are luminance controls, so an extreme headroom limit
-    // must not clip one channel before the others. Uniformly scale the whole
-    // signed triplet and preserve RGB ratios, chromaticity, hue, and normalized
-    // chroma. Per-channel curves intentionally keep scalar component bounds.
     let peak = max(max(abs(value.r), abs(value.g)), abs(value.b));
     if peak <= SCENE_CURVE_WORK_MAX {
         return value;
@@ -537,14 +484,8 @@ fn remap_scene_luminance(
     let luminance = dot(rgb, Common::LUMA);
     let black = max(black_luminance, 0.0);
     if luminance <= 0.0 {
-        // Continue the scene-domain master curve linearly through non-positive
-        // luminance. Using the same endpoint slope as the positive branch keeps
-        // signed opponent colors continuous across the zero-luminance plane.
         return limit_scene_curve_rgb_ratio_preserving(vec3<f32>(black) + rgb * zero_slope);
     }
-    // Separate the neutral black offset from the chromatic signal. A lifted
-    // endpoint intentionally reduces shadow colorfulness as pixels approach the
-    // neutral black floor; the endpoint slope controls both sides of zero.
     let mapped_luminance = max(adjusted_luminance, black);
     let chromatic_luminance = mapped_luminance - black;
     return limit_scene_curve_rgb_ratio_preserving(
@@ -556,9 +497,6 @@ fn scene_curve_zero_slope(curve: u32) -> f32 {
     let count = tone_curve_count(curve);
     let first = tone_curve_point(curve, 0u);
     let encoded_black = point_curve_value(curve, 0.0);
-    // point_curve_value() holds the first endpoint constant to the left of its
-    // X coordinate. If that endpoint was moved right, the effective slope at
-    // scene zero is therefore flat rather than the first segment's secant.
     if first.x > 0.0 {
         return 0.0;
     }
@@ -570,10 +508,6 @@ fn apply_scene_channel_curve(curve: u32, value: f32) -> f32 {
     let encoded_black = point_curve_value(curve, 0.0);
     let black = scene_curve_decode(encoded_black);
     if value < 0.0 {
-        // Extend the nonnegative curve with its scene-domain slope at zero.
-        // This preserves signed intermediate detail and removes the jump from
-        // an untouched negative epsilon to a lifted zero endpoint. Bound the
-        // result to finite half-float-safe scene headroom.
         return clamp_scene_curve_value(
             black + value * scene_curve_zero_slope(curve),
         );
@@ -597,9 +531,6 @@ fn apply_point_tone_curve(rgb: vec3<f32>) -> vec3<f32> {
         rgb,
         adjusted_luminance,
         black_luminance,
-        // The composite curve treats its decoded black endpoint as a floor.
-        // A descending first segment is therefore flat at the endpoint; use
-        // that effective nonnegative slope on the signed side as well.
         max(scene_curve_zero_slope(0u), 0.0),
     );
 }
@@ -618,14 +549,6 @@ fn apply_rgb_point_curves(rgb: vec3<f32>) -> vec3<f32> {
     return result;
 }
 
-// Display-linear Blacks-toe calibration. The two decay scales are denominators
-// of exp2(-luminance / scale), so each scale is the display-linear luminance
-// interval over which that tail halves. 0.035 gives positive Blacks a compact
-// black lift with a long low-amplitude tail; 0.070 makes the negative tail fall
-// off more slowly. The 10.50 coefficient is the fitted EV-domain strength of
-// the deepest negative toe inside the 0.012..0.030 luminance mask. Together
-// these values reproduce the measured black-end response without tying the
-// control to scene exposure or the profile/sigmoid view transform.
 const DISPLAY_BLACKS_LIFT_DECAY: f32 = 0.035;
 const DISPLAY_BLACKS_CRUSH_TAIL_DECAY: f32 = 0.070;
 const DISPLAY_BLACKS_DEEP_CRUSH_EV: f32 = 10.50;
@@ -635,9 +558,6 @@ fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
         return rgb;
     }
 
-    // Apply Blacks after the single view transform so profile/sigmoid compression
-    // cannot erase its endpoint authority. The fixed display-linear response also
-    // keeps low/high-key histogram statistics from changing the control's reach.
     let luminance = dot(rgb, Common::LUMA);
     if luminance <= 0.0 {
         return rgb;
@@ -649,11 +569,9 @@ fn apply_display_blacks_toe_amount(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
 
     var offset_ev = 0.0;
     if amount >= 0.0 {
-        // Positive Blacks is a long, smooth toe with a small upper-tone tail.
         let weight = 0.08 + 0.92 * exp2(-luminance / DISPLAY_BLACKS_LIFT_DECAY);
         offset_ev = amount * 1.75 * weight * hdr_guard;
     } else {
-        // Negative Blacks crushes the darkest region, then falls to a restrained tail.
         let deep = 1.0 - ToneCommon::tone_smoothstep(0.012, 0.030, luminance);
         let tail = 0.10 + 2.35 * exp2(-luminance / DISPLAY_BLACKS_CRUSH_TAIL_DECAY);
         offset_ev = -(-amount) * (DISPLAY_BLACKS_DEEP_CRUSH_EV * deep + tail) * hdr_guard;
@@ -677,9 +595,6 @@ fn finite_scalar(value: f32) -> bool {
 
 fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
     let white_target = Common::scene_tone_uniforms.sigmoid_curve.x;
-    // The ABI slot stores log2(paper_exposure). Steep but valid curves can
-    // overflow both the film response and paper exposure in linear form even
-    // though their ratio remains perfectly well behaved.
     let log2_paper_exposure = Common::scene_tone_uniforms.sigmoid_curve.z;
     let film_fog = Common::scene_tone_uniforms.sigmoid_curve.w;
     let film_power = Common::scene_tone_uniforms.sigmoid_power.x;
@@ -702,9 +617,6 @@ fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
         return 0.0;
     }
 
-    // Stable base-2 logistic for F / (P + F), evaluated from log2(F/P).
-    // Both exp2 calls receive a non-positive argument and therefore cannot
-    // overflow. The exact zero/zero-fog case was handled above.
     let log2_film_response = film_power * log2(film_base);
     let log2_ratio = log2_film_response - log2_paper_exposure;
     var ratio = 0.0;
@@ -720,9 +632,6 @@ fn generalized_loglogistic_sigmoid(value: f32) -> f32 {
 }
 
 fn desaturate_negative_values(rgb: vec3<f32>) -> vec3<f32> {
-    // Exact darktable sigmoid projection: move a triplet with negative
-    // channels toward its non-negative arithmetic mean just far enough for the
-    // minimum channel to reach zero.
     let pixel_average = max((rgb.r + rgb.g + rgb.b) / 3.0, 0.0);
     let minimum = min(rgb.r, min(rgb.g, rgb.b));
     let saturation_factor = select(
@@ -734,7 +643,6 @@ fn desaturate_negative_values(rgb: vec3<f32>) -> vec3<f32> {
         + saturation_factor * (rgb - vec3<f32>(pixel_average));
 }
 
-// Returns min, mid, max channel indices, matching darktable's seven cases.
 fn pixel_channel_order(rgb: vec3<f32>) -> vec3<u32> {
     if rgb.r >= rgb.g {
         if rgb.g > rgb.b {

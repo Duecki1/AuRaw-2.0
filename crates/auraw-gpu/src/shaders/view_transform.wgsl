@@ -6,23 +6,8 @@
 #import auraw::tone_common as ToneCommon
 #import auraw::tonemap as Tonemap
 
-// Display/view-domain processing: perceptual color mixer, color grading, the
-// profile/sigmoid view transform, display black toe, and output encoding.
 
-// The named HSL channels are a UI model, not a reason to process in
-// mathematical HSL. HSL lightness is based on per-pixel RGB extrema and turns
-// demosaic/chroma noise into luminance noise. The mixer below instead selects
-// hues in perceptual OKLab, stabilizes only the selector with an edge-aware
-// neighbourhood, and applies luminance as a scene-linear exposure gain.
 
-// Perceptual hue-selector anchors, expressed in turns on the OKLab a/b plane:
-// hue = wrap(atan2(b, a) / (2*pi), 0, 1). The values were obtained by converting
-// fully saturated sRGB primary/secondary swatches plus the orange and purple
-// intermediates at HSL 0, 30, 60, 120, 180, 240, 270, and 300 degrees to
-// OKLab. They therefore do not equal the source HSL angles: OKLab deliberately
-// redistributes hue around its perceptual plane. The paired bell widths are
-// empirical overlap widths chosen to bridge the unequal OKLab spacing while
-// retaining distinct centers for the eight named mixer ranges.
 const MIXER_HUE_RED: f32 = 0.0812052;
 const MIXER_HUE_ORANGE: f32 = 0.1465993;
 const MIXER_HUE_YELLOW: f32 = 0.3049145;
@@ -66,15 +51,10 @@ fn circular_distance(a: f32, b: f32) -> f32 {
 fn smooth_hue_bell(hue: f32, anchor: f32, width: f32) -> f32 {
     let t = clamp(1.0 - circular_distance(hue, anchor) / width, 0.0, 1.0);
     let feather = t * t * (3.0 - 2.0 * t);
-    // Squaring the smoothstep keeps channel centers precise while retaining
-    // soft overlaps between the eight named colour ranges.
     return feather * feather;
 }
 
 fn mixer_band_weights(hue: f32) -> MixerBandWeights {
-    // Red, orange, yellow, green, aqua, blue, purple, magenta. Use the OKLab
-    // swatch-derived anchors above rather than treating HSL degrees as uniform
-    // angles in the perceptual a/b plane.
     let first = vec4<f32>(
         smooth_hue_bell(hue, MIXER_HUE_RED, MIXER_WIDTH_RED),
         smooth_hue_bell(hue, MIXER_HUE_ORANGE, MIXER_WIDTH_ORANGE),
@@ -95,10 +75,6 @@ fn mixer_band_value(weights: MixerBandWeights, first: vec4<f32>, second: vec4<f3
 }
 
 fn directed_hue_shift(value: f32, backward_span: f32, forward_span: f32) -> f32 {
-    // Preserve the historical +/-100 response exactly, but permit the extended
-    // UI range to continue linearly up to twice that shift. This lets a named
-    // channel travel beyond its immediate neighbour without changing existing
-    // sidecars or reducing fine control around zero.
     let amount = clamp(value / 100.0, -2.0, 2.0);
     let span = select(backward_span, forward_span, amount >= 0.0);
     return amount * span * 0.90;
@@ -128,9 +104,6 @@ fn mixer_sample_from_rgb(rgb: vec3<f32>) -> MixerSample {
         hue_vector = lab.yz / chroma;
     }
 
-    // Chroma is judged relative to perceptual lightness. This makes nearly
-    // neutral pixels in shadows and highlights ineligible for arbitrary hue
-    // classification, while retaining low-saturation real colours.
     let relative_chroma = chroma / max(0.028 + 0.095 * max(lab.x, 0.0), 0.028);
     let chroma_confidence = smoothstep(0.10, 0.62, relative_chroma);
     let signal_confidence = smoothstep(0.035, 0.115, max(lab.x, 0.0));
@@ -144,13 +117,8 @@ fn stabilized_mixer_sample(pos: vec2<i32>, center_rgb: vec3<f32>) -> MixerSample
         return center;
     }
 
-    // A compact bilateral selector filter is enough to suppress Bayer/X-Trans
-    // chroma speckle without softening image detail. Only hue selection is
-    // filtered; the actual RGB detail always comes from the center pixel.
     var vector_sum = center.hue_vector * center.confidence * 4.0;
     var weight_sum = center.confidence * 4.0;
-    // Desktop/high-quality rendering already uses a wider tone guide, so use
-    // a 5x5 selector there. Android preview keeps a 3x3 selector for speed.
     let selector_radius = select(1, 2, Common::camera_uniforms.tone_guide_radius > 3.5);
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
@@ -191,8 +159,6 @@ fn stabilized_mixer_sample(pos: vec2<i32>, center_rgb: vec3<f32>) -> MixerSample
 fn mixer_saturation_factor(amount: f32) -> f32 {
     let value = clamp(amount, -1.0, 1.0);
     if value >= 0.0 {
-        // Positive saturation has a soft shoulder; +100 is strong but does not
-        // produce the brittle 2x channel excursion of a simple RGB multiplier.
         return exp2(value * 0.85);
     }
     return max(1.0 + value, 0.0);
@@ -201,17 +167,11 @@ fn mixer_saturation_factor(amount: f32) -> f32 {
 fn mixer_luminance_ev(amount: f32, lightness: f32) -> f32 {
     let value = clamp(amount, -1.0, 1.0);
     let endpoint_ev = select(1.45, 1.20, value >= 0.0);
-    // Avoid turning barely-exposed chroma noise into bright coloured pixels.
-    // This is a smooth signal confidence, not a hard shadow threshold.
     let signal = smoothstep(0.040, 0.135, max(lightness, 0.0));
     let hdr_guard = 1.0 / (1.0 + 0.20 * max(lightness - 1.0, 0.0));
     return value * endpoint_ev * signal * hdr_guard;
 }
 
-// The local Hue control is a uniform rotation of the underlying pixel
-// hue, not a tint overlay or a named-channel HSL edit. Work in perceptual
-// OKLab so lightness and chroma stay fixed, then use the shared Rec.2020 gamut
-// service only when the rotated hue cannot represent the requested chroma.
 fn apply_hue_rotation_value(input_rgb: vec3<f32>, degrees: f32) -> vec3<f32> {
     let rotation = clamp(degrees, -180.0, 180.0);
     if abs(rotation) < 1e-7 {
@@ -244,9 +204,6 @@ fn apply_local_hue_rotations(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> 
         let weight = SceneAdjustments::local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
 
-        // Scale the rotation itself by mask coverage. This follows the color
-        // wheel through feathered edges instead of blending opposite hues
-        // through gray at half coverage.
         rgb = apply_hue_rotation_value(rgb, degrees * weight);
     }
     return rgb;
@@ -270,9 +227,6 @@ fn color_grade_vector(wheel: vec4<f32>) -> vec2<f32> {
 }
 
 fn color_grade_tonal_weights(luminance: f32, options: vec4<f32>) -> vec3<f32> {
-    // Evaluate ranges in exposure space around photographic middle gray.
-    // Wider blending produces smooth overlap without hard range
-    // boundaries. Balance shifts the shared pivot by up to 1.5 stops.
     let ev = log2(max(luminance, 1e-7) / ToneCommon::SCENE_MIDDLE_GREY);
     let width = mix(0.60, 2.80, clamp(options.x, 0.0, 1.0));
     let pivot = -clamp(options.y, -1.0, 1.0) * 1.5;
@@ -315,10 +269,6 @@ fn apply_color_grading_wheels(
 
     var adjusted = rgb;
     if dot(grade_vector, grade_vector) > 1e-12 {
-        // Deep-shadow confidence and a soft saturation guard prevent grading
-        // from amplifying demosaic chroma noise or forcing already vivid
-        // colors against the gamut boundary. Gamut compression then holds
-        // OKLab lightness and hue instead of clipping individual RGB channels.
         let signal = smoothstep(0.025, 0.115, max(lab.x, 0.0));
         let hdr_guard = 1.0 / (1.0 + 0.25 * max(lab.x - 1.0, 0.0));
         let existing_chroma = length(lab.yz);
@@ -339,7 +289,6 @@ fn apply_color_grading_wheels(
         + highlights.z * weights.z
         + global.z;
     if abs(luminance_grade) > 1e-7 {
-        // Scene-linear scalar gain preserves the graded hue and RGB ratios.
         adjusted = adjusted * exp2(mixer_luminance_ev(luminance_grade, lab.x));
     }
     return adjusted;
@@ -417,7 +366,6 @@ fn apply_color_mixer_values(
     }
 
     if abs(luminance_amount) > 1e-7 {
-        // A scalar scene-linear gain preserves RGB ratios, hue and saturation.
         adjusted = adjusted * exp2(mixer_luminance_ev(luminance_amount, sample.lab.x));
         adjusted = Color::perceptual_gamut_compress_nonnegative_rec2020(adjusted);
     }
@@ -446,9 +394,6 @@ fn apply_local_color_mixer(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
         let weight = SceneAdjustments::local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
 
-        // A local HSL/mixer edit is exactly the global mixer node with mask-
-        // supplied parameters, followed by one masked blend. Keeping one node
-        // implementation prevents local/global selector or gamut drift.
         let adjusted = apply_color_mixer_values(
             pos,
             rgb,
@@ -465,16 +410,9 @@ fn apply_local_color_mixer(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn apply_view_transform(scene_rgb: vec3<f32>) -> vec3<f32> {
-    // Optional creative profile look is the final scene-domain operation. It is
-    // deliberately downstream of H/S/W/B, Contrast, curves, presence, mixer,
-    // and grading so those controls mean the same thing across camera profiles.
     let looked = Profile::apply_optional_profile_look(scene_rgb);
     let view_input = Color::gamut_project_nonnegative_rec2020(looked);
 
-    // Rendered TIFFs already arrive with a baked display
-    // rendering. Reapplying the default scene->display sigmoid deepens shadows
-    // and pushes highlights, so raster inputs bypass it unless the user has
-    // explicitly enabled a non-default sigmoid/contrast configuration.
     if Common::camera_uniforms._pad_1_field <= 0.5 {
         return view_input;
     }
@@ -523,7 +461,5 @@ fn apply_view_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     display_linear = apply_local_display_blacks(pos, display_linear);
     display_linear = CreativeEffects::apply_vignette(pos, display_linear);
     textureStore(SceneAdjustments::display_linear_out, pos, vec4<f32>(display_linear, 1.0));
-    // Output ICC/device encoding is a separate display-domain operation, not a
-    // second view transform. It receives already display-referred linear RGB.
     textureStore(SceneAdjustments::out_tex, pos, vec4<f32>(Profile::apply_output_lut(display_linear), 1.0));
 }

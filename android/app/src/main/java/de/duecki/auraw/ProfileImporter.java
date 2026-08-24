@@ -13,7 +13,6 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.util.Locale;
 
-/** Imports SAF camera-profile trees into bounded app-private mirrors. */
 final class ProfileImporter {
     private static final String LOG_TAG = "AuRaw";
     private static final long MAX_DCP_FILE_BYTES = 64L * 1024L * 1024L;
@@ -67,7 +66,7 @@ final class ProfileImporter {
                 storage.getContentResolver().takePersistableUriPermission(
                         treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
             } catch (SecurityException ignored) {
-                // Some providers allow the current read without a persistable grant.
+                // Some providers permit this read but reject persistent grants.
             }
         }
         new Thread(
@@ -307,7 +306,6 @@ final class ProfileImporter {
                 }
             }
         } catch (Exception ignored) {
-            // A provider may omit display metadata while still allowing traversal.
         }
         return "CameraProfiles";
     }

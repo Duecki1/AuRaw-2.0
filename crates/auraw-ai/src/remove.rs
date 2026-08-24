@@ -119,9 +119,7 @@ pub fn spawn_remove(request: RemoveRequest) -> mpsc::Receiver<RemoveEvent> {
     receiver
 }
 
-/// Runs clone/heal locally. Unlike Remove, this path never initializes ONNX or
-/// downloads a model; only the small native scene regions touched by the brush
-/// are rendered and cached as a non-destructive patch.
+/// Local clone/heal path; never initializes or downloads an ONNX model.
 pub fn spawn_retouch(request: RetouchRequest) -> mpsc::Receiver<RemoveEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker = sender.clone();
@@ -770,9 +768,7 @@ fn perceptual_decode_signed(value: f32) -> f32 {
     }
 }
 
-/// Port of GIMP 3.0.4's checkerboard Gauss-Seidel/SOR healing solver. The
-/// solved field is destination minus source in perceptual RGB, matching
-/// `app/paint/gimpheal.c`.
+/// Port of GIMP 3.0.4's `app/paint/gimpheal.c` solver.
 fn gimp_heal_laplace_loop(
     pixels: &mut [f32],
     width: usize,

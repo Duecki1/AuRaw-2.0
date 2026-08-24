@@ -5,15 +5,7 @@
 #import auraw::tonemap as Tonemap
 #import auraw::detail_capture as DetailCapture
 
-// Scene-domain adjustment stages: camera characterization, exposure, basic tone,
-// presence controls, and global/local point curves. Creative and display-domain
-// operations are deliberately defined in their own shader files.
 
-// Post-demosaic render graph with explicit domain boundaries. Pixels flow through
-// camera characterization -> scene edits -> optional look -> exactly one view
-// transform -> output encoding. The physical passes below may fuse adjacent
-// logical nodes, but they never move scene-style controls across the
-// scene/display boundary.
 
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
@@ -27,9 +19,6 @@
 @group(0) @binding(29) var display_linear_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 @group(0) @binding(30) var glow_work_tex: texture_2d<f32>;
 @group(0) @binding(31) var glow_work_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
-// Unlike the viewport-local atlas at binding 27, this compact atlas always
-// represents the complete image. Long-range Light Rays can therefore sample
-// identical normalized coordinates in fit preview, zoom crops, and export tiles.
 @group(0) @binding(34) var light_rays_mask_tex: texture_2d_array<f32>;
 
 fn local_mask_uv(pos: vec2<i32>) -> vec2<f32> {
@@ -69,10 +58,6 @@ fn local_mask_texture_uv(region_uv: vec2<f32>) -> vec2<f32> {
     }
     let atlas_size = vec2<f32>(max(atlas_size_u, vec2<u32>(1u)));
     let valid_size = vec2<f32>(max(valid_size_u, vec2<u32>(1u)));
-    // Only the top-left valid_size portion may have been uploaded. Scale the
-    // ordinary normalized coordinates into that rectangle, clamping to its
-    // outer texel centres so filtering never pulls stale atlas pixels. This
-    // preserves the exact pixel-centre mapping used while rasterizing the crop.
     let half_texel = vec2<f32>(0.5) / valid_size;
     let safe_region_uv = clamp(region_uv, half_texel, vec2<f32>(1.0) - half_texel);
     return safe_region_uv * valid_size / atlas_size;
@@ -83,9 +68,6 @@ fn local_mask_weight(pos: vec2<i32>, index: u32) -> f32 {
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
         return 0.0;
     }
-    // CPU mask rasterization has already composited the shared Subject
-    // refinement (and inverted Not Subject) before this atlas upload. Sampling
-    // the atlas directly here therefore preserves the exact refined weights.
     return textureSampleLevel(
         local_mask_tex,
         local_mask_sampler,
@@ -165,15 +147,9 @@ fn source_scene_at(pos: vec2<i32>) -> vec3<f32> {
 
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = source_scene_at(pos);
-    // Sensor RAWs arrive in camera RGB and use the CPU-assembled camera/DCP
-    // matrix. Pre-demosaiced TIFFs arrive in scene-linear Rec.2020 and carry an
-    // identity matrix, so both source types meet at the same working boundary.
     var working = Color::cam_to_working(camera_rgb);
 
 
-    // Rendered TIFFs have no sensor-space white-balance model. Apply the same
-    // Bradford scene adaptation used by local adjustments so Temperature/Tint
-    // remains fully functional without pretending the raster is a CFA mosaic.
     if Common::camera_uniforms._pad_0_field > 0.5 {
         working = BasicAdjustments::apply_temperature_tint_values(
             working,
@@ -185,10 +161,7 @@ fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
 }
 
 fn adjustment_base_at(pos: vec2<i32>) -> vec3<f32> {
-    // Binding 22 is deliberately stage-relative. The capture-sharpen/tone pass
-    // binds the pre-tone base here; the later presence pass binds its post-tone
-    // output here. This keeps both spatial operators sampling the correct domain
-    // without allocating another full-frame working texture.
+    // Binding 22 is stage-relative: pre-tone here, post-tone in the presence pass.
     return DetailCapture::adjustment_base_at(pos);
 }
 
@@ -201,9 +174,6 @@ fn log_luminance(rgb: vec3<f32>) -> f32 {
 }
 
 fn presence_reference_scale() -> f32 {
-    // Spatial presence controls are authored relative to a 1080-pixel short
-    // edge. Scaling their sample steps makes the preview proxy, zoom detail,
-    // and full-resolution export operate on comparable subject detail.
     return clamp(
         f32(min(Common::camera_uniforms.full_width, Common::camera_uniforms.full_height)) / 1080.0,
         0.55,
@@ -230,8 +200,6 @@ fn bilateral_log_luminance(
     var sum = 0.0;
     var sum_w = 0.0;
 
-    // The shader has a fixed maximum footprint so mobile and desktop compile
-    // the same code. `radius` selects 3x3, 5x5, or 7x7 behavior at runtime.
     for (var dy = -3; dy <= 3; dy = dy + 1) {
         for (var dx = -3; dx <= 3; dx = dx + 1) {
             if abs(dx) > radius || abs(dy) > radius { continue; }
@@ -262,9 +230,6 @@ fn atrous_log_luminance(pos: vec2<i32>, step: i32, range_strength: f32) -> f32 {
     let center = log_luminance(adjustment_base_at(pos));
     var sum = 0.0;
     var sum_w = 0.0;
-    // A 5x5 B3-spline à-trous kernel samples a much wider spatial scale than
-    // a dense 7x7 blur at lower cost. This gives Clarity a genuinely mid-scale
-    // response (roughly 25-35 preview pixels) while remaining edge-aware.
     for (var ky = -2; ky <= 2; ky = ky + 1) {
         for (var kx = -2; kx <= 2; kx = kx + 1) {
             let sample_pos = pos + vec2<i32>(kx * step, ky * step);
@@ -389,8 +354,6 @@ fn apply_local_curves_for_mask(mask_index: u32, input_rgb: vec3<f32>) -> vec3<f3
             adjusted,
             curved,
             black_luminance,
-            // Match the composite curve's neutral black-floor policy on both
-            // sides of zero while channel curves retain signed slopes.
             max(local_scene_curve_zero_slope(mask_index, 0u), 0.0),
         );
     }
@@ -415,13 +378,6 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
         let weight = local_mask_weight(pos, index);
         if weight <= 1e-5 { continue; }
 
-        // A local adjustment is one masked invocation of the same logical
-        // scene-tone node, not a weighted parameter contribution to a shared
-        // aggregate. This keeps overlap behavior deterministic for nonlinear
-        // tone, contrast, WB, and curve operations.
-        // Shadows is an EV-zone remap, so feather/opacity scales the
-        // adjustment parameter itself. Mixing an already nonlinear fully-
-        // adjusted result would produce a different transfer at mask edges.
         rgb = Tonemap::apply_local_basic_tone_values_with_low_strength(
             rgb,
             pos,
@@ -432,8 +388,6 @@ fn apply_local_scene_tone_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f3
             weight,
         );
 
-        // Preserve masked-result interpolation for unrelated
-        // local tone/WB/curve controls. Blacks is deferred to display-linear.
         var adjusted = Tonemap::apply_local_basic_tone_values(
             rgb,
             pos,
@@ -459,9 +413,6 @@ fn prepare_scene_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= Common::camera_uniforms.width || gid.y >= Common::camera_uniforms.height { return; }
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
 
-    // Camera characterization is the only DCP color component allowed before
-    // scene edits. Fixed profile exposure and editable global/local Exposure are
-    // also scene-linear. The LookTable is deferred until scene controls finish.
     var rgb = Profile::apply_camera_characterization(scene_working_at(pos));
     let profile_exposure_ev = bitcast<f32>(Common::camera_uniforms.profile_flags.z);
     rgb = rgb * exp2(profile_exposure_ev);
@@ -476,9 +427,6 @@ fn apply_scene_tone_node(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = vec2<i32>(i32(gid.x), i32(gid.y));
     var rgb = adjustment_base_at(pos);
 
-    // Capture sharpening and all H/S/W/B, Contrast, curve, and local tone
-    // controls operate in the scene domain. ProfileToneCurve is excluded so
-    // slider semantics remain profile-independent.
     rgb = DetailCapture::apply_capture_sharpening(pos, rgb);
     rgb = Tonemap::apply_basic_tone(rgb, pos);
     textureStore(local_effects_out, pos, vec4<f32>(rgb, 1.0));

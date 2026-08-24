@@ -7,9 +7,6 @@
 #import auraw::xtrans::markesteijn_homogeneity::{MARK_HOMO_MARGIN, mark_local_homogeneity}
 #import auraw::xtrans::markesteijn_accumulate::{mark_accumulate}
 
-// Grouped X-Trans entry points. Stage implementation lives in composable
-// naga_oil modules; write bindings stay here so the existing work-format
-// specialization and pipeline/bind-group contracts remain unchanged.
 
 @group(0) @binding(4) var xtrans_seed_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 

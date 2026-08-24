@@ -83,7 +83,6 @@ public final class AndroidStorageContractTest {
             AndroidStorageContract.libraryFolder(library, "../outside");
             fail("folder traversal should be rejected");
         } catch (IllegalArgumentException expected) {
-            // Expected.
         }
     }
 
@@ -115,7 +114,6 @@ public final class AndroidStorageContractTest {
                     oversized, library, "capture.dng", 3);
             fail("oversized sidecar should be rejected");
         } catch (IllegalStateException expected) {
-            // Expected: the bounded copy must not replace the existing sidecar.
         }
         assertArrayEquals(oldPayload, Files.readAllBytes(destination.toPath()));
 

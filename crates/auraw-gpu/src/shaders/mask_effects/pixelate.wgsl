@@ -1,7 +1,3 @@
-// Pixel cells are anchored in full-image coordinates so zoom previews and
-// independently processed export tiles share the same grid. Each cell uses a
-// small box average from the completed developed image, avoiding a noisy
-// single-pixel representative while remaining a reversible GPU composition.
 
 fn mask_pixelated_source_at(pos: vec2<i32>, reference_block_size: f32) -> vec3<f32> {
     let block_size = SceneAdjustments::presence_step(reference_block_size, 96);
