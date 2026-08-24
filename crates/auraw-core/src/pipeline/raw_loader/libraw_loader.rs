@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Camera-matrix normalization and temperature/tint handling follow
+// darktable 5.6.0 and the related Ansel/dcraw implementations.
+// Copyright (C) 2010-2026 darktable developers and the Ansel/dcraw authors.
+// Copyright (C) 2026 AuRaw contributors (Rust adaptation).
+
 use super::super::noise::NoiseProfile;
 use super::{
     validate_raw_dimensions, CameraColorModel, CameraProfile, CameraProfileCandidate,

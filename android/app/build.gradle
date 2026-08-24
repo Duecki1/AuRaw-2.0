@@ -80,6 +80,13 @@ if (aurawAbis.isEmpty() || !supportedAbis.containsAll(aurawAbis)) {
 }
 
 def nativeStageRoot = new File(repositoryRoot, "android/native")
+def stagedLegalAssets = layout.buildDirectory.dir("generated/auraw-legal-assets")
+def stageLegalAssets = tasks.register("stageLegalAssets", Sync) {
+    from(repositoryRoot) {
+        include("COPYING", "NOTICE.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES.md")
+    }
+    into(stagedLegalAssets)
+}
 // Lensfun's XML database is architecture-independent. All ABI builds install
 // the same pinned database, so package the copy staged by the first requested ABI.
 def lensfunAssets = new File(
@@ -118,7 +125,7 @@ android {
 
     sourceSets {
         main.jniLibs.srcDirs = ["src/main/jniLibs"]
-        main.assets.srcDirs = [lensfunAssets]
+        main.assets.srcDirs = [lensfunAssets, stagedLegalAssets]
     }
 
     // AGP 8.5.1+ page-aligns uncompressed JNI libraries for 16 KiB-page devices.
@@ -147,6 +154,10 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(stageLegalAssets)
 }
 
 dependencies {

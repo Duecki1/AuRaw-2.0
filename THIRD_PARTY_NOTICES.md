@@ -15,7 +15,8 @@ against darktable release 5.6.0:
 - Bayer RCD demosaicing in `crates/auraw-gpu/src/shaders/pass1.wgsl` through
   `pass4.wgsl`, based on `src/iop/demosaicing/rcd.c` and its OpenCL kernels.
 - Markesteijn X-Trans demosaicing and dual-demosaic behavior in
-  `crates/auraw-gpu/src/shaders/xtrans/`, based on
+  `crates/auraw-gpu/src/shaders/xtrans/`, `xtrans_demosaic.wgsl`, and
+  `xtrans_finish.wgsl`, based on
   `src/iop/demosaicing/xtrans.c`, `dual.c`, and their OpenCL kernels.
 - LCh and inpaint-opposed highlight reconstruction in
   `crates/auraw-gpu/src/shaders/highlights.wgsl` and
@@ -30,16 +31,19 @@ Copyright (C) 2010-2026 darktable developers and the authors named in the
 upstream files. darktable is GPL-3.0-or-later. The referenced source is in the
 [darktable 5.6.0 tree](https://github.com/darktable-org/darktable/tree/release-5.6.0).
 
-RCD credits Luis Sanz Rodríguez and the original RCD-Demosaicing project.
+RCD credits Luis Sanz Rodríguez, Ingo Weyrich, Hanno Schwalm, and the original
+RCD-Demosaicing project. Dual demosaicing credits Ingo Weyrich and Hanno
+Schwalm.
 Markesteijn demosaicing credits Frank Markesteijn, as adapted through dcraw and
 darktable. Their applicable notices are retained through the darktable notice.
 
 ### Ansel and dcraw
 
-The XYZ-to-camera normalization convention in
-`crates/auraw-core/src/pipeline/raw_loader/libraw_loader.rs` follows the
-Ansel/dcraw implementation. AuRaw's former Ansel-derived highlight path was
-subsequently replaced by the darktable 5.6.0 implementation documented above.
+The XYZ-to-camera normalization and related temperature/tint conventions in
+`crates/auraw-core/src/pipeline/raw_loader/libraw_loader.rs` follow darktable
+and the related Ansel/dcraw implementations. AuRaw's former Ansel-derived
+highlight path was subsequently replaced by the darktable 5.6.0 implementation
+documented above.
 
 Ansel and the relevant adapted source are GPL-3.0-or-later. The implementation
 was reviewed at Ansel revision
@@ -108,6 +112,7 @@ native components:
   GNU libiconv (LGPL-2.1), PCRE2 (BSD-3-Clause), libffi (MIT), and zlib
   (Zlib). Their versions and source hashes are pinned in
   `android/app/src/main/cpp/CMakeLists.txt` or its resolved GLib subprojects.
+- The committed Gradle wrapper is part of Gradle, licensed under Apache-2.0.
 
 Windows and macOS artifacts may bundle additional runtime libraries discovered
 from the build environment. `BUILD-INFO.txt` and `SHA256SUMS.txt` in each
@@ -118,7 +123,22 @@ upstream licenses.
 
 Resolved Rust crate names, versions, and checksums are recorded in
 `Cargo.lock`. Each crate retains the license declared by its package and source
-repository. AuRaw does not relicense those dependencies.
+repository. AuRaw does not relicense those dependencies. This includes the
+bundled egui default fonts (Hack, Noto Emoji, Ubuntu Light, and emoji-icon-font)
+and the Phosphor icon font; their MIT, OFL-1.1, Ubuntu Font Licence 1.0, and
+other applicable terms are reproduced with the crate notices.
+
+Complete resolved Rust dependency license texts and package attribution are in
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md). Regenerate that file from
+`Cargo.lock` with the command documented at its top.
+
+## License policy
+
+Rust dependency licenses are checked in CI against the explicit allow-list in
+`deny.toml`. A new proprietary, noncommercial, research-only, or otherwise
+unreviewed Rust dependency license fails that check. Native components,
+adapted source, bundled data, and optional model licenses require separate
+manual review and are recorded above.
 
 The full GPL-3.0 text governing AuRaw and compatible adaptations is in
 [`COPYING`](COPYING).

@@ -1,9 +1,9 @@
-#import auraw::common as Common
-
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from darktable 5.6.0 hlreconstruct/opposed code.
 // Copyright (C) 2010-2026 darktable developers.
 // Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
+#import auraw::common as Common
 
 @group(0) @binding(3) var reconstructed_raw_write: texture_storage_2d<r32float, write>;
 

@@ -1,0 +1,20 @@
+# Rust dependency licenses
+
+This file is generated from `Cargo.lock` by cargo-about. It covers the resolved
+Rust dependencies used by AuRaw's supported release targets. Regenerate it with:
+
+`cargo about generate --locked --workspace --fail -o THIRD_PARTY_LICENSES.md about.hbs`
+
+{{#each licenses}}
+## {{{name}}} (`{{id}}`)
+
+Used by:
+{{#each used_by}}
+- `{{crate.name}} {{crate.version}}`{{#if crate.repository}} — {{{crate.repository}}}{{/if}}
+{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}

@@ -20,6 +20,14 @@ pub(super) fn sidecar_interaction_active(ctx: &egui::Context) -> bool {
     ctx.input(|input| input.pointer.any_down()) || ctx.egui_wants_keyboard_input()
 }
 
+fn edited_preview_is_current_for_thumbnail(
+    original_requested: bool,
+    original_rendered_state: Option<(bool, u64)>,
+    preview_revision: u64,
+) -> bool {
+    !original_requested && original_rendered_state == Some((false, preview_revision))
+}
+
 impl AurawApp {
     pub(crate) fn report_mask_persistence_limit(
         &mut self,
@@ -731,26 +739,36 @@ impl AurawApp {
             return;
         }
 
+        if !edited_preview_is_current_for_thumbnail(
+            self.preview.original_requested,
+            self.preview.original_rendered_state,
+            self.preview.revision,
+        ) {
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
+        let Some(render_state) = frame.wgpu_render_state() else {
+            self.persistence.developed_thumbnail_pending = None;
+            log::warn!("cannot cache developed thumbnail without the wgpu backend");
+            return;
+        };
         let snapshot = if self.preview.pending_stage.is_none() {
             self.preview
                 .gpu_pipeline
                 .as_ref()
-                .map(RawGpuPipeline::output_snapshot)
+                .map(|pipeline| pipeline.output_snapshot(&render_state.device, &render_state.queue))
         } else if self.preview.navigation_pending_stage.is_none() {
-            self.preview
-                .navigation
-                .as_ref()
-                .map(|preview| preview.pipeline.output_snapshot())
+            self.preview.navigation.as_ref().map(|preview| {
+                preview
+                    .pipeline
+                    .output_snapshot(&render_state.device, &render_state.queue)
+            })
         } else {
             None
         };
         let Some(snapshot) = snapshot else {
             self.egui_ctx.request_repaint();
-            return;
-        };
-        let Some(render_state) = frame.wgpu_render_state() else {
-            self.persistence.developed_thumbnail_pending = None;
-            log::warn!("cannot cache developed thumbnail without the wgpu backend");
             return;
         };
         let device = render_state.device.clone();
@@ -934,5 +952,26 @@ mod sidecar_persistence_tests {
 
         assert_eq!(new.generation, 3);
         assert_eq!(new.due_at, switched_at + SIDECAR_AUTOSAVE_INTERVAL);
+    }
+
+    #[test]
+    fn developed_thumbnail_waits_for_edited_preview_after_before_after_use() {
+        let revision = 41;
+
+        assert!(!edited_preview_is_current_for_thumbnail(
+            true,
+            Some((true, revision)),
+            revision,
+        ));
+        assert!(!edited_preview_is_current_for_thumbnail(
+            false,
+            Some((true, revision)),
+            revision,
+        ));
+        assert!(edited_preview_is_current_for_thumbnail(
+            false,
+            Some((false, revision)),
+            revision,
+        ));
     }
 }

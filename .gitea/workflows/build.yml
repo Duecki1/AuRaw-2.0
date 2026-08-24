@@ -165,7 +165,9 @@ jobs:
           test -n "$LENSFUN_DB"
 
           rm -rf AppDir dist appimage-packaging
-          mkdir -p dist appimage-packaging AppDir/usr/share/auraw/lensfun
+          mkdir -p dist appimage-packaging AppDir/usr/share/auraw/lensfun AppDir/usr/share/doc/auraw
+          install -m 0644 COPYING NOTICE.md THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md \
+            AppDir/usr/share/doc/auraw/
           cp -a "$LENSFUN_DB"/. AppDir/usr/share/auraw/lensfun/
           test -n "$(find AppDir/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
 

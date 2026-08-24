@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 RCD demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// RCD credits: Luis Sanz Rodriguez, Ingo Weyrich, and Hanno Schwalm.
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 

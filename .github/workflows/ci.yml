@@ -45,6 +45,18 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      - name: Check dependency licenses
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check licenses
+
+      - name: Check generated dependency notices
+        run: |
+          cargo install cargo-about --version 0.9.2 --features cli --locked
+          cargo about generate --locked --workspace --fail \
+            -o "$RUNNER_TEMP/THIRD_PARTY_LICENSES.md" about.hbs
+          diff -u THIRD_PARTY_LICENSES.md "$RUNNER_TEMP/THIRD_PARTY_LICENSES.md"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

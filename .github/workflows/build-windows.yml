@@ -130,7 +130,7 @@ jobs:
           rm -rf dist
           mkdir -p "$package_dir"
           cp "$release_dir/auraw.exe" "$package_dir/"
-          cp COPYING THIRD_PARTY_NOTICES.md README.md "$package_dir/"
+          cp COPYING NOTICE.md THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md README.md "$package_dir/"
 
           lensfun_db="$(find /mingw64/share/lensfun -type f -name '*.xml' -printf '%h\n' | head -n 1)"
           test -n "$lensfun_db"
