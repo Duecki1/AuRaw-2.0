@@ -104,19 +104,21 @@ impl AurawApp {
             &self.preview.gpu_pipeline,
             &self.develop.loaded_raw,
         ) {
-            let params = GpuParams::new(exposure, masks, raw)
-                .with_vignette_geometry(self.develop.geometry);
+            let params =
+                GpuParams::new(exposure, masks, raw).with_vignette_geometry(self.develop.geometry);
             if self.preview.original_requested {
                 pipeline.recompute(&render_state.queue, &render_state.device, &params);
             } else if let Err(error) = pipeline.recompute_with_remove(
                 &render_state.queue,
                 &render_state.device,
                 &params,
-                &self.inpaint.edits,
-                full_raw,
-                exposure,
-                [0.0, 0.0],
-                [full_raw.width as f32, full_raw.height as f32],
+                RemoveSceneContext::new(
+                    &self.inpaint.edits,
+                    full_raw,
+                    exposure,
+                    [0.0, 0.0],
+                    [full_raw.width as f32, full_raw.height as f32],
+                ),
             ) {
                 self.ui.notice = Some(format!("Could not apply Remove to preview: {error:#}"));
             }
@@ -128,21 +130,29 @@ impl AurawApp {
             let params = GpuParams::new(exposure, masks, &navigation.raw)
                 .with_vignette_geometry(self.develop.geometry);
             if self.preview.original_requested {
-                navigation.pipeline.recompute(&render_state.queue, &render_state.device, &params);
+                navigation
+                    .pipeline
+                    .recompute(&render_state.queue, &render_state.device, &params);
             } else if let Err(error) = navigation.pipeline.recompute_with_remove(
                 &render_state.queue,
                 &render_state.device,
                 &params,
-                &self.inpaint.edits,
-                full_raw,
-                exposure,
-                [0.0, 0.0],
-                [full_raw.width as f32, full_raw.height as f32],
+                RemoveSceneContext::new(
+                    &self.inpaint.edits,
+                    full_raw,
+                    exposure,
+                    [0.0, 0.0],
+                    [full_raw.width as f32, full_raw.height as f32],
+                ),
             ) {
-                self.ui.notice = Some(format!("Could not apply Remove to navigation preview: {error:#}"));
+                self.ui.notice = Some(format!(
+                    "Could not apply Remove to navigation preview: {error:#}"
+                ));
             }
         }
-        if let Some(detail) = self.preview.detail
+        if let Some(detail) = self
+            .preview
+            .detail
             .as_ref()
             .filter(|detail| detail.revision == self.preview.revision)
         {
@@ -170,19 +180,28 @@ impl AurawApp {
                 );
             }
             if self.preview.original_requested {
-                detail.pipeline.recompute(&render_state.queue, &render_state.device, &params);
+                detail
+                    .pipeline
+                    .recompute(&render_state.queue, &render_state.device, &params);
             } else if let Some(full_raw) = self.develop.loaded_raw.as_ref() {
                 if let Err(error) = detail.pipeline.recompute_with_remove(
                     &render_state.queue,
                     &render_state.device,
                     &params,
-                    &self.inpaint.edits,
-                    full_raw,
-                    exposure,
-                    [detail.source_origin[0] as f32, detail.source_origin[1] as f32],
-                    [detail.source_size[0] as f32, detail.source_size[1] as f32],
+                    RemoveSceneContext::new(
+                        &self.inpaint.edits,
+                        full_raw,
+                        exposure,
+                        [
+                            detail.source_origin[0] as f32,
+                            detail.source_origin[1] as f32,
+                        ],
+                        [detail.source_size[0] as f32, detail.source_size[1] as f32],
+                    ),
                 ) {
-                    self.ui.notice = Some(format!("Could not apply Remove to zoomed preview: {error:#}"));
+                    self.ui.notice = Some(format!(
+                        "Could not apply Remove to zoomed preview: {error:#}"
+                    ));
                 }
             }
         }

@@ -314,13 +314,21 @@ impl Sidebar {
         }
     }
 
-    pub(super) fn duplicate_mask_group(app: &mut AurawApp, mask_index: usize, invert: bool) -> bool {
+    pub(super) fn duplicate_mask_group(
+        app: &mut AurawApp,
+        mask_index: usize,
+        invert: bool,
+    ) -> bool {
         Self::commit_mask_change(app, "Mask-group copy", None, false, |stack| {
             stack.duplicate_mask(mask_index, invert)
         })
     }
 
-    pub(super) fn paste_mask_group(ctx: &egui::Context, app: &mut AurawApp, mask_index: usize) -> bool {
+    pub(super) fn paste_mask_group(
+        ctx: &egui::Context,
+        app: &mut AurawApp,
+        mask_index: usize,
+    ) -> bool {
         let Some(mask) = Self::copied_mask_group(ctx) else {
             return false;
         };

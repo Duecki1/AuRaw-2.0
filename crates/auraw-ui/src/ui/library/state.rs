@@ -371,7 +371,8 @@ impl LibraryState {
                             if let Some(tree) = scan_folder_tree(&root_folder, || {
                                 tree_cancellation.load(Ordering::Acquire) != generation
                             }) {
-                                let _ = tree_sender.send(ScanEvent::FolderTree { generation, tree });
+                                let _ =
+                                    tree_sender.send(ScanEvent::FolderTree { generation, tree });
                                 tree_repaint.request_repaint();
                             }
                         })
@@ -430,7 +431,10 @@ impl LibraryState {
                         }
                     };
                     if event_sender
-                        .send(ScanEvent::AndroidFolders { generation, folders })
+                        .send(ScanEvent::AndroidFolders {
+                            generation,
+                            folders,
+                        })
                         .is_err()
                     {
                         return;
@@ -600,9 +604,10 @@ impl LibraryState {
                     self.folder_tree = Some(tree);
                 }
                 #[cfg(target_os = "android")]
-                ScanEvent::AndroidFolders { generation, folders }
-                    if generation == self.generation.load(Ordering::Acquire) =>
-                {
+                ScanEvent::AndroidFolders {
+                    generation,
+                    folders,
+                } if generation == self.generation.load(Ordering::Acquire) => {
                     self.platform.folders = folders;
                     let folder_paths = self
                         .platform
@@ -610,11 +615,12 @@ impl LibraryState {
                         .iter()
                         .map(|folder| folder.path.as_str())
                         .collect::<HashSet<_>>();
-                    self.platform.expanded_folders.retain(|path| {
-                        path.is_empty() || folder_paths.contains(path.as_str())
-                    });
+                    self.platform
+                        .expanded_folders
+                        .retain(|path| path.is_empty() || folder_paths.contains(path.as_str()));
                     let selected_folder = self.platform.folder.clone();
-                    self.platform.expanded_folders
+                    self.platform
+                        .expanded_folders
                         .extend(android_folder_ancestors(&selected_folder));
                 }
                 ScanEvent::Catalog {
@@ -652,7 +658,8 @@ impl LibraryState {
                     }
                     self.scanning = false;
                     self.catalog_ready = true;
-                    self.thumbnail_progress.begin(generation, self.entries.len());
+                    self.thumbnail_progress
+                        .begin(generation, self.entries.len());
                     self.status = catalog_status(warning_count, truncated);
                 }
                 ScanEvent::Thumbnail {
@@ -663,7 +670,8 @@ impl LibraryState {
                     result,
                 } if generation == self.generation.load(Ordering::Acquire) => {
                     if final_thumbnail {
-                        self.thumbnail_progress.record_completion(generation, asset_id.clone());
+                        self.thumbnail_progress
+                            .record_completion(generation, asset_id.clone());
                     }
                     let Some(index) = self.entry_indices.get(&asset_id).copied() else {
                         continue;

@@ -3,19 +3,18 @@ use crate::ai_denoise::{AiDenoiseEvent, RAWNIND_PACKAGE_BYTES};
 use eframe::egui;
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::AtomicBool,
-        Arc,
-    },
+    sync::{atomic::AtomicBool, Arc},
 };
 
 impl AurawApp {
     fn discard_ai_preview_caches(&mut self) {
         for texture_id in [
-            self.preview.detail
+            self.preview
+                .detail
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
-            self.preview.navigation
+            self.preview
+                .navigation
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
         ]
@@ -29,7 +28,8 @@ impl AurawApp {
     fn rawnind_model_dir(&self) -> PathBuf {
         #[cfg(target_os = "android")]
         {
-            self.android.android_app
+            self.android
+                .android_app
                 .internal_data_path()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("models/rawdenoise-nind-1.0")
@@ -43,7 +43,8 @@ impl AurawApp {
     fn rawnind_result_cache_dir(&self) -> PathBuf {
         #[cfg(target_os = "android")]
         {
-            self.android.android_app
+            self.android
+                .android_app
                 .internal_data_path()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("ai-denoise-results-v2")
@@ -77,7 +78,8 @@ impl AurawApp {
     }
 
     fn rawnind_result_cache_path(&self) -> Option<PathBuf> {
-        self.persistence.sidecar_target
+        self.persistence
+            .sidecar_target
             .as_ref()
             .map(|target| self.rawnind_result_cache_path_for_target(target))
     }
@@ -101,7 +103,8 @@ impl AurawApp {
             return;
         }
         if self.foreground_operation_active() {
-            self.ui.notice = Some("Finish or cancel the current editing operation first.".to_owned());
+            self.ui.notice =
+                Some("Finish or cancel the current editing operation first.".to_owned());
             return;
         }
         if self.develop.loaded_raw.is_none() {
@@ -111,7 +114,9 @@ impl AurawApp {
             self.egui_ctx.request_repaint();
             return;
         }
-        if self.develop.loaded_raw
+        if self
+            .develop
+            .loaded_raw
             .as_ref()
             .is_some_and(|raw| raw.is_pre_demosaiced_raster())
         {
@@ -124,7 +129,9 @@ impl AurawApp {
             self.egui_ctx.request_repaint();
             return;
         }
-        if self.develop.loaded_raw
+        if self
+            .develop
+            .loaded_raw
             .as_ref()
             .is_some_and(|raw| raw.ai_denoised_image().is_some())
         {
@@ -201,10 +208,12 @@ impl AurawApp {
         }
         #[cfg(not(target_os = "android"))]
         for texture_id in [
-            self.preview.detail
+            self.preview
+                .detail
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
-            self.preview.navigation
+            self.preview
+                .navigation
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
         ]
@@ -349,7 +358,9 @@ impl AurawApp {
         self.preview.detail_urgent = false;
         match result {
             Ok(image) if self.develop.exposure.ai_denoise_enabled && !operation.is_cancelled() => {
-                let install = self.develop.loaded_raw
+                let install = self
+                    .develop
+                    .loaded_raw
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("the RAW was closed"))
                     .and_then(|raw| raw.set_ai_denoised_image(image));
@@ -402,7 +413,9 @@ impl AurawApp {
                 self.ai.denoise_resume_pending = true;
                 return;
             }
-            if self.develop.loaded_raw
+            if self
+                .develop
+                .loaded_raw
                 .as_ref()
                 .is_some_and(|raw| raw.ai_denoised_image().is_some())
             {
@@ -469,6 +482,5 @@ impl AurawApp {
                 });
             });
         }
-
     }
 }

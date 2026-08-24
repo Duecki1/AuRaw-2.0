@@ -1,4 +1,3 @@
-
 use anyhow::{Context, Result};
 use ort::{
     ep::{ExecutionProvider, ExecutionProviderDispatch},
@@ -603,10 +602,11 @@ mod tests {
 
     #[test]
     fn gpu_allocation_failures_are_quarantined_instead_of_retried() {
-        let error = anyhow::anyhow!(
-            "BFCArena::AllocateRawInternal failed to allocate memory on CUDA GPU"
-        );
+        let error =
+            anyhow::anyhow!("BFCArena::AllocateRawInternal failed to allocate memory on CUDA GPU");
         assert!(is_gpu_memory_failure(&error));
-        assert!(!is_gpu_memory_failure(&anyhow::anyhow!("invalid tensor shape")));
+        assert!(!is_gpu_memory_failure(&anyhow::anyhow!(
+            "invalid tensor shape"
+        )));
     }
 }

@@ -8,7 +8,8 @@ impl AurawApp {
         }
         #[cfg(target_os = "android")]
         {
-            self.android.android_app
+            self.android
+                .android_app
                 .internal_data_path()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("models")
@@ -29,7 +30,8 @@ impl AurawApp {
     }
 
     pub(in crate::app) fn vitmatte_model_path(&self) -> PathBuf {
-        self.ai_model_root().join("vitmatte-small-composition-1k.onnx")
+        self.ai_model_root()
+            .join("vitmatte-small-composition-1k.onnx")
     }
 
     #[cfg(not(target_os = "android"))]
@@ -100,9 +102,11 @@ impl AurawApp {
         if self.ui.desktop_picker_receiver.is_some() {
             return;
         }
-        let mut dialog = rfd::AsyncFileDialog::new()
-            .set_title("Select the ONNX Runtime shared library");
-        if let Some(parent) = self.ai.runtime_path
+        let mut dialog =
+            rfd::AsyncFileDialog::new().set_title("Select the ONNX Runtime shared library");
+        if let Some(parent) = self
+            .ai
+            .runtime_path
             .as_deref()
             .and_then(|path| path.parent())
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -119,7 +123,9 @@ impl AurawApp {
     }
 
     #[cfg(not(target_os = "android"))]
-    pub(in crate::app) fn validate_and_persist_onnx_runtime(path: PathBuf) -> Result<(PathBuf, String), String> {
+    pub(in crate::app) fn validate_and_persist_onnx_runtime(
+        path: PathBuf,
+    ) -> Result<(PathBuf, String), String> {
         if !path.is_file() {
             return Err(format!("{} is not a file.", path.display()));
         }

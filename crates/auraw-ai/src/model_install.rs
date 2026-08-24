@@ -1,6 +1,4 @@
-use crate::model_artifact::{
-    ensure_artifact, verify_artifact, DownloadOptions, ModelArtifact,
-};
+use crate::model_artifact::{ensure_artifact, verify_artifact, DownloadOptions, ModelArtifact};
 use anyhow::Result;
 use std::path::Path;
 
@@ -91,12 +89,7 @@ mod tests {
         fs::write(&path, b"valid model bytes").unwrap();
         let mut progress_calls = 0;
         TEST_INSTALL
-            .ensure_installed(
-                &path,
-                true,
-                |_| progress_calls += 1,
-                || Ok(()),
-            )
+            .ensure_installed(&path, true, |_| progress_calls += 1, || Ok(()))
             .unwrap();
         assert_eq!(progress_calls, 0);
     }

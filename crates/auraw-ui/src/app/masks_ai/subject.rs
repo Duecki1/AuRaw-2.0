@@ -18,7 +18,8 @@ impl AurawApp {
     pub(crate) fn request_subject_mask(&mut self, frame: &eframe::Frame) {
         self.ai.object_error_dialog = None;
         if self.foreground_operation_active() {
-            self.ui.notice = Some("Finish or cancel the current editing operation first.".to_owned());
+            self.ui.notice =
+                Some("Finish or cancel the current editing operation first.".to_owned());
             return;
         }
         if let Some(mask) = self.masks.subject_cache.clone() {
@@ -41,12 +42,17 @@ impl AurawApp {
         }
     }
 
-    pub(in crate::app) fn start_subject_worker(&mut self, model_path: PathBuf, allow_download: bool) {
+    pub(in crate::app) fn start_subject_worker(
+        &mut self,
+        model_path: PathBuf,
+        allow_download: bool,
+    ) {
         if self.foreground_operation_active() {
             return;
         }
         let Some(source) = self.masks.source_cache.clone() else {
-            self.ui.notice = Some("The preview could not be prepared for subject selection.".to_owned());
+            self.ui.notice =
+                Some("The preview could not be prepared for subject selection.".to_owned());
             return;
         };
         #[cfg(not(target_os = "android"))]
@@ -58,10 +64,8 @@ impl AurawApp {
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
 
-        let model_present = crate::ai_masks::birefnet_model_is_verified(
-            self.ai.birefnet_quality,
-            &model_path,
-        );
+        let model_present =
+            crate::ai_masks::birefnet_model_is_verified(self.ai.birefnet_quality, &model_path);
         let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let receiver = spawn_subject_mask(
             SubjectMaskWorkerRequest {
@@ -158,7 +162,9 @@ impl AurawApp {
             }
         }
         if finished.is_none() && disconnected {
-            finished = Some(Err("The subject-mask worker stopped unexpectedly.".to_owned()));
+            finished = Some(Err(
+                "The subject-mask worker stopped unexpectedly.".to_owned()
+            ));
         }
         let Some(result) = finished else {
             self.foreground_operation = Some(operation);
@@ -179,7 +185,8 @@ impl AurawApp {
                         self.apply_subject_mask(mask);
                         succeeded = true;
                     } else {
-                        error_message = Some("Subject selection returned an invalid mask image.".to_owned());
+                        error_message =
+                            Some("Subject selection returned an invalid mask image.".to_owned());
                     }
                 }
                 Err(error) => error_message = Some(format!("Subject selection failed: {error}")),

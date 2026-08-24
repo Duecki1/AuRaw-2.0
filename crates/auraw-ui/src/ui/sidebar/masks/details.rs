@@ -267,15 +267,14 @@ impl Sidebar {
                             (MaskSection::ColorMixer, "Color Mixer", false),
                         ] {
                             Self::adjustment_section(ui, label, default_open, true, |ui| {
-                                let (section_changed, _) =
-                                    Self::show_local_mask_adjustment_section(
-                                        ui,
-                                        &mut mask.adjustments,
-                                        section,
-                                        &mut local_curve_tab,
-                                        &mut local_color_grade_tab,
-                                        &mut local_hsl_mixer_color,
-                                    );
+                                let (section_changed, _) = Self::show_local_mask_adjustment_section(
+                                    ui,
+                                    &mut mask.adjustments,
+                                    section,
+                                    &mut local_curve_tab,
+                                    &mut local_color_grade_tab,
+                                    &mut local_hsl_mixer_color,
+                                );
                                 adjustments_changed |= section_changed;
                             });
                         }
@@ -396,7 +395,8 @@ impl Sidebar {
         app.develop_ui.hsl_mixer_color = local_hsl_mixer_color;
         app.masks.brush_mode = brush_mode;
         app.masks.subject_refinement_active = refinement_active;
-        let refinement_settings_changed = app.masks.stack.subject_refinement.size != refinement_size
+        let refinement_settings_changed = app.masks.stack.subject_refinement.size
+            != refinement_size
             || app.masks.stack.subject_refinement.feather != refinement_feather
             || app.masks.stack.subject_refinement.flow != refinement_flow;
         app.masks.stack.subject_refinement.size = refinement_size;

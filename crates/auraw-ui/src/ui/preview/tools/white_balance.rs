@@ -10,7 +10,9 @@ impl Preview {
         source_height: u32,
         response: &egui::Response,
     ) {
-        let lens_geometry = app.develop.loaded_raw
+        let lens_geometry = app
+            .develop
+            .loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.clone());
         let pointer = response
@@ -39,7 +41,10 @@ impl Preview {
                 app.develop_ui.white_balance_picker_drag = Some([uv, uv]);
             }
         } else if down {
-            if let (Some(area), Some(uv)) = (app.develop_ui.white_balance_picker_drag.as_mut(), pointer_uv) {
+            if let (Some(area), Some(uv)) = (
+                app.develop_ui.white_balance_picker_drag.as_mut(),
+                pointer_uv,
+            ) {
                 area[1] = uv;
                 ui.ctx().request_repaint();
             }
@@ -74,7 +79,9 @@ impl Preview {
         let Some(area) = app.develop_ui.white_balance_picker_drag else {
             return;
         };
-        let lens_geometry = app.develop.loaded_raw
+        let lens_geometry = app
+            .develop
+            .loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.as_deref());
         let start = final_geometry_native_source_to_screen(
@@ -106,5 +113,4 @@ impl Preview {
             painter.circle_stroke(start, 6.0, Stroke::new(1.5, Color32::WHITE));
         }
     }
-
 }

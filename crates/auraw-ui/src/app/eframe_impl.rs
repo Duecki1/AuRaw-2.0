@@ -3,10 +3,12 @@ use super::*;
 impl AurawApp {
     fn release_optional_gpu_memory(&mut self) {
         let retired = [
-            self.preview.detail
+            self.preview
+                .detail
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
-            self.preview.navigation
+            self.preview
+                .navigation
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
         ];
@@ -362,7 +364,9 @@ impl eframe::App for AurawApp {
     fn on_exit(&mut self) {
         auraw_ai::set_active_ai_context(None);
         #[cfg(target_os = "android")]
-        if let Err(error) = crate::android::clear_background_task_notification(&self.android.android_app) {
+        if let Err(error) =
+            crate::android::clear_background_task_notification(&self.android.android_app)
+        {
             log::warn!("{error}");
         }
         self.persist_performance_settings();

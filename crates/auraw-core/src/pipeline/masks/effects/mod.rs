@@ -1,4 +1,3 @@
-
 mod blur;
 mod edge_glow;
 mod fog;
@@ -7,8 +6,8 @@ mod lens_blur;
 mod light_rays;
 mod motion_blur;
 mod neon;
-mod pixelate;
 pub mod params;
+mod pixelate;
 mod radial_blur;
 mod smoke;
 mod tilt_shift;

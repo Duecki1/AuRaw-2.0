@@ -34,15 +34,13 @@ fn run() -> Result<()> {
     let (temperature_offset, tint_offset) = raw
         .white_balance_offsets_from_temperature_tint(selected_temperature, selected_tint)
         .context("selected white balance is outside the supported camera model")?;
-    let (selected_wb, camera_to_working, profile_weight) = raw
-        .adjusted_white_balance_and_camera_transform(temperature_offset, tint_offset);
+    let (selected_wb, camera_to_working, profile_weight) =
+        raw.adjusted_white_balance_and_camera_transform(temperature_offset, tint_offset);
 
     println!("Camera: {} {}", raw.camera_make, raw.camera_model);
     println!("As shot: {as_shot_temperature:.1} K, tint {as_shot_tint:.6}");
     println!("Selected: {selected_temperature:.1} K, tint {selected_tint:.6}");
-    println!(
-        "Offsets: temperature {temperature_offset:.6}, tint {tint_offset:.6}"
-    );
+    println!("Offsets: temperature {temperature_offset:.6}, tint {tint_offset:.6}");
     println!("As-shot multipliers: {}", format_vector(raw.wb_coeffs));
     println!("Selected multipliers: {}", format_vector(selected_wb));
     println!("DNG profile interpolation weight: {profile_weight:.6}");

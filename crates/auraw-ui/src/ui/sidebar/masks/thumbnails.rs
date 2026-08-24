@@ -15,7 +15,9 @@ impl Sidebar {
             return;
         }
 
-        let (image_width, image_height) = app.develop.preview_raw
+        let (image_width, image_height) = app
+            .develop
+            .preview_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((1, 1));
@@ -47,7 +49,8 @@ impl Sidebar {
         if !component_cache_valid {
             let images: Vec<_> = selected_mask
                 .and_then(|mask_index| {
-                    app.masks.stack
+                    app.masks
+                        .stack
                         .masks
                         .get(mask_index)
                         .map(|mask| (mask_index, mask))

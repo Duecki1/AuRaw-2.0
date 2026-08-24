@@ -1,4 +1,3 @@
-
 use crate::execution_provider::{
     ai_acceleration_enabled, create_session_with_fallback, FallbackSession, ModelSource,
     SessionOptions,
@@ -86,7 +85,11 @@ impl<S> RuntimeSlot<S> {
         } else if let Some(active) = self.active.as_mut() {
             active.retention = retention;
         }
-        Ok(&mut self.active.as_mut().expect("AI session was just created").session)
+        Ok(&mut self
+            .active
+            .as_mut()
+            .expect("AI session was just created")
+            .session)
     }
 
     fn reconcile(
@@ -332,9 +335,13 @@ mod tests {
     #[test]
     fn only_one_session_can_be_resident() {
         let mut slot = RuntimeSlot::default();
-        slot.ensure_model(AiModel::BiRefNetMedium, interactive_masks(), 0, true, || {
-            Ok::<_, ()>(())
-        })
+        slot.ensure_model(
+            AiModel::BiRefNetMedium,
+            interactive_masks(),
+            0,
+            true,
+            || Ok::<_, ()>(()),
+        )
         .unwrap();
         assert_eq!(slot.active_model(), Some(AiModel::BiRefNetMedium));
         slot.ensure_model(AiModel::SamEncoder, interactive_masks(), 0, true, || {
@@ -358,9 +365,13 @@ mod tests {
     #[test]
     fn one_shot_model_unloads_after_inference() {
         let mut slot = RuntimeSlot::default();
-        slot.ensure_model(AiModel::RawNindBayer, ModelRetention::OneShot, 0, true, || {
-            Ok::<_, ()>(())
-        })
+        slot.ensure_model(
+            AiModel::RawNindBayer,
+            ModelRetention::OneShot,
+            0,
+            true,
+            || Ok::<_, ()>(()),
+        )
         .unwrap();
         slot.reconcile(Some(AiRuntimeContext::Masks), 0, true);
         assert_eq!(slot.active_model(), None);

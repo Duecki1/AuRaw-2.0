@@ -1,4 +1,3 @@
-
 use super::SIDECAR_SUFFIX;
 #[cfg(not(target_os = "android"))]
 use super::{

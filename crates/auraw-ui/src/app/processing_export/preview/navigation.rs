@@ -77,7 +77,8 @@ impl AurawApp {
                 }
             };
             #[cfg(not(target_os = "android"))]
-            if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
+            if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline)
+            {
                 self.ui.notice = Some(
                     "Could not prepare the preview color profile. The previous complete preview remains available."
                         .to_owned(),
@@ -97,13 +98,17 @@ impl AurawApp {
                 &render_state.queue,
                 &render_state.device,
                 &params,
-                &self.inpaint.edits,
-                &full_raw,
-                &self.develop.target_exposure,
-                [0.0, 0.0],
-                [full_raw.width as f32, full_raw.height as f32],
+                RemoveSceneContext::new(
+                    &self.inpaint.edits,
+                    &full_raw,
+                    &self.develop.target_exposure,
+                    [0.0, 0.0],
+                    [full_raw.width as f32, full_raw.height as f32],
+                ),
             ) {
-                self.ui.notice = Some(format!("Could not apply Remove to navigation preview: {error:#}"));
+                self.ui.notice = Some(format!(
+                    "Could not apply Remove to navigation preview: {error:#}"
+                ));
                 return;
             }
             let mut renderer = render_state.renderer.write();
@@ -122,7 +127,12 @@ impl AurawApp {
         let Some(preview) = self.preview.navigation.as_mut() else {
             return;
         };
-        if self.masks.navigation_dirty_layers.iter().any(|dirty| *dirty) {
+        if self
+            .masks
+            .navigation_dirty_layers
+            .iter()
+            .any(|dirty| *dirty)
+        {
             let edge = preview.pipeline.mask_atlas_edge();
             for layer in 0..MAX_LOCAL_MASKS {
                 if !self.masks.navigation_dirty_layers[layer] {
@@ -160,8 +170,12 @@ impl AurawApp {
             }
         }
 
-        let params = GpuParams::new(&self.develop.target_exposure, &self.masks.stack, &preview.raw)
-            .with_vignette_geometry(self.develop.geometry);
+        let params = GpuParams::new(
+            &self.develop.target_exposure,
+            &self.masks.stack,
+            &preview.raw,
+        )
+        .with_vignette_geometry(self.develop.geometry);
         let stages = match stage {
             ProcessingStage::Raw => &[
                 ProcessingStage::Raw,
@@ -177,13 +191,17 @@ impl AurawApp {
                 &render_state.device,
                 &params,
                 *stage,
-                &self.inpaint.edits,
-                &full_raw,
-                &self.develop.target_exposure,
-                [0.0, 0.0],
-                [full_raw.width as f32, full_raw.height as f32],
+                RemoveSceneContext::new(
+                    &self.inpaint.edits,
+                    &full_raw,
+                    &self.develop.target_exposure,
+                    [0.0, 0.0],
+                    [full_raw.width as f32, full_raw.height as f32],
+                ),
             ) {
-                self.ui.notice = Some(format!("Could not apply Remove to navigation preview: {error:#}"));
+                self.ui.notice = Some(format!(
+                    "Could not apply Remove to navigation preview: {error:#}"
+                ));
                 self.preview.navigation_pending_stage = None;
                 return;
             }

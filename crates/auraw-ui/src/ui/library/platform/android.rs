@@ -143,10 +143,7 @@ pub(in crate::ui::library) fn start_local_library_export(
 ) -> bool {
     let targets = android_targets(assets)
         .into_iter()
-        .map(|(uri, display_name)| crate::app::AndroidLibraryExportTarget {
-            uri,
-            display_name,
-        })
+        .map(|(uri, display_name)| crate::app::AndroidLibraryExportTarget { uri, display_name })
         .collect::<Vec<_>>();
     if targets.is_empty() {
         return false;

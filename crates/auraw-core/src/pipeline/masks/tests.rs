@@ -222,8 +222,7 @@ fn light_rays_settings_round_trip_without_touching_local_adjustments() {
     mask.adjustments.exposure = 1.25;
 
     let encoded = serde_json::to_string(&mask).expect("serialize Light Rays mask");
-    let decoded: LocalMask =
-        serde_json::from_str(&encoded).expect("deserialize Light Rays mask");
+    let decoded: LocalMask = serde_json::from_str(&encoded).expect("deserialize Light Rays mask");
     assert_eq!(decoded.effect, MaskEffect::LightRays);
     assert_eq!(decoded.effect_settings.light_rays.amount, 68.0);
     assert_eq!(decoded.effect_settings.light_rays.length, 145.0);
@@ -366,20 +365,12 @@ fn overlap_builds_between_strokes_but_not_between_dabs_in_one_stroke() {
     ];
     let center = 16 * 32 + 16;
 
-    let one_stroke = rasterize_recorded_brush(
-        MaskRasterSpace::new(32, 32, 100, 100),
-        &dabs,
-        true,
-        &[0],
-    );
+    let one_stroke =
+        rasterize_recorded_brush(MaskRasterSpace::new(32, 32, 100, 100), &dabs, true, &[0]);
     assert!((one_stroke[center] - 0.1).abs() < 0.01);
 
-    let overlapping_strokes = rasterize_recorded_brush(
-        MaskRasterSpace::new(32, 32, 100, 100),
-        &dabs,
-        true,
-        &[0, 1],
-    );
+    let overlapping_strokes =
+        rasterize_recorded_brush(MaskRasterSpace::new(32, 32, 100, 100), &dabs, true, &[0, 1]);
     assert!((overlapping_strokes[center] - 0.19).abs() < 0.01);
 
     let overlap_disabled = rasterize_recorded_brush(
@@ -415,12 +406,8 @@ fn eraser_opacity_builds_between_strokes_not_between_dabs() {
     ];
     let center = 16 * 32 + 16;
 
-    let one_eraser_stroke = rasterize_recorded_brush(
-        MaskRasterSpace::new(32, 32, 100, 100),
-        &dabs,
-        true,
-        &[0, 1],
-    );
+    let one_eraser_stroke =
+        rasterize_recorded_brush(MaskRasterSpace::new(32, 32, 100, 100), &dabs, true, &[0, 1]);
     assert!((one_eraser_stroke[center] - 0.9).abs() < 0.01);
 
     let two_eraser_strokes = rasterize_recorded_brush(
@@ -496,8 +483,7 @@ fn cropped_low_resolution_matte_keeps_full_frame_subpixel_alignment() {
     let pixels = (0..29)
         .flat_map(|y| (0..37).map(move |x| ((x * 17 + y * 31) % 256) as u8))
         .collect();
-    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
-    {
+    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
         *mask = MaskImage::new(37, 29, pixels);
     }
 
@@ -530,8 +516,7 @@ fn radial_layer_has_soft_center_and_clear_corners() {
 fn centered_brush_is_symmetric_on_even_atlas() {
     let mut stack = MaskStack::default();
     stack.add_mask(MaskKind::Brush);
-    if let MaskGeometry::Brush { dabs, .. } =
-        &mut stack.selected_component_mut().unwrap().geometry
+    if let MaskGeometry::Brush { dabs, .. } = &mut stack.selected_component_mut().unwrap().geometry
     {
         dabs.push(BrushDab {
             center: [0.5, 0.5],
@@ -549,8 +534,7 @@ fn centered_brush_is_symmetric_on_even_atlas() {
 fn brush_eraser_removes_existing_coverage() {
     let mut stack = MaskStack::default();
     stack.add_mask(MaskKind::Brush);
-    if let MaskGeometry::Brush { dabs, .. } =
-        &mut stack.selected_component_mut().unwrap().geometry
+    if let MaskGeometry::Brush { dabs, .. } = &mut stack.selected_component_mut().unwrap().geometry
     {
         dabs.push(BrushDab {
             center: [0.5, 0.5],
@@ -574,8 +558,7 @@ fn brush_eraser_removes_existing_coverage() {
 fn partial_brush_and_eraser_dabs_change_only_stored_stroke_coverage() {
     let mut stack = MaskStack::default();
     stack.add_mask(MaskKind::Brush);
-    if let MaskGeometry::Brush { dabs, .. } =
-        &mut stack.selected_component_mut().unwrap().geometry
+    if let MaskGeometry::Brush { dabs, .. } = &mut stack.selected_component_mut().unwrap().geometry
     {
         dabs.push(BrushDab {
             center: [0.5, 0.5],
@@ -588,8 +571,7 @@ fn partial_brush_and_eraser_dabs_change_only_stored_stroke_coverage() {
     assert!((painted[32 * 64 + 32] - 0.4).abs() < 0.01);
     assert_eq!(stack.masks[0].opacity, 1.0);
 
-    if let MaskGeometry::Brush { dabs, .. } =
-        &mut stack.selected_component_mut().unwrap().geometry
+    if let MaskGeometry::Brush { dabs, .. } = &mut stack.selected_component_mut().unwrap().geometry
     {
         dabs.push(BrushDab {
             center: [0.5, 0.5],
@@ -624,13 +606,11 @@ fn background_reuses_and_inverts_subject_probability() {
     let subject = MaskImage::new(2, 1, vec![0, 255]).unwrap();
     let mut stack = MaskStack::default();
     stack.add_mask(MaskKind::Subject);
-    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
-    {
+    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
         *mask = Some(subject.clone());
     }
     stack.add_mask(MaskKind::Background);
-    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
-    {
+    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
         *mask = Some(subject);
     }
     let foreground = stack.rasterize_layer(0, 2, 1, 2, 1);
@@ -677,13 +657,11 @@ fn shared_subject_refinement_updates_subject_and_background_as_exact_inverses() 
     let raw = MaskImage::new(32, 32, vec![128; 32 * 32]).unwrap();
     let mut stack = MaskStack::default();
     stack.add_mask(MaskKind::Subject);
-    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
-    {
+    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
         *mask = Some(raw.clone());
     }
     stack.add_mask(MaskKind::Background);
-    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
-    {
+    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
         *mask = Some(raw);
     }
     stack.subject_refinement.stroke_starts.push(0);
@@ -726,8 +704,7 @@ fn shared_subject_refinement_updates_subject_and_background_as_exact_inverses() 
         .all(|(subject, not_subject)| *subject as u16 + *not_subject as u16 == 255));
 
     stack.add_mask(MaskKind::Subject);
-    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry
-    {
+    if let MaskGeometry::Ai { mask, .. } = &mut stack.selected_component_mut().unwrap().geometry {
         *mask = Some(regenerated);
     }
     let inherited = stack.rasterize_layer(2, 32, 32, 32, 32);
@@ -987,8 +964,7 @@ fn subtract_component_removes_coverage() {
         *initialized = true;
     }
     stack.add_component(MaskKind::Brush, MaskCombineMode::Subtract);
-    if let MaskGeometry::Brush { dabs, .. } =
-        &mut stack.selected_component_mut().unwrap().geometry
+    if let MaskGeometry::Brush { dabs, .. } = &mut stack.selected_component_mut().unwrap().geometry
     {
         dabs.push(BrushDab::default());
     }

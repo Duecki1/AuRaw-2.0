@@ -38,7 +38,11 @@ impl LibraryState {
         }
     }
 
-    pub(super) fn restore_resident_thumbnail_texture(&mut self, index: usize, context: &egui::Context) {
+    pub(super) fn restore_resident_thumbnail_texture(
+        &mut self,
+        index: usize,
+        context: &egui::Context,
+    ) {
         let generation = self.generation.load(Ordering::Acquire);
         self.usage_clock = self.usage_clock.wrapping_add(1).max(1);
         let usage_clock = self.usage_clock;
@@ -327,7 +331,6 @@ pub(super) fn compare_library_names(left: &LibraryAsset, right: &LibraryAsset) -
         .then_with(|| left.id.cmp(&right.id))
 }
 
-
 pub(super) fn make_resident_thumbnail(thumbnail: &RawThumbnail) -> RawThumbnail {
     if thumbnail.width <= RESIDENT_THUMBNAIL_EDGE && thumbnail.height <= RESIDENT_THUMBNAIL_EDGE {
         return thumbnail.clone();
@@ -349,7 +352,10 @@ pub(super) fn make_resident_thumbnail(thumbnail: &RawThumbnail) -> RawThumbnail 
     }
 }
 
-pub(super) fn loaded_library_thumbnail(thumbnail: RawThumbnail, developed: bool) -> LoadedLibraryThumbnail {
+pub(super) fn loaded_library_thumbnail(
+    thumbnail: RawThumbnail,
+    developed: bool,
+) -> LoadedLibraryThumbnail {
     let resident_thumbnail = make_resident_thumbnail(&thumbnail);
     LoadedLibraryThumbnail {
         thumbnail,
@@ -377,8 +383,12 @@ pub(super) fn loaded_library_raw_preview_with_stale_edits(
     loaded
 }
 
-pub(super) type ThumbnailLoader =
-    Arc<dyn Fn(&LibraryAsset, ThumbnailLoadStage) -> Result<LoadedLibraryThumbnail, String> + Send + Sync + 'static>;
+pub(super) type ThumbnailLoader = Arc<
+    dyn Fn(&LibraryAsset, ThumbnailLoadStage) -> Result<LoadedLibraryThumbnail, String>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[cfg(not(target_os = "android"))]
 pub(super) struct DevelopedThumbnailGpu {
@@ -799,8 +809,10 @@ pub(super) fn load_android_library_thumbnail(
         Ok(Some(sidecar)) => {
             let has_edits = crate::sidecar::edit_state_has_adjustments(&sidecar.edits);
             if render_edited_thumbnails_during_indexing {
-                thumbnail =
-                    crate::pipeline::transform_thumbnail_geometry(&thumbnail, sidecar.edits.geometry);
+                thumbnail = crate::pipeline::transform_thumbnail_geometry(
+                    &thumbnail,
+                    sidecar.edits.geometry,
+                );
             }
             has_edits
         }
@@ -817,7 +829,11 @@ pub(super) fn load_android_library_thumbnail(
     }
 }
 
-pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize, load: ThumbnailLoader) {
+pub(super) fn run_thumbnail_workers(
+    worker: ThumbnailWorker,
+    worker_count: usize,
+    load: ThumbnailLoader,
+) {
     let ThumbnailWorker {
         assets,
         warning_count,

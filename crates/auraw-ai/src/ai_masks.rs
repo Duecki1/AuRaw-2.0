@@ -1,11 +1,9 @@
 use crate::execution_provider::{CpuFallbackProfile, FallbackSession, SessionOptions};
-use crate::model_runtime::{
-    with_model_session, AiModel, AiRuntimeContext, ModelRetention,
-};
 use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
 use crate::model_install::ModelInstallSpec;
-use crate::ModelDownloadProgress;
+use crate::model_runtime::{with_model_session, AiModel, AiRuntimeContext, ModelRetention};
 use crate::pipeline::{MaskImage};
+use crate::ModelDownloadProgress;
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use ort::value::Tensor;
@@ -1283,6 +1281,7 @@ mod object;
 
 pub use object::{
     spawn_object_mask, ObjectCropRect, ObjectInferenceCache, ObjectMaskEvent, ObjectMaskRequest,
-    ObjectMaskResult, SamTensorData, SAM21_DECODER_MODEL_URL, SAM21_DECODER_SHA256_HEX,
-    SAM21_ENCODER_MODEL_URL, SAM21_ENCODER_SHA256_HEX, SAM21_MODEL_BYTES_ESTIMATE,
+    ObjectMaskResult, ObjectMaskWorkerRequest, SamTensorData, SAM21_DECODER_MODEL_URL,
+    SAM21_DECODER_SHA256_HEX, SAM21_ENCODER_MODEL_URL, SAM21_ENCODER_SHA256_HEX,
+    SAM21_MODEL_BYTES_ESTIMATE,
 };

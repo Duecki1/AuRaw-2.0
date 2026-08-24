@@ -308,11 +308,7 @@ impl Preview {
             ));
         }
 
-        let selected_source = app
-            .inpaint
-            .tool
-            .retouch()
-            .and(app.inpaint.source_point);
+        let selected_source = app.inpaint.tool.retouch().and(app.inpaint.source_point);
         if let Some(selected_source) = selected_source {
             let hover_native = [uv[0] * source_width as f32, uv[1] * source_height as f32];
             let stroke_origin = app

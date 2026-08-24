@@ -1,6 +1,9 @@
 use super::*;
 
-pub(super) fn mask_component_badge(component_index: usize, combine: MaskCombineMode) -> &'static str {
+pub(super) fn mask_component_badge(
+    component_index: usize,
+    combine: MaskCombineMode,
+) -> &'static str {
     if component_index == 0 {
         "BASE"
     } else {

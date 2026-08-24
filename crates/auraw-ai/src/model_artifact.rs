@@ -214,9 +214,9 @@ where
             0
         };
         if downloaded > artifact.size.limit() {
-            partial.remove().with_context(|| {
-                format!("remove oversized partial {} download", artifact.name)
-            })?;
+            partial
+                .remove()
+                .with_context(|| format!("remove oversized partial {} download", artifact.name))?;
             downloaded = 0;
         }
         if downloaded > 0 {
@@ -354,9 +354,9 @@ where
         match verify_artifact(partial.path(), artifact) {
             Ok(()) => {
                 cancellation()?;
-                partial.publish(path).with_context(|| {
-                    format!("publish {} to {}", artifact.name, path.display())
-                })?;
+                partial
+                    .publish(path)
+                    .with_context(|| format!("publish {} to {}", artifact.name, path.display()))?;
                 return Ok(());
             }
             Err(error) => {

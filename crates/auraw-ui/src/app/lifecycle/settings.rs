@@ -53,7 +53,9 @@ impl AurawApp {
     }
 
     pub(crate) fn thumbnail_cache_size_label(&mut self) -> String {
-        let update = self.ui.thumbnail_cache_size_receiver
+        let update = self
+            .ui
+            .thumbnail_cache_size_receiver
             .as_ref()
             .map(mpsc::Receiver::try_recv);
         match update {
@@ -73,7 +75,8 @@ impl AurawApp {
             Some(Err(mpsc::TryRecvError::Empty)) | None => {}
         }
 
-        if self.ui.thumbnail_cache_size.is_none() && self.ui.thumbnail_cache_size_receiver.is_none() {
+        if self.ui.thumbnail_cache_size.is_none() && self.ui.thumbnail_cache_size_receiver.is_none()
+        {
             let (sender, receiver) = mpsc::channel();
             let repaint = self.egui_ctx.clone();
             #[cfg(target_os = "android")]
@@ -178,10 +181,7 @@ impl AurawApp {
 
     #[cfg(target_os = "android")]
     pub(crate) fn select_android_library_folder(&mut self, folder: String) {
-        if self
-            .library
-            .select_android_folder(folder, &self.egui_ctx)
-        {
+        if self.library.select_android_folder(folder, &self.egui_ctx) {
             self.persist_performance_settings();
         }
     }

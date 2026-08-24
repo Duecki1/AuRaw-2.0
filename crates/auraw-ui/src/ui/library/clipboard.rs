@@ -7,7 +7,11 @@ pub(super) fn image_paste_summary(
     destination: &str,
     errors: Vec<String>,
 ) -> Result<String, String> {
-    let verb = if mode == ImageClipboardMode::Copy { "Copied" } else { "Moved" };
+    let verb = if mode == ImageClipboardMode::Copy {
+        "Copied"
+    } else {
+        "Moved"
+    };
     let noun = if total == 1 { "RAW" } else { "RAWs" };
     if errors.is_empty() {
         Ok(format!("{verb} {completed} {noun} to {destination}."))
@@ -120,7 +124,10 @@ pub(super) fn run_image_paste(
 
     let result = image_paste_summary(mode, total, completed, &destination_label, errors);
     let remaining_clipboard = if mode == ImageClipboardMode::Cut && !remaining.is_empty() {
-        Some(ImageClipboard { mode, assets: remaining })
+        Some(ImageClipboard {
+            mode,
+            assets: remaining,
+        })
     } else {
         None
     };

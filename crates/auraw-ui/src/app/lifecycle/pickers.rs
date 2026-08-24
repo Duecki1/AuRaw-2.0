@@ -10,7 +10,9 @@ impl AurawApp {
             .iter()
             .flat_map(|extension| [extension.to_string(), extension.to_ascii_uppercase()])
             .collect::<Vec<_>>();
-        let initial_directory = self.develop.current_path
+        let initial_directory = self
+            .develop
+            .current_path
             .as_deref()
             .and_then(selected_picker_directory)
             .or_else(|| self.library.folder().map(std::path::Path::to_path_buf));
@@ -67,7 +69,9 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn poll_desktop_picker(&mut self, frame: &eframe::Frame) {
-        let result = self.ui.desktop_picker_receiver
+        let result = self
+            .ui
+            .desktop_picker_receiver
             .as_ref()
             .and_then(|receiver| receiver.try_recv().ok());
         let Some(result) = result else {
@@ -162,7 +166,8 @@ impl AurawApp {
                 crate::android::PickerResult::Picked(document) => {
                     self.library.refresh(&self.egui_ctx);
                     let batch_owned_open = self.export.android_batch_load_pending;
-                    let profile_reload_owned_open = self.android.pending_android_profile_reload.is_some();
+                    let profile_reload_owned_open =
+                        self.android.pending_android_profile_reload.is_some();
                     let reset_reload_owned_open =
                         std::mem::take(&mut self.android.pending_android_library_reset_reload);
                     let library_refresh_owned_open = !batch_owned_open
@@ -278,10 +283,14 @@ impl AurawApp {
                 }
                 crate::android::PickerResult::Failed(error) => {
                     self.develop_ui.loading_thumbnail.clear();
-                    let was_profile_reload = self.android.pending_android_profile_reload.take().is_some();
+                    let was_profile_reload =
+                        self.android.pending_android_profile_reload.take().is_some();
                     let was_reset_reload =
                         std::mem::take(&mut self.android.pending_android_library_reset_reload);
-                    if self.export.android_batch_load_pending && !was_profile_reload && !was_reset_reload {
+                    if self.export.android_batch_load_pending
+                        && !was_profile_reload
+                        && !was_reset_reload
+                    {
                         self.export.android_batch_load_pending = false;
                         self.complete_android_library_batch_export_item(Err(error));
                     } else if self.ai.library_mask_refresh.is_some()
