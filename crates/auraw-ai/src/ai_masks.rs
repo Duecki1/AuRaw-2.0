@@ -2,7 +2,7 @@ use crate::execution_provider::{CpuFallbackProfile, FallbackSession, SessionOpti
 use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
 use crate::model_install::ModelInstallSpec;
 use crate::model_runtime::{with_model_session, AiModel, AiRuntimeContext, ModelRetention};
-use crate::pipeline::{MaskImage};
+use crate::pipeline::MaskImage;
 use crate::ModelDownloadProgress;
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
@@ -165,6 +165,7 @@ const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
     attempts: 1,
     resume: false,
 };
+const VITMATTE_MAX_EDGE_DESKTOP: u32 = 2048;
 const VITMATTE_MAX_EDGE_ANDROID: u32 = 1024;
 const VITMATTE_SIZE_DIVISOR: u32 = 32;
 
@@ -201,6 +202,26 @@ fn mask_model_retention(cache_supported: bool) -> ModelRetention {
         } else {
             ModelRetention::OneShot
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum SubjectMaskEvent {
+    DownloadProgress(ModelDownloadProgress),
+    Inferencing,
+    Finished(Result<SubjectMaskResult, String>),
+}
+
+#[derive(Debug)]
+pub struct SubjectMaskResult {
+    pub width: u32,
+    pub height: u32,
+    pub mask: Vec<u8>,
+}
+
+impl SubjectMaskResult {
+    pub fn into_probability_mask(self) -> Option<MaskImage> {
+        MaskImage::new(self.width, self.height, self.mask)
     }
 }
 
@@ -615,76 +636,6 @@ fn validate_birefnet_output_shape(
         u32::try_from(output_height).context("BiRefNet output height exceeds u32")?,
         output_elements,
     ))
-}
-= request;
-    anyhow::ensure!(
-    );
-    let expected_bytes = pixels
-        .checked_mul(4)
-        .and_then(|value| usize::try_from(value).ok())
-    anyhow::ensure!(
-        rgba.len() == expected_bytes,
-        rgba.len()
-    );
-    initialize_runtime(runtime_path, runtime_sha256)?;
-    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
-    let resized = image::imageops::resize(
-        &image,
-        layout.resized_width,
-        layout.resized_height,
-        FilterType::Triangle,
-    );
-    let plane = layout.padded_width as usize * layout.padded_height as usize;
-    let mut values = vec![0.0f32; plane * 3];
-    for (x, y, pixel) in resized.enumerate_pixels() {
-        let index = y as usize * layout.padded_width as usize + x as usize;
-        for channel in 0..3usize {
-            values[channel * plane + index] =
-                (pixel[channel] as f32 / 255.0 - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel];
-        }
-    }
-    let input = Tensor::from_array((
-        [
-            1usize,
-            3,
-            layout.padded_height as usize,
-            layout.padded_width as usize,
-        ],
-        values,
-    ))
-
-    let (output_width, output_height, probabilities) = with_model_session(
-        model_path,
-        mask_model_retention(true),
-    )?;
-
-    let coarse_mask =
-        object::resize_probability_u8(&probabilities, output_width, output_height, width, height);
-    let mask = refine_mask_with_vitmatte(
-        vitmatte_path,
-        image.as_raw(),
-        width,
-        height,
-        &coarse_mask,
-        1.0,
-    )
-    anyhow::ensure!(
-        mask.len() == width as usize * height as usize,
-    );
-        width,
-        height,
-        mask,
-    })
-}
-    );
-    let queries =
-    anyhow::ensure!(
-    );
-    let expected = queries
-    anyhow::ensure!(
-        logits_len == expected,
-    );
-    Ok(queries)
 }
 
 fn normalized_birefnet_input(
@@ -1156,100 +1107,14 @@ mod tests {
     }
 }
 
-
-    #[test]
-        assert_eq!(
-                .unwrap(),
-            (336, 192)
-        );
-        assert!(
-        );
-    }
-
-    #[test]
-        assert_eq!((layout.resized_width, layout.resized_height), (1333, 750));
-        assert_eq!((layout.padded_width, layout.padded_height), (1344, 768));
-    }
-
-    #[test]
-    }
-
-    #[test]
-        let set_probability = |logits: &mut [f32], query, class, probability: f32| {
-        };
-
-        set_probability(&mut class_logits, 0, 2, 0.9);
-        set_probability(&mut class_logits, 0, 12, 0.1);
-        set_probability(&mut class_logits, 1, 0, 0.6);
-        set_probability(&mut class_logits, 1, 20, 0.4);
-        set_probability(&mut class_logits, 2, 1, 0.6);
-        set_probability(&mut class_logits, 2, 126, 0.4);
-
-        let query_classes = (0..queries)
-            .map(|query| {
-                let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let denominator = logits
-                    .iter()
-                    .map(|logit| (*logit - maximum).exp())
-                    .sum::<f32>();
-                logits[..ADE20K_CLASS_COUNT]
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(class, logit)| {
-                        let probability = (*logit - maximum).exp() / denominator;
-                            .then_some((class, probability))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let mask_logits = vec![10.0; queries];
-
-            &mask_logits,
-            1,
-            &query_classes::Sky.ade20k_class_ids(),
-        );
-            &mask_logits,
-            1,
-            &query_classes::Architecture.ade20k_class_ids(),
-        );
-        assert!(sky[0] > 0.5, "strongest sky class should select the pixel");
-        assert!(
-            architecture[0] < 0.5,
-            "two weaker architecture classes must not win by category size"
-        );
-    }
-
-    #[test]
--{}.onnx",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let cancellation = AtomicBool::new(false);
-        assert!(format!("{error:#}").contains("consent"));
-        assert!(!missing.exists());
-    }
-
-    #[test]
-        let vitmatte = PathBuf::from(std::env::var_os("AURAW_TEST_VITMATTE").unwrap());
-        let runtime = PathBuf::from(std::env::var_os("AURAW_TEST_ORT").unwrap());
-        let sha256 = sha256_file_hex(&runtime).unwrap();
-            model_path: &model,
-            vitmatte_path: &vitmatte,
-            runtime_path: Some(&runtime),
-            runtime_sha256: Some(&sha256),
-            dimensions: [32, 24],
-            rgba: vec![127; 32 * 24 * 4],
-        })
-        .unwrap();
-        assert_eq!((result.width, result.height), (32, 24));
-        assert_eq!(result.mask.len(), 32 * 24);
-    }
+#[cfg(test)]
+mod vitmatte_tests {
+    use super::*;
 
     #[test]
     #[ignore = "manual integration probe requiring AURAW_TEST_VITMATTE and AURAW_TEST_ORT"]
+    fn pinned_vitmatte_refines_an_object_boundary() {
+        let vitmatte = PathBuf::from(std::env::var_os("AURAW_TEST_VITMATTE").unwrap());
         let runtime = PathBuf::from(std::env::var_os("AURAW_TEST_ORT").unwrap());
         let sha256 = sha256_file_hex(&runtime).unwrap();
         initialize_runtime(Some(&runtime), Some(&sha256)).unwrap();

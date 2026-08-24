@@ -1,6 +1,5 @@
 use crate::ai_masks::{
-    spawn_object_mask, spawn_subject_mask, BiRefNetQuality,
-    ObjectInferenceCache, ObjectMaskEvent,
+    spawn_object_mask, spawn_subject_mask, BiRefNetQuality, ObjectInferenceCache, ObjectMaskEvent,
     ObjectMaskRequest, ObjectMaskWorkerRequest, SubjectMaskEvent, SubjectMaskWorkerRequest,
     SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
 };
@@ -10,11 +9,11 @@ use crate::pipeline::{
     affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
     load_raw_file_with_profile_selection, spawn_tiled_export, BrushMode, CameraProfileMode,
     ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
-    GpuParams, GpuProgramPrewarm, LensfunCatalog, LensfunLens, LoadedRaw,
-    MaskGeometry, MaskImage, MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage,
-    ProxySpec, RawGpuPipeline, RawGpuProgramTemplate, RemoveBrushPoint, RemoveBrushStroke,
-    RemoveEditState, RemoveSceneContext, RetouchAlignment, RetouchStroke, RetouchTool,
-    SubjectRefinement, TileSpec, TiledExportJob, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
+    GpuParams, GpuProgramPrewarm, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage,
+    MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
+    RawGpuPipeline, RawGpuProgramTemplate, RemoveBrushPoint, RemoveBrushStroke, RemoveEditState,
+    RemoveSceneContext, RetouchAlignment, RetouchStroke, RetouchTool, SubjectRefinement, TileSpec,
+    TiledExportJob, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::remove::{spawn_remove, spawn_retouch, RemoveEvent, RemoveRequest, RetouchRequest};
 use crate::sidecar::{
@@ -823,7 +822,7 @@ struct LensCorrectionTaskRequest {
     cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
 }
 
-type GeneratedAiMaskTargets = (bool, VecDeque<(usize, usize)>, VecDeque<(usize, usize)>);
+type GeneratedAiMaskTargets = (bool, VecDeque<(usize, usize)>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ForegroundOperationKind {
@@ -1205,10 +1204,7 @@ impl AurawApp {
             && self.ai.library_mask_refresh.is_none()
             && matches!(
                 self.foreground_operation_kind(),
-                Some(
-                    ForegroundOperationKind::SubjectMask
-                        | ForegroundOperationKind::ObjectMask
-                )
+                Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
             )
         {
             self.cancel_foreground_operation();

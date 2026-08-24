@@ -19,6 +19,30 @@ fn common_mask_properties_mutate_through_shared_model_api() {
         MaskKind::Radial,
         MaskKind::Linear,
         MaskKind::Subject,
+        MaskKind::Object,
+        MaskKind::LuminanceRange,
+        MaskKind::ColorRange,
+    ] {
+        stack.clear();
+        stack.add_mask(kind);
+        let component = &mut stack.masks[0].components[0];
+        assert!(component.common.rename("Shared"));
+        assert!(component.common.set_enabled(false));
+        component.common.toggle_invert();
+        assert!(component.set_feather(0.37));
+        assert!(component.set_combine(MaskCombineMode::Intersect));
+        assert_eq!(component.name, "Shared");
+        assert!(!component.enabled);
+        assert!(component.invert);
+        assert_eq!(component.combine, MaskCombineMode::Intersect);
+        let feather = match &component.geometry {
+            MaskGeometry::Brush { feather, .. }
+            | MaskGeometry::Radial { feather, .. }
+            | MaskGeometry::Linear { feather, .. }
+            | MaskGeometry::Ai { feather, .. }
+            | MaskGeometry::Object { feather, .. }
+            | MaskGeometry::LuminanceRange { feather, .. }
+            | MaskGeometry::ColorRange { feather, .. } => *feather,
             _ => unreachable!("tested mask kind must expose feather"),
         };
         assert_eq!(feather, 0.37);
@@ -1086,27 +1110,6 @@ fn submask_components_can_move_between_nonempty_groups() {
     assert_eq!(stack.selected_mask, Some(1));
     assert_eq!(stack.selected_component, Some(1));
     assert_eq!(stack.move_submask_component(0, 0, 1, 0), None);
-}
-
-    let geometry = &mut stack.masks[0].components[0].geometry;
-        mask,
-        category,
-        feather,
-        ..
-    } = geometry
-    else {
-    };
-    *mask = MaskImage::new(2, 1, vec![0, 255]);
-    *feather = 0.0;
-    assert_eq!(stack.rasterize_layer(0, 2, 1, 2, 1), [0, 255]);
-
-    let json = serde_json::to_string(&stack).unwrap();
-    let restored: MaskStack = serde_json::from_str(&json).unwrap();
-    assert!(matches!(
-        restored.masks[0].components[0].geometry,
-            ..
-        }
-    ));
 }
 
 #[test]

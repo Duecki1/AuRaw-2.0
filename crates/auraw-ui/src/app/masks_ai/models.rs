@@ -34,6 +34,11 @@ impl AurawApp {
             .join("vitmatte-small-composition-1k.onnx")
     }
 
+    pub(in crate::app) fn big_lama_model_path(&self) -> PathBuf {
+        self.ai_model_root()
+            .join(crate::remove::BIG_LAMA_MODEL_FILENAME)
+    }
+
     #[cfg(not(target_os = "android"))]
     pub(in crate::app) fn onnx_runtime_config_path() -> PathBuf {
         let root = std::env::var_os("XDG_CONFIG_HOME")

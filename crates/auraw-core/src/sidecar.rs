@@ -398,14 +398,14 @@ mod base64_arc_bytes {
 
 fn generated_mask(geometry: &MaskGeometry) -> Option<&Option<MaskImage>> {
     match geometry {
-        MaskGeometry::Ai { mask, .. }
+        MaskGeometry::Ai { mask, .. } | MaskGeometry::Object { mask, .. } => Some(mask),
         _ => None,
     }
 }
 
 fn generated_mask_mut(geometry: &mut MaskGeometry) -> Option<&mut Option<MaskImage>> {
     match geometry {
-        MaskGeometry::Ai { mask, .. }
+        MaskGeometry::Ai { mask, .. } | MaskGeometry::Object { mask, .. } => Some(mask),
         _ => None,
     }
 }
@@ -1318,7 +1318,7 @@ fn estimate_sidecar_bytes(masks: &MaskStack) -> Result<u64, SidecarError> {
                 }
                 MaskGeometry::Ai {
                     mask: Some(image), ..
-                }
+                } => add_unique_mask_asset_bound(
                     &mut estimated,
                     image,
                     &mut unique_images,
@@ -1380,7 +1380,7 @@ fn measure_sidecar_dynamic_bytes(masks: &MaskStack) -> Result<u64, SidecarError>
                 }
                 MaskGeometry::Ai {
                     mask: Some(image), ..
-                }
+                } => add_unique_mask_asset_measured(
                     &mut measured,
                     image,
                     &mut unique_images,

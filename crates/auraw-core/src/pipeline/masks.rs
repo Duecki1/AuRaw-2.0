@@ -103,7 +103,6 @@ impl MaskKind {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum MaskCombineMode {
     #[default]
@@ -456,10 +455,6 @@ impl MaskGeometry {
                 edge_refine: default_object_edge_refine(),
                 strokes: Vec::new(),
             },
-                mask: None,
-                grow: 0.0,
-                feather: 0.0,
-            },
             MaskKind::LuminanceRange => Self::LuminanceRange {
                 source: None,
                 low: 0.2,
@@ -484,8 +479,7 @@ impl MaskGeometry {
             Self::Fullscreen => true,
             Self::Brush { dabs, .. } => !dabs.is_empty(),
             Self::Radial { initialized, .. } | Self::Linear { initialized, .. } => *initialized,
-                mask.is_some()
-            }
+            Self::Ai { mask, .. } | Self::Object { mask, .. } => mask.is_some(),
             Self::LuminanceRange { source, .. } => source.is_some(),
             Self::ColorRange {
                 source, sampled, ..
@@ -1486,7 +1480,9 @@ fn component_shape_margin_pixels(component: &MaskComponent, image_edge: f32) -> 
             + 2.0
     };
     match &component.geometry {
-        MaskGeometry::Ai { grow, feather, .. }
+        MaskGeometry::Ai { grow, feather, .. } | MaskGeometry::Object { grow, feather, .. } => {
+            shape_margin(*grow, *feather)
+        }
         MaskGeometry::LuminanceRange { grow, .. } | MaskGeometry::ColorRange { grow, .. } => {
             shape_margin(*grow, 0.0)
         }

@@ -331,6 +331,31 @@ mod tests {
         assert_eq!(&*events.lock().unwrap(), &["create low".to_owned()]);
     }
 
+    #[test]
+    fn different_model_drops_previous_before_create() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut slot = RuntimeSlot::default();
+        slot.ensure_model(AiModel::BiRefNetLow, interactive_masks(), 0, true, || {
+            Ok::<_, ()>(DropLog {
+                label: "low",
+                events: Arc::clone(&events),
+            })
+        })
+        .unwrap();
+        slot.ensure_model(AiModel::ViTMatte, interactive_masks(), 0, true, || {
+            events.lock().unwrap().push("create vitmatte".to_owned());
+            Ok::<_, ()>(DropLog {
+                label: "vitmatte",
+                events: Arc::clone(&events),
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            &*events.lock().unwrap(),
+            &["drop low".to_owned(), "create vitmatte".to_owned()]
+        );
+        assert_eq!(slot.active_model(), Some(AiModel::ViTMatte));
+    }
 
     #[test]
     fn only_one_session_can_be_resident() {
@@ -459,4 +484,14 @@ mod tests {
         assert_eq!(slot.active_model(), Some(AiModel::BiRefNetHigh));
     }
 
+    #[test]
+    fn provider_policy_change_invalidates_current_session() {
+        let mut slot = RuntimeSlot::default();
+        slot.ensure_model(AiModel::ViTMatte, interactive_masks(), 4, true, || {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        slot.reconcile(Some(AiRuntimeContext::Masks), 5, false);
+        assert_eq!(slot.active_model(), None);
+    }
 }

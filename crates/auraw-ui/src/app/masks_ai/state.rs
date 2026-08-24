@@ -290,10 +290,7 @@ impl AurawApp {
         self.ai.mask_update_active
             || matches!(
                 self.foreground_operation_kind(),
-                Some(
-                    ForegroundOperationKind::SubjectMask
-                        | ForegroundOperationKind::ObjectMask
-                )
+                Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
             )
             || self.ai.subject_consent_open
             || self.ai.object_consent_open
@@ -324,6 +321,19 @@ impl AurawApp {
             self.foreground_operation_is(ForegroundOperationKind::ObjectMask)
                 || self.ai.object_pending_target.is_some(),
         );
+        let subject_remaining = usize::from(self.ai.mask_update_subject_pending) * subject_targets;
+        subject_remaining + self.ai.mask_update_object_queue.len() + current_object
+    }
+
+    pub(in crate::app) fn generated_ai_mask_targets(&self) -> GeneratedAiMaskTargets {
+        let mut subject = false;
+        let mut objects = VecDeque::new();
+        for (mask_index, local_mask) in self.masks.stack.masks.iter().enumerate() {
+            for (component_index, component) in local_mask.components.iter().enumerate() {
+                match (component.kind, &component.geometry) {
+                    (MaskKind::Subject | MaskKind::Background, MaskGeometry::Ai { .. }) => {
+                        subject = true
+                    }
                     (MaskKind::Object, MaskGeometry::Object { strokes, .. })
                         if strokes
                             .iter()
@@ -335,6 +345,7 @@ impl AurawApp {
                 }
             }
         }
+        (subject, objects)
     }
 
     pub(in crate::app) fn has_range_mask_targets(&self) -> bool {
@@ -354,9 +365,37 @@ impl AurawApp {
         self.ai.object_cache = None;
         if matches!(
             self.foreground_operation_kind(),
-            Some(
-                ForegroundOperationKind::SubjectMask
-                    | ForegroundOperationKind::ObjectMask
+            Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
+        ) {
+            self.cancel_foreground_operation();
+        }
+        self.ai.object_pending_target = None;
+        self.ai.mask_update_active = false;
+        self.ai.mask_update_subject_pending = false;
+        self.ai.mask_update_object_queue.clear();
+        self.ai.mask_update_failed = false;
+    }
+
+    pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
+        let (has_subject, object_targets) = self.generated_ai_mask_targets();
+        let has_ranges = self.has_range_mask_targets();
+        self.invalidate_generated_mask_sources();
+        self.ai.masks_need_update = has_subject || !object_targets.is_empty() || has_ranges;
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn validate_onnx_runtime_for_ai(&mut self) -> bool {
+        let (Some(runtime_path), Some(runtime_sha256)) =
+            (self.ai.runtime_path.clone(), self.ai.runtime_sha256.clone())
+        else {
+            self.ui.notice = Some(
+                "Choose an ONNX Runtime library under Settings before using desktop AI tools."
+                    .to_owned(),
+            );
+            return false;
+        };
+        match crate::ai_masks::probe_runtime_subprocess(&runtime_path, &runtime_sha256) {
+            Ok(()) => true,
             Err(error) => {
                 self.ui.notice = Some(format!(
                     "ONNX Runtime validation failed: {error:#}. Select a different onnxruntime.dll in Settings."
@@ -382,21 +421,18 @@ impl AurawApp {
             self.ui.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
             return;
         }
+        let (update_subject, object_targets) = self.generated_ai_mask_targets();
         let update_ranges = self.has_range_mask_targets();
         if self.masks.stack.masks.is_empty() {
             self.ai.masks_need_update = false;
             return;
         }
         #[cfg(not(target_os = "android"))]
-            && !self.validate_onnx_runtime_for_ai()
-        {
+        if (update_subject || !object_targets.is_empty()) && !self.validate_onnx_runtime_for_ai() {
             return;
         }
 
-        if update_subject
-            || !object_targets.is_empty()
-            || update_ranges
-        {
+        if update_subject || !object_targets.is_empty() || update_ranges {
             self.masks.source_cache = None;
             self.masks.subject_cache = None;
             self.ai.object_cache = None;
@@ -430,6 +466,7 @@ impl AurawApp {
             }
         }
 
+        if !update_subject && object_targets.is_empty() {
             self.ai.masks_need_update = false;
             self.ui.notice =
                 Some("Masks were refreshed for the current image geometry.".to_owned());
@@ -460,10 +497,7 @@ impl AurawApp {
             || self.ai.mask_update_subject_pending
             || matches!(
                 self.foreground_operation_kind(),
-                Some(
-                    ForegroundOperationKind::SubjectMask
-                        | ForegroundOperationKind::ObjectMask
-                )
+                Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
             )
             || self.ai.subject_consent_open
             || self.ai.object_consent_open
@@ -498,30 +532,6 @@ impl AurawApp {
             } else {
                 self.ai.object_pending_target = Some((mask_index, component_index));
                 self.ai.object_consent_open = true;
-                self.egui_ctx.request_repaint();
-            }
-            return;
-        }
-
-        while let Some((mask_index, component_index)) =
-        {
-            let valid = self
-                .masks
-                .stack
-                .masks
-                .get(mask_index)
-                .and_then(|mask| mask.components.get(component_index))
-                .is_some_and(|component| {
-                    matches!(
-                        (component.kind, &component.geometry),
-                    )
-                });
-            if !valid {
-                continue;
-            }
-                && crate::ai_masks::vitmatte_model_is_verified(&self.vitmatte_model_path())
-            {
-            } else {
                 self.egui_ctx.request_repaint();
             }
             return;

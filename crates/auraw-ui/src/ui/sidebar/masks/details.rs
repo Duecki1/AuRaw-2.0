@@ -414,7 +414,6 @@ impl Sidebar {
         if request_object {
             app.request_object_mask(mask_index, component_index);
         }
-        }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if effect_changed {
             app.develop_ui.mask_section = MaskSection::Properties;

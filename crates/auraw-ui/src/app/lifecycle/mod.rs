@@ -229,6 +229,21 @@ pub(super) fn needs_canonical_mask_source(masks: &MaskStack) -> bool {
                 MaskGeometry::LuminanceRange { source: None, .. }
                     | MaskGeometry::ColorRange { source: None, .. }
                     | MaskGeometry::Object { .. }
+            )
+        })
+    })
+}
+
+pub(super) fn install_missing_range_sources(masks: &mut MaskStack, source: &MaskRgbImage) {
+    for mask in &mut masks.masks {
+        for component in &mut mask.components {
+            match &mut component.geometry {
+                MaskGeometry::LuminanceRange { source: target, .. }
+                | MaskGeometry::ColorRange { source: target, .. }
+                    if target.is_none() =>
+                {
+                    *target = Some(source.clone());
+                }
                 _ => {}
             }
         }
