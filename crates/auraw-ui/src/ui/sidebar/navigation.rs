@@ -25,7 +25,7 @@ impl Sidebar {
                 SidebarTab::Adjustments => "Edit",
                 SidebarTab::Crop => "Crop & Straighten",
                 SidebarTab::Masks => "Masking",
-                SidebarTab::Inpainting => "Remove",
+                SidebarTab::Inpainting => "Inpaint",
                 SidebarTab::Export => "Export",
             },
         );

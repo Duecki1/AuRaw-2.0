@@ -135,6 +135,33 @@ impl Settings {
 
             ui.separator();
             ui.strong("Library performance");
+            #[cfg(not(target_os = "android"))]
+            {
+                let mut render_edited_thumbnails = app
+                    .library
+                    .renders_edited_thumbnails_during_indexing();
+                if ui
+                    .checkbox(
+                        &mut render_edited_thumbnails,
+                        "Render edited thumbnails while indexing",
+                    )
+                    .on_hover_text(
+                        "Apply saved edits to library thumbnails during indexing. Disabled by default to keep indexing fast and memory use low.",
+                    )
+                    .changed()
+                {
+                    app.set_render_edited_thumbnails_during_indexing(render_edited_thumbnails);
+                }
+                ui.add(
+                    egui::Label::new(if render_edited_thumbnails {
+                        "Edited RAWs are rendered in the background after their original previews appear."
+                    } else {
+                        "All RAWs use their original previews. An orange refresh badge marks previews that do not include saved edits."
+                    })
+                    .wrap(),
+                );
+            }
+
             let mut raw_cache_files = app.develop.raw_cache_limit;
             if adjustment_slider(
                 ui,
@@ -169,14 +196,14 @@ impl Settings {
                 0,
                 1.0,
                 Some(
-                    "Concurrent background thumbnail jobs, including embedded previews, preview-less RAW fallback renders, and edited-thumbnail rebuilding.",
+                    "Concurrent background thumbnail jobs, including embedded previews, preview-less RAW fallback renders, and edited-thumbnail rendering when enabled above.",
                 ),
             ) {
                 app.set_thumbnail_worker_count(thumbnail_workers);
             }
             ui.add(
                 egui::Label::new(
-                    "Higher values fill the library faster, but preview-less and edited jobs may unpack a full sensor and use substantial memory. Changing this restarts the current queue; the setting is saved across restarts.",
+                    "Higher values fill the library faster, but preview-less jobs—and edited jobs when enabled—may unpack a full sensor and use substantial memory. Changing this restarts the current queue; the setting is saved across restarts.",
                 )
                 .wrap(),
             );

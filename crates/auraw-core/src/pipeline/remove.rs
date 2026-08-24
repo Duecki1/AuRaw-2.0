@@ -1,11 +1,68 @@
 use super::{ExposureParams, LoadedRaw};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub const BIG_LAMA_INPUT_EDGE: u32 = 512;
 pub const REMOVE_MAX_STROKES: usize = 512;
 pub const REMOVE_MAX_POINTS_PER_STROKE: usize = 65_536;
 pub const REMOVE_MAX_PATCHES_PER_STROKE: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetouchTool {
+    #[default]
+    Clone,
+    Heal,
+}
+
+impl RetouchTool {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Clone => "Clone",
+            Self::Heal => "Heal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetouchAlignment {
+    #[default]
+    None,
+    Aligned,
+    Registered,
+    Fixed,
+}
+
+impl RetouchAlignment {
+    pub const ALL: [Self; 4] = [Self::None, Self::Aligned, Self::Registered, Self::Fixed];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Aligned => "Aligned",
+            Self::Registered => "Registered",
+            Self::Fixed => "Fixed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RetouchStroke {
+    pub tool: RetouchTool,
+    pub alignment: RetouchAlignment,
+    /// Native-image source point selected by the user.
+    pub source: [f32; 2],
+    /// First native-image destination point in this stroke.
+    pub destination: [f32; 2],
+    /// GIMP-style hard-center fraction. The remaining radius is feathered.
+    pub hardness: f32,
+    pub opacity: f32,
+    /// Opacity that was already baked into patches written before sidecar schema 16.
+    /// New patches keep opacity live and leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baked_opacity: Option<f32>,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RemoveBrushPoint {
@@ -52,16 +109,21 @@ impl NativeRect {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RemoveContextCrop {
-    pub context: NativeRect,
-    pub target: NativeRect,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RemovePatchSidecarCache {
+    pub fingerprint: u64,
+    pub rgb_png: Arc<[u8]>,
+    pub alpha_png: Arc<[u8]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemovePatch {
     pub bounds: NativeRect,
-    #[serde(default, with = "arc_u16_le_base64")]
+    #[serde(
+        default,
+        with = "arc_u16_le_base64",
+        skip_serializing_if = "arc_u16_is_empty"
+    )]
     pub rgb_scene16f: Arc<[u16]>,
     #[serde(
         default,
@@ -69,12 +131,31 @@ pub struct RemovePatch {
         skip_serializing_if = "arc_u16_is_empty"
     )]
     pub rgb_srgb16: Arc<[u16]>,
-    #[serde(with = "arc_u8_base64")]
+    #[serde(
+        default,
+        with = "arc_u8_base64",
+        skip_serializing_if = "arc_u8_is_empty"
+    )]
     pub alpha: Arc<[u8]>,
+    #[serde(skip)]
+    pub(crate) sidecar_cache: Arc<OnceLock<RemovePatchSidecarCache>>,
 }
 
 fn arc_u16_is_empty(values: &Arc<[u16]>) -> bool {
     values.is_empty()
+}
+
+fn arc_u8_is_empty(values: &Arc<[u8]>) -> bool {
+    values.is_empty()
+}
+
+impl PartialEq for RemovePatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.bounds == other.bounds
+            && self.rgb_scene16f == other.rgb_scene16f
+            && self.rgb_srgb16 == other.rgb_srgb16
+            && self.alpha == other.alpha
+    }
 }
 
 impl RemovePatch {
@@ -100,6 +181,7 @@ impl RemovePatch {
             rgb_scene16f: Arc::from(rgb_scene16f),
             rgb_srgb16: Arc::from([]),
             alpha: Arc::from(alpha),
+            sidecar_cache: Arc::default(),
         })
     }
 
@@ -125,6 +207,7 @@ impl RemovePatch {
             rgb_scene16f: Arc::from([]),
             rgb_srgb16: Arc::from(rgb_srgb16),
             alpha: Arc::from(alpha),
+            sidecar_cache: Arc::default(),
         })
     }
 
@@ -133,11 +216,43 @@ impl RemovePatch {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RemoveStroke {
     pub brush: RemoveBrushStroke,
     #[serde(default)]
     pub patches: Vec<RemovePatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retouch: Option<RetouchStroke>,
+    #[serde(default = "default_remove_stroke_opacity")]
+    pub opacity: f32,
+}
+
+impl Default for RemoveStroke {
+    fn default() -> Self {
+        Self {
+            brush: RemoveBrushStroke::default(),
+            patches: Vec::new(),
+            retouch: None,
+            opacity: 1.0,
+        }
+    }
+}
+
+const fn default_remove_stroke_opacity() -> f32 {
+    1.0
+}
+
+impl RemoveStroke {
+    /// Live blend factor for this cached stroke. Retouch patches written before
+    /// schema 16 already contain their creation opacity, so they use a ratio.
+    pub fn composite_opacity(&self) -> f32 {
+        let opacity = self.opacity.clamp(0.0, 1.0);
+        match self.retouch.and_then(|retouch| retouch.baked_opacity) {
+            Some(baked) if baked > f32::EPSILON => opacity / baked,
+            Some(_) => 0.0,
+            None => opacity,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -263,120 +378,37 @@ fn paint_disc(pixels: &mut [u8], bounds: NativeRect, center_x: f32, center_y: f3
     }
 }
 
-pub fn plan_remove_context_crops(
+/// Chooses the sole native context for one Big-LaMa stroke. This deliberately
+/// never tiles: every stroke is resized into one model input and inferred once.
+pub fn plan_remove_context_crop(
     image_width: u32,
     image_height: u32,
     mask: &RemoveMask,
-) -> Vec<RemoveContextCrop> {
+) -> Option<NativeRect> {
     if image_width == 0 || image_height == 0 || mask.is_empty() {
-        return Vec::new();
+        return None;
     }
     let shortest = image_width.min(image_height).max(1);
-    let max_context = (BIG_LAMA_INPUT_EDGE * 2).min(shortest).max(1);
     let mask_edge = mask.bounds.width.max(mask.bounds.height).max(1);
     let desired = mask_edge.saturating_mul(3).max(384).min(shortest);
-    if desired <= max_context || mask_edge <= max_context / 2 {
-        let context = square_inside_image(
+    if mask_edge <= shortest {
+        return Some(square_inside_image(
             image_width,
             image_height,
             mask.bounds.x + mask.bounds.width / 2,
             mask.bounds.y + mask.bounds.height / 2,
-            desired.min(max_context),
-        );
-        return vec![RemoveContextCrop {
-            context,
-            target: context,
-        }];
+            desired,
+        ));
     }
-
-    let mut core_edge = (max_context / 2).max(96);
-    let max_core_edge = (max_context * 3 / 4).max(core_edge);
-    loop {
-        let overlap = (core_edge / 4).max(24);
-        let stride = core_edge.saturating_sub(overlap).max(1);
-        let tiles_x = tile_count_for_span(mask.bounds.width, core_edge, stride);
-        let tiles_y = tile_count_for_span(mask.bounds.height, core_edge, stride);
-        if tiles_x.saturating_mul(tiles_y) <= REMOVE_MAX_PATCHES_PER_STROKE
-            || core_edge >= max_core_edge
-        {
-            break;
-        }
-        core_edge = core_edge.saturating_add(32).min(max_core_edge);
-    }
-    let overlap = (core_edge / 4).max(24);
-    let stride = core_edge.saturating_sub(overlap).max(1);
-    let mut crops = Vec::new();
-    let mut core_y = mask.bounds.y;
-    while core_y < mask.bounds.bottom() {
-        let mut core_x = mask.bounds.x;
-        while core_x < mask.bounds.right() {
-            let core_w = core_edge.min(mask.bounds.right() - core_x);
-            let core_h = core_edge.min(mask.bounds.bottom() - core_y);
-            if mask_region_has_pixels(mask, NativeRect {
-                x: core_x,
-                y: core_y,
-                width: core_w,
-                height: core_h,
-            }) {
-                let center_x = core_x + core_w / 2;
-                let center_y = core_y + core_h / 2;
-                let context = square_inside_image(
-                    image_width,
-                    image_height,
-                    center_x,
-                    center_y,
-                    max_context,
-                );
-                let planned = RemoveContextCrop {
-                    context,
-                    target: NativeRect {
-                        x: core_x,
-                        y: core_y,
-                        width: core_w,
-                        height: core_h,
-                    },
-                };
-                if !crops.contains(&planned) {
-                    crops.push(planned);
-                }
-            }
-            if core_x.saturating_add(core_w) >= mask.bounds.right() {
-                break;
-            }
-            core_x = core_x.saturating_add(stride);
-        }
-        let core_h = core_edge.min(mask.bounds.bottom() - core_y);
-        if core_y.saturating_add(core_h) >= mask.bounds.bottom() {
-            break;
-        }
-        core_y = core_y.saturating_add(stride);
-    }
-    crops
-}
-
-fn tile_count_for_span(span: u32, core_edge: u32, stride: u32) -> usize {
-    if span <= core_edge {
-        return 1;
-    }
-    1usize.saturating_add(
-        span.saturating_sub(core_edge)
-            .div_ceil(stride.max(1)) as usize,
-    )
-}
-
-fn mask_region_has_pixels(mask: &RemoveMask, rect: NativeRect) -> bool {
-    let Some(intersection) = mask.bounds.intersect(rect) else {
-        return false;
-    };
-    for y in intersection.y..intersection.bottom() {
-        let row = (y - mask.bounds.y) as usize * mask.bounds.width as usize;
-        for x in intersection.x..intersection.right() {
-            if mask.pixels[row + (x - mask.bounds.x) as usize] != 0 {
-                return true;
-            }
-        }
-    }
-    false
+    // A square crop cannot contain a mask spanning more than the image's
+    // shortest edge. Use the complete image in that uncommon case; Big-LaMa
+    // still receives exactly one resized 512x512 input and runs once.
+    Some(NativeRect {
+        x: 0,
+        y: 0,
+        width: image_width,
+        height: image_height,
+    })
 }
 
 fn square_inside_image(
@@ -411,10 +443,8 @@ pub fn remove_scene_white_balance(raw: &LoadedRaw, exposure: &ExposureParams) ->
     if raw.is_pre_demosaiced_raster() {
         return [1.0; 3];
     }
-    let (wb, _, _) = raw.adjusted_white_balance_and_camera_transform(
-        exposure.temperature,
-        exposure.tint,
-    );
+    let (wb, _, _) =
+        raw.adjusted_white_balance_and_camera_transform(exposure.temperature, exposure.tint);
     let green = 0.5 * (wb[1] + wb[3]);
     [wb[0].max(1e-8), green.max(1e-8), wb[2].max(1e-8)]
 }
@@ -568,7 +598,13 @@ pub fn composite_remove_edits_into_linear_region(
     }
     for stroke in &edits.strokes {
         for patch in &stroke.patches {
-            composite_patch_into_linear_region(patch, region, rgb);
+            composite_patch_into_linear_region_with_opacity(
+                patch,
+                region,
+                rgb,
+                stroke.composite_opacity(),
+                stroke.retouch.is_some(),
+            );
         }
     }
 }
@@ -577,6 +613,16 @@ pub fn composite_patch_into_linear_region(
     patch: &RemovePatch,
     region: NativeRect,
     rgb: &mut [f32],
+) {
+    composite_patch_into_linear_region_with_opacity(patch, region, rgb, 1.0, false);
+}
+
+fn composite_patch_into_linear_region_with_opacity(
+    patch: &RemovePatch,
+    region: NativeRect,
+    rgb: &mut [f32],
+    opacity: f32,
+    baked_retouch_coverage: bool,
 ) {
     if patch.has_scene_pixels() {
         return;
@@ -591,7 +637,16 @@ pub fn composite_patch_into_linear_region(
             let patch_x = (x - patch.bounds.x) as usize;
             let region_x = (x - region.x) as usize;
             let patch_index = patch_y * patch.bounds.width as usize + patch_x;
-            let alpha = patch.alpha[patch_index] as f32 / 255.0;
+            let coverage = patch.alpha[patch_index] as f32 / 255.0;
+            let alpha = if baked_retouch_coverage {
+                if coverage > 0.0 {
+                    opacity
+                } else {
+                    0.0
+                }
+            } else {
+                coverage * opacity
+            };
             if alpha <= 0.0 {
                 continue;
             }
@@ -634,8 +689,7 @@ fn perceptual_gamut_compress(rgb: [f32; 3]) -> [f32; 3] {
     if min >= 0.0 && max <= 1.0 {
         return rgb;
     }
-    let luma = (rgb[0] * 0.212_672_9 + rgb[1] * 0.715_152_2 + rgb[2] * 0.072_175)
-        .clamp(0.0, 1.0);
+    let luma = (rgb[0] * 0.212_672_9 + rgb[1] * 0.715_152_2 + rgb[2] * 0.072_175).clamp(0.0, 1.0);
     let mut scale: f32 = 1.0;
     for value in rgb {
         let delta = value - luma;
@@ -739,8 +793,8 @@ mod tests {
         };
         let mask = rasterize_remove_brush(64, 48, &brush).unwrap();
         assert!(mask.pixels.iter().all(|value| *value == 0 || *value == 255));
-        assert!(mask.pixels.iter().any(|value| *value == 255));
-        assert!(mask.pixels.iter().any(|value| *value == 0));
+        assert!(mask.pixels.contains(&255));
+        assert!(mask.pixels.contains(&0));
     }
 
     #[test]
@@ -754,16 +808,14 @@ mod tests {
             dilation_radius: 4,
         };
         let mask = rasterize_remove_brush(7000, 6000, &brush).unwrap();
-        let crops = plan_remove_context_crops(7000, 6000, &mask);
-        assert_eq!(crops.len(), 1);
-        assert_eq!(crops[0].context.width, crops[0].context.height);
-        assert!(crops[0].context.width >= 900);
-        assert!(crops[0].context.width <= BIG_LAMA_INPUT_EDGE * 2);
-        assert_eq!(crops[0].target, crops[0].context);
+        let crop = plan_remove_context_crop(7000, 6000, &mask).unwrap();
+        assert_eq!(crop.width, crop.height);
+        assert!(crop.width >= 900);
+        assert_eq!(crop.intersect(mask.bounds), Some(mask.bounds));
     }
 
     #[test]
-    fn large_mask_uses_overlapping_local_crops() {
+    fn large_mask_uses_one_context_containing_the_entire_stroke() {
         let mut points = Vec::new();
         for x in (1000..4000).step_by(120) {
             points.push(RemoveBrushPoint {
@@ -777,17 +829,13 @@ mod tests {
             dilation_radius: 5,
         };
         let mask = rasterize_remove_brush(7000, 6000, &brush).unwrap();
-        let crops = plan_remove_context_crops(7000, 6000, &mask);
-        assert!(crops.len() > 1);
-        assert!(crops.iter().all(|crop| {
-            crop.context.width == crop.context.height
-                && crop.context.width <= BIG_LAMA_INPUT_EDGE * 2
-                && crop.target.width < crop.context.width
-        }));
+        let crop = plan_remove_context_crop(7000, 6000, &mask).unwrap();
+        assert_eq!(crop.width, crop.height);
+        assert_eq!(crop.intersect(mask.bounds), Some(mask.bounds));
     }
 
     #[test]
-    fn huge_contiguous_mask_keeps_unmasked_context_per_tile() {
+    fn huge_contiguous_mask_still_uses_one_context() {
         let mask = RemoveMask {
             bounds: NativeRect {
                 x: 1000,
@@ -797,17 +845,13 @@ mod tests {
             },
             pixels: vec![255; 3000 * 2200],
         };
-        let crops = plan_remove_context_crops(7000, 6000, &mask);
-        assert!(crops.len() > 1);
-        assert!(crops.iter().all(|crop| {
-            crop.target.width < crop.context.width
-                && crop.target.height < crop.context.height
-                && crop.context.intersect(crop.target) == Some(crop.target)
-        }));
+        let crop = plan_remove_context_crop(7000, 6000, &mask).unwrap();
+        assert_eq!(crop.width, crop.height);
+        assert_eq!(crop.intersect(mask.bounds), Some(mask.bounds));
     }
 
     #[test]
-    fn full_large_image_stays_within_patch_cap() {
+    fn full_image_mask_uses_the_full_image_once() {
         let mask = RemoveMask {
             bounds: NativeRect {
                 x: 0,
@@ -817,9 +861,16 @@ mod tests {
             },
             pixels: vec![255; 7000 * 6000],
         };
-        let crops = plan_remove_context_crops(7000, 6000, &mask);
-        assert!(!crops.is_empty());
-        assert!(crops.len() <= REMOVE_MAX_PATCHES_PER_STROKE);
+        let crop = plan_remove_context_crop(7000, 6000, &mask).unwrap();
+        assert_eq!(
+            crop,
+            NativeRect {
+                x: 0,
+                y: 0,
+                width: 7000,
+                height: 6000,
+            }
+        );
     }
 
     #[test]
@@ -867,9 +918,54 @@ mod tests {
         );
         for pixel in 0..9 {
             if pixel != 4 {
-                assert_eq!(&rgb[pixel * 3..pixel * 3 + 3], &before[pixel * 3..pixel * 3 + 3]);
+                assert_eq!(
+                    &rgb[pixel * 3..pixel * 3 + 3],
+                    &before[pixel * 3..pixel * 3 + 3]
+                );
             }
         }
         assert_ne!(&rgb[12..15], &before[12..15]);
+    }
+
+    #[test]
+    fn stroke_opacity_is_live_for_remove_and_current_retouch_patches() {
+        let remove = RemoveStroke {
+            opacity: 0.35,
+            ..RemoveStroke::default()
+        };
+        assert_eq!(remove.composite_opacity(), 0.35);
+
+        let retouch = RemoveStroke {
+            opacity: 0.4,
+            retouch: Some(RetouchStroke {
+                tool: RetouchTool::Clone,
+                alignment: RetouchAlignment::Aligned,
+                source: [0.0; 2],
+                destination: [0.0; 2],
+                hardness: 0.5,
+                opacity: 0.8,
+                baked_opacity: None,
+            }),
+            ..RemoveStroke::default()
+        };
+        assert_eq!(retouch.composite_opacity(), 0.4);
+    }
+
+    #[test]
+    fn legacy_retouch_uses_opacity_ratio_to_preserve_its_baked_patch() {
+        let stroke = RemoveStroke {
+            opacity: 0.4,
+            retouch: Some(RetouchStroke {
+                tool: RetouchTool::Heal,
+                alignment: RetouchAlignment::Aligned,
+                source: [0.0; 2],
+                destination: [0.0; 2],
+                hardness: 0.5,
+                opacity: 0.8,
+                baked_opacity: Some(0.8),
+            }),
+            ..RemoveStroke::default()
+        };
+        assert!((stroke.composite_opacity() - 0.5).abs() < f32::EPSILON);
     }
 }
