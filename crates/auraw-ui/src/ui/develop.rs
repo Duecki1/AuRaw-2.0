@@ -546,7 +546,7 @@ fn filmstrip_thumbnail(
 
     if item.developed_thumbnail_pending {
         let center = rect.right_top() + egui::vec2(-13.0, 13.0);
-        crate::ui::components::pending_indicator(&painter, center, 10.0, 13.0);
+        crate::ui::components::pending_indicator(painter, center, 10.0, 13.0);
     }
 
     let label_rect = egui::Rect::from_min_max(
@@ -594,7 +594,11 @@ fn filmstrip_thumbnail(
         );
     }
 
-    response.on_hover_text(item.path.display().to_string())
+    let mut tooltip = item.path.display().to_string();
+    if item.developed_thumbnail_pending {
+        tooltip.push_str("\nThis preview does not include the latest saved edits.");
+    }
+    response.on_hover_text(tooltip)
 }
 
 fn cover_uv(source_size: Option<[u32; 2]>, target_size: egui::Vec2) -> egui::Rect {

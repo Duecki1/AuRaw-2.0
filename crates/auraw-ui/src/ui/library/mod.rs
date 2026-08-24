@@ -277,6 +277,7 @@ struct LoadedLibraryThumbnail {
     thumbnail: RawThumbnail,
     resident_thumbnail: RawThumbnail,
     developed: bool,
+    developed_thumbnail_stale: bool,
     developed_render_pending: bool,
 }
 
@@ -689,6 +690,7 @@ pub(crate) struct LibraryState {
     status: String,
     usage_clock: u64,
     thumbnail_workers: usize,
+    render_edited_thumbnails_during_indexing: bool,
     sort_order: LibrarySortOrder,
     thumbnail_size: LibraryThumbnailSize,
     selected_assets: HashSet<LibraryAssetId>,

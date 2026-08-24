@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 13;
+const SETTINGS_VERSION: u32 = 14;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -13,6 +13,8 @@ pub(crate) struct PerformanceSettings {
     pub raw_cache_files: usize,
     #[serde(default = "default_thumbnail_workers")]
     pub thumbnail_workers: usize,
+    #[serde(default)]
+    pub render_edited_thumbnails_during_indexing: bool,
     #[serde(default)]
     pub library_thumbnail_size: crate::ui::library::LibraryThumbnailSize,
     #[serde(default)]
@@ -104,6 +106,7 @@ impl Default for PerformanceSettings {
             version: SETTINGS_VERSION,
             raw_cache_files: default_raw_cache_files(),
             thumbnail_workers: default_thumbnail_workers(),
+            render_edited_thumbnails_during_indexing: false,
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::default(),
             library_sort_order: crate::ui::library::LibrarySortOrder::default(),
             preview_quality: crate::app::PreviewQuality::default(),
@@ -298,6 +301,7 @@ mod tests {
             version: 99,
             raw_cache_files: usize::MAX,
             thumbnail_workers: 0,
+            render_edited_thumbnails_during_indexing: true,
             library_thumbnail_size: crate::ui::library::LibraryThumbnailSize::Large,
             library_sort_order: crate::ui::library::LibrarySortOrder::NameAscending,
             preview_quality: crate::app::PreviewQuality::High,
@@ -338,6 +342,7 @@ mod tests {
             crate::app::maximum_raw_cache_limit()
         );
         assert_eq!(settings.thumbnail_workers, 1);
+        assert!(settings.render_edited_thumbnails_during_indexing);
         assert_eq!(
             settings.library_thumbnail_size,
             crate::ui::library::LibraryThumbnailSize::Large
@@ -413,6 +418,7 @@ mod tests {
 
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
         assert!(!settings.image_relative_brush_size);
+        assert!(!settings.render_edited_thumbnails_during_indexing);
         assert_eq!(
             settings.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::Low
@@ -444,6 +450,7 @@ mod tests {
             library_sort_order: crate::ui::library::LibrarySortOrder::SmallestFirst,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             image_relative_brush_size: true,
+            render_edited_thumbnails_during_indexing: true,
             ..Default::default()
         };
         #[cfg(not(target_os = "android"))]
@@ -471,6 +478,7 @@ mod tests {
             crate::ai_masks::BiRefNetQuality::High
         );
         assert!(restored.image_relative_brush_size);
+        assert!(restored.render_edited_thumbnails_during_indexing);
         #[cfg(not(target_os = "android"))]
         {
             assert!(!restored.ai_gpu_acceleration);
