@@ -53,6 +53,7 @@ pub enum MaskKind {
     Linear,
     Subject,
     Background,
+    #[serde(alias = "Landscape")]
     Object,
     LuminanceRange,
     ColorRange,
@@ -354,6 +355,7 @@ pub enum MaskGeometry {
         grow: f32,
         feather: f32,
     },
+    #[serde(alias = "Landscape")]
     Object {
         mask: Option<MaskImage>,
         #[serde(default)]
