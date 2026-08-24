@@ -750,6 +750,7 @@ fn edited_thumbnail_workers_publish_raw_preview_before_background_development() 
             ..
         }) => {
             assert!(!loaded.developed);
+            assert!(loaded.developed_thumbnail_stale);
             assert!(loaded.developed_render_pending);
         }
         _ => panic!("worker did not publish the RAW preview first"),
@@ -761,6 +762,7 @@ fn edited_thumbnail_workers_publish_raw_preview_before_background_development() 
             ..
         }) => {
             assert!(loaded.developed);
+            assert!(!loaded.developed_thumbnail_stale);
             assert!(!loaded.developed_render_pending);
         }
         _ => panic!("worker did not replace the RAW preview with its edited thumbnail"),
@@ -773,6 +775,66 @@ fn edited_thumbnail_workers_publish_raw_preview_before_background_development() 
         stage_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
         ThumbnailLoadStage::DevelopedPreview
     );
+    worker.join().unwrap();
+}
+
+#[test]
+fn stale_edited_preview_does_not_schedule_development_when_index_rendering_is_disabled() {
+    let generation = 10;
+    let asset = test_asset("stale-edited-preview.dng");
+    let (event_sender, event_receiver) = mpsc::sync_channel(3);
+    let (request_sender, request_receiver) = mpsc::sync_channel(1);
+    drop(request_sender);
+    let (stage_sender, stage_receiver) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        run_thumbnail_workers(
+            ThumbnailWorker {
+                assets: vec![asset],
+                warning_count: 0,
+                truncated: false,
+                generation,
+                cancellation: Arc::new(AtomicU64::new(generation)),
+                decoding_paused: Arc::new(AtomicBool::new(false)),
+                decode_gate: Arc::new(RwLock::new(())),
+                event_sender,
+                request_receiver,
+                repaint: eframe::egui::Context::default(),
+            },
+            1,
+            Arc::new(move |_, stage| {
+                stage_sender.send(stage).unwrap();
+                Ok(loaded_library_raw_preview_with_stale_edits(RawThumbnail {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0, 0, 0, 255],
+                }))
+            }),
+        );
+    });
+
+    assert!(matches!(
+        event_receiver.recv_timeout(Duration::from_secs(2)),
+        Ok(ScanEvent::Catalog { generation: 10, .. })
+    ));
+    match event_receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(ScanEvent::Thumbnail {
+            final_thumbnail: true,
+            result: Ok(loaded),
+            ..
+        }) => {
+            assert!(!loaded.developed);
+            assert!(loaded.developed_thumbnail_stale);
+            assert!(!loaded.developed_render_pending);
+        }
+        _ => panic!("worker did not publish the stale original preview as final"),
+    }
+    assert_eq!(
+        stage_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        ThumbnailLoadStage::RawPreview
+    );
+    assert!(stage_receiver
+        .recv_timeout(Duration::from_millis(100))
+        .is_err());
     worker.join().unwrap();
 }
 

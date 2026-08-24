@@ -1,14 +1,15 @@
-use super::*;
 #[cfg(not(target_os = "android"))]
 use super::desktop::{
     developed_thumbnail_fingerprint_path_for_raw,
     legacy_developed_thumbnail_fingerprint_path_for_raw, legacy_developed_thumbnail_path_for_raw,
 };
-use crate::pipeline::{
-    MaskKind, NativeRect, RemoveBrushPoint, RemoveBrushStroke, RemovePatch, RemoveStroke,
-};
+use super::*;
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
+use crate::pipeline::{
+    MaskKind, NativeRect, RemoveBrushPoint, RemoveBrushStroke, RemovePatch, RemoveStroke,
+    RetouchAlignment, RetouchStroke, RetouchTool,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn sample_edits() -> EditState {
@@ -326,11 +327,197 @@ fn sidecar_round_trip_preserves_edit_state() {
             vec![255, 96],
         )
         .unwrap()],
+        retouch: Some(RetouchStroke {
+            tool: RetouchTool::Heal,
+            alignment: RetouchAlignment::Aligned,
+            source: [900.0, 700.0],
+            destination: [1234.0, 987.0],
+            hardness: 0.5,
+            opacity: 0.8,
+            baked_opacity: None,
+        }),
+        opacity: 0.8,
     });
     let encoded = encode(edits.clone()).unwrap();
     let loaded = decode(&encoded).unwrap();
     assert_eq!(loaded.edits, edits);
     assert!(!loaded.migrated);
+}
+
+#[test]
+fn retouch_patches_are_deduplicated_and_png_compressed() {
+    let width = 128;
+    let height = 96;
+    let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+    let mut alpha = Vec::with_capacity(width as usize * height as usize);
+    for y in 0..height {
+        for x in 0..width {
+            rgb.extend([
+                half::f16::from_f32(0.25 + (x % 8) as f32 / 64.0).to_bits(),
+                half::f16::from_f32(0.5).to_bits(),
+                half::f16::from_f32(0.75 + (y % 4) as f32 / 64.0).to_bits(),
+            ]);
+            alpha.push(if x < 4 || y < 4 { 96 } else { 255 });
+        }
+    }
+    let raw_bytes = rgb.len() * 2 + alpha.len();
+    let patch = RemovePatch::new_scene(
+        NativeRect {
+            x: 40,
+            y: 80,
+            width,
+            height,
+        },
+        rgb,
+        alpha,
+    )
+    .unwrap();
+    let mut edits = sample_edits();
+    Arc::make_mut(&mut edits.remove).strokes.push(RemoveStroke {
+        brush: RemoveBrushStroke::default(),
+        patches: vec![patch.clone(), patch],
+        retouch: Some(RetouchStroke {
+            tool: RetouchTool::Clone,
+            alignment: RetouchAlignment::None,
+            source: [20.0, 20.0],
+            destination: [40.0, 80.0],
+            hardness: 0.5,
+            opacity: 1.0,
+            baked_opacity: None,
+        }),
+        opacity: 1.0,
+    });
+
+    let encoded = encode(edits.clone()).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(document["remove_assets"].as_array().unwrap().len(), 1);
+    assert_eq!(document["remove_asset_refs"].as_array().unwrap().len(), 2);
+    assert_eq!(document["remove_assets"][0]["encoding"], "scene16f");
+    assert!(document
+        .pointer("/edits/remove/strokes/0/patches/0/rgb_scene16f")
+        .is_none());
+    assert!(document
+        .pointer("/edits/remove/strokes/0/patches/0/alpha")
+        .is_none());
+    let compressed_base64_bytes = document["remove_assets"][0]["rgb_png"]
+        .as_str()
+        .unwrap()
+        .len()
+        + document["remove_assets"][0]["alpha_png"]
+            .as_str()
+            .unwrap()
+            .len();
+    assert!(compressed_base64_bytes < raw_bytes / 4);
+
+    let loaded = decode(&encoded).unwrap();
+    assert_eq!(loaded.edits, edits);
+    let [first, second] = loaded.edits.remove.strokes[0].patches.as_slice() else {
+        panic!("expected two restored retouch patches");
+    };
+    assert!(Arc::ptr_eq(&first.rgb_scene16f, &second.rgb_scene16f));
+    assert!(Arc::ptr_eq(&first.alpha, &second.alpha));
+
+    let mut malformed = document;
+    malformed["remove_assets"][0]["rgb_png"] = "AAAA".into();
+    assert!(matches!(
+        decode(&serde_json::to_vec(&malformed).unwrap()),
+        Err(SidecarError::Invalid(message)) if message.contains("retouch PNG")
+    ));
+}
+
+#[test]
+fn schema_fifteen_retouch_opacity_migrates_to_live_stroke_metadata() {
+    let mut edits = sample_edits();
+    Arc::make_mut(&mut edits.remove).strokes.push(RemoveStroke {
+        brush: RemoveBrushStroke::default(),
+        patches: vec![RemovePatch::new_scene(
+            NativeRect {
+                x: 4,
+                y: 8,
+                width: 1,
+                height: 1,
+            },
+            vec![
+                half::f16::from_f32(0.2).to_bits(),
+                half::f16::from_f32(0.3).to_bits(),
+                half::f16::from_f32(0.4).to_bits(),
+            ],
+            vec![255],
+        )
+        .unwrap()],
+        retouch: Some(RetouchStroke {
+            tool: RetouchTool::Heal,
+            alignment: RetouchAlignment::Aligned,
+            source: [2.0, 3.0],
+            destination: [4.0, 8.0],
+            hardness: 0.25,
+            opacity: 0.6,
+            baked_opacity: None,
+        }),
+        opacity: 0.6,
+    });
+    let encoded = encode(edits).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    legacy["schema_version"] = serde_json::json!(15);
+    legacy
+        .pointer_mut("/edits/remove/strokes/0")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("opacity");
+
+    let loaded = decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let stroke = &loaded.edits.remove.strokes[0];
+    assert!(loaded.migrated);
+    assert_eq!(stroke.opacity, 0.6);
+    assert_eq!(stroke.retouch.unwrap().baked_opacity, Some(0.6));
+    assert!((stroke.composite_opacity() - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn schema_fourteen_inline_retouch_patch_is_still_supported() {
+    let patch = RemovePatch::new(
+        NativeRect {
+            x: 3,
+            y: 7,
+            width: 2,
+            height: 1,
+        },
+        vec![100, 200, 300, 400, 500, 600],
+        vec![255, 127],
+    )
+    .unwrap();
+    let mut edits = sample_edits();
+    Arc::make_mut(&mut edits.remove).strokes.push(RemoveStroke {
+        brush: RemoveBrushStroke::default(),
+        patches: vec![patch],
+        retouch: None,
+        opacity: 1.0,
+    });
+    let legacy = SidecarDocument {
+        format: SIDECAR_FORMAT.to_owned(),
+        schema_version: 14,
+        edits: edits.clone(),
+        mask_assets: Vec::new(),
+        mask_asset_refs: Vec::new(),
+        remove_assets: Vec::new(),
+        remove_asset_refs: Vec::new(),
+    };
+    let bytes = serde_json::to_vec(&legacy).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(document
+        .pointer("/edits/remove/strokes/0/patches/0/rgb_srgb16")
+        .is_some());
+    assert!(document.get("remove_assets").is_none());
+
+    let loaded = decode(&bytes).unwrap();
+    assert!(loaded.migrated);
+    assert_eq!(loaded.edits, edits);
+
+    let rewritten = encode(loaded.edits).unwrap();
+    let current: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+    assert_eq!(current["remove_assets"][0]["encoding"], "srgb16");
+    assert_eq!(decode(&rewritten).unwrap().edits, edits);
 }
 
 #[test]
@@ -655,6 +842,8 @@ fn beta_inline_mask_sidecar_migrates_to_asset_layout_without_losing_masks() {
         edits: edits.clone(),
         mask_assets: Vec::new(),
         mask_asset_refs: Vec::new(),
+        remove_assets: Vec::new(),
+        remove_asset_refs: Vec::new(),
     };
     let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
     assert!(legacy_bytes
@@ -743,6 +932,8 @@ fn corrupt_and_future_sidecars_are_rejected() {
         edits,
         mask_assets: Vec::new(),
         mask_asset_refs: Vec::new(),
+        remove_assets: Vec::new(),
+        remove_asset_refs: Vec::new(),
     };
     assert!(matches!(
         decode(&serde_json::to_vec(&future).unwrap()),

@@ -2,8 +2,9 @@ use super::{
     pack_effect_mask, pack_local_point_curve, pack_point_curve, processing_work_format,
     shader_manager::ShaderManager, work_shader_source, ProcessingQuality, SHADER_BAYER_RCD_P1,
     SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4, SHADER_COLOR_DENOISE,
-    SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_SCENE_ADJUSTMENTS,
-    SHADER_TONE_ANALYSIS, SHADER_VIEW_TRANSFORM, SHADER_XTRANS_DEMOSAIC, SHADER_XTRANS_FINISH,
+    SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_REMOVE_COMPOSITE,
+    SHADER_SCENE_ADJUSTMENTS, SHADER_TONE_ANALYSIS, SHADER_VIEW_TRANSFORM, SHADER_XTRANS_DEMOSAIC,
+    SHADER_XTRANS_FINISH,
 };
 use crate::pipeline::{LocalMask, MaskEffect, MaskKind, PointCurve};
 
@@ -40,6 +41,7 @@ fn compute_shaders_validate() {
         ("tone analysis", SHADER_TONE_ANALYSIS),
         ("scene adjustments", SHADER_SCENE_ADJUSTMENTS),
         ("creative effects", SHADER_CREATIVE_EFFECTS),
+        ("Remove composite", SHADER_REMOVE_COMPOSITE),
         ("view transform", SHADER_VIEW_TRANSFORM),
     ] {
         validate_shader(name, source, ProcessingQuality::Preview);
@@ -53,6 +55,7 @@ fn high_quality_shaders_validate() {
         ("dual demosaic", SHADER_DUAL_DEMOSAIC),
         ("X-Trans demosaic", SHADER_XTRANS_DEMOSAIC),
         ("color denoise", SHADER_COLOR_DENOISE),
+        ("Remove composite", SHADER_REMOVE_COMPOSITE),
         ("scene adjustments", SHADER_SCENE_ADJUSTMENTS),
     ] {
         validate_shader(name, source, ProcessingQuality::High);
