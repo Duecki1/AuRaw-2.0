@@ -177,7 +177,10 @@ pub(super) fn justified_thumbnail_layout(
     (placements, total_height)
 }
 
-pub(super) fn thumbnail_cover_uv(source_size: Option<[u32; 2]>, target_size: egui::Vec2) -> egui::Rect {
+pub(super) fn thumbnail_cover_uv(
+    source_size: Option<[u32; 2]>,
+    target_size: egui::Vec2,
+) -> egui::Rect {
     let Some([width, height]) = source_size.filter(|[width, height]| *width > 0 && *height > 0)
     else {
         return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));

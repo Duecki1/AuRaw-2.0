@@ -338,7 +338,9 @@ fn load_build_contract() -> Result<BuildContract> {
             .and_then(Value::as_u64)
             .filter(|value| *value > 0)
             .ok_or_else(|| {
-                XtaskError::new(format!("workspace.metadata.{key} must be a positive integer"))
+                XtaskError::new(format!(
+                    "workspace.metadata.{key} must be a positive integer"
+                ))
             })
     };
 
@@ -475,8 +477,7 @@ fn directory_has_extension(path: &Path, extension: &str) -> Result<bool> {
             let file_type = entry.file_type()?;
             if file_type.is_dir() {
                 directories.push(entry.path());
-            } else if file_type.is_file()
-                && entry.path().extension() == Some(OsStr::new(extension))
+            } else if file_type.is_file() && entry.path().extension() == Some(OsStr::new(extension))
             {
                 return Ok(true);
             }
@@ -530,7 +531,11 @@ fn android_ndk_root(
     if revision != expected_version {
         return Err(XtaskError::new(format!(
             "Android NDK {expected_version} is required, found {} at {}",
-            if revision.is_empty() { "unknown" } else { revision },
+            if revision.is_empty() {
+                "unknown"
+            } else {
+                revision
+            },
             ndk.display()
         )));
     }
@@ -601,7 +606,11 @@ fn run_gradle_android_native_dependencies(
             "Unknown profile '{profile}' (use release or debug)"
         )));
     }
-    let gradlew = root.join(if cfg!(windows) { "gradlew.bat" } else { "gradlew" });
+    let gradlew = root.join(if cfg!(windows) {
+        "gradlew.bat"
+    } else {
+        "gradlew"
+    });
     require_file(&gradlew)?;
     let mut title = profile.to_owned();
     if let Some(first) = title.get_mut(0..1) {
@@ -636,7 +645,11 @@ fn command_build_android_dependency(
             let staged = root.join("android/native/libraw").join(&args.abi);
             require_file(&staged.join("include/libraw/libraw.h"))?;
             require_file(&staged.join("lib/libraw.a"))?;
-            println!("AGP/CMake staged LibRaw for {} in {}", args.abi, staged.display());
+            println!(
+                "AGP/CMake staged LibRaw for {} in {}",
+                args.abi,
+                staged.display()
+            );
         }
         AndroidDependency::Lensfun => {
             let staged = root.join("android/native/lensfun").join(&args.abi);
@@ -650,7 +663,11 @@ fn command_build_android_dependency(
                     assets.display()
                 )));
             }
-            println!("AGP/CMake staged Lensfun for {} in {}", args.abi, staged.display());
+            println!(
+                "AGP/CMake staged Lensfun for {} in {}",
+                args.abi,
+                staged.display()
+            );
         }
     }
     Ok(())
@@ -1018,7 +1035,10 @@ fn verify_elf_alignment(objdump: &Path, _archive_path: &str, library: &Path) -> 
             XtaskError::new(format!("could not execute {}: {error}", objdump.display()))
         })?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let load_lines: Vec<&str> = stdout.lines().filter(|line| line.contains("LOAD")).collect();
+    let load_lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("LOAD"))
+        .collect();
     let alignments: Vec<u32> = load_lines
         .iter()
         .filter_map(|line| parse_alignment_power(line))

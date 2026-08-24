@@ -7,11 +7,11 @@ use std::sync::Arc;
 mod effects;
 
 pub use effects::{
-    params as effect_params,
-    BlurEffectSettings, EdgeGlowEffectSettings, FogEffectSettings, GlowEffectSettings,
-    LensBlurEffectSettings, LightRaysEffectSettings, MaskEffect, MaskEffectCategory,
-    MaskEffectSettings, MotionBlurEffectSettings, NeonEffectSettings, PixelateEffectSettings,
-    RadialBlurEffectSettings, RadialBlurMode, SmokeEffectSettings, TiltShiftEffectSettings,
+    params as effect_params, BlurEffectSettings, EdgeGlowEffectSettings, FogEffectSettings,
+    GlowEffectSettings, LensBlurEffectSettings, LightRaysEffectSettings, MaskEffect,
+    MaskEffectCategory, MaskEffectSettings, MotionBlurEffectSettings, NeonEffectSettings,
+    PixelateEffectSettings, RadialBlurEffectSettings, RadialBlurMode, SmokeEffectSettings,
+    TiltShiftEffectSettings,
 };
 
 pub const MAX_LOCAL_MASKS: usize = 32;
@@ -1124,11 +1124,14 @@ impl MaskStack {
         let Some(mask) = self.masks.get_mut(mask_index) else {
             return false;
         };
-        if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len() {
+        if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len()
+        {
             return false;
         }
         component.name = copied_name(&component.name, |candidate| {
-            mask.components.iter().any(|component| component.name == candidate)
+            mask.components
+                .iter()
+                .any(|component| component.name == candidate)
         });
         if invert {
             component.common.toggle_invert();
@@ -1838,9 +1841,9 @@ pub fn rasterize_brush_dabs(
         MaskRasterSpace::new(width, height, image_width, image_height),
         dabs,
     )
-        .into_iter()
-        .map(|value| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
-        .collect()
+    .into_iter()
+    .map(|value| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+    .collect()
 }
 
 fn rasterize_brush(space: MaskRasterSpace, dabs: &[BrushDab]) -> Vec<f32> {

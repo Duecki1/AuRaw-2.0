@@ -69,11 +69,17 @@ pub(crate) fn library_image_context_menu(
     }
 
     ui.separator();
-    if ui.add_enabled(action_enabled, egui::Button::new("Copy")).clicked() {
+    if ui
+        .add_enabled(action_enabled, egui::Button::new("Copy"))
+        .clicked()
+    {
         action = Some(LibraryAction::Copy(context_assets.to_vec()));
         ui.close();
     }
-    if ui.add_enabled(action_enabled, egui::Button::new("Cut")).clicked() {
+    if ui
+        .add_enabled(action_enabled, egui::Button::new("Cut"))
+        .clicked()
+    {
         action = Some(LibraryAction::Cut(context_assets.to_vec()));
         ui.close();
     }
@@ -276,11 +282,7 @@ pub(crate) fn apply_library_action(
     }
 }
 
-fn set_library_clipboard(
-    app: &mut AurawApp,
-    mode: ImageClipboardMode,
-    assets: Vec<LibraryAsset>,
-) {
+fn set_library_clipboard(app: &mut AurawApp, mode: ImageClipboardMode, assets: Vec<LibraryAsset>) {
     let count = assets.len();
     app.library.image_clipboard = Some(ImageClipboard { mode, assets });
     #[cfg(not(target_os = "android"))]
@@ -292,7 +294,11 @@ fn set_library_clipboard(
     crate::android::set_back_navigation_active(false);
     app.library.status = format!(
         "{} {count} RAW{}. Choose Paste in a Library folder.",
-        if mode == ImageClipboardMode::Copy { "Copied" } else { "Cut" },
+        if mode == ImageClipboardMode::Copy {
+            "Copied"
+        } else {
+            "Cut"
+        },
         if count == 1 { "" } else { "s" }
     );
 }
@@ -438,7 +444,11 @@ pub(super) fn selection_bar_actions(
         }
         ui.separator();
         if ui
-            .button(if selected_count > 1 { "Delete selected" } else { "Delete" })
+            .button(if selected_count > 1 {
+                "Delete selected"
+            } else {
+                "Delete"
+            })
             .clicked()
         {
             action = Some(SelectionBarCommand::Delete);
@@ -456,10 +466,9 @@ pub(super) fn library_selection_action(
 ) -> Option<LibraryAction> {
     match command {
         SelectionBarCommand::Export => Some(LibraryAction::Export(assets.to_vec())),
-        SelectionBarCommand::CopyAdjustments if assets.len() == 1 => assets
-            .first()
-            .cloned()
-            .map(LibraryAction::CopyAdjustments),
+        SelectionBarCommand::CopyAdjustments if assets.len() == 1 => {
+            assets.first().cloned().map(LibraryAction::CopyAdjustments)
+        }
         SelectionBarCommand::CopyAdjustments => None,
         SelectionBarCommand::PasteAdjustments => {
             Some(LibraryAction::PasteAdjustments(assets.to_vec()))
@@ -549,26 +558,28 @@ pub(super) fn show_library_selection_action_bar(
     }
 }
 
-pub(crate) fn show_library_action_overlays(
-    ui: &mut Ui,
-    app: &mut AurawApp,
-    frame: &eframe::Frame,
-) {
+pub(crate) fn show_library_action_overlays(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
     show_library_raw_name_dialog(ui, app, frame);
 
-    let paste_choice = app.library.adjustment_paste_dialog.as_ref().and_then(|dialog| {
-        show_adjustment_paste_choice(
-            ui,
-            "library-adjustment-paste-conflict-dialog",
-            dialog.edited_count,
-            dialog.assets.len(),
-        )
-    });
+    let paste_choice = app
+        .library
+        .adjustment_paste_dialog
+        .as_ref()
+        .and_then(|dialog| {
+            show_adjustment_paste_choice(
+                ui,
+                "library-adjustment-paste-conflict-dialog",
+                dialog.edited_count,
+                dialog.assets.len(),
+            )
+        });
     if let Some(choice) = paste_choice {
         if let Some(dialog) = app.library.adjustment_paste_dialog.take() {
             let mode = match choice {
                 AdjustmentPasteChoice::Merge => Some(crate::sidecar::AdjustmentPasteMode::Merge),
-                AdjustmentPasteChoice::Replace => Some(crate::sidecar::AdjustmentPasteMode::Replace),
+                AdjustmentPasteChoice::Replace => {
+                    Some(crate::sidecar::AdjustmentPasteMode::Replace)
+                }
                 AdjustmentPasteChoice::Cancel => None,
             };
             if let Some(mode) = mode {
@@ -578,14 +589,18 @@ pub(crate) fn show_library_action_overlays(
     }
 
     let can_regenerate = app.can_start_library_ai_mask_refresh();
-    let refresh_choice = app.library.ai_mask_refresh_prompt.as_ref().and_then(|prompt| {
-        show_ai_mask_refresh_choice(
-            ui,
-            "library-ai-mask-refresh-prompt",
-            prompt.assets.len(),
-            can_regenerate,
-        )
-    });
+    let refresh_choice = app
+        .library
+        .ai_mask_refresh_prompt
+        .as_ref()
+        .and_then(|prompt| {
+            show_ai_mask_refresh_choice(
+                ui,
+                "library-ai-mask-refresh-prompt",
+                prompt.assets.len(),
+                can_regenerate,
+            )
+        });
     if let Some(choice) = refresh_choice {
         if let Some(prompt) = app.library.ai_mask_refresh_prompt.take() {
             if choice == AiMaskRefreshChoice::Regenerate {
@@ -690,5 +705,4 @@ pub(crate) fn show_library_action_overlays(
     } else if close_export_dialog {
         app.library.export_dialog = None;
     }
-
 }

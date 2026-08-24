@@ -32,7 +32,8 @@ impl Library {
                     )
                     .clicked()
                     {
-                        requested_toolbar_action = Some(platform::LocalFolderToolbarAction::Refresh);
+                        requested_toolbar_action =
+                            Some(platform::LocalFolderToolbarAction::Refresh);
                     }
                     if crate::ui::icons::phosphor_icon_button_enabled(
                         ui,
@@ -431,20 +432,25 @@ fn show_local_image_paste_bar(ui: &mut Ui, app: &mut AurawApp) {
     let mut clear = false;
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new(format!("{}  {label}", egui_phosphor::regular::CLIPBOARD))
-                .small(),
+            egui::RichText::new(format!("{}  {label}", egui_phosphor::regular::CLIPBOARD)).small(),
         );
         #[cfg(not(target_os = "android"))]
         let destination_available = app.library.folder.is_some();
         #[cfg(target_os = "android")]
         let destination_available = true;
         if ui
-            .add_enabled(!in_progress && destination_available, egui::Button::new("Paste here"))
+            .add_enabled(
+                !in_progress && destination_available,
+                egui::Button::new("Paste here"),
+            )
             .clicked()
         {
             paste = true;
         }
-        if ui.add_enabled(!in_progress, egui::Button::new("Clear")).clicked() {
+        if ui
+            .add_enabled(!in_progress, egui::Button::new("Clear"))
+            .clicked()
+        {
             clear = true;
         }
     });
@@ -454,7 +460,11 @@ fn show_local_image_paste_bar(ui: &mut Ui, app: &mut AurawApp) {
     if paste {
         #[cfg(not(target_os = "android"))]
         if let Some(folder) = app.library.folder.clone() {
-            start_image_clipboard_paste(app, LibraryTransferDestination::LocalFolder(folder), ui.ctx());
+            start_image_clipboard_paste(
+                app,
+                LibraryTransferDestination::LocalFolder(folder),
+                ui.ctx(),
+            );
         }
         #[cfg(target_os = "android")]
         {

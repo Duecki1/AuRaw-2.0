@@ -137,9 +137,8 @@ impl Settings {
             ui.strong("Library performance");
             #[cfg(not(target_os = "android"))]
             {
-                let mut render_edited_thumbnails = app
-                    .library
-                    .renders_edited_thumbnails_during_indexing();
+                let mut render_edited_thumbnails =
+                    app.library.renders_edited_thumbnails_during_indexing();
                 if ui
                     .checkbox(
                         &mut render_edited_thumbnails,
@@ -252,8 +251,10 @@ impl Settings {
                 ui.separator();
                 ui.strong("Active display profile");
                 ui.add(
-                    egui::Label::new(egui::RichText::new(&app.preferences.display_profile_label).strong())
-                        .wrap(),
+                    egui::Label::new(
+                        egui::RichText::new(&app.preferences.display_profile_label).strong(),
+                    )
+                    .wrap(),
                 );
                 if let Some(source) = app.preferences.display_profile_source.as_deref() {
                     ui.add(egui::Label::new(egui::RichText::new(source).monospace()).wrap());
@@ -402,7 +403,8 @@ impl Settings {
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(
-                            app.preferences.camera_profile_folder_label
+                            app.preferences
+                                .camera_profile_folder_label
                                 .as_deref()
                                 .unwrap_or("CameraProfiles"),
                         )
@@ -457,8 +459,8 @@ impl Settings {
                 if ui.button("Auto-detect Adobe").clicked() {
                     app.auto_detect_camera_profile_folder();
                 }
-                let can_clear =
-                    app.preferences.camera_profile_folder.is_some() || app.preferences.camera_profile_auto_detect;
+                let can_clear = app.preferences.camera_profile_folder.is_some()
+                    || app.preferences.camera_profile_auto_detect;
                 #[cfg(target_os = "android")]
                 let can_clear = can_clear && !app.android.picker_pending;
                 if ui
@@ -691,7 +693,8 @@ impl Settings {
                 },
             );
 
-            let enabled = app.develop.exposure.highlight_method != HighlightReconstructionMethod::Off;
+            let enabled =
+                app.develop.exposure.highlight_method != HighlightReconstructionMethod::Off;
             ui.add_enabled_ui(enabled, |ui| {
                 changed |= adjustment_slider(
                     ui,

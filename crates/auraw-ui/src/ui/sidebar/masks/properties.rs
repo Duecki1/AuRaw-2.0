@@ -7,7 +7,10 @@ impl Sidebar {
             ui.add_space(4.0);
             let button = egui::Button::new(effect.label())
                 .right_text(egui_phosphor::regular::CARET_DOWN)
-                .min_size(egui::vec2(ui.available_width(), crate::ui::theme::CONTROL_HEIGHT));
+                .min_size(egui::vec2(
+                    ui.available_width(),
+                    crate::ui::theme::CONTROL_HEIGHT,
+                ));
             egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
                 ui.set_min_width(190.0);
                 if ui
@@ -90,7 +93,12 @@ impl Sidebar {
             )
     }
 
-    pub(super) fn apply_mask_geometry_change(ui: &Ui, app: &mut AurawApp, mask_index: usize, changed: bool) {
+    pub(super) fn apply_mask_geometry_change(
+        ui: &Ui,
+        app: &mut AurawApp,
+        mask_index: usize,
+        changed: bool,
+    ) {
         if changed && ui.input(|input| input.pointer.primary_down()) {
             app.note_mask_geometry_interaction(mask_index);
         } else if changed {

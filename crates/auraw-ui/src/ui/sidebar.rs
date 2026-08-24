@@ -6,8 +6,8 @@ use crate::pipeline::{
     BrushMode, DemosaicMode, DenoiseQuality, ExportBitDepth, ExportColorProfile, ExportResizeMode,
     ExposureParams, LoadedRaw, LocalMask, MaskCombineMode, MaskComponent, MaskEffect,
     MaskEffectCategory, MaskGeometry, MaskKind, RetouchAlignment, SigmoidColorProcessing,
-    MAX_EXPORT_EDGE,
-    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS, MAX_WHITE_BALANCE_TINT, MIN_WHITE_BALANCE_TINT,
+    MAX_EXPORT_EDGE, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS, MAX_WHITE_BALANCE_TINT,
+    MIN_WHITE_BALANCE_TINT,
 };
 use crate::ui::components::adjustment_slider::{
     adjustment_slider, adjustment_slider_with_reset, gradient_adjustment_slider,
@@ -15,7 +15,7 @@ use crate::ui::components::adjustment_slider::{
 };
 use crate::ui::components::color_grading::color_grading_editor;
 use crate::ui::components::hsl_mixer::hsl_mixer;
-use crate::ui::components::tone_curve_editor::{ToneCurveChannels, tone_curve_channel_editor};
+use crate::ui::components::tone_curve_editor::{tone_curve_channel_editor, ToneCurveChannels};
 use crate::ui::layout::ScreenLayout;
 use eframe::egui::{self, Ui};
 

@@ -71,7 +71,6 @@ impl Preview {
 
         true
     }
-
 }
 
 pub(super) fn begin_mask_drag(

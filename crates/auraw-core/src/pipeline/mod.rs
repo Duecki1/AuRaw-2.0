@@ -5,8 +5,8 @@ pub mod lensfun;
 pub mod masks;
 pub mod noise;
 pub mod processing;
-pub mod remove;
 pub mod raw_loader;
+pub mod remove;
 pub mod sigmoid;
 mod tiff_loader;
 pub mod white_balance_presets;
@@ -32,23 +32,29 @@ pub use geometry::{
 };
 pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, LensfunLens};
 pub use masks::{
-    ellipse_outline_points, export_mask_atlas_edge, export_mask_atlas_edge_limit, mask_atlas_edge,
-    rasterize_brush_dabs, BlurEffectSettings, BrushDab, BrushMode, EdgeGlowEffectSettings,
-    effect_params,
-    FogEffectSettings, GlowEffectSettings, LandscapeCategory, LensBlurEffectSettings,
-    LightRaysEffectSettings,
-    LocalAdjustments, LocalMask, MaskCombineMode, MaskCommon, MaskComponent, MaskEffect,
-    MaskEffectCategory, MaskEffectSettings, MaskGeometry, MaskImage, MaskKind, MaskRgbImage,
-    MaskStack,
-    MotionBlurEffectSettings, NeonEffectSettings, ObjectStroke, PixelateEffectSettings,
-    RadialBlurEffectSettings, RadialBlurMode, SmokeEffectSettings, SubjectRefinement,
-    TiltShiftEffectSettings, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
+    effect_params, ellipse_outline_points, export_mask_atlas_edge, export_mask_atlas_edge_limit,
+    mask_atlas_edge, rasterize_brush_dabs, BlurEffectSettings, BrushDab, BrushMode,
+    EdgeGlowEffectSettings, FogEffectSettings, GlowEffectSettings, LandscapeCategory,
+    LensBlurEffectSettings, LightRaysEffectSettings, LocalAdjustments, LocalMask, MaskCombineMode,
+    MaskCommon, MaskComponent, MaskEffect, MaskEffectCategory, MaskEffectSettings, MaskGeometry,
+    MaskImage, MaskKind, MaskRgbImage, MaskStack, MotionBlurEffectSettings, NeonEffectSettings,
+    ObjectStroke, PixelateEffectSettings, RadialBlurEffectSettings, RadialBlurMode,
+    SmokeEffectSettings, SubjectRefinement, TiltShiftEffectSettings, MAX_LOCAL_MASKS,
+    MAX_MASK_COMPONENTS,
 };
 pub use noise::{AdaptiveDetailDefaults, DenoiseQuality, NoiseProfile};
 pub use processing::{
     affected_stage, build_proxy, build_region_proxy, crop_raw, extract_padded_tile,
     extract_padded_tile_into, required_export_tile_halo, ExportTile, ProcessingStage, ProxySpec,
     TilePlan, TileSpec, EXPORT_TILE_HALO, MIN_EXPORT_TILE_HALO,
+};
+pub use raw_loader::{invalidate_dcp_profile_index, prewarm_dcp_profile_index};
+pub use raw_loader::{
+    is_supported_raw_path, load_raw_display_dimensions, load_raw_embedded_thumbnail, load_raw_file,
+    load_raw_file_with_dcp, load_raw_file_with_profile_config,
+    load_raw_file_with_profile_selection, load_raw_thumbnail, AiDenoisedImage,
+    CameraProfileCandidate, CameraProfileMode, CfaKind, CompactPixelMap, LoadedRaw, RawThumbnail,
+    SUPPORTED_RAW_EXTENSIONS,
 };
 pub use remove::{
     adaptive_remove_dilation, canonical_remove_scene_to_pipeline_scene,
@@ -58,18 +64,9 @@ pub use remove::{
     plan_remove_context_crop, rasterize_remove_brush, remove_model_srgb_to_canonical_scene,
     remove_model_view_gain, remove_scene_to_model_srgb, remove_scene_white_balance,
     working_rec2020_to_canonical_remove_scene, NativeRect, RemoveBrushPoint, RemoveBrushStroke,
-    RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, RetouchAlignment,
-    RetouchStroke, RetouchTool, BIG_LAMA_INPUT_EDGE,
-    REMOVE_MAX_PATCHES_PER_STROKE,
-    REMOVE_MAX_POINTS_PER_STROKE, REMOVE_MAX_STROKES,
-};
-pub use raw_loader::{invalidate_dcp_profile_index, prewarm_dcp_profile_index};
-pub use raw_loader::{
-    is_supported_raw_path, load_raw_display_dimensions, load_raw_embedded_thumbnail, load_raw_file,
-    load_raw_file_with_dcp, load_raw_file_with_profile_config,
-    load_raw_file_with_profile_selection, load_raw_thumbnail, AiDenoisedImage,
-    CameraProfileCandidate, CameraProfileMode, CfaKind, CompactPixelMap, LoadedRaw, RawThumbnail,
-    SUPPORTED_RAW_EXTENSIONS,
+    RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, RetouchAlignment, RetouchStroke,
+    RetouchTool, BIG_LAMA_INPUT_EDGE, REMOVE_MAX_PATCHES_PER_STROKE, REMOVE_MAX_POINTS_PER_STROKE,
+    REMOVE_MAX_STROKES,
 };
 pub use sigmoid::{SigmoidColorProcessing, SigmoidParams};
 pub use white_balance_presets::WhiteBalancePreset;

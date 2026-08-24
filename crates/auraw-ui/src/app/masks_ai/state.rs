@@ -38,7 +38,9 @@ impl MaskState {
                 mask.components
                     .iter()
                     .enumerate()
-                    .map(move |(component_index, component)| (mask_index, component_index, component))
+                    .map(move |(component_index, component)| {
+                        (mask_index, component_index, component)
+                    })
             })
             .filter(|(_, _, component)| {
                 component.kind == target.kind && component.geometry == target.geometry
@@ -109,7 +111,9 @@ impl AurawApp {
 
         self.masks.interaction_has_uncommitted_change = true;
         let now = Instant::now();
-        let upload_due = self.masks.interaction_last_upload
+        let upload_due = self
+            .masks
+            .interaction_last_upload
             .is_none_or(|last| now.duration_since(last) >= INTERACTIVE_MASK_INTERVAL);
         if upload_due {
             self.mark_mask_geometry_dirty(layer);
@@ -130,7 +134,9 @@ impl AurawApp {
 
         self.masks.interaction_has_uncommitted_change = true;
         let now = Instant::now();
-        let upload_due = self.masks.interaction_last_upload
+        let upload_due = self
+            .masks
+            .interaction_last_upload
             .is_none_or(|last| now.duration_since(last) >= INTERACTIVE_MASK_INTERVAL);
         if upload_due {
             self.mark_all_mask_layers_dirty();
@@ -173,7 +179,9 @@ impl AurawApp {
             mask_index,
             component_index,
             geometry,
-            subject_refinement: self.masks.subject_refinement_active
+            subject_refinement: self
+                .masks
+                .subject_refinement_active
                 .then(|| self.masks.stack.subject_refinement.clone()),
             object_cache: self.ai.object_cache.clone(),
         });
@@ -226,7 +234,11 @@ impl AurawApp {
 
     pub(crate) fn sync_selected_mask_tool(&mut self) {
         self.masks.thumbnail_component_mask = None;
-        let kind = self.masks.stack.selected_component().map(|component| component.kind);
+        let kind = self
+            .masks
+            .stack
+            .selected_component()
+            .map(|component| component.kind);
         if let Some(kind) = kind {
             self.select_mask_tool(kind);
         } else {
@@ -236,7 +248,8 @@ impl AurawApp {
 
     pub(crate) fn activate_mask_tool(&mut self, kind: MaskKind) {
         self.finish_mask_geometry_interaction();
-        self.masks.active_tool = (kind.is_available() && kind != MaskKind::Fullscreen).then_some(kind);
+        self.masks.active_tool =
+            (kind.is_available() && kind != MaskKind::Fullscreen).then_some(kind);
         self.masks.drag = None;
         self.masks.last_brush_point = None;
         self.masks.touch_gesture_backup = None;
@@ -250,7 +263,8 @@ impl AurawApp {
 
     pub(crate) fn select_mask_tool(&mut self, kind: MaskKind) {
         self.finish_mask_geometry_interaction();
-        self.masks.active_tool = (kind.is_available() && kind != MaskKind::Fullscreen).then_some(kind);
+        self.masks.active_tool =
+            (kind.is_available() && kind != MaskKind::Fullscreen).then_some(kind);
         self.masks.drag = None;
         self.masks.last_brush_point = None;
         self.masks.touch_gesture_backup = None;
@@ -292,7 +306,9 @@ impl AurawApp {
             return 0;
         }
 
-        let subject_targets = self.masks.stack
+        let subject_targets = self
+            .masks
+            .stack
             .masks
             .iter()
             .flat_map(|mask| &mask.components)
@@ -329,16 +345,13 @@ impl AurawApp {
         for (mask_index, local_mask) in self.masks.stack.masks.iter().enumerate() {
             for (component_index, component) in local_mask.components.iter().enumerate() {
                 match (component.kind, &component.geometry) {
-                    (
-                        MaskKind::Subject | MaskKind::Background,
-                        MaskGeometry::Ai { .. },
-                    ) => subject = true,
-                    (
-                        MaskKind::Object,
-                        MaskGeometry::Object { strokes, .. },
-                    ) if strokes
-                        .iter()
-                        .any(|stroke| stroke.positive && !stroke.points.is_empty()) =>
+                    (MaskKind::Subject | MaskKind::Background, MaskGeometry::Ai { .. }) => {
+                        subject = true
+                    }
+                    (MaskKind::Object, MaskGeometry::Object { strokes, .. })
+                        if strokes
+                            .iter()
+                            .any(|stroke| stroke.positive && !stroke.points.is_empty()) =>
                     {
                         objects.push_back((mask_index, component_index));
                     }
@@ -398,10 +411,9 @@ impl AurawApp {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn validate_onnx_runtime_for_ai(&mut self) -> bool {
-        let (Some(runtime_path), Some(runtime_sha256)) = (
-            self.ai.runtime_path.clone(),
-            self.ai.runtime_sha256.clone(),
-        ) else {
+        let (Some(runtime_path), Some(runtime_sha256)) =
+            (self.ai.runtime_path.clone(), self.ai.runtime_sha256.clone())
+        else {
             self.ui.notice = Some(
                 "Choose an ONNX Runtime library under Settings before using desktop AI tools."
                     .to_owned(),
@@ -435,8 +447,7 @@ impl AurawApp {
             self.ui.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
             return;
         }
-        let (update_subject, object_targets, landscape_targets) =
-            self.generated_ai_mask_targets();
+        let (update_subject, object_targets, landscape_targets) = self.generated_ai_mask_targets();
         let update_ranges = self.has_range_mask_targets();
         if self.masks.stack.masks.is_empty() {
             self.ai.masks_need_update = false;
@@ -489,7 +500,8 @@ impl AurawApp {
 
         if !update_subject && object_targets.is_empty() && landscape_targets.is_empty() {
             self.ai.masks_need_update = false;
-            self.ui.notice = Some("Masks were refreshed for the current image geometry.".to_owned());
+            self.ui.notice =
+                Some("Masks were refreshed for the current image geometry.".to_owned());
             self.egui_ctx.request_repaint();
             return;
         }
@@ -531,10 +543,11 @@ impl AurawApp {
             return;
         }
 
-        while let Some((mask_index, component_index)) =
-            self.ai.mask_update_object_queue.pop_front()
+        while let Some((mask_index, component_index)) = self.ai.mask_update_object_queue.pop_front()
         {
-            let valid = self.masks.stack
+            let valid = self
+                .masks
+                .stack
                 .masks
                 .get(mask_index)
                 .and_then(|mask| mask.components.get(component_index))
@@ -565,7 +578,9 @@ impl AurawApp {
         while let Some((mask_index, component_index)) =
             self.ai.mask_update_landscape_queue.pop_front()
         {
-            let valid = self.masks.stack
+            let valid = self
+                .masks
+                .stack
                 .masks
                 .get(mask_index)
                 .and_then(|mask| mask.components.get(component_index))
@@ -610,7 +625,8 @@ impl AurawApp {
             );
         } else {
             self.ai.masks_need_update = false;
-            self.ui.notice = Some("Masks were refreshed for the current image geometry.".to_owned());
+            self.ui.notice =
+                Some("Masks were refreshed for the current image geometry.".to_owned());
         }
         self.egui_ctx.request_repaint();
     }

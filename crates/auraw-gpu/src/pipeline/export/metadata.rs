@@ -1,4 +1,3 @@
-
 use super::*;
 
 pub(super) fn add_png_text_metadata<W: Write>(

@@ -2,7 +2,11 @@ use super::*;
 
 impl AurawApp {
     pub(in crate::app) fn cached_raw_decode(&mut self, key: &str) -> Option<Arc<LoadedRaw>> {
-        let index = self.develop.raw_cache.iter().position(|entry| entry.key == key)?;
+        let index = self
+            .develop
+            .raw_cache
+            .iter()
+            .position(|entry| entry.key == key)?;
         let entry = self.develop.raw_cache.remove(index)?;
         let raw = Arc::clone(&entry.raw);
         self.develop.raw_cache.push_back(entry);
@@ -14,10 +18,17 @@ impl AurawApp {
             self.develop.raw_cache.clear();
             return;
         }
-        if let Some(index) = self.develop.raw_cache.iter().position(|entry| entry.key == key) {
+        if let Some(index) = self
+            .develop
+            .raw_cache
+            .iter()
+            .position(|entry| entry.key == key)
+        {
             self.develop.raw_cache.remove(index);
         }
-        self.develop.raw_cache.push_back(CachedRawDecode { key, raw });
+        self.develop
+            .raw_cache
+            .push_back(CachedRawDecode { key, raw });
         self.trim_raw_cache();
     }
 
@@ -93,7 +104,9 @@ impl AurawApp {
             }
         }
 
-        let event = self.develop_ui.loading_thumbnail
+        let event = self
+            .develop_ui
+            .loading_thumbnail
             .receiver
             .as_ref()
             .and_then(|receiver| match receiver.try_recv() {

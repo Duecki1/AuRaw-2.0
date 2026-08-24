@@ -262,11 +262,10 @@ pub fn tone_curve_channel_editor(
     let mut changed = false;
     ui.horizontal(|ui| {
         let spacing = ui.spacing().item_spacing.x;
-        let segment_width = ((ui.available_width()
-            - crate::ui::theme::TOOLBAR_ICON_EDGE
-            - spacing * 4.0)
-            .max(min_segment_width))
-            / 4.0;
+        let segment_width =
+            ((ui.available_width() - crate::ui::theme::TOOLBAR_ICON_EDGE - spacing * 4.0)
+                .max(min_segment_width))
+                / 4.0;
         for (tab, label, color) in TONE_CURVE_TABS {
             let text = egui::RichText::new(label).color(color);
             if crate::ui::theme::segmented_button(ui, text, *selected_tab == tab, segment_width)

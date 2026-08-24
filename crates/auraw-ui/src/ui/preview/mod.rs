@@ -6,8 +6,7 @@ use crate::app::{
 };
 use crate::pipeline::{
     BrushDab, BrushMode, GeometryTransform, LensGeometryMap, MaskCombineMode, MaskGeometry,
-    MaskKind,
-    ObjectStroke, RetouchStroke,
+    MaskKind, ObjectStroke, RetouchStroke,
 };
 use crate::ui::mask_component_color;
 use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui};
@@ -87,18 +86,24 @@ impl Preview {
         }
 
         let (outer_rect, _) = ui.allocate_exact_size(available, Sense::hover());
-        let source_dimensions = app.develop.loaded_raw
+        let source_dimensions = app
+            .develop
+            .loaded_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((pipeline_width, pipeline_height));
-        let lens_geometry = app.develop.loaded_raw
+        let lens_geometry = app
+            .develop
+            .loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.clone());
-        let crop_preview = app.ui.sidebar_tab == SidebarTab::Crop && !app.preview.original_visible();
+        let crop_preview =
+            app.ui.sidebar_tab == SidebarTab::Crop && !app.preview.original_visible();
         let final_geometry_preview =
             !crop_preview && (!app.develop.geometry.is_identity() || lens_geometry.is_some());
         let (geometry_width, geometry_height) = if final_geometry_preview {
-            app.develop.geometry
+            app.develop
+                .geometry
                 .crop_pixel_dimensions(source_dimensions.0, source_dimensions.1)
         } else if crop_preview && app.develop.geometry.quarter_turns % 2 == 1 {
             (source_dimensions.1, source_dimensions.0)
@@ -118,23 +123,26 @@ impl Preview {
         let mut image_rect =
             zoomed_image_rect(outer_rect, base_size, app.preview.zoom, app.preview.center);
         let visible_image_rect = outer_rect.intersect(image_rect);
-        let mut interaction_rect = if app.ui.sidebar_tab == SidebarTab::Masks {
-            outer_rect
-        } else if app.ui.sidebar_tab == SidebarTab::Crop {
-            outer_rect
-        } else {
-            visible_image_rect
-        };
+        let mut interaction_rect =
+            if matches!(app.ui.sidebar_tab, SidebarTab::Masks | SidebarTab::Crop) {
+                outer_rect
+            } else {
+                visible_image_rect
+            };
         if interaction_rect.width() <= 0.0 || interaction_rect.height() <= 0.0 {
             interaction_rect = outer_rect;
         }
-        let white_balance_canvas =
-            white_balance_picker_owns_canvas(app.ui.sidebar_tab, app.develop_ui.white_balance_picker_active);
+        let white_balance_canvas = white_balance_picker_owns_canvas(
+            app.ui.sidebar_tab,
+            app.develop_ui.white_balance_picker_active,
+        );
         if !white_balance_canvas {
             app.develop_ui.white_balance_picker_drag = None;
         }
-        let brush_canvas = matches!(app.ui.sidebar_tab, SidebarTab::Masks | SidebarTab::Inpainting)
-            || white_balance_canvas;
+        let brush_canvas = matches!(
+            app.ui.sidebar_tab,
+            SidebarTab::Masks | SidebarTab::Inpainting
+        ) || white_balance_canvas;
         let interaction_id = match app.ui.sidebar_tab {
             SidebarTab::Masks => ui.id().with("develop-preview-mask-interaction"),
             SidebarTab::Inpainting => ui.id().with("develop-preview-inpaint-interaction"),
@@ -333,7 +341,9 @@ impl Preview {
             );
         }
 
-        if let Some(detail) = app.preview.detail
+        if let Some(detail) = app
+            .preview
+            .detail
             .as_ref()
             .filter(|detail| detail.revision == app.preview.revision)
         {
@@ -506,5 +516,4 @@ impl Preview {
             }
         }
     }
-
 }

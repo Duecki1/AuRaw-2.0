@@ -1,8 +1,8 @@
+use super::super::{ExportDestination, ExportTask, ExportTaskKind, ExportTaskReceiver};
 use super::{
     batch::batch_export_overall_fraction,
     export::{clear_export_task, export_source_stem},
 };
-use super::super::{ExportDestination, ExportTask, ExportTaskKind, ExportTaskReceiver};
 use crate::pipeline::ExportEvent;
 use std::path::Path;
 use std::sync::{
@@ -13,7 +13,10 @@ use std::sync::{
 #[test]
 fn display_label_overrides_the_materialized_filename_for_exports() {
     assert_eq!(
-        export_source_stem(Some(Path::new("/cache/asset/original.dng")), Some("IMG_1234.DNG")),
+        export_source_stem(
+            Some(Path::new("/cache/asset/original.dng")),
+            Some("IMG_1234.DNG")
+        ),
         "IMG_1234"
     );
 }

@@ -1,4 +1,3 @@
-
 use super::*;
 
 pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError> {

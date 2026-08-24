@@ -1,11 +1,9 @@
 use crate::execution_provider::{CpuFallbackProfile, FallbackSession, SessionOptions};
-use crate::model_runtime::{
-    with_model_session, AiModel, AiRuntimeContext, ModelRetention,
-};
 use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
 use crate::model_install::ModelInstallSpec;
-use crate::ModelDownloadProgress;
+use crate::model_runtime::{with_model_session, AiModel, AiRuntimeContext, ModelRetention};
 use crate::pipeline::{LandscapeCategory, MaskImage};
+use crate::ModelDownloadProgress;
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use ort::value::Tensor;
@@ -322,8 +320,8 @@ pub fn spawn_landscape_mask(
                         allow_download,
                         &cancellation,
                         |progress| {
-                            let _ = worker_sender
-                                .send(LandscapeMaskEvent::DownloadProgress(progress));
+                            let _ =
+                                worker_sender.send(LandscapeMaskEvent::DownloadProgress(progress));
                         },
                     )?;
                     ensure_vitmatte_model(
@@ -331,8 +329,8 @@ pub fn spawn_landscape_mask(
                         allow_download,
                         &cancellation,
                         |progress| {
-                            let _ = worker_sender
-                                .send(LandscapeMaskEvent::DownloadProgress(progress));
+                            let _ =
+                                worker_sender.send(LandscapeMaskEvent::DownloadProgress(progress));
                         },
                     )?;
                     ensure_ai_not_cancelled(&cancellation)?;
@@ -1760,6 +1758,7 @@ mod object;
 
 pub use object::{
     spawn_object_mask, ObjectCropRect, ObjectInferenceCache, ObjectMaskEvent, ObjectMaskRequest,
-    ObjectMaskResult, SamTensorData, SAM21_DECODER_MODEL_URL, SAM21_DECODER_SHA256_HEX,
-    SAM21_ENCODER_MODEL_URL, SAM21_ENCODER_SHA256_HEX, SAM21_MODEL_BYTES_ESTIMATE,
+    ObjectMaskResult, ObjectMaskWorkerRequest, SamTensorData, SAM21_DECODER_MODEL_URL,
+    SAM21_DECODER_SHA256_HEX, SAM21_ENCODER_MODEL_URL, SAM21_ENCODER_SHA256_HEX,
+    SAM21_MODEL_BYTES_ESTIMATE,
 };

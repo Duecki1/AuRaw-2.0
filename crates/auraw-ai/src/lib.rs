@@ -1,4 +1,3 @@
-
 pub mod diagnostics {
     pub use auraw_core::diagnostics::*;
 }
@@ -14,10 +13,10 @@ pub mod pipeline {
 pub mod ai_denoise;
 pub mod ai_masks;
 pub mod execution_provider;
-pub mod remove;
 mod model_artifact;
 mod model_install;
 mod model_runtime;
+pub mod remove;
 pub use model_install::ModelDownloadProgress;
 pub use model_runtime::{set_active_ai_context, AiRuntimeContext};
 

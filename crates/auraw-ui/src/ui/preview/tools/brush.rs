@@ -89,8 +89,8 @@ fn interpolated_brush_samples(
     radius_px: f32,
     minimum_spacing_fraction: f32,
 ) -> Vec<[f32; 2]> {
-    let spacing_px = (radius_px * DAB_SPACING_RADIUS_FRACTION)
-        .clamp(MIN_DAB_SPACING_PX, MAX_DAB_SPACING_PX);
+    let spacing_px =
+        (radius_px * DAB_SPACING_RADIUS_FRACTION).clamp(MIN_DAB_SPACING_PX, MAX_DAB_SPACING_PX);
     if distance_px < spacing_px * minimum_spacing_fraction {
         return Vec::new();
     }

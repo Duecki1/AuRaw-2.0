@@ -23,7 +23,8 @@ impl AurawApp {
 
         let previous_camera_profile = self.develop.selected_camera_profile.clone();
         let pasted_camera_profile = merged.camera_profile.as_ref().and_then(|relative| {
-            self.preferences.camera_profile_folder
+            self.preferences
+                .camera_profile_folder
                 .as_ref()
                 .map(|root| root.join(relative))
         });
@@ -93,11 +94,7 @@ impl AurawApp {
         let needs_ai_refresh = self.ai.masks_need_update;
         if camera_profile_category_changed && previous_camera_profile != pasted_camera_profile {
             let edit_override = self.capture_sidecar_edit_state();
-            self.reload_current_after_adjustment_paste(
-                frame,
-                pasted_camera_profile,
-                edit_override,
-            );
+            self.reload_current_after_adjustment_paste(frame, pasted_camera_profile, edit_override);
         }
         Ok(needs_ai_refresh)
     }
@@ -115,7 +112,9 @@ impl AurawApp {
         #[cfg(not(target_os = "android"))]
         {
             let crate::sidecar::SidecarTarget::Desktop { raw_path } = sidecar_target;
-            let label = self.develop.current_label
+            let label = self
+                .develop
+                .current_label
                 .clone()
                 .unwrap_or_else(|| raw_path.display().to_string());
             let target = crate::sidecar::SidecarTarget::Desktop {
@@ -138,7 +137,9 @@ impl AurawApp {
         {
             match sidecar_target {
                 crate::sidecar::SidecarTarget::Desktop { raw_path } => {
-                    let label = self.develop.current_label
+                    let label = self
+                        .develop
+                        .current_label
                         .clone()
                         .unwrap_or_else(|| raw_path.display().to_string());
                     let target = crate::sidecar::SidecarTarget::Desktop {
@@ -175,7 +176,7 @@ impl AurawApp {
                             "Adjustments were pasted, but the camera profile could not be reloaded: {error}"
                         ));
                     }
-                }
+                },
             }
         }
     }
@@ -339,7 +340,6 @@ impl AurawApp {
         }
         (completed, ai_refresh, failures)
     }
-
 }
 
 pub(super) fn desktop_library_sidecar_edits(
@@ -565,9 +565,10 @@ impl AurawApp {
             }
 
             if let Some(state) = self.ai.library_mask_refresh.as_mut() {
-                state
-                    .failures
-                    .push(format!("{}: could not start RAW load", job.source.display()));
+                state.failures.push(format!(
+                    "{}: could not start RAW load",
+                    job.source.display()
+                ));
                 complete_library_ai_mask_refresh_item(state);
             }
         }
@@ -636,7 +637,9 @@ impl AurawApp {
             return;
         };
 
-        let cancel_requested = self.ai.library_mask_refresh
+        let cancel_requested = self
+            .ai
+            .library_mask_refresh
             .as_ref()
             .is_some_and(|state| state.cancel_requested);
         if cancel_requested {
@@ -662,10 +665,7 @@ impl AurawApp {
 
         let mask_targets = ai_mask_refresh_target_count(&self.masks.stack);
         if let Some(state) = self.ai.library_mask_refresh.as_mut() {
-            let previous_targets = state
-                .current
-                .as_ref()
-                .map_or(0, |job| job.mask_targets);
+            let previous_targets = state.current.as_ref().map_or(0, |job| job.mask_targets);
             state.mask_total = state.mask_total.saturating_sub(previous_targets);
             if let Some(current) = state.current.as_mut() {
                 current.mask_targets = mask_targets;
@@ -683,7 +683,9 @@ impl AurawApp {
         error: String,
         frame: &eframe::Frame,
     ) {
-        let label = self.ai.library_mask_refresh
+        let label = self
+            .ai
+            .library_mask_refresh
             .as_ref()
             .and_then(|state| state.current.as_ref())
             .map(|job| job.display_name.clone())
@@ -718,20 +720,26 @@ impl AurawApp {
     }
 
     pub(crate) fn poll_library_ai_mask_refresh(&mut self, frame: &eframe::Frame) {
-        let cancel_now = self.ai.library_mask_refresh
+        let cancel_now = self
+            .ai
+            .library_mask_refresh
             .as_ref()
             .is_some_and(|state| state.cancel_requested && state.current.is_none());
         if cancel_now {
             self.finish_library_ai_mask_refresh();
             return;
         }
-        let phase = self.ai.library_mask_refresh
+        let phase = self
+            .ai
+            .library_mask_refresh
             .as_ref()
             .and_then(|state| state.current.as_ref().map(|_| state.phase));
         let Some(phase) = phase else {
             return;
         };
-        let cancel_after_phase = self.ai.library_mask_refresh
+        let cancel_after_phase = self
+            .ai
+            .library_mask_refresh
             .as_ref()
             .is_some_and(|state| state.cancel_requested);
         if cancel_after_phase
@@ -745,7 +753,9 @@ impl AurawApp {
             return;
         }
 
-        let label = self.ai.library_mask_refresh
+        let label = self
+            .ai
+            .library_mask_refresh
             .as_ref()
             .and_then(|state| state.current.as_ref())
             .map(|job| {
@@ -768,7 +778,9 @@ impl AurawApp {
                 }
 
                 if self.ai.masks_need_update {
-                    let reason = self.ui.notice
+                    let reason = self
+                        .ui
+                        .notice
                         .clone()
                         .unwrap_or_else(|| "AI masks still need an update".to_owned());
                     if let Some(state) = self.ai.library_mask_refresh.as_mut() {
@@ -792,7 +804,9 @@ impl AurawApp {
 
                 let revision = self.edit_commit_revision();
                 if self.persistence.sidecar_failed_revision == Some(revision) {
-                    let reason = self.ui.notice
+                    let reason = self
+                        .ui
+                        .notice
                         .clone()
                         .unwrap_or_else(|| "could not save regenerated AI masks".to_owned());
                     if let Some(state) = self.ai.library_mask_refresh.as_mut() {

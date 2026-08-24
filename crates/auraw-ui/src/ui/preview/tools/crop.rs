@@ -59,17 +59,20 @@ impl Preview {
                         let target = nearest_straight_axis_degrees(angle);
                         let correction = normalize_degrees(target - angle);
                         let previous = app.develop.geometry.rotation_degrees;
-                        app.develop.geometry.rotation_degrees = (previous + correction).clamp(-45.0, 45.0);
+                        app.develop.geometry.rotation_degrees =
+                            (previous + correction).clamp(-45.0, 45.0);
                         if (app.develop.geometry.rotation_degrees - previous).abs() > 1e-4 {
-                            let reference = if let Some(reference) = app.develop_ui.crop_constraint_reference {
-                                reference
-                            } else {
-                                let reference = app.develop.geometry.crop;
-                                app.develop_ui.crop_constraint_reference = Some(reference);
-                                reference
-                            };
+                            let reference =
+                                if let Some(reference) = app.develop_ui.crop_constraint_reference {
+                                    reference
+                                } else {
+                                    let reference = app.develop.geometry.crop;
+                                    app.develop_ui.crop_constraint_reference = Some(reference);
+                                    reference
+                                };
                             app.develop.geometry.crop = reference;
-                            app.develop.geometry
+                            app.develop
+                                .geometry
                                 .fit_crop_inside_transformed_source(source_width, source_height);
                             app.note_geometry_changed();
                         }
@@ -84,8 +87,12 @@ impl Preview {
         if primary_pressed {
             if let Some(pointer) = pointer.filter(|point| image_rect.expand(28.0).contains(*point))
             {
-                let display_crop_rect =
-                    crop_preview_screen_rect(image_rect, app.develop.geometry, source_width, source_height);
+                let display_crop_rect = crop_preview_screen_rect(
+                    image_rect,
+                    app.develop.geometry,
+                    source_width,
+                    source_height,
+                );
                 if let Some(display_handle) = crop_handle_at(display_crop_rect, pointer, 28.0) {
                     let handle = crop_source_handle_for_display(display_handle, quarter_turns);
                     let start = crop_preview_pointer_to_source_normalized(
@@ -153,12 +160,15 @@ impl Preview {
                         constrain_crop_aspect(app, crop, drag.handle)
                     };
                 }
-                crop = app.develop.geometry.constrain_crop_drag_to_transformed_source(
-                    drag.crop,
-                    crop,
-                    source_width,
-                    source_height,
-                );
+                crop = app
+                    .develop
+                    .geometry
+                    .constrain_crop_drag_to_transformed_source(
+                        drag.crop,
+                        crop,
+                        source_width,
+                        source_height,
+                    );
                 if crop != app.develop.geometry.crop {
                     app.develop.geometry.crop = crop;
                     app.develop_ui.crop_constraint_reference = Some(crop);
@@ -182,14 +192,22 @@ impl Preview {
         source_height: u32,
     ) {
         let painter = ui.painter_at(overlay_clip_rect);
-        let crop_rect =
-            crop_preview_screen_rect(image_rect, app.develop.geometry, source_width, source_height);
+        let crop_rect = crop_preview_screen_rect(
+            image_rect,
+            app.develop.geometry,
+            source_width,
+            source_height,
+        );
         let visible_crop = crop_rect.intersect(visible_rect);
         if visible_crop.width() <= 0.0 || visible_crop.height() <= 0.0 {
             return;
         }
-        let image_polygon =
-            crop_workspace_image_polygon(image_rect, app.develop.geometry, source_width, source_height);
+        let image_polygon = crop_workspace_image_polygon(
+            image_rect,
+            app.develop.geometry,
+            source_width,
+            source_height,
+        );
         let shade = Color32::from_black_alpha(150);
         for rect in [
             Rect::from_min_max(
@@ -283,5 +301,4 @@ impl Preview {
             painter.circle_filled(line.current, 4.0, Color32::WHITE);
         }
     }
-
 }

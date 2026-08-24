@@ -5,7 +5,12 @@ impl Sidebar {
         egui::Id::new("submask-component-drag")
     }
 
-    pub(in crate::ui::sidebar) fn show_masks(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
+    pub(in crate::ui::sidebar) fn show_masks(
+        ui: &mut Ui,
+        app: &mut AurawApp,
+        layout: ScreenLayout,
+        frame: &eframe::Frame,
+    ) {
         if app.ai.masks_need_update {
             crate::ui::theme::section_card(ui, "Masks need updating", |ui| {
                 ui.label(
@@ -195,7 +200,8 @@ impl Sidebar {
                                     }
                                 }
                             }
-                            let component = &app.masks.stack.masks[index].components[component_index];
+                            let component =
+                                &app.masks.stack.masks[index].components[component_index];
                             let component_name = component.name.clone();
                             let component_enabled = component.enabled;
                             let component_badge =
@@ -237,7 +243,8 @@ impl Sidebar {
                                     |ui| {
                                         Self::submask_context_menu(
                                             ui,
-                                            &mut app.masks.stack.masks[index].components[component_index],
+                                            &mut app.masks.stack.masks[index].components
+                                                [component_index],
                                             component_count > 1,
                                             component_count < MAX_MASK_COMPONENTS,
                                             &mut menu_geometry_changed,
@@ -260,7 +267,9 @@ impl Sidebar {
                                 submask_drag = Some(SubmaskDragState {
                                     source_mask: index,
                                     source_component: component_index,
-                                    source_texture: app.masks.thumbnail_component_textures
+                                    source_texture: app
+                                        .masks
+                                        .thumbnail_component_textures
                                         .get(component_index)
                                         .cloned(),
                                     source_name: component_name.clone(),
@@ -446,7 +455,11 @@ impl Sidebar {
                 Self::refresh_mask_thumbnails(ui, app);
             }
         } else if let Some((mask_index, component_index)) = remove_component {
-            if app.masks.stack.delete_component(mask_index, component_index) {
+            if app
+                .masks
+                .stack
+                .delete_component(mask_index, component_index)
+            {
                 app.mark_mask_geometry_dirty(mask_index);
                 app.sync_selected_mask_tool();
                 Self::refresh_mask_thumbnails(ui, app);
@@ -485,7 +498,11 @@ impl Sidebar {
             }
         } else if let Some(component_index) = select_component {
             if let Some(mask_index) = app.masks.stack.selected_mask {
-                if app.masks.stack.select_component(mask_index, component_index) {
+                if app
+                    .masks
+                    .stack
+                    .select_component(mask_index, component_index)
+                {
                     app.sync_selected_mask_tool();
                     app.blink_selected_component();
                 }

@@ -7,7 +7,9 @@ impl AurawApp {
         component_index: usize,
     ) -> bool {
         let target = (mask_index, component_index);
-        let cleared = self.masks.stack
+        let cleared = self
+            .masks
+            .stack
             .masks
             .get_mut(mask_index)
             .and_then(|mask| mask.components.get_mut(component_index))
@@ -34,7 +36,9 @@ impl AurawApp {
         if self.ai.object_pending_target == Some(target) {
             self.ai.object_pending_target = None;
         }
-        if self.ai.object_cache
+        if self
+            .ai
+            .object_cache
             .as_ref()
             .is_some_and(|(cached_target, _)| *cached_target == target)
         {
@@ -51,7 +55,9 @@ impl AurawApp {
         if !self.validate_onnx_runtime_for_ai() {
             return;
         }
-        let Some(component) = self.masks.stack
+        let Some(component) = self
+            .masks
+            .stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -80,7 +86,8 @@ impl AurawApp {
                 self.ai.object_pending_target = Some((mask_index, component_index));
                 self.cancel_foreground_operation();
             } else {
-                self.ui.notice = Some("Finish or cancel the current editing operation first.".to_owned());
+                self.ui.notice =
+                    Some("Finish or cancel the current editing operation first.".to_owned());
             }
             return;
         }
@@ -117,7 +124,9 @@ impl AurawApp {
             return;
         };
         let (strokes, brush_size, edge_refine) = {
-            let Some(component) = self.masks.stack
+            let Some(component) = self
+                .masks
+                .stack
                 .masks
                 .get(mask_index)
                 .and_then(|mask| mask.components.get(component_index))
@@ -147,7 +156,9 @@ impl AurawApp {
                 *edge_refine,
             )
         };
-        let cache = self.ai.object_cache
+        let cache = self
+            .ai
+            .object_cache
             .as_ref()
             .filter(|(target, _)| *target == (mask_index, component_index))
             .map(|(_, cache)| cache.clone());
@@ -181,16 +192,16 @@ impl AurawApp {
             &vitmatte_path,
         );
         let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let receiver = spawn_object_mask(
+        let receiver = spawn_object_mask(ObjectMaskWorkerRequest {
             encoder_path,
             decoder_path,
             vitmatte_path,
             allow_download,
             runtime_path,
             runtime_sha256,
-            request,
-            Arc::clone(&cancellation),
-        );
+            inference: request,
+            cancellation: Arc::clone(&cancellation),
+        });
         let progress = ForegroundProgress::indeterminate(if needs_download {
             "Preparing object-mask models…"
         } else {
@@ -243,8 +254,7 @@ impl AurawApp {
                 }
                 ObjectMaskEvent::Inferencing { decoder_only } => {
                     if let ForegroundOperationContext::Object {
-                        inference_started,
-                        ..
+                        inference_started, ..
                     } = &mut operation.context
                     {
                         *inference_started = true;
@@ -259,7 +269,9 @@ impl AurawApp {
             }
         }
         if finished.is_none() && disconnected {
-            finished = Some(Err("The object-mask worker stopped unexpectedly.".to_owned()));
+            finished = Some(Err(
+                "The object-mask worker stopped unexpectedly.".to_owned()
+            ));
         }
         let Some(result) = finished else {
             self.foreground_operation = Some(operation);
@@ -300,7 +312,9 @@ impl AurawApp {
                         }
                         (Err(error), Some(_)) => error_message = Some(error),
                         (Ok((mask_index, component_index)), Some(mask)) => {
-                            let applied = self.masks.stack
+                            let applied = self
+                                .masks
+                                .stack
                                 .masks
                                 .get_mut(mask_index)
                                 .and_then(|local| local.components.get_mut(component_index))
@@ -340,7 +354,8 @@ impl AurawApp {
         if library_refresh {
             if cancelled {
                 self.cancel_ai_mask_update();
-            } else if let Some((mask_index, component_index)) = self.ai.object_pending_target.take() {
+            } else if let Some((mask_index, component_index)) = self.ai.object_pending_target.take()
+            {
                 self.request_object_mask(mask_index, component_index);
             } else if updating_all {
                 self.ai.mask_update_failed |= !succeeded;

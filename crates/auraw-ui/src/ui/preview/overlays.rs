@@ -50,7 +50,11 @@ pub(super) fn overlay_raster_region(
     }
 }
 
-pub(super) fn overlay_source_uv(region: OverlayRasterKey, source_width: u32, source_height: u32) -> [f32; 4] {
+pub(super) fn overlay_source_uv(
+    region: OverlayRasterKey,
+    source_width: u32,
+    source_height: u32,
+) -> [f32; 4] {
     let width = source_width.max(1) as f32;
     let height = source_height.max(1) as f32;
     [
@@ -179,7 +183,11 @@ pub(super) fn group_coverage_rgba(
     rgba
 }
 
-pub(super) fn zoom_scaled_brush_size(tool_size: f32, preview_zoom: f32, image_relative: bool) -> f32 {
+pub(super) fn zoom_scaled_brush_size(
+    tool_size: f32,
+    preview_zoom: f32,
+    image_relative: bool,
+) -> f32 {
     let tool_size = tool_size.max(0.0);
     if image_relative {
         tool_size

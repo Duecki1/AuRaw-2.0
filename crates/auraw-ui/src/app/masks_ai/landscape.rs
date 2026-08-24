@@ -9,10 +9,13 @@ impl AurawApp {
     ) {
         self.ai.object_error_dialog = None;
         if self.foreground_operation_active() {
-            self.ui.notice = Some("Finish or cancel the current editing operation first.".to_owned());
+            self.ui.notice =
+                Some("Finish or cancel the current editing operation first.".to_owned());
             return;
         }
-        let valid = self.masks.stack
+        let valid = self
+            .masks
+            .stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -70,7 +73,9 @@ impl AurawApp {
             self.egui_ctx.request_repaint();
             return;
         }
-        let Some(category) = self.masks.stack
+        let Some(category) = self
+            .masks
+            .stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -158,15 +163,16 @@ impl AurawApp {
                     ));
                 }
                 LandscapeMaskEvent::Inferencing => {
-                    operation.progress =
-                        ForegroundProgress::indeterminate("Running local landscape-mask inference…");
+                    operation.progress = ForegroundProgress::indeterminate(
+                        "Running local landscape-mask inference…",
+                    );
                 }
                 LandscapeMaskEvent::Finished(result) => finished = Some(result),
             }
         }
         if finished.is_none() && disconnected {
             finished = Some(Err(
-                "The landscape-mask worker stopped unexpectedly.".to_owned(),
+                "The landscape-mask worker stopped unexpectedly.".to_owned()
             ));
         }
         let Some(result) = finished else {
@@ -201,7 +207,9 @@ impl AurawApp {
                         }
                         (Err(error), Some(_)) => error_message = Some(error),
                         (Ok((mask_index, component_index)), Some(mask_image)) => {
-                            let applied = self.masks.stack
+                            let applied = self
+                                .masks
+                                .stack
                                 .masks
                                 .get_mut(mask_index)
                                 .and_then(|mask| mask.components.get_mut(component_index))

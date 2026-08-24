@@ -1,4 +1,3 @@
-
 pub const MIDDLE_GREY: f32 = 0.1845;
 const CONTRAST_SLOPE_CALIBRATION: f32 = 0.9939394;
 
