@@ -51,9 +51,7 @@ impl RetouchAlignment {
 pub struct RetouchStroke {
     pub tool: RetouchTool,
     pub alignment: RetouchAlignment,
-    /// Native-image source point selected by the user.
     pub source: [f32; 2],
-    /// First native-image destination point in this stroke.
     pub destination: [f32; 2],
     /// GIMP-style hard-center fraction. The remaining radius is feathered.
     pub hardness: f32,

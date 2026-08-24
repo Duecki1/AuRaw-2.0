@@ -26,7 +26,6 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 
-/** Coordinates RAW import, library, sidecar, and migration storage operations. */
 final class StorageManager {
     private static final String LOG_TAG = "AuRaw";
     private static final long MAX_RAW_IMPORT_BYTES = 2_000_000_000L;
@@ -208,12 +207,10 @@ final class StorageManager {
         return storeRawInLibrary(uri, displayName);
     }
 
-    /** Human-readable storage location shown by the Rust library UI. */
     String rawLibraryLocation() {
         return rawLibraryDirectory().getAbsolutePath();
     }
 
-    /** Lists the canonical .library plus any not-yet-migrated upgrade entries. */
     String listRawLibrary() {
         try {
             return listCombinedRawLibrary();
@@ -222,7 +219,6 @@ final class StorageManager {
         }
     }
 
-    /** Lists app-owned folders as URI-encoded relative-path/name records. */
     String listRawLibraryFolders() {
         try {
             File root = rawLibraryDirectory();
@@ -234,7 +230,6 @@ final class StorageManager {
         }
     }
 
-    /** Selects the app-owned folder used for listing and subsequent imports. */
     void selectRawLibraryFolder(String relativePath) throws Exception {
         File folder = AndroidStorageContract.libraryFolder(rawLibraryDirectory(), relativePath);
         if (!folder.isDirectory()) {
@@ -244,7 +239,6 @@ final class StorageManager {
                 rawLibraryDirectory(), folder);
     }
 
-    /** Creates one child folder and returns its normalized relative path. */
     String createRawLibraryFolder(String parentPath, String requestedName) throws Exception {
         File root = rawLibraryDirectory();
         File parent = AndroidStorageContract.libraryFolder(root, parentPath);
@@ -262,7 +256,6 @@ final class StorageManager {
         return AndroidStorageContract.relativeLibraryFolder(root, folder);
     }
 
-    /** Returns an owned native descriptor; Rust closes it after thumbnail extraction. */
     int openRawLibraryFd(String uriText) throws Exception {
         Uri uri = Uri.parse(uriText);
         ParcelFileDescriptor descriptor;
@@ -276,7 +269,6 @@ final class StorageManager {
                 descriptor, "The RAW library returned no file descriptor");
     }
 
-    /** Returns a persistent private JPEG path for an unedited RAW thumbnail. */
     String rawThumbnailCachePath(
             String uriText,
             long bytes,
@@ -285,7 +277,6 @@ final class StorageManager {
         return thumbnailCache.rawPath(uriText, bytes, modifiedSeconds, maximumEdge);
     }
 
-    /** Edited thumbnails are validated by Rust against the exact sidecar bytes. */
     String developedThumbnailCachePath(String uriText) throws Exception {
         return thumbnailCache.developedPath(uriText);
     }
@@ -295,7 +286,6 @@ final class StorageManager {
         thumbnailCache.copyDeveloped(sourceUri, destinationUri);
     }
 
-    /** Preserves the edited thumbnail cache when a library bundle is copied or moved. */
     void copyRawLibraryDevelopedThumbnail(String sourceUri, String destinationUri)
             throws Exception {
         copyDevelopedThumbnailCache(sourceUri, destinationUri);
@@ -313,7 +303,6 @@ final class StorageManager {
         return thumbnailCache.sizeBytes();
     }
 
-    /** Materializes one library RAW into app-private storage for Rust-side processing/copying. */
     String materializeRawLibraryDocument(String uriText, String displayName) throws Exception {
         Uri uri = Uri.parse(uriText);
         verifyRawLibraryIdentity(uri, displayName);
@@ -344,12 +333,10 @@ final class StorageManager {
         }
     }
 
-    /** Compatibility fallback for thumbnail decoding uses the same storage materialization. */
     String materializeRawLibraryThumbnail(String uriText, String displayName) throws Exception {
         return materializeRawLibraryDocument(uriText, displayName);
     }
 
-    /** Called when a library thumbnail is selected in Rust. */
     void openRawLibraryDocument(String uriText, String displayName) {
         new Thread(
                 () -> {
@@ -362,7 +349,6 @@ final class StorageManager {
                 "AuRaw library open").start();
     }
 
-    /** Removes the visible edit sidecar belonging to one library RAW. */
     void removeRawSidecar(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
@@ -384,7 +370,6 @@ final class StorageManager {
         }
     }
 
-    /** Imports an app-local RAW bundle (RAW plus optional .auraw sidecar) into the library. */
     String importLocalRawLibraryDocument(String rawPath, String displayName) throws Exception {
         File sourceRaw = new File(rawPath);
         if (!sourceRaw.isFile() || !AndroidStorageContract.isRawName(displayName)) {
@@ -406,19 +391,16 @@ final class StorageManager {
                 try {
                     deleteRawLibraryDocument(imported.uri.toString(), imported.displayName);
                 } catch (Exception ignored) {
-                    // Preserve the original failure; best-effort cleanup only.
                 }
             }
             throw error;
         }
     }
 
-    /** Rolls back an imported copy when a move cannot commit. */
     void deleteImportedRawLibraryDocument(String rawUri, String displayName) throws Exception {
         deleteRawLibraryDocument(rawUri, displayName);
     }
 
-    /** Renames an app-owned library RAW and its matching sidecar as one bundle. */
     String renameRawLibraryDocument(
             String rawUriText,
             String displayName,
@@ -473,7 +455,6 @@ final class StorageManager {
         return destinationUri;
     }
 
-    /** Deletes a library RAW and its sidecar after validating AuRaw ownership. */
     void deleteRawLibraryDocument(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
@@ -489,11 +470,6 @@ final class StorageManager {
         clearDevelopedThumbnailCache(rawUriText);
     }
 
-    /**
-     * Copies an existing visible sibling sidecar into private cache. Rust calls
-     * this only from its decode worker, then removes the returned cache file.
-     * An empty result means that the RAW has no sidecar yet.
-     */
     String materializeRawSidecar(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
@@ -558,16 +534,10 @@ final class StorageManager {
         }
     }
 
-    /** Creates the private staging file populated by Rust's sidecar worker. */
     String createRawSidecarCache() throws Exception {
         return File.createTempFile("auraw-sidecar-", ".auraw", storage.getCacheDir()).getAbsolutePath();
     }
 
-    /**
-     * Publishes a completed staging file beside its RAW. New libraries use a
-     * same-directory temporary file and atomic replacement; old MediaStore rows
-     * remain supported only until their one-time migration succeeds.
-     */
     String publishRawSidecar(
             String cachedPath,
             String rawUriText,
@@ -596,9 +566,7 @@ final class StorageManager {
         ArrayList<Uri> oldSidecars = legacyMediaStoreSidecarUris(rawDisplayName);
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, stagedName);
-        // MediaProvider may rewrite unknown extensions to match a specific
-        // MIME type (for example `.auraw.json`). The unknown binary MIME keeps
-        // AuRaw's exact custom filename intact.
+        // A known MIME may make MediaProvider rewrite AuRaw's custom extension.
         values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream");
         values.put(MediaStore.Downloads.RELATIVE_PATH, LEGACY_MEDIASTORE_RAW_RELATIVE_PATH);
         values.put(MediaStore.Downloads.IS_PENDING, 1);
@@ -651,8 +619,7 @@ final class StorageManager {
             }
             return LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + displayName;
         } finally {
-            // Once the staged row is published it is a complete, discoverable
-            // recovery generation. Preserve it if final renaming fails.
+            // A published staging row is a valid recovery generation; preserve it.
             if (!contentPublished) {
                 resolver.delete(destination, null, null);
             }
@@ -898,8 +865,6 @@ final class StorageManager {
     private String listCombinedRawLibrary() {
         ArrayList<RawLibraryRecord> records = new ArrayList<>();
         records.addAll(listFileRawLibrary(selectedRawLibraryDirectory()));
-        // Upgrade-only locations are exposed alongside the canonical root until
-        // migration finishes. They never appear while browsing a child folder.
         if (selectedRawLibraryFolder.isEmpty()) {
             try {
                 records.addAll(listFileRawLibrary(externalMediaRootDirectory()));
@@ -997,8 +962,7 @@ final class StorageManager {
             int nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME);
             int sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.SIZE);
             int modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DATE_MODIFIED);
-            // Return one sentinel record beyond the UI limit so Rust can
-            // distinguish exactly 20,000 files from a truncated collection.
+            // One sentinel beyond the UI limit distinguishes exact-size from truncation.
             while (result.size() <= MAX_RAW_LIBRARY_FILES && cursor.moveToNext()) {
                 String name = cursor.getString(nameColumn);
                 if (!AndroidStorageContract.isRawName(name)) {
@@ -1026,8 +990,7 @@ final class StorageManager {
         }
         Arrays.sort(files, (left, right) -> Long.compare(right.lastModified(), left.lastModified()));
         for (File file : files) {
-            // Return one sentinel record beyond the UI limit; Rust displays
-            // only the first MAX_RAW_LIBRARY_FILES entries.
+            // Preserve one sentinel beyond the UI limit.
             if (result.size() > MAX_RAW_LIBRARY_FILES) {
                 break;
             }
@@ -1162,9 +1125,7 @@ final class StorageManager {
             }
         }
 
-        // Recover a sidecar left behind if a previous run moved its RAW first
-        // and then failed while moving the sidecar. Do not attach a sidecar to
-        // a same-named collision that still has its original RAW in the root.
+        // Recover a sidecar stranded after its RAW moved in a previous failed migration.
         for (File sourceSidecar : files) {
             String sidecarName = sourceSidecar.getName();
             if (!sourceSidecar.isFile() || !sidecarName.endsWith(".auraw")) {
@@ -1265,7 +1226,6 @@ final class StorageManager {
                 storage.getContentResolver().delete(uri, null, null);
             }
         } catch (Exception ignored) {
-            // Preserve the original import error.
         }
     }
 
@@ -1337,8 +1297,7 @@ final class StorageManager {
                 }
             }
         } catch (Exception ignored) {
-            // The streaming limit remains authoritative when metadata is
-            // absent, stale, or unavailable from the provider.
+            // Streaming bounds remain authoritative when provider metadata is unreliable.
         }
         return null;
     }
@@ -1360,7 +1319,7 @@ final class StorageManager {
                 }
             }
         } catch (Exception ignored) {
-            // The URI itself is still readable even if this optional query fails.
+            // The URI may remain readable when its optional display-name query fails.
         }
         return "selected RAW";
     }

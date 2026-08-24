@@ -7,11 +7,6 @@ fn cam_to_working(rgb: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
-// Shared perceptual gamut service. Color-edit nodes work in OKLab and ask this
-// service for the reachable chroma along one constant-lightness/hue ray. A
-// soft knee begins near the boundary so saturation, mixer, grading, the view
-// transform, and output encoding all approach gamut in the same way instead of
-// independently clipping or inventing their own safety guards.
 fn signed_cuberoot(value: f32) -> f32 {
     return sign(value) * pow(abs(value), 1.0 / 3.0);
 }
@@ -81,8 +76,6 @@ fn perceptual_soft_chroma(requested: f32, boundary: f32) -> f32 {
 fn rec2020_nonnegative_boundary(lightness: f32, hue: vec2<f32>, requested: f32) -> f32 {
     var low = 0.0;
     var high = max(requested, 0.04);
-    // Expand until the hue ray exits the positive Rec.2020 domain. Fixed loop
-    // bounds keep shader cost deterministic on desktop and mobile.
     for (var iteration = 0; iteration < 8; iteration = iteration + 1) {
         let probe = rec2020_from_oklab(vec3<f32>(max(lightness, 0.0), hue * high));
         if rgb_is_nonnegative(probe) {
@@ -161,9 +154,6 @@ fn perceptual_rec2020_from_oklab_nonnegative(
     let direction = hue / hue_length;
     let candidate = rec2020_from_oklab(vec3<f32>(l, direction * requested_chroma));
 
-    // One 1/0.9 chroma probe exactly tests whether the requested color is below
-    // the soft-knee region. Most pixels take this fast path; only near/outside
-    // the boundary pay for the binary boundary solve.
     let knee_probe = rec2020_from_oklab(
         vec3<f32>(l, direction * (requested_chroma / 0.90)),
     );
@@ -205,9 +195,6 @@ fn perceptual_gamut_compress_unit_rec2020(rgb: vec3<f32>) -> vec3<f32> {
     }
     let boundary = rec2020_unit_boundary(l, hue, chroma);
     let compressed = perceptual_soft_chroma(chroma, boundary);
-    // The boundary solve can leave sub-ULP excursions at saturated edges.
-    // Clamp only after out-of-cube projection; valid unit-cube inputs return
-    // unchanged through the fast path above.
     return clamp(
         rec2020_from_oklab(vec3<f32>(l, hue * compressed)),
         vec3<f32>(0.0),
@@ -232,10 +219,6 @@ fn perceptual_gamut_compress_unit_srgb(rgb: vec3<f32>) -> vec3<f32> {
     return oklab_to_linear_srgb(vec3<f32>(l, hue * compressed));
 }
 
-// Generic neutral-axis projectors remain for profile-table mathematical
-// domains that are not Rec.2020/OKLab editing nodes (notably ProPhoto DCP LUT
-// coordinates). User-facing color tools and output transforms use the shared
-// perceptual service above.
 fn gamut_project_nonnegative(rgb: vec3<f32>, lightness: f32) -> vec3<f32> {
     let neutral_value = max(lightness, 0.0);
     let neutral = vec3<f32>(neutral_value);
@@ -286,8 +269,6 @@ fn map_negative_gamut(rgb: vec3<f32>) -> vec3<f32> {
     return gamut_project_nonnegative_rec2020(rgb);
 }
 
-// Extended sRGB transfer: sign-preserving so diagnostic/intermediate callers
-// cannot accidentally hide a negative component before explicit gamut mapping.
 fn srgb_oetf(c: vec3<f32>) -> vec3<f32> {
     let magnitude = abs(c);
     let lo = c * 12.92;

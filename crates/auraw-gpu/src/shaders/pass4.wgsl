@@ -3,9 +3,6 @@
 #import auraw::noise as Noise
 #import auraw::noise_ca_finish as NoiseCaFinish
 
-// Bayer RCD stage 4. The 9-pixel exterior is deliberately produced by PPG,
-// matching darktable's RCD margin policy; RCD samples never rely on clamped
-// coordinates. The same reference result feeds optional FDC and dual modes.
 @group(0) @binding(7) var tex2_read: texture_2d<f32>;
 @group(0) @binding(9) var tex3_read: texture_2d<f32>;
 @group(0) @binding(10) var scene_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
@@ -28,9 +25,6 @@ fn green_plane_at(pos: vec2<i32>) -> f32 {
     return textureLoad(tex2_read, Common::clamp_pos(pos), 0).x;
 }
 
-// PPG fallback used for the complete exterior margin and for small images.
-// It preserves measured samples and only clamps where the border algorithm
-// itself requires unavailable sensor samples.
 fn ppg_green_at(pos: vec2<i32>) -> f32 {
     let p = Common::clamp_pos(pos);
     if RawSampling::color_at(p) == 1u { return RawSampling::raw_cfa_at(p); }
@@ -213,12 +207,6 @@ fn bayer_median5(a: f32, b: f32, c: f32, d: f32, e: f32) -> f32 {
 }
 
 fn bayer_reference_false_color_guard(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
-    // RCD is intentionally detail preserving, but one-pixel chroma outliers can
-    // survive on hair, fabric, and other near-Nyquist detail. A five-sample
-    // cross median removes only isolated U/V excursions while keeping the
-    // center luminance untouched. The adaptive blend is zero for coherent real
-    // color and rises only when the center chroma disagrees strongly with all
-    // four immediate neighbors.
     let uv0 = bayer_uv(rgb);
     let uvn = bayer_uv(rcd_reference_at(Common::clamp_pos(pos + vec2<i32>(0, -1))));
     let uvs = bayer_uv(rcd_reference_at(Common::clamp_pos(pos + vec2<i32>(0,  1))));
@@ -246,9 +234,6 @@ fn frequency_chroma_at(pos: vec2<i32>, center: vec3<f32>) -> vec3<f32> {
     var carrier_xy = vec2<f32>(0.0);
     var carrier_weight = 0.0;
 
-    // Analyze the three Bayer chroma carriers over a 13x13 apodized window.
-    // Removing only coherent Nyquist-period chroma protects real low-frequency
-    // colour while suppressing zippering and maze aliases.
     for (var dy = -6; dy <= 6; dy = dy + 1) {
         let wy = f32(7 - abs(dy));
         let py = bayer_phase2(dy);
@@ -322,9 +307,6 @@ fn dual_high_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32
     let threshold = 0.005 * pow(max(Common::camera_uniforms.dual_threshold, 0.0), 1.1);
     if threshold <= 1e-7 { return 1.0; }
 
-    // Do not mistake sensor noise for real image detail. The low branch stores
-    // its own support/coherence confidence in alpha, so weak low estimates
-    // automatically fall back to RCD instead of smearing edges or borders.
     let variance = Noise::nr_component_variance(0.5 * (reference + low.rgb));
     let noise_floor = 2.25 * sqrt(max(variance.x, 1e-10));
     let detail_signal = max(detail - noise_floor, 0.0);
@@ -343,8 +325,6 @@ fn dual_high_weight(pos: vec2<i32>, reference: vec3<f32>, low: vec4<f32>) -> f32
     return clamp(1.0 - low_confidence * (1.0 - high_confidence), 0.0, 1.0);
 }
 
-// Adapter used by the reusable noise/CA composition module. Bayer's reference
-// path requires explicit clamping before the RCD/PPG border fallback.
 override fn NoiseCaFinish::finish_reference_at(pos: vec2<i32>) -> vec3<f32> {
     return rcd_reference_at(Common::clamp_pos(pos));
 }

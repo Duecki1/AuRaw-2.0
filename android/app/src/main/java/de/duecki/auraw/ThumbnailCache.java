@@ -10,7 +10,6 @@ import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Locale;
 
-/** Owns the bounded persistent thumbnail cache and migration from the legacy cache directory. */
 final class ThumbnailCache {
     private static final String LOG_TAG = "AuRaw";
     private static final int MAX_ENTRIES = 512;
@@ -24,8 +23,7 @@ final class ThumbnailCache {
 
     String rawPath(String uriText, long bytes, long modifiedSeconds, int maximumEdge)
             throws Exception {
-        // v2 invalidates previews generated before TIFF input color management
-        // and rendered-raster tone handling stabilized.
+        // v2 invalidates previews from before TIFF color/tone handling stabilized.
         return path(
                 "raw-v2\n" + uriText + "\n" + bytes + "\n" + modifiedSeconds
                         + "\n" + maximumEdge,
@@ -64,7 +62,6 @@ final class ThumbnailCache {
         }
     }
 
-    /** Clears regenerable RAW and edited library previews from both cache generations. */
     void clear() {
         clearDirectory(persistentDirectory());
         clearDirectory(legacyDirectory());
@@ -91,11 +88,7 @@ final class ThumbnailCache {
         return cached;
     }
 
-    /**
-     * Thumbnail JPEGs are regenerable, but no-backup app storage keeps Android's cache scavenger
-     * from discarding the whole library between launches. The bounded LRU prevents unbounded
-     * growth and app-data clearing/uninstall still removes all entries.
-     */
+    // Bounded no-backup storage survives cache eviction but is removed on uninstall.
     private File persistentDirectory() {
         File directory = new File(storage.getNoBackupFilesDir(), "library-thumbnails");
         if (!directory.isDirectory() && !directory.mkdirs()) {
@@ -174,7 +167,6 @@ final class ThumbnailCache {
     }
 
     private static void trim(File directory) {
-        // PNG cache entries from older builds are intentionally discarded, not decoded.
         File[] legacyPngs = directory.listFiles(
                 (parent, name) -> name.endsWith(".png") || name.endsWith(".png.fingerprint"));
         if (legacyPngs != null) {
@@ -194,7 +186,6 @@ final class ThumbnailCache {
             }
         }
 
-        // A crash between the JPEG and fingerprint writes may leave an orphan.
         File[] fingerprints = directory.listFiles(
                 (parent, name) -> name.endsWith(".developed.jpg.fingerprint"));
         if (fingerprints == null) {

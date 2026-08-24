@@ -1,13 +1,6 @@
 #import auraw::common as Common
 
-// Shared sensor-profiled denoise math. Sampling stays in the CFA-specific
-// finishing shader so Bayer and X-Trans can reuse their native reconstructed
-// reference textures without adding another full-frame intermediate.
 
-// Denoise runs before camera characterization, so these are deliberately
-// camera-space signal/opponent weights rather than Rec.2020 luminance. The
-// green-heavy signal axis is reversible with the two green-referenced colour
-// differences and avoids assigning display primaries to sensor channels.
 const NR_SIGNAL_WEIGHTS: vec3<f32> = vec3<f32>(0.25, 0.50, 0.25);
 const NR_DIRECTIONS: array<vec2<i32>, 8> = array<vec2<i32>, 8>(
     vec2<i32>( 1,  0), vec2<i32>(-1,  0),
@@ -27,10 +20,6 @@ fn nr_signal(rgb: vec3<f32>) -> f32 {
 }
 
 fn nr_opponents(rgb: vec3<f32>) -> vec2<f32> {
-    // Darktable's profiled wavelet path uses a Y0U0V0-like basis so the two
-    // colour axes do not share the complete green-channel noise term. This
-    // camera-space form is exactly invertible with NR_SIGNAL_WEIGHTS and its
-    // opponent axes are orthogonal for equal-variance sensor channels.
     return vec2<f32>(
         0.5 * (rgb.r - rgb.b),
         0.25 * rgb.r - 0.5 * rgb.g + 0.25 * rgb.b,
@@ -52,7 +41,6 @@ fn nr_rgb_variance(signal_rgb: vec3<f32>) -> vec3<f32> {
     );
 }
 
-// x = camera-signal variance, y = conservative maximum opponent variance.
 fn nr_component_variance(rgb: vec3<f32>) -> vec2<f32> {
     let variance = nr_rgb_variance(rgb);
     let squared_weights = NR_SIGNAL_WEIGHTS * NR_SIGNAL_WEIGHTS;
@@ -63,8 +51,6 @@ fn nr_component_variance(rgb: vec3<f32>) -> vec2<f32> {
 
 fn nr_opponent_variance(rgb: vec3<f32>) -> vec2<f32> {
     let variance = nr_rgb_variance(rgb);
-    // Variances of U0 = 0.5R - 0.5B and
-    // V0 = 0.25R - 0.5G + 0.25B, ignoring post-demosaic covariance.
     return max(
         vec2<f32>(
             0.25 * (variance.r + variance.b),
@@ -82,8 +68,6 @@ fn nr_signal_range_weight(
     spatial: f32,
 ) -> f32 {
     let detail = clamp(Common::camera_uniforms.noise_options.y, 0.0, 1.0);
-    // Detail raises selectivity. At 100, cross-edge pooling is rejected more
-    // aggressively; at 0, flat noisy regions can pool a wider sigma range.
     let signal_sigma = mix(3.4, 1.7, detail);
     let signal_delta = sample_signal - center_signal;
     let signal_variance = center_variance.x + sample_variance.x;
@@ -130,8 +114,6 @@ fn nr_finish_signal(
     let signal_strength = nr_perceptual_strength(Common::camera_uniforms.noise_options.x, 3.2);
     if signal_strength <= 1e-6 { return center; }
 
-    // Avoid turning weak/failed profile fits into generic blur. The fallback
-    // remains usable, but a measured profile earns the full requested blend.
     let profile_trust = mix(0.72, 1.0, clamp(Common::camera_uniforms.noise_options.w, 0.0, 1.0));
     let out_signal = mix(center_signal, filtered_signal, signal_strength * profile_trust);
     return nr_from_signal_opponents(out_signal, center_opponents);
@@ -140,7 +122,5 @@ fn nr_finish_signal(
 fn nr_perceptual_strength(requested: f32, response: f32) -> f32 {
     let x = clamp(requested, 0.0, 1.0);
     if x <= 1e-6 { return 0.0; }
-    // Normalized exponential response: low values remain useful,
-    // the transition is continuous, and 100 remains an exact full blend.
     return (1.0 - exp(-response * x)) / (1.0 - exp(-response));
 }

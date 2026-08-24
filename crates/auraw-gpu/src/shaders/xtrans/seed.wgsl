@@ -1,8 +1,6 @@
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 
-// X-Trans seed interpolation helpers. The entry point and storage output stay
-// in xtrans_demosaic.wgsl so work-format specialization remains centralized.
 struct XTransDirectionalEstimate {
     value: f32,
     gradient: f32,
@@ -14,8 +12,6 @@ fn xtrans_in_bounds(pos: vec2<i32>) -> bool {
         && pos.x < i32(Common::camera_uniforms.width) && pos.y < i32(Common::camera_uniforms.height);
 }
 
-// Returns (sample value, distance). A negative distance means no sample was
-// found in this direction within the X-Trans 6x6 neighbourhood.
 fn xtrans_nearest_in_direction(
     pos: vec2<i32>,
     channel: u32,

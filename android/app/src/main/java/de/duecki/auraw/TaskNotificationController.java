@@ -12,7 +12,6 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
 
-/** Mirrors AuRaw's current long-running task into one quiet ongoing notification. */
 final class TaskNotificationController {
     static final int REQUEST_POST_NOTIFICATIONS = 1004;
 

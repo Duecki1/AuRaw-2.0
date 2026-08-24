@@ -1,8 +1,6 @@
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 
-// Bayer RCD stage 3: interpolate the opposite red/blue channel at red/blue
-// photosites from diagonal colour differences and the P/Q discriminator.
 @group(0) @binding(7) var tex2_read: texture_2d<f32>;
 @group(0) @binding(8) var tex3_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 

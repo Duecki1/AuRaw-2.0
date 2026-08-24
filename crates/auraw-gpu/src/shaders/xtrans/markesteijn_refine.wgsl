@@ -1,8 +1,6 @@
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 
-// Markesteijn pass 2 recalculates green from pass 1, then refreshes missing
-// chroma around that green.
 @group(0) @binding(7) var markesteijn_read_2: texture_2d<f32>;
 
 fn mark2_load(pos: vec2<i32>) -> vec3<f32> {
@@ -27,8 +25,6 @@ fn mark2_recalculate_axis(pos: vec2<i32>, direction: vec2<i32>, channel: u32) ->
     let center = mark2_load(pos);
     let near = mark2_load(pos + direction);
     let far = mark2_load(pos - 2 * direction);
-    // Direct translation of the reference recalc relation:
-    // (G[-2d] + 2G[d] - C[-2d] - 2C[d] + 3C[0]) / 3.
     let estimate = (
         far.g + 2.0 * near.g
         - mark2_component(far, channel)

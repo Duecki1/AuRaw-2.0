@@ -1,5 +1,3 @@
-// Edge Glow detects scale-aware luminance edges in the completed developed
-// image, then adds colored scene-linear emission without changing its source.
 
 fn edge_glow_log_luminance_at(pos: vec2<i32>) -> f32 {
     return log2(max(Common::safe_luma(SceneAdjustments::local_effects_at(pos)), 1e-6));
