@@ -155,7 +155,7 @@ impl Settings {
                     egui::Label::new(if render_edited_thumbnails {
                         "Edited RAWs are rendered in the background after their original previews appear."
                     } else {
-                        "All RAWs use their original previews. An orange refresh badge marks previews that do not include saved edits."
+                        "Existing edited previews are reused. An orange refresh badge marks edited RAWs whose preview is missing or out of date."
                     })
                     .wrap(),
                 );

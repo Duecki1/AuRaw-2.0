@@ -849,6 +849,29 @@ fn stale_edited_preview_does_not_schedule_development_when_index_rendering_is_di
     worker.join().unwrap();
 }
 
+#[cfg(not(target_os = "android"))]
+#[test]
+fn disabled_index_rendering_still_reuses_a_fresh_edited_thumbnail() {
+    let root = unique_temp_dir("library-fresh-edited-thumbnail");
+    let raw = root.join("edited.dng");
+    fs::write(&raw, b"raw").unwrap();
+    fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"saved edits").unwrap();
+    install_test_developed_thumbnail(&raw);
+
+    let loaded = load_desktop_library_thumbnail(
+        &test_asset(raw),
+        ThumbnailLoadStage::RawPreview,
+        false,
+    )
+    .expect("a fresh edited thumbnail should remain usable when index rendering is disabled");
+
+    assert!(loaded.developed);
+    assert!(!loaded.developed_thumbnail_stale);
+    assert!(!loaded.developed_render_pending);
+    assert_eq!([loaded.thumbnail.width, loaded.thumbnail.height], [16, 12]);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn resident_thumbnail_is_bounded_and_keeps_aspect_ratio() {
     let thumbnail = RawThumbnail {
