@@ -24,6 +24,16 @@ impl AurawApp {
         }
     }
 
+    pub(crate) fn set_render_edited_thumbnails_during_indexing(&mut self, enabled: bool) {
+        let context = self.egui_ctx.clone();
+        if self
+            .library
+            .set_render_edited_thumbnails_during_indexing(enabled, &context)
+        {
+            self.persist_performance_settings();
+        }
+    }
+
     #[cfg(not(target_os = "android"))]
     pub(crate) fn set_ai_gpu_acceleration(&mut self, enabled: bool) {
         if self.ai.gpu_acceleration == enabled {
@@ -200,6 +210,9 @@ impl AurawApp {
         let settings = crate::performance_settings::PerformanceSettings {
             raw_cache_files: self.develop.raw_cache_limit,
             thumbnail_workers: self.library.thumbnail_worker_count(),
+            render_edited_thumbnails_during_indexing: self
+                .library
+                .renders_edited_thumbnails_during_indexing(),
             library_thumbnail_size: self.library.thumbnail_size(),
             library_sort_order: self.library.sort_order(),
             preview_quality: self.preview.quality,

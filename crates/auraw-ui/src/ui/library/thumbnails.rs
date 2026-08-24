@@ -355,6 +355,7 @@ pub(super) fn loaded_library_thumbnail(thumbnail: RawThumbnail, developed: bool)
         thumbnail,
         resident_thumbnail,
         developed,
+        developed_thumbnail_stale: false,
         developed_render_pending: false,
     }
 }
@@ -363,7 +364,16 @@ pub(super) fn loaded_library_raw_preview_pending_development(
     thumbnail: RawThumbnail,
 ) -> LoadedLibraryThumbnail {
     let mut loaded = loaded_library_thumbnail(thumbnail, false);
+    loaded.developed_thumbnail_stale = true;
     loaded.developed_render_pending = true;
+    loaded
+}
+
+pub(super) fn loaded_library_raw_preview_with_stale_edits(
+    thumbnail: RawThumbnail,
+) -> LoadedLibraryThumbnail {
+    let mut loaded = loaded_library_thumbnail(thumbnail, false);
+    loaded.developed_thumbnail_stale = true;
     loaded
 }
 
@@ -676,34 +686,39 @@ pub(crate) fn load_desktop_cached_thumbnail(
 pub(super) fn load_desktop_library_thumbnail(
     asset: &LibraryAsset,
     stage: ThumbnailLoadStage,
+    render_edited_thumbnails_during_indexing: bool,
 ) -> Result<LoadedLibraryThumbnail, String> {
     let Some(path) = asset.desktop_path() else {
         return Err("invalid desktop thumbnail request".to_owned());
     };
     match stage {
         ThumbnailLoadStage::RawPreview => {
-            match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
-                Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
-                Ok(None) => {}
-                Err(error) => log::warn!(
-                    "could not use developed thumbnail cache for {}: {error}",
-                    path.display()
-                ),
+            if render_edited_thumbnails_during_indexing {
+                match crate::sidecar::load_developed_thumbnail_cache(path, THUMBNAIL_EDGE) {
+                    Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
+                    Ok(None) => {}
+                    Err(error) => log::warn!(
+                        "could not use developed thumbnail cache for {}: {error}",
+                        path.display()
+                    ),
+                }
             }
 
-            let render_developed = crate::sidecar::sidecar_path_for_raw(path).is_file();
-            return load_desktop_raw_library_thumbnail(path, render_developed);
+            let has_edits = crate::sidecar::sidecar_path_for_raw(path).is_file();
+            load_desktop_raw_library_thumbnail(
+                path,
+                has_edits,
+                render_edited_thumbnails_during_indexing,
+            )
         }
         ThumbnailLoadStage::DevelopedPreview => {
             match render_uncached_developed_thumbnail(path, THUMBNAIL_EDGE) {
-                Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
-                Ok(None) => return load_desktop_raw_library_thumbnail(path, false),
-                Err(error) => {
-                    return Err(format!(
-                        "could not render the edited RAW thumbnail for {}: {error}",
-                        path.display()
-                    ))
-                }
+                Ok(Some(thumbnail)) => Ok(loaded_library_thumbnail(thumbnail, true)),
+                Ok(None) => load_desktop_raw_library_thumbnail(path, false, false),
+                Err(error) => Err(format!(
+                    "could not render the edited RAW thumbnail for {}: {error}",
+                    path.display()
+                )),
             }
         }
     }
@@ -712,12 +727,15 @@ pub(super) fn load_desktop_library_thumbnail(
 #[cfg(not(target_os = "android"))]
 fn load_desktop_raw_library_thumbnail(
     path: &Path,
-    render_developed: bool,
+    has_edits: bool,
+    render_edited_thumbnails_during_indexing: bool,
 ) -> Result<LoadedLibraryThumbnail, String> {
     match crate::thumbnail_cache::load_desktop_raw_thumbnail(path, THUMBNAIL_EDGE) {
         Ok(Some(thumbnail)) => {
-            return Ok(if render_developed {
+            return Ok(if has_edits && render_edited_thumbnails_during_indexing {
                 loaded_library_raw_preview_pending_development(thumbnail)
+            } else if has_edits {
+                loaded_library_raw_preview_with_stale_edits(thumbnail)
             } else {
                 loaded_library_thumbnail(thumbnail, false)
             })
@@ -737,8 +755,10 @@ fn load_desktop_raw_library_thumbnail(
             path.display()
         );
     }
-    Ok(if render_developed {
+    Ok(if has_edits && render_edited_thumbnails_during_indexing {
         loaded_library_raw_preview_pending_development(thumbnail)
+    } else if has_edits {
+        loaded_library_raw_preview_with_stale_edits(thumbnail)
     } else {
         loaded_library_thumbnail(thumbnail, false)
     })
@@ -749,6 +769,7 @@ pub(super) fn load_android_library_thumbnail(
     app: &auraw_ffi::AndroidApp,
     asset: &LibraryAsset,
     _stage: ThumbnailLoadStage,
+    render_edited_thumbnails_during_indexing: bool,
 ) -> Result<LoadedLibraryThumbnail, String> {
     let Some(uri) = asset.android_uri() else {
         return Err("invalid Android thumbnail request".to_owned());
@@ -756,12 +777,15 @@ pub(super) fn load_android_library_thumbnail(
     let display_name = asset.display_name.as_str();
     let bytes = asset.metadata.bytes;
     let modified_seconds = asset.metadata.modified_seconds;
-    match crate::android::load_developed_thumbnail_cache(app, uri, display_name, THUMBNAIL_EDGE) {
-        Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
-        Ok(None) => {}
-        Err(error) => log::warn!(
-            "could not use Android developed-thumbnail cache for {display_name}: {error}"
-        ),
+    if render_edited_thumbnails_during_indexing {
+        match crate::android::load_developed_thumbnail_cache(app, uri, display_name, THUMBNAIL_EDGE)
+        {
+            Ok(Some(thumbnail)) => return Ok(loaded_library_thumbnail(thumbnail, true)),
+            Ok(None) => {}
+            Err(error) => log::warn!(
+                "could not use Android developed-thumbnail cache for {display_name}: {error}"
+            ),
+        }
     }
     let mut thumbnail = crate::android::load_library_thumbnail(
         app,
@@ -771,11 +795,26 @@ pub(super) fn load_android_library_thumbnail(
         modified_seconds,
         THUMBNAIL_EDGE,
     )?;
-    if let Ok(Some(sidecar)) = crate::sidecar::load_android(app, uri, display_name) {
-        thumbnail =
-            crate::pipeline::transform_thumbnail_geometry(&thumbnail, sidecar.edits.geometry);
+    let has_edits = match crate::sidecar::load_android(app, uri, display_name) {
+        Ok(Some(sidecar)) => {
+            let has_edits = crate::sidecar::edit_state_has_adjustments(&sidecar.edits);
+            if render_edited_thumbnails_during_indexing {
+                thumbnail =
+                    crate::pipeline::transform_thumbnail_geometry(&thumbnail, sidecar.edits.geometry);
+            }
+            has_edits
+        }
+        Ok(None) => false,
+        Err(error) => {
+            log::warn!("could not inspect Android edit sidecar for {display_name}: {error}");
+            false
+        }
+    };
+    if has_edits {
+        Ok(loaded_library_raw_preview_with_stale_edits(thumbnail))
+    } else {
+        Ok(loaded_library_thumbnail(thumbnail, false))
     }
-    Ok(loaded_library_thumbnail(thumbnail, false))
 }
 
 pub(super) fn run_thumbnail_workers(worker: ThumbnailWorker, worker_count: usize, load: ThumbnailLoader) {

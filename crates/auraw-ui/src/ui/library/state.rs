@@ -9,6 +9,7 @@ impl LibraryState {
             LibraryThumbnailSize::default(),
             LibrarySortOrder::default(),
             true,
+            false,
         )
     }
 
@@ -19,6 +20,7 @@ impl LibraryState {
         thumbnail_size: LibraryThumbnailSize,
         sort_order: LibrarySortOrder,
         folder_sidebar_open: bool,
+        render_edited_thumbnails_during_indexing: bool,
     ) -> Self {
         let _ = context;
         let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
@@ -43,6 +45,7 @@ impl LibraryState {
             status: "Open a folder to build your RAW library.".to_owned(),
             usage_clock: 0,
             thumbnail_workers,
+            render_edited_thumbnails_during_indexing,
             sort_order,
             thumbnail_size,
             selected_assets: HashSet::new(),
@@ -70,6 +73,7 @@ impl LibraryState {
         thumbnail_size: LibraryThumbnailSize,
         sort_order: LibrarySortOrder,
         selected_folder: String,
+        render_edited_thumbnails_during_indexing: bool,
     ) -> Self {
         let root_location =
             crate::android::library_location(&android_app).unwrap_or_else(|error| {
@@ -115,6 +119,7 @@ impl LibraryState {
             status: String::new(),
             usage_clock: 0,
             thumbnail_workers,
+            render_edited_thumbnails_during_indexing,
             sort_order,
             thumbnail_size,
             selected_assets: HashSet::new(),
@@ -196,6 +201,23 @@ impl LibraryState {
 
     pub(crate) fn thumbnail_worker_count(&self) -> usize {
         self.thumbnail_workers
+    }
+
+    pub(crate) fn renders_edited_thumbnails_during_indexing(&self) -> bool {
+        self.render_edited_thumbnails_during_indexing
+    }
+
+    pub(crate) fn set_render_edited_thumbnails_during_indexing(
+        &mut self,
+        enabled: bool,
+        context: &egui::Context,
+    ) -> bool {
+        if self.render_edited_thumbnails_during_indexing == enabled {
+            return false;
+        }
+        self.render_edited_thumbnails_during_indexing = enabled;
+        self.refresh(context);
+        true
     }
 
     pub(crate) fn thumbnail_background_progress(&self) -> Option<ThumbnailProgress> {
@@ -298,6 +320,8 @@ impl LibraryState {
         let decoding_paused = Arc::clone(&self.decoding_paused);
         let decode_gate = Arc::clone(&self.decode_gate);
         let thumbnail_workers = self.thumbnail_workers;
+        let render_edited_thumbnails_during_indexing =
+            self.render_edited_thumbnails_during_indexing;
         let repaint = context.clone();
         let (event_sender, event_receiver) = mpsc::sync_channel(MAX_PENDING_THUMBNAIL_RESULTS);
         let (request_sender, request_receiver) = mpsc::sync_channel(MAX_PENDING_THUMBNAILS);
@@ -309,6 +333,10 @@ impl LibraryState {
             entry.thumbnail_error = None;
             entry.thumbnail_failures = 0;
             entry.thumbnail_retry_after = None;
+            if !render_edited_thumbnails_during_indexing {
+                entry.developed_thumbnail = false;
+                entry.developed_thumbnail_pending = false;
+            }
         }
         self.scanning = true;
         self.catalog_ready = !self.entries.is_empty();
@@ -376,7 +404,13 @@ impl LibraryState {
                             repaint,
                         },
                         thumbnail_workers,
-                        Arc::new(load_desktop_library_thumbnail),
+                        Arc::new(move |asset, stage| {
+                            load_desktop_library_thumbnail(
+                                asset,
+                                stage,
+                                render_edited_thumbnails_during_indexing,
+                            )
+                        }),
                     );
                 })
         };
@@ -437,7 +471,12 @@ impl LibraryState {
                         },
                         thumbnail_workers,
                         Arc::new(move |asset, stage| {
-                            load_android_library_thumbnail(&thumbnail_app, asset, stage)
+                            load_android_library_thumbnail(
+                                &thumbnail_app,
+                                asset,
+                                stage,
+                                render_edited_thumbnails_during_indexing,
+                            )
                         }),
                     );
                 })
@@ -642,6 +681,7 @@ impl LibraryState {
                                 thumbnail,
                                 resident_thumbnail,
                                 developed,
+                                developed_thumbnail_stale,
                                 developed_render_pending,
                             } = loaded;
                             let decoded_size = [thumbnail.width, thumbnail.height];
@@ -667,7 +707,8 @@ impl LibraryState {
                             self.entries[index].thumbnail_retry_after = None;
                             self.entries[index].developed_thumbnail = developed;
                             self.entries[index].thumbnail_queued = developed_render_pending;
-                            self.entries[index].developed_thumbnail_pending = developed_render_pending;
+                            self.entries[index].developed_thumbnail_pending =
+                                developed_thumbnail_stale;
                         }
                         Err(error) => {
                             if !self.entries[index].developed_thumbnail {

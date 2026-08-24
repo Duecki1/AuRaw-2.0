@@ -288,7 +288,11 @@ pub(super) fn thumbnail_tile(
         tooltip.push_str(error);
     }
     if entry.developed_thumbnail_pending {
-        tooltip.push_str("\nRendering edits in the background.");
+        tooltip.push_str(if entry.thumbnail_queued {
+            "\nRendering edits in the background."
+        } else {
+            "\nThis original preview does not include saved edits."
+        });
     }
     response.on_hover_text(tooltip)
 }
