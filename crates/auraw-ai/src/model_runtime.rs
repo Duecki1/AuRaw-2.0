@@ -16,7 +16,6 @@ pub(crate) enum AiModel {
     BiRefNetLow,
     BiRefNetMedium,
     BiRefNetHigh,
-    MaskFormer,
     ViTMatte,
     SamEncoder,
     SamDecoder,
@@ -343,19 +342,19 @@ mod tests {
             })
         })
         .unwrap();
-        slot.ensure_model(AiModel::MaskFormer, interactive_masks(), 0, true, || {
-            events.lock().unwrap().push("create maskformer".to_owned());
+        slot.ensure_model(AiModel::ViTMatte, interactive_masks(), 0, true, || {
+            events.lock().unwrap().push("create vitmatte".to_owned());
             Ok::<_, ()>(DropLog {
-                label: "maskformer",
+                label: "vitmatte",
                 events: Arc::clone(&events),
             })
         })
         .unwrap();
         assert_eq!(
             &*events.lock().unwrap(),
-            &["drop low".to_owned(), "create maskformer".to_owned()]
+            &["drop low".to_owned(), "create vitmatte".to_owned()]
         );
-        assert_eq!(slot.active_model(), Some(AiModel::MaskFormer));
+        assert_eq!(slot.active_model(), Some(AiModel::ViTMatte));
     }
 
     #[test]
@@ -488,7 +487,7 @@ mod tests {
     #[test]
     fn provider_policy_change_invalidates_current_session() {
         let mut slot = RuntimeSlot::default();
-        slot.ensure_model(AiModel::MaskFormer, interactive_masks(), 4, true, || {
+        slot.ensure_model(AiModel::ViTMatte, interactive_masks(), 4, true, || {
             Ok::<_, ()>(())
         })
         .unwrap();

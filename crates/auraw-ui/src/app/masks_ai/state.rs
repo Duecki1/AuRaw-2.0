@@ -290,15 +290,10 @@ impl AurawApp {
         self.ai.mask_update_active
             || matches!(
                 self.foreground_operation_kind(),
-                Some(
-                    ForegroundOperationKind::SubjectMask
-                        | ForegroundOperationKind::ObjectMask
-                        | ForegroundOperationKind::LandscapeMask
-                )
+                Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
             )
             || self.ai.subject_consent_open
             || self.ai.object_consent_open
-            || self.ai.landscape_consent_open
     }
 
     pub(crate) fn ai_mask_update_remaining_target_count(&self) -> usize {
@@ -326,22 +321,13 @@ impl AurawApp {
             self.foreground_operation_is(ForegroundOperationKind::ObjectMask)
                 || self.ai.object_pending_target.is_some(),
         );
-        let current_landscape = usize::from(
-            self.foreground_operation_is(ForegroundOperationKind::LandscapeMask)
-                || self.ai.landscape_pending_target.is_some(),
-        );
         let subject_remaining = usize::from(self.ai.mask_update_subject_pending) * subject_targets;
-        subject_remaining
-            + self.ai.mask_update_object_queue.len()
-            + current_object
-            + self.ai.mask_update_landscape_queue.len()
-            + current_landscape
+        subject_remaining + self.ai.mask_update_object_queue.len() + current_object
     }
 
     pub(in crate::app) fn generated_ai_mask_targets(&self) -> GeneratedAiMaskTargets {
         let mut subject = false;
         let mut objects = VecDeque::new();
-        let mut landscapes = VecDeque::new();
         for (mask_index, local_mask) in self.masks.stack.masks.iter().enumerate() {
             for (component_index, component) in local_mask.components.iter().enumerate() {
                 match (component.kind, &component.geometry) {
@@ -355,14 +341,11 @@ impl AurawApp {
                     {
                         objects.push_back((mask_index, component_index));
                     }
-                    (MaskKind::Landscape, MaskGeometry::Landscape { .. }) => {
-                        landscapes.push_back((mask_index, component_index));
-                    }
                     _ => {}
                 }
             }
         }
-        (subject, objects, landscapes)
+        (subject, objects)
     }
 
     pub(in crate::app) fn has_range_mask_targets(&self) -> bool {
@@ -382,31 +365,22 @@ impl AurawApp {
         self.ai.object_cache = None;
         if matches!(
             self.foreground_operation_kind(),
-            Some(
-                ForegroundOperationKind::SubjectMask
-                    | ForegroundOperationKind::ObjectMask
-                    | ForegroundOperationKind::LandscapeMask
-            )
+            Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
         ) {
             self.cancel_foreground_operation();
         }
-        self.ai.landscape_pending_target = None;
         self.ai.object_pending_target = None;
         self.ai.mask_update_active = false;
         self.ai.mask_update_subject_pending = false;
         self.ai.mask_update_object_queue.clear();
-        self.ai.mask_update_landscape_queue.clear();
         self.ai.mask_update_failed = false;
     }
 
     pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
-        let (has_subject, object_targets, landscape_targets) = self.generated_ai_mask_targets();
+        let (has_subject, object_targets) = self.generated_ai_mask_targets();
         let has_ranges = self.has_range_mask_targets();
         self.invalidate_generated_mask_sources();
-        self.ai.masks_need_update = has_subject
-            || !object_targets.is_empty()
-            || !landscape_targets.is_empty()
-            || has_ranges;
+        self.ai.masks_need_update = has_subject || !object_targets.is_empty() || has_ranges;
     }
 
     #[cfg(not(target_os = "android"))]
@@ -447,24 +421,18 @@ impl AurawApp {
             self.ui.notice = Some("Wait for the current AI mask operation to finish.".to_owned());
             return;
         }
-        let (update_subject, object_targets, landscape_targets) = self.generated_ai_mask_targets();
+        let (update_subject, object_targets) = self.generated_ai_mask_targets();
         let update_ranges = self.has_range_mask_targets();
         if self.masks.stack.masks.is_empty() {
             self.ai.masks_need_update = false;
             return;
         }
         #[cfg(not(target_os = "android"))]
-        if (update_subject || !object_targets.is_empty() || !landscape_targets.is_empty())
-            && !self.validate_onnx_runtime_for_ai()
-        {
+        if (update_subject || !object_targets.is_empty()) && !self.validate_onnx_runtime_for_ai() {
             return;
         }
 
-        if update_subject
-            || !object_targets.is_empty()
-            || !landscape_targets.is_empty()
-            || update_ranges
-        {
+        if update_subject || !object_targets.is_empty() || update_ranges {
             self.masks.source_cache = None;
             self.masks.subject_cache = None;
             self.ai.object_cache = None;
@@ -498,7 +466,7 @@ impl AurawApp {
             }
         }
 
-        if !update_subject && object_targets.is_empty() && landscape_targets.is_empty() {
+        if !update_subject && object_targets.is_empty() {
             self.ai.masks_need_update = false;
             self.ui.notice =
                 Some("Masks were refreshed for the current image geometry.".to_owned());
@@ -509,7 +477,6 @@ impl AurawApp {
         self.ai.mask_update_active = true;
         self.ai.mask_update_subject_pending = update_subject;
         self.ai.mask_update_object_queue = object_targets;
-        self.ai.mask_update_landscape_queue = landscape_targets;
         self.ai.mask_update_failed = false;
 
         if update_subject {
@@ -530,15 +497,10 @@ impl AurawApp {
             || self.ai.mask_update_subject_pending
             || matches!(
                 self.foreground_operation_kind(),
-                Some(
-                    ForegroundOperationKind::SubjectMask
-                        | ForegroundOperationKind::ObjectMask
-                        | ForegroundOperationKind::LandscapeMask
-                )
+                Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
             )
             || self.ai.subject_consent_open
             || self.ai.object_consent_open
-            || self.ai.landscape_consent_open
         {
             return;
         }
@@ -575,37 +537,6 @@ impl AurawApp {
             return;
         }
 
-        while let Some((mask_index, component_index)) =
-            self.ai.mask_update_landscape_queue.pop_front()
-        {
-            let valid = self
-                .masks
-                .stack
-                .masks
-                .get(mask_index)
-                .and_then(|mask| mask.components.get(component_index))
-                .is_some_and(|component| {
-                    matches!(
-                        (component.kind, &component.geometry),
-                        (MaskKind::Landscape, MaskGeometry::Landscape { .. })
-                    )
-                });
-            if !valid {
-                continue;
-            }
-            let path = self.landscape_model_path();
-            if crate::ai_masks::landscape_model_is_verified(&path)
-                && crate::ai_masks::vitmatte_model_is_verified(&self.vitmatte_model_path())
-            {
-                self.start_landscape_worker(mask_index, component_index, path, false);
-            } else {
-                self.ai.landscape_pending_target = Some((mask_index, component_index));
-                self.ai.landscape_consent_open = true;
-                self.egui_ctx.request_repaint();
-            }
-            return;
-        }
-
         self.finish_ai_mask_update();
     }
 
@@ -616,7 +547,6 @@ impl AurawApp {
         self.ai.mask_update_active = false;
         self.ai.mask_update_subject_pending = false;
         self.ai.mask_update_object_queue.clear();
-        self.ai.mask_update_landscape_queue.clear();
         if self.ai.mask_update_failed {
             self.ai.masks_need_update = true;
             self.ui.notice = Some(
@@ -635,10 +565,8 @@ impl AurawApp {
         self.ai.mask_update_active = false;
         self.ai.mask_update_subject_pending = false;
         self.ai.mask_update_object_queue.clear();
-        self.ai.mask_update_landscape_queue.clear();
         self.ai.mask_update_failed = false;
         self.ai.object_pending_target = None;
-        self.ai.landscape_pending_target = None;
         self.ai.masks_need_update = true;
         self.ui.notice = Some("AI-mask update canceled.".to_owned());
         self.egui_ctx.request_repaint();

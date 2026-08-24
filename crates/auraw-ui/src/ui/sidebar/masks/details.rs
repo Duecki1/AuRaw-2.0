@@ -189,7 +189,6 @@ impl Sidebar {
         let mut effect_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
-        let mut request_landscape = false;
         let mut brush_mode = app.masks.brush_mode;
         let selected_is_subject = app.masks.stack.masks[mask_index]
             .components
@@ -234,7 +233,6 @@ impl Sidebar {
                                 &mut clear_refinement,
                             ),
                             &mut request_object,
-                            &mut request_landscape,
                         );
                     });
 
@@ -345,7 +343,6 @@ impl Sidebar {
                                                 &mut clear_refinement,
                                             ),
                                             &mut request_object,
-                                            &mut request_landscape,
                                         );
                                     },
                                 );
@@ -385,7 +382,6 @@ impl Sidebar {
                                     &mut clear_refinement,
                                 ),
                                 &mut request_object,
-                                &mut request_landscape,
                             );
                         });
                         adjustments_changed |= Self::show_mask_effect_settings(ui, mask);
@@ -417,9 +413,6 @@ impl Sidebar {
         }
         if request_object {
             app.request_object_mask(mask_index, component_index);
-        }
-        if request_landscape {
-            app.request_landscape_mask(frame, mask_index, component_index);
         }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if effect_changed {

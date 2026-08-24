@@ -375,10 +375,6 @@ pub(super) fn ai_mask_refresh_target_count(masks: &crate::pipeline::MaskStack) -
                 .iter()
                 .any(|stroke| stroke.positive && !stroke.points.is_empty()),
             (
-                crate::pipeline::MaskKind::Landscape,
-                crate::pipeline::MaskGeometry::Landscape { .. },
-            ) => true,
-            (
                 crate::pipeline::MaskKind::LuminanceRange,
                 crate::pipeline::MaskGeometry::LuminanceRange { .. },
             )
@@ -708,11 +704,7 @@ impl AurawApp {
         }
         if matches!(
             self.foreground_operation_kind(),
-            Some(
-                ForegroundOperationKind::SubjectMask
-                    | ForegroundOperationKind::ObjectMask
-                    | ForegroundOperationKind::LandscapeMask
-            )
+            Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
         ) {
             self.cancel_foreground_operation();
         }

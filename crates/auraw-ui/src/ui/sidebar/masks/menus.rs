@@ -11,7 +11,6 @@ impl Sidebar {
             MaskKind::Subject,
             MaskKind::Background,
             MaskKind::Object,
-            MaskKind::Landscape,
             MaskKind::LuminanceRange,
             MaskKind::ColorRange,
             MaskKind::DepthRange,

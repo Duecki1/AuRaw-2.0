@@ -34,11 +34,6 @@ impl AurawApp {
             .join("vitmatte-small-composition-1k.onnx")
     }
 
-    pub(in crate::app) fn landscape_model_path(&self) -> PathBuf {
-        self.ai_model_root()
-            .join("maskformer-swin-base-ade20k-int8.onnx")
-    }
-
     pub(in crate::app) fn big_lama_model_path(&self) -> PathBuf {
         self.ai_model_root()
             .join(crate::remove::BIG_LAMA_MODEL_FILENAME)

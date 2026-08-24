@@ -34,13 +34,12 @@ pub use lensfun::{apply_lensfun_correction, lensfun_catalog, LensfunCatalog, Len
 pub use masks::{
     effect_params, ellipse_outline_points, export_mask_atlas_edge, export_mask_atlas_edge_limit,
     mask_atlas_edge, rasterize_brush_dabs, BlurEffectSettings, BrushDab, BrushMode,
-    EdgeGlowEffectSettings, FogEffectSettings, GlowEffectSettings, LandscapeCategory,
-    LensBlurEffectSettings, LightRaysEffectSettings, LocalAdjustments, LocalMask, MaskCombineMode,
-    MaskCommon, MaskComponent, MaskEffect, MaskEffectCategory, MaskEffectSettings, MaskGeometry,
-    MaskImage, MaskKind, MaskRgbImage, MaskStack, MotionBlurEffectSettings, NeonEffectSettings,
-    ObjectStroke, PixelateEffectSettings, RadialBlurEffectSettings, RadialBlurMode,
-    SmokeEffectSettings, SubjectRefinement, TiltShiftEffectSettings, MAX_LOCAL_MASKS,
-    MAX_MASK_COMPONENTS,
+    EdgeGlowEffectSettings, FogEffectSettings, GlowEffectSettings, LensBlurEffectSettings,
+    LightRaysEffectSettings, LocalAdjustments, LocalMask, MaskCombineMode, MaskCommon,
+    MaskComponent, MaskEffect, MaskEffectCategory, MaskEffectSettings, MaskGeometry, MaskImage,
+    MaskKind, MaskRgbImage, MaskStack, MotionBlurEffectSettings, NeonEffectSettings, ObjectStroke,
+    PixelateEffectSettings, RadialBlurEffectSettings, RadialBlurMode, SmokeEffectSettings,
+    SubjectRefinement, TiltShiftEffectSettings, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS,
 };
 pub use noise::{AdaptiveDetailDefaults, DenoiseQuality, NoiseProfile};
 pub use processing::{

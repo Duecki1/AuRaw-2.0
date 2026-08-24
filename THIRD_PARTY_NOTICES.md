@@ -87,12 +87,7 @@ from AuRaw's GPL license; users must comply with the model terms for their use.
 | Subject selection | [BiRefNet v1 ONNX checkpoints](https://github.com/ZhengPeng7/BiRefNet/releases/tag/v1) | MIT |
 | Object selection | [SAM 2.1 Hiera Tiny ONNX encoder and decoder](https://huggingface.co/akiyamanx/sam2.1-hiera-tiny-onnx/tree/aa11669045f8d82c74e46f8f77c9b56792c90ebb), based on Meta SAM 2 | Apache-2.0 |
 | Subject/object edge refinement | [ViTMatte ONNX](https://huggingface.co/Xenova/vitmatte-small-composition-1k/tree/5e04250c42d7a03dc125b13adb415a47584ec60b), based on `hustvl/vitmatte-small-composition-1k` | Apache-2.0 |
-| Landscape selection | [MaskFormer ONNX](https://huggingface.co/onnx-community/maskformer-swin-base-ade/tree/9366a4a18164800bcb3e01eb3ddb82160173c1c7), based on `facebook/maskformer-swin-base-ade` | **CC BY-NC 4.0; noncommercial use only, with attribution** |
 | RAW denoise | [darktable-ai RawNIND release 5.6.0](https://github.com/darktable-org/darktable-ai/tree/release-5.6.0/models/rawdenoise-nind) | GPL-3.0 |
-
-The MaskFormer restriction applies to that optional model and its landscape
-selection feature. AuRaw does not grant commercial-use rights for it. The
-download confirmation also presents this restriction before installation.
 
 ## Native libraries and release packages
 

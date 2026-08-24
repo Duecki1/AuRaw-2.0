@@ -14,7 +14,6 @@ pub(super) fn ai_mask_source_proxy_edge(width: u32, height: u32) -> u32 {
 }
 
 mod dialogs;
-mod landscape;
 mod models;
 mod object;
 mod source;

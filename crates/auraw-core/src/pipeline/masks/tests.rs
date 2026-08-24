@@ -19,7 +19,6 @@ fn common_mask_properties_mutate_through_shared_model_api() {
         MaskKind::Radial,
         MaskKind::Linear,
         MaskKind::Subject,
-        MaskKind::Landscape,
         MaskKind::Object,
         MaskKind::LuminanceRange,
         MaskKind::ColorRange,
@@ -41,7 +40,6 @@ fn common_mask_properties_mutate_through_shared_model_api() {
             | MaskGeometry::Radial { feather, .. }
             | MaskGeometry::Linear { feather, .. }
             | MaskGeometry::Ai { feather, .. }
-            | MaskGeometry::Landscape { feather, .. }
             | MaskGeometry::Object { feather, .. }
             | MaskGeometry::LuminanceRange { feather, .. }
             | MaskGeometry::ColorRange { feather, .. } => *feather,
@@ -1112,36 +1110,6 @@ fn submask_components_can_move_between_nonempty_groups() {
     assert_eq!(stack.selected_mask, Some(1));
     assert_eq!(stack.selected_component, Some(1));
     assert_eq!(stack.move_submask_component(0, 0, 1, 0), None);
-}
-
-#[test]
-fn landscape_masks_are_available_persisted_and_rasterized() {
-    let mut stack = MaskStack::default();
-    assert_eq!(stack.add_mask(MaskKind::Landscape), Some((0, 0)));
-    let geometry = &mut stack.masks[0].components[0].geometry;
-    let MaskGeometry::Landscape {
-        mask,
-        category,
-        feather,
-        ..
-    } = geometry
-    else {
-        panic!("landscape mask used unexpected geometry");
-    };
-    *category = LandscapeCategory::Water;
-    *mask = MaskImage::new(2, 1, vec![0, 255]);
-    *feather = 0.0;
-    assert_eq!(stack.rasterize_layer(0, 2, 1, 2, 1), [0, 255]);
-
-    let json = serde_json::to_string(&stack).unwrap();
-    let restored: MaskStack = serde_json::from_str(&json).unwrap();
-    assert!(matches!(
-        restored.masks[0].components[0].geometry,
-        MaskGeometry::Landscape {
-            category: LandscapeCategory::Water,
-            ..
-        }
-    ));
 }
 
 #[test]

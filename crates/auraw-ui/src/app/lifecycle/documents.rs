@@ -262,14 +262,11 @@ impl AurawApp {
         self.ai.mask_update_active = false;
         self.ai.mask_update_subject_pending = false;
         self.ai.mask_update_object_queue.clear();
-        self.ai.mask_update_landscape_queue.clear();
         self.ai.mask_update_failed = false;
         self.ai.subject_consent_open = false;
         self.ai.object_consent_open = false;
         self.ai.object_pending_target = None;
         self.ai.object_cache = None;
-        self.ai.landscape_consent_open = false;
-        self.ai.landscape_pending_target = None;
         self.masks.dirty_layers = [false; MAX_LOCAL_MASKS];
         self.masks.detail_dirty_layers = [false; MAX_LOCAL_MASKS];
         self.masks.navigation_dirty_layers = [false; MAX_LOCAL_MASKS];

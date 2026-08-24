@@ -272,19 +272,6 @@ pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError>
                         validate_image(image.width, image.height, image.pixels.len(), 1)?;
                     }
                 }
-                MaskGeometry::Landscape {
-                    mask,
-                    grow,
-                    feather,
-                    ..
-                } => {
-                    finite("landscape mask settings", &[*grow, *feather])?;
-                    bounded("landscape mask grow", *grow, -1.0, 1.0)?;
-                    bounded("landscape mask feather", *feather, 0.0, 1.0)?;
-                    if let Some(image) = mask {
-                        validate_image(image.width, image.height, image.pixels.len(), 1)?;
-                    }
-                }
                 MaskGeometry::Object {
                     mask,
                     grow,
@@ -386,7 +373,6 @@ fn geometry_matches_kind(kind: MaskKind, geometry: &MaskGeometry) -> bool {
                 MaskGeometry::Ai { .. }
             )
             | (MaskKind::Object, MaskGeometry::Object { .. })
-            | (MaskKind::Landscape, MaskGeometry::Landscape { .. })
             | (
                 MaskKind::LuminanceRange,
                 MaskGeometry::LuminanceRange { .. }

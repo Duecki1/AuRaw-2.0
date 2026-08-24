@@ -611,21 +611,16 @@ impl AurawApp {
         self.ai.mask_update_active = false;
         self.ai.mask_update_subject_pending = false;
         self.ai.mask_update_object_queue.clear();
-        self.ai.mask_update_landscape_queue.clear();
         self.ai.mask_update_failed = false;
         if self.ai.masks_need_update {
-            let (subject, objects, landscapes) = self.generated_ai_mask_targets();
-            self.ai.masks_need_update = subject
-                || !objects.is_empty()
-                || !landscapes.is_empty()
-                || self.has_range_mask_targets();
+            let (subject, objects) = self.generated_ai_mask_targets();
+            self.ai.masks_need_update =
+                subject || !objects.is_empty() || self.has_range_mask_targets();
         }
         self.ai.subject_consent_open = false;
         self.ai.object_consent_open = false;
         self.ai.object_pending_target = None;
         self.ai.object_cache = None;
-        self.ai.landscape_consent_open = false;
-        self.ai.landscape_pending_target = None;
     }
 }
 

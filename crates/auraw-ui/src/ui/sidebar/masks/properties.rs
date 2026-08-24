@@ -141,7 +141,6 @@ impl Sidebar {
         subject_controls: (&mut bool, crate::ai_masks::BiRefNetQuality, bool),
         refinement_controls: (&mut bool, &mut f32, &mut f32, &mut f32, &mut bool),
         request_object: &mut bool,
-        request_landscape: &mut bool,
     ) -> bool {
         let (request_subject, birefnet_quality, birefnet_quality_change_enabled) = subject_controls;
         let (
@@ -508,38 +507,6 @@ impl Sidebar {
                         }
                     });
                     ui.small(format!("{} selection stroke(s)", strokes.len()));
-                }
-                MaskGeometry::Landscape {
-                    mask: generated_mask,
-                    category,
-                    grow,
-                    feather,
-                } => {
-                    ui.label("Choose a landscape element, then generate its semantic mask.");
-                    let before = *category;
-                    egui::ComboBox::from_id_salt("landscape-mask-category")
-                        .selected_text(category.label())
-                        .show_ui(ui, |ui| {
-                            for option in crate::pipeline::LandscapeCategory::ALL {
-                                ui.selectable_value(category, option, option.label());
-                            }
-                        });
-                    if before != *category {
-                        *generated_mask = None;
-                        geometry_changed = true;
-                    }
-                    if ui.button("Generate Mask").clicked() {
-                        *request_landscape = true;
-                    }
-                    geometry_changed |= Self::mask_grow_slider(ui, grow);
-                    geometry_changed |= Self::mask_feather_slider(
-                        ui,
-                        "Feather",
-                        feather,
-                        0.0..=1.0,
-                        "Softens the semantic boundary after generation.",
-                        0.0,
-                    );
                 }
                 MaskGeometry::LuminanceRange {
                     low,
