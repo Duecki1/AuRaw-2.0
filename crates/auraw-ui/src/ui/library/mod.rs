@@ -699,6 +699,7 @@ pub(crate) struct LibraryState {
     render_edited_thumbnails_during_indexing: bool,
     sort_order: LibrarySortOrder,
     thumbnail_size: LibraryThumbnailSize,
+    search_query: String,
     selected_assets: HashSet<LibraryAssetId>,
     selection_mode: bool,
     image_clipboard: Option<ImageClipboard>,

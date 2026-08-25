@@ -121,25 +121,55 @@ pub(super) fn justified_thumbnail_layout(
     target_height: f32,
     gap: f32,
 ) -> (Vec<egui::Rect>, f32) {
+    justified_thumbnail_layout_from_aspects(
+        entries.iter().map(library_entry_aspect).collect(),
+        available_width,
+        target_height,
+        gap,
+    )
+}
+
+pub(super) fn justified_thumbnail_layout_for_indices(
+    entries: &[LibraryEntry],
+    indices: &[usize],
+    available_width: f32,
+    target_height: f32,
+    gap: f32,
+) -> (Vec<egui::Rect>, f32) {
+    justified_thumbnail_layout_from_aspects(
+        indices
+            .iter()
+            .map(|index| library_entry_aspect(&entries[*index]))
+            .collect(),
+        available_width,
+        target_height,
+        gap,
+    )
+}
+
+fn library_entry_aspect(entry: &LibraryEntry) -> f32 {
+    entry
+        .layout_size
+        .or(entry.thumbnail_size)
+        .and_then(|[width, source_height]| {
+            (width > 0 && source_height > 0).then_some(width as f32 / source_height as f32)
+        })
+        .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
+        .unwrap_or(1.5)
+}
+
+fn justified_thumbnail_layout_from_aspects(
+    aspects: Vec<f32>,
+    available_width: f32,
+    target_height: f32,
+    gap: f32,
+) -> (Vec<egui::Rect>, f32) {
     let available_width = available_width.max(1.0);
     let target_height = target_height.max(1.0);
     let gap = gap.max(0.0);
-    let aspects: Vec<f32> = entries
-        .iter()
-        .map(|entry| {
-            entry
-                .layout_size
-                .or(entry.thumbnail_size)
-                .and_then(|[width, source_height]| {
-                    (width > 0 && source_height > 0).then_some(width as f32 / source_height as f32)
-                })
-                .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
-                .unwrap_or(1.5)
-        })
-        .collect();
 
     let row_ranges = balanced_justified_row_ranges(&aspects, available_width, target_height, gap);
-    let mut placements = Vec::with_capacity(entries.len());
+    let mut placements = Vec::with_capacity(aspects.len());
     let mut y = 0.0;
 
     for (row_start, row_end) in row_ranges {
