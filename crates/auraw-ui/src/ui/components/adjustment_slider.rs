@@ -26,6 +26,11 @@ const CONTROL_GAP: f32 = 2.0;
 const ROW_BOTTOM_SPACE: f32 = 7.0;
 #[cfg(target_os = "android")]
 const ROW_BOTTOM_SPACE: f32 = 3.0;
+const COMPACT_ROW_GAP: f32 = 4.0;
+const COMPACT_ROW_BOTTOM_SPACE: f32 = 1.0;
+const COMPACT_LABEL_MIN_WIDTH: f32 = 76.0;
+const COMPACT_LABEL_MAX_WIDTH: f32 = 104.0;
+const COMPACT_TRACK_MIN_WIDTH: f32 = 64.0;
 
 #[derive(Clone, Copy, Debug)]
 pub enum SliderGradient {
@@ -261,30 +266,29 @@ where
             ui.set_width(control_width);
             ui.spacing_mut().item_spacing.y = CONTROL_GAP;
 
-            ui.allocate_ui_with_layout(
-                egui::vec2(control_width, HEADER_HEIGHT),
-                Layout::left_to_right(Align::Center),
-                |ui| {
-                    let mut label_response = if let Some(accent) = accent {
-                        let (swatch_rect, swatch_response) =
-                            ui.allocate_exact_size(egui::vec2(9.0, 9.0), Sense::hover());
-                        ui.painter()
-                            .circle_filled(swatch_rect.center(), 4.5, accent);
-                        ui.painter().circle_stroke(
-                            swatch_rect.center(),
-                            4.5,
-                            Stroke::new(1.0, egui::Color32::from_white_alpha(90)),
-                        );
-                        swatch_response.union(ui.label(RichText::new(label)))
-                    } else {
-                        ui.label(label)
-                    };
-                    label_response = label_response.on_hover_text(reset_tooltip(hover_text));
-                    if label_response.double_clicked() {
-                        changed |= set_numeric(value, reset_value, decimals);
-                    }
+            if crate::ui::theme::is_compact_portrait(ui) {
+                let (label_width, track_width) = compact_slider_widths(control_width);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(control_width, HEADER_HEIGHT),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = COMPACT_ROW_GAP;
+                        let label_tooltip = format!("{label}\n{}", reset_tooltip(hover_text));
+                        let label_response = compact_slider_label(ui, label, accent, label_width)
+                            .on_hover_text(label_tooltip);
+                        if label_response.double_clicked() {
+                            changed |= set_numeric(value, reset_value, decimals);
+                        }
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        changed |= guarded_slider(
+                            ui,
+                            value,
+                            range.clone(),
+                            track_width,
+                            reset_value,
+                            options,
+                        );
+
                         let mut value_response = if ui.input(|input| input.has_touch_screen()) {
                             touch_value_field(ui, (*value).to_f64(), decimals)
                         } else {
@@ -302,16 +306,100 @@ where
                         if value_response.double_clicked() {
                             changed |= set_numeric(value, reset_value, decimals);
                         }
-                    });
-                },
-            );
+                    },
+                );
+                ui.add_space(COMPACT_ROW_BOTTOM_SPACE);
+            } else {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(control_width, HEADER_HEIGHT),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        let mut label_response = if let Some(accent) = accent {
+                            let (swatch_rect, swatch_response) =
+                                ui.allocate_exact_size(egui::vec2(9.0, 9.0), Sense::hover());
+                            ui.painter()
+                                .circle_filled(swatch_rect.center(), 4.5, accent);
+                            ui.painter().circle_stroke(
+                                swatch_rect.center(),
+                                4.5,
+                                Stroke::new(1.0, egui::Color32::from_white_alpha(90)),
+                            );
+                            swatch_response.union(ui.label(RichText::new(label)))
+                        } else {
+                            ui.label(label)
+                        };
+                        label_response = label_response.on_hover_text(reset_tooltip(hover_text));
+                        if label_response.double_clicked() {
+                            changed |= set_numeric(value, reset_value, decimals);
+                        }
 
-            changed |= guarded_slider(ui, value, range, control_width, reset_value, options);
-            ui.add_space(ROW_BOTTOM_SPACE);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let mut value_response = if ui.input(|input| input.has_touch_screen()) {
+                                touch_value_field(ui, (*value).to_f64(), decimals)
+                            } else {
+                                let response = ui.add_sized(
+                                    [VALUE_FIELD_WIDTH, HEADER_HEIGHT],
+                                    DragValue::new(value)
+                                        .range(range.clone())
+                                        .speed(speed)
+                                        .fixed_decimals(decimals),
+                                );
+                                changed |= response.changed();
+                                response
+                            };
+                            value_response =
+                                value_response.on_hover_text(reset_tooltip(hover_text));
+                            if value_response.double_clicked() {
+                                changed |= set_numeric(value, reset_value, decimals);
+                            }
+                        });
+                    },
+                );
+
+                changed |= guarded_slider(ui, value, range, control_width, reset_value, options);
+                ui.add_space(ROW_BOTTOM_SPACE);
+            }
         });
     });
 
     changed
+}
+
+fn compact_slider_widths(control_width: f32) -> (f32, f32) {
+    let usable_width = (control_width - VALUE_FIELD_WIDTH - COMPACT_ROW_GAP * 2.0).max(2.0);
+    let label_width = (control_width * 0.27)
+        .clamp(COMPACT_LABEL_MIN_WIDTH, COMPACT_LABEL_MAX_WIDTH)
+        .min((usable_width - COMPACT_TRACK_MIN_WIDTH).max(1.0));
+    (label_width, (usable_width - label_width).max(1.0))
+}
+
+fn compact_slider_label(
+    ui: &mut Ui,
+    label: &str,
+    accent: Option<egui::Color32>,
+    width: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, HEADER_HEIGHT), Sense::click());
+    let painter = ui.painter_at(rect);
+    let mut text_x = rect.left();
+    if let Some(accent) = accent {
+        let center = egui::pos2(rect.left() + 5.0, rect.center().y);
+        painter.circle_filled(center, 4.5, accent);
+        painter.circle_stroke(
+            center,
+            4.5,
+            Stroke::new(1.0, egui::Color32::from_white_alpha(90)),
+        );
+        text_x += 15.0;
+    }
+    painter.text(
+        egui::pos2(text_x, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui.visuals().text_color(),
+    );
+    response
 }
 
 fn touch_value_field(ui: &mut Ui, value: f64, decimals: usize) -> egui::Response {
@@ -360,7 +448,12 @@ where
         ((value.to_f64() - start) / span).clamp(0.0, 1.0)
     } as f32;
 
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, SLIDER_HEIGHT), Sense::hover());
+    let slider_height = if crate::ui::theme::is_compact_portrait(ui) {
+        HEADER_HEIGHT
+    } else {
+        SLIDER_HEIGHT
+    };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, slider_height), Sense::hover());
     let track_rect = egui::Rect::from_center_size(
         rect.center(),
         egui::vec2((rect.width() - HANDLE_RADIUS * 2.0).max(1.0), TRACK_HEIGHT),
@@ -767,11 +860,22 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{gradient_color_at, SliderGradient, HEADER_HEIGHT};
+    use super::{
+        compact_slider_widths, gradient_color_at, SliderGradient, COMPACT_ROW_GAP, HEADER_HEIGHT,
+        VALUE_FIELD_WIDTH,
+    };
 
     #[test]
     fn slider_header_reserves_the_full_themed_control_height() {
         assert_eq!(HEADER_HEIGHT, crate::ui::theme::CONTROL_HEIGHT);
+    }
+
+    #[test]
+    fn compact_slider_row_uses_the_available_width() {
+        let width = 360.0;
+        let (label, track) = compact_slider_widths(width);
+        assert!((label + track + VALUE_FIELD_WIDTH + COMPACT_ROW_GAP * 2.0 - width).abs() < 0.001);
+        assert!(track >= 64.0);
     }
 
     #[test]

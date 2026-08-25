@@ -1,3 +1,9 @@
+const COMPACT_PRIMARY_PANEL_HEIGHT: f32 = 52.0;
+const COMPACT_PRIMARY_TAB_HEIGHT: f32 = 48.0;
+const COMPACT_CONTEXT_PANEL_HEIGHT: f32 = 48.0;
+const COMPACT_CONTEXT_TAB_HEIGHT: f32 = 44.0;
+const COMPACT_CONTEXT_ACTION_WIDTH: f32 = 44.0;
+
 fn mobile_tab_text_geometry(height: f32) -> (f32, f32, f32, f32) {
     let icon_size = (height * 0.38).clamp(19.0, 23.0);
     let label_size = if height > 54.0 { 10.5 } else { 9.5 };
@@ -12,9 +18,14 @@ fn mobile_tab_text_geometry(height: f32) -> (f32, f32, f32, f32) {
 impl Sidebar {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
         ui.take_available_width();
+        let vertical_spacing = if crate::ui::theme::is_compact_portrait(ui) {
+            crate::ui::theme::SPACE_XS
+        } else {
+            crate::ui::theme::SPACE_SM
+        };
         ui.spacing_mut().item_spacing = egui::vec2(
             crate::ui::theme::SPACE_SM,
-            crate::ui::theme::SPACE_SM,
+            vertical_spacing,
         );
 
         if layout == ScreenLayout::Vertical {
@@ -37,6 +48,7 @@ impl Sidebar {
     }
 
     fn show_vertical_mobile_shell(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+        let compact = crate::ui::theme::is_compact_portrait(ui);
         if !app.ui.expert_mode
             && matches!(
                 app.develop_ui.adjustment_section,
@@ -48,14 +60,22 @@ impl Sidebar {
 
         egui::Panel::bottom("develop_portrait_primary_tabs")
             .resizable(false)
-            .exact_size(62.0)
+            .exact_size(if compact {
+                COMPACT_PRIMARY_PANEL_HEIGHT
+            } else {
+                62.0
+            })
             .frame(Self::mobile_navigation_frame(ui))
             .show(ui, |ui| Self::show_mobile_primary_tabs(ui, app));
 
         if matches!(app.ui.sidebar_tab, SidebarTab::Adjustments | SidebarTab::Masks) {
             egui::Panel::bottom("develop_portrait_context_tabs")
                 .resizable(false)
-                .exact_size(58.0)
+                .exact_size(if compact {
+                    COMPACT_CONTEXT_PANEL_HEIGHT
+                } else {
+                    58.0
+                })
                 .frame(Self::mobile_navigation_frame(ui))
                 .show(ui, |ui| Self::show_mobile_context_tabs(ui, app));
         }
@@ -86,6 +106,11 @@ impl Sidebar {
 
         Self::paint_mobile_navigation_separators(ui);
         ui.spacing_mut().item_spacing.x = 0.0;
+        let tab_height = if crate::ui::theme::is_compact_portrait(ui) {
+            COMPACT_PRIMARY_TAB_HEIGHT
+        } else {
+            56.0
+        };
         let previous = app.ui.sidebar_tab;
         let item_width = (ui.available_width() / 5.0).max(1.0);
         ui.horizontal(|ui| {
@@ -116,7 +141,7 @@ impl Sidebar {
                     icon,
                     label,
                     app.ui.sidebar_tab == tab,
-                    egui::vec2(item_width, 56.0),
+                    egui::vec2(item_width, tab_height),
                     tooltip,
                 )
                 .clicked()
@@ -132,103 +157,153 @@ impl Sidebar {
         use egui_phosphor::regular;
 
         Self::paint_mobile_navigation_separators(ui);
-        egui::ScrollArea::horizontal()
-            .id_salt("develop-portrait-context-tabs")
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 1.0;
-                ui.horizontal(|ui| match app.ui.sidebar_tab {
-                    SidebarTab::Adjustments => {
-                        for (section, icon, label) in [
-                            (AdjustmentSection::Light, regular::SUN, "Light"),
-                            (AdjustmentSection::ToneCurve, regular::WAVE_SINE, "Curve"),
-                            (AdjustmentSection::Color, regular::DROP, "Color"),
-                            (
-                                AdjustmentSection::ColorGrading,
-                                regular::CIRCLES_THREE,
-                                "Grading",
-                            ),
-                            (AdjustmentSection::Detail, regular::APERTURE, "Detail"),
-                            (AdjustmentSection::Effects, regular::SPARKLE, "Effects"),
-                            (AdjustmentSection::ColorMixer, regular::SWATCHES, "Mixer"),
-                            (AdjustmentSection::Optics, regular::EYE, "Optics"),
-                        ] {
-                            if Self::mobile_icon_tab(
-                                ui,
-                                icon,
-                                label,
-                                app.develop_ui.adjustment_section == section,
-                                egui::vec2(Self::CONTEXT_TAB_WIDTH, 52.0),
-                                label,
-                            )
-                            .clicked()
-                            {
-                                app.develop_ui.adjustment_section = section;
-                                if section != AdjustmentSection::Color {
-                                    app.develop_ui.white_balance_picker_active = false;
-                                    app.develop_ui.white_balance_picker_drag = None;
-                                }
-                            }
-                        }
-                        if app.ui.expert_mode {
-                            for (section, icon, label) in [
-                                (
-                                    AdjustmentSection::AdvancedRendering,
-                                    regular::SLIDERS,
-                                    "Advanced",
-                                ),
-                                (AdjustmentSection::Raw, regular::IMAGE, "Raw"),
-                            ] {
-                                if Self::mobile_icon_tab(
-                                    ui,
-                                    icon,
-                                    label,
-                                    app.develop_ui.adjustment_section == section,
-                                    egui::vec2(Self::CONTEXT_TAB_WIDTH, 52.0),
-                                    label,
-                                )
-                                .clicked()
-                                {
-                                    app.develop_ui.adjustment_section = section;
-                                    app.develop_ui.white_balance_picker_active = false;
-                                    app.develop_ui.white_balance_picker_drag = None;
-                                }
-                            }
-                        }
-                    }
-                    SidebarTab::Masks => {
-                        let adjustment_mask = app.masks.stack
-                            .selected_mask()
-                            .is_none_or(|mask| mask.effect.uses_adjustments());
-                        for (section, icon, label) in [
-                            (MaskSection::Properties, regular::SELECTION, "Mask"),
-                            (MaskSection::Light, regular::SUN, "Light"),
-                            (MaskSection::ToneCurve, regular::WAVE_SINE, "Curve"),
-                            (MaskSection::Color, regular::DROP, "Color"),
-                            (MaskSection::ColorGrading, regular::CIRCLES_THREE, "Grading"),
-                            (MaskSection::Effects, regular::SPARKLE, "Effects"),
-                            (MaskSection::ColorMixer, regular::SWATCHES, "Mixer"),
-                        ] {
-                            if section != MaskSection::Properties && !adjustment_mask {
-                                continue;
-                            }
-                            if Self::mobile_icon_tab(
-                                ui,
-                                icon,
-                                label,
-                                app.develop_ui.mask_section == section,
-                                egui::vec2(Self::CONTEXT_TAB_WIDTH, 52.0),
-                                label,
-                            )
-                            .clicked()
-                            {
-                                app.develop_ui.mask_section = section;
-                            }
+        let compact = crate::ui::theme::is_compact_portrait(ui);
+        let tab_height = if compact {
+            COMPACT_CONTEXT_TAB_HEIGHT
+        } else {
+            52.0
+        };
+        let has_reset_action = compact && app.ui.sidebar_tab == SidebarTab::Adjustments;
+        let action_width = if has_reset_action {
+            COMPACT_CONTEXT_ACTION_WIDTH
+        } else {
+            0.0
+        };
+        let tabs_width = (ui.available_width() - action_width).max(1.0);
+
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(tabs_width, tab_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_width(tabs_width);
+                    egui::ScrollArea::horizontal()
+                        .id_salt("develop-portrait-context-tabs")
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        )
+                        .show(ui, |ui| {
+                            Self::show_mobile_context_tab_items(ui, app, tab_height)
+                        });
+                },
+            );
+
+            if has_reset_action
+                && crate::ui::icons::phosphor_icon_button(
+                    ui,
+                    regular::ARROW_COUNTER_CLOCKWISE,
+                    egui::vec2(COMPACT_CONTEXT_ACTION_WIDTH, tab_height),
+                    "Reset all develop adjustments",
+                )
+                .clicked()
+            {
+                app.reset_develop_adjustments();
+            }
+        });
+    }
+
+    fn show_mobile_context_tab_items(ui: &mut Ui, app: &mut AurawApp, tab_height: f32) {
+        use egui_phosphor::regular;
+
+        ui.spacing_mut().item_spacing.x = 1.0;
+        ui.horizontal(|ui| match app.ui.sidebar_tab {
+            SidebarTab::Adjustments => {
+                for (section, icon, label) in [
+                    (AdjustmentSection::Light, regular::SUN, "Light"),
+                    (AdjustmentSection::ToneCurve, regular::WAVE_SINE, "Curve"),
+                    (AdjustmentSection::Color, regular::DROP, "Color"),
+                    (
+                        AdjustmentSection::ColorGrading,
+                        regular::CIRCLES_THREE,
+                        "Grading",
+                    ),
+                    (AdjustmentSection::Detail, regular::APERTURE, "Detail"),
+                    (AdjustmentSection::Effects, regular::SPARKLE, "Effects"),
+                    (AdjustmentSection::ColorMixer, regular::SWATCHES, "Mixer"),
+                    (AdjustmentSection::Optics, regular::EYE, "Optics"),
+                ] {
+                    if Self::mobile_icon_tab(
+                        ui,
+                        icon,
+                        label,
+                        app.develop_ui.adjustment_section == section,
+                        egui::vec2(Self::CONTEXT_TAB_WIDTH, tab_height),
+                        label,
+                    )
+                    .clicked()
+                    {
+                        app.develop_ui.adjustment_section = section;
+                        if section != AdjustmentSection::Color {
+                            app.develop_ui.white_balance_picker_active = false;
+                            app.develop_ui.white_balance_picker_drag = None;
                         }
                     }
-                    SidebarTab::Crop | SidebarTab::Inpainting | SidebarTab::Export => {}
-                });
-            });
+                }
+                if app.ui.expert_mode {
+                    for (section, icon, label) in [
+                        (
+                            AdjustmentSection::AdvancedRendering,
+                            regular::SLIDERS,
+                            "Advanced",
+                        ),
+                        (AdjustmentSection::Raw, regular::IMAGE, "Raw"),
+                    ] {
+                        if Self::mobile_icon_tab(
+                            ui,
+                            icon,
+                            label,
+                            app.develop_ui.adjustment_section == section,
+                            egui::vec2(Self::CONTEXT_TAB_WIDTH, tab_height),
+                            label,
+                        )
+                        .clicked()
+                        {
+                            app.develop_ui.adjustment_section = section;
+                            app.develop_ui.white_balance_picker_active = false;
+                            app.develop_ui.white_balance_picker_drag = None;
+                        }
+                    }
+                }
+            }
+            SidebarTab::Masks => {
+                let adjustment_mask = app
+                    .masks
+                    .stack
+                    .selected_mask()
+                    .is_none_or(|mask| mask.effect.uses_adjustments());
+                for (section, icon, label) in [
+                    (MaskSection::Properties, regular::SELECTION, "Mask"),
+                    (MaskSection::Light, regular::SUN, "Light"),
+                    (MaskSection::ToneCurve, regular::WAVE_SINE, "Curve"),
+                    (MaskSection::Color, regular::DROP, "Color"),
+                    (
+                        MaskSection::ColorGrading,
+                        regular::CIRCLES_THREE,
+                        "Grading",
+                    ),
+                    (MaskSection::Effects, regular::SPARKLE, "Effects"),
+                    (MaskSection::ColorMixer, regular::SWATCHES, "Mixer"),
+                ] {
+                    if section != MaskSection::Properties && !adjustment_mask {
+                        continue;
+                    }
+                    if Self::mobile_icon_tab(
+                        ui,
+                        icon,
+                        label,
+                        app.develop_ui.mask_section == section,
+                        egui::vec2(Self::CONTEXT_TAB_WIDTH, tab_height),
+                        label,
+                    )
+                    .clicked()
+                    {
+                        app.develop_ui.mask_section = section;
+                    }
+                }
+            }
+            SidebarTab::Crop | SidebarTab::Inpainting | SidebarTab::Export => {}
+        });
     }
 
     fn mobile_icon_tab(
@@ -471,37 +546,39 @@ impl Sidebar {
         layout: ScreenLayout,
         frame: &eframe::Frame,
     ) {
-        crate::ui::theme::toolbar_row(ui, |ui| {
-            if layout == ScreenLayout::Vertical {
-                ui.strong(match app.develop_ui.adjustment_section {
-                    AdjustmentSection::Light => "Light",
-                    AdjustmentSection::ToneCurve => "Tone Curve",
-                    AdjustmentSection::Color => "Color",
-                    AdjustmentSection::ColorGrading => "Color Grading",
-                    AdjustmentSection::Detail => "Detail",
-                    AdjustmentSection::Effects => "Effects",
-                    AdjustmentSection::ColorMixer => "Color Mixer",
-                    AdjustmentSection::Optics => "Optics",
-                    AdjustmentSection::AdvancedRendering => "Advanced Rendering",
-                    AdjustmentSection::Raw => "Raw",
-                });
-            } else {
-                ui.strong("Global adjustments");
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::ui::icons::phosphor_icon_button(
-                    ui,
-                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                    crate::ui::theme::toolbar_icon_size(),
-                    "Reset all develop adjustments",
-                )
-                .clicked()
-                {
-                    app.reset_develop_adjustments();
+        if !crate::ui::theme::is_compact_portrait(ui) {
+            crate::ui::theme::toolbar_row(ui, |ui| {
+                if layout == ScreenLayout::Vertical {
+                    ui.strong(match app.develop_ui.adjustment_section {
+                        AdjustmentSection::Light => "Light",
+                        AdjustmentSection::ToneCurve => "Tone Curve",
+                        AdjustmentSection::Color => "Color",
+                        AdjustmentSection::ColorGrading => "Color Grading",
+                        AdjustmentSection::Detail => "Detail",
+                        AdjustmentSection::Effects => "Effects",
+                        AdjustmentSection::ColorMixer => "Color Mixer",
+                        AdjustmentSection::Optics => "Optics",
+                        AdjustmentSection::AdvancedRendering => "Advanced Rendering",
+                        AdjustmentSection::Raw => "Raw",
+                    });
+                } else {
+                    ui.strong("Global adjustments");
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::ui::icons::phosphor_icon_button(
+                        ui,
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                        crate::ui::theme::toolbar_icon_size(),
+                        "Reset all develop adjustments",
+                    )
+                    .clicked()
+                    {
+                        app.reset_develop_adjustments();
+                    }
+                });
             });
-        });
-        ui.add_space(4.0);
+            ui.add_space(4.0);
+        }
 
         Self::show_camera_profile_selector(ui, app, frame);
 

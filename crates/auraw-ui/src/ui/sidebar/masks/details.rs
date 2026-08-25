@@ -1,5 +1,13 @@
 use super::*;
 
+fn mask_effect_picker_visible(
+    orientation: MaskStripOrientation,
+    vertical_section: Option<MaskSection>,
+) -> bool {
+    orientation == MaskStripOrientation::Horizontal
+        || vertical_section == Some(MaskSection::Properties)
+}
+
 impl Sidebar {
     pub(super) fn create_mask_group_card(
         ui: &mut Ui,
@@ -209,8 +217,10 @@ impl Sidebar {
 
         {
             let mask = &mut app.masks.stack.masks[mask_index];
-            effect_changed |= Self::show_mask_effect_picker(ui, &mut mask.effect);
-            crate::ui::theme::card_gap(ui);
+            if mask_effect_picker_visible(orientation, vertical_section) {
+                effect_changed |= Self::show_mask_effect_picker(ui, &mut mask.effect);
+                crate::ui::theme::card_gap(ui);
+            }
 
             match orientation {
                 MaskStripOrientation::Horizontal => {
@@ -422,5 +432,30 @@ impl Sidebar {
         if adjustments_changed || effect_changed {
             app.mark_mask_adjustments_dirty();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mask_effect_picker_visible, MaskSection, MaskStripOrientation};
+
+    #[test]
+    fn portrait_mask_type_only_appears_in_properties() {
+        assert!(mask_effect_picker_visible(
+            MaskStripOrientation::Vertical,
+            Some(MaskSection::Properties),
+        ));
+        assert!(!mask_effect_picker_visible(
+            MaskStripOrientation::Vertical,
+            Some(MaskSection::Light),
+        ));
+        assert!(!mask_effect_picker_visible(
+            MaskStripOrientation::Vertical,
+            Some(MaskSection::Color),
+        ));
+        assert!(mask_effect_picker_visible(
+            MaskStripOrientation::Horizontal,
+            None,
+        ));
     }
 }

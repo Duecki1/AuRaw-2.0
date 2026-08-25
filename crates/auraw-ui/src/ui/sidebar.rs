@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn mobile_tab_icon_and_label_stack_is_vertically_centered() {
-        for height in [52.0, 56.0] {
+        for height in [44.0, 48.0, 52.0, 56.0] {
             let (icon_size, label_size, icon_center, label_center) =
                 mobile_tab_text_geometry(height);
             let stack_top = icon_center - icon_size * 0.5;

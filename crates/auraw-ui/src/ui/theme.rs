@@ -20,6 +20,8 @@ pub const SPACE_MD: f32 = 12.0;
 pub const SPACE_LG: f32 = 16.0;
 pub const CARD_GAP: f32 = SPACE_MD;
 pub const CONTENT_MARGIN: i8 = 12;
+const COMPACT_PORTRAIT_CARD_GAP: f32 = SPACE_SM;
+const COMPACT_PORTRAIT_CONTENT_MARGIN: i8 = 8;
 pub const FORM_STACK_BREAKPOINT: f32 = 520.0;
 pub const HELP_BUTTON_EDGE: f32 = if cfg!(target_os = "android") {
     CONTROL_HEIGHT
@@ -340,6 +342,22 @@ pub fn toolbar_icon_size() -> Vec2 {
     Vec2::splat(TOOLBAR_ICON_EDGE)
 }
 
+pub fn is_compact_portrait(ui: &Ui) -> bool {
+    compact_portrait_for_platform(ui.ctx().content_rect().size(), cfg!(target_os = "android"))
+}
+
+fn compact_portrait_for_platform(viewport: Vec2, android: bool) -> bool {
+    android && viewport.x < viewport.y
+}
+
+fn content_margin(ui: &Ui) -> i8 {
+    if is_compact_portrait(ui) {
+        COMPACT_PORTRAIT_CONTENT_MARGIN
+    } else {
+        CONTENT_MARGIN
+    }
+}
+
 pub fn tool_rail_icon_size() -> Vec2 {
     Vec2::splat(TOOL_RAIL_ICON_EDGE)
 }
@@ -374,9 +392,13 @@ pub fn panel_title(ui: &mut Ui, title: impl Into<RichText>) -> InnerResponse<Res
 }
 
 pub fn toolbar_frame(ui: &Ui) -> Frame {
+    let compact = is_compact_portrait(ui);
     Frame::new()
         .fill(ui.visuals().panel_fill)
-        .inner_margin(Margin::symmetric(CONTENT_MARGIN, 6))
+        .inner_margin(Margin::symmetric(
+            if compact { 10 } else { CONTENT_MARGIN },
+            if compact { 4 } else { 6 },
+        ))
         .stroke(Stroke::new(
             1.0,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
@@ -386,13 +408,17 @@ pub fn toolbar_frame(ui: &Ui) -> Frame {
 pub fn panel_frame(ui: &Ui) -> Frame {
     Frame::new()
         .fill(ui.visuals().panel_fill)
-        .inner_margin(Margin::same(SPACE_SM as i8))
+        .inner_margin(Margin::same(if is_compact_portrait(ui) {
+            6
+        } else {
+            SPACE_SM as i8
+        }))
 }
 
 pub fn card_frame(ui: &Ui) -> Frame {
     Frame::new()
         .fill(ui.visuals().faint_bg_color)
-        .inner_margin(Margin::same(CONTENT_MARGIN))
+        .inner_margin(Margin::same(content_margin(ui)))
         .corner_radius(6.0)
         .stroke(Stroke::new(
             1.0,
@@ -401,7 +427,7 @@ pub fn card_frame(ui: &Ui) -> Frame {
 }
 
 pub fn content_card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
-    let frame_width = f32::from(CONTENT_MARGIN) * 2.0 + 2.0;
+    let frame_width = f32::from(content_margin(ui)) * 2.0 + 2.0;
     let inner_width = (ui.available_width() - frame_width).max(1.0);
     card_frame(ui).show(ui, |ui| {
         ui.set_width(inner_width);
@@ -553,7 +579,12 @@ pub fn action_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> In
 }
 
 pub fn card_gap(ui: &mut Ui) {
-    let explicit_space = (CARD_GAP - ui.spacing().item_spacing.y).max(0.0);
+    let gap = if is_compact_portrait(ui) {
+        COMPACT_PORTRAIT_CARD_GAP
+    } else {
+        CARD_GAP
+    };
+    let explicit_space = (gap - ui.spacing().item_spacing.y).max(0.0);
     ui.add_space(explicit_space);
 }
 
@@ -780,6 +811,15 @@ mod tests {
     fn android_widgets_request_the_full_touch_target_height() {
         assert_eq!(platform_control_height(true), ANDROID_CONTROL_HEIGHT);
         assert_eq!(platform_control_height(false), DESKTOP_CONTROL_HEIGHT);
+    }
+
+    #[test]
+    fn compact_density_is_limited_to_android_portrait() {
+        let portrait = eframe::egui::vec2(411.0, 891.0);
+        let landscape = eframe::egui::vec2(891.0, 411.0);
+        assert!(super::compact_portrait_for_platform(portrait, true));
+        assert!(!super::compact_portrait_for_platform(landscape, true));
+        assert!(!super::compact_portrait_for_platform(portrait, false));
     }
 
     #[test]

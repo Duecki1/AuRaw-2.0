@@ -269,6 +269,7 @@ pub fn tone_curve_channel_editor(
         for (tab, label, color) in TONE_CURVE_TABS {
             let text = egui::RichText::new(label).color(color);
             if crate::ui::theme::segmented_button(ui, text, *selected_tab == tab, segment_width)
+                .on_hover_text(tone_curve_description(tab))
                 .clicked()
             {
                 *selected_tab = tab;
@@ -300,11 +301,22 @@ pub fn tone_curve_channel_editor(
         ToneCurveTab::Green => (curves.green, CHANNEL_GREEN, "Green channel curve"),
         ToneCurveTab::Blue => (curves.blue, CHANNEL_BLUE, "Blue channel curve"),
     };
-    ui.label(
-        egui::RichText::new(description)
-            .size(11.5)
-            .color(ui.visuals().weak_text_color()),
-    );
+    if !crate::ui::theme::is_compact_portrait(ui) {
+        ui.label(
+            egui::RichText::new(description)
+                .size(11.5)
+                .color(ui.visuals().weak_text_color()),
+        );
+    }
     changed |= tone_curve_editor(ui, curve, color);
     changed
+}
+
+fn tone_curve_description(tab: ToneCurveTab) -> &'static str {
+    match tab {
+        ToneCurveTab::Rgb => "Composite luminance curve",
+        ToneCurveTab::Red => "Red channel curve",
+        ToneCurveTab::Green => "Green channel curve",
+        ToneCurveTab::Blue => "Blue channel curve",
+    }
 }
