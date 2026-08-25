@@ -529,6 +529,12 @@ impl AurawApp {
             },
         };
         crate::ui::theme::apply(&cc.egui_ctx, app.preferences.ui_design);
+        if let Err(error) = crate::android::set_light_system_bars(
+            &app.android.android_app,
+            !app.preferences.ui_design.is_dark(),
+        ) {
+            log::warn!("{error}");
+        }
         app
     }
 }

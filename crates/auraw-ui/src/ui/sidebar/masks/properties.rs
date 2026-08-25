@@ -170,9 +170,16 @@ impl Sidebar {
 
         ui.add_space(4.0);
         ui.scope(|ui| {
+            let is_fullscreen = matches!(&component.geometry, MaskGeometry::Fullscreen);
             ui.horizontal_wrapped(|ui| {
                 ui.strong(component.name.as_str());
                 ui.weak(component.kind.label());
+                if is_fullscreen {
+                    crate::ui::theme::help_button(
+                        ui,
+                        "Covers the complete image with uniform mask strength.",
+                    );
+                }
                 let mut inverted = component.invert;
                 if ui.checkbox(&mut inverted, "Invert").changed() {
                     component.common.toggle_invert();
@@ -196,9 +203,7 @@ impl Sidebar {
             });
 
             match &mut component.geometry {
-                MaskGeometry::Fullscreen => {
-                    ui.label("Covers the complete image with uniform mask strength.");
-                }
+                MaskGeometry::Fullscreen => {}
                 MaskGeometry::Brush {
                     size,
                     feather,

@@ -1,3 +1,32 @@
+fn inpaint_tool_help(tool: InpaintTool) -> &'static str {
+    match tool {
+        InpaintTool::Remove => {
+            "Paint unwanted content. Big-LaMa repairs a native-resolution local context crop after release."
+        }
+        InpaintTool::Clone => {
+            "Copy pixels from a source. Ctrl-click (Command-click on macOS) or right-click the image to choose it."
+        }
+        InpaintTool::Heal => {
+            "Copy source texture while matching the destination's color and light with GIMP-style perceptual Poisson healing."
+        }
+    }
+}
+
+fn retouch_alignment_help(alignment: RetouchAlignment) -> &'static str {
+    match alignment {
+        RetouchAlignment::None => {
+            "Source follows this stroke, then returns to the selected point."
+        }
+        RetouchAlignment::Aligned => {
+            "Source keeps the same offset between separate strokes."
+        }
+        RetouchAlignment::Registered => {
+            "Source and destination use the same image coordinates."
+        }
+        RetouchAlignment::Fixed => "Every brush dab starts from the selected source point.",
+    }
+}
+
 impl Sidebar {
     pub(crate) fn show_inpainting(
         ui: &mut Ui,
@@ -32,11 +61,13 @@ impl Sidebar {
         });
         ui.add_space(4.0);
 
-        crate::ui::theme::section_card(ui, "Tool", |ui| {
+        let tool_help = inpaint_tool_help(app.inpaint.tool);
+        crate::ui::theme::section_card_with_help(ui, "Tool", tool_help, |ui| {
             let previous_tool = app.inpaint.tool;
             ui.horizontal_wrapped(|ui| {
                 for tool in InpaintTool::ALL {
-                    ui.selectable_value(&mut app.inpaint.tool, tool, tool.label());
+                    ui.selectable_value(&mut app.inpaint.tool, tool, tool.label())
+                        .on_hover_text(inpaint_tool_help(tool));
                 }
             });
             if app.inpaint.tool != previous_tool {
@@ -48,60 +79,31 @@ impl Sidebar {
                 app.inpaint.hovered_stroke = None;
                 app.inpaint.selected_stroke = None;
             }
-            ui.add_space(8.0);
-            let help = match app.inpaint.tool {
-                InpaintTool::Remove => {
-                    "Paint unwanted content. Big-LaMa repairs a native-resolution local context crop after release."
-                }
-                InpaintTool::Clone => {
-                    "Copy pixels from a source. Ctrl-click (Command-click on macOS) or right-click the image to choose it."
-                }
-                InpaintTool::Heal => {
-                    "Copy source texture while matching the destination's color and light with GIMP-style perceptual Poisson healing."
-                }
-            };
-            ui.label(
-                egui::RichText::new(help)
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            );
 
             if app.inpaint.tool.retouch().is_some() {
-                ui.add_space(8.0);
                 let previous_alignment = app.inpaint.alignment;
-                egui::ComboBox::from_id_salt("retouch-source-alignment")
-                    .selected_text(app.inpaint.alignment.label())
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
+                let alignment_help = retouch_alignment_help(app.inpaint.alignment);
+                crate::ui::theme::form_combo_with_help(
+                    ui,
+                    "Source alignment",
+                    "retouch-source-alignment",
+                    app.inpaint.alignment.label(),
+                    180.0,
+                    alignment_help,
+                    |ui| {
                         for alignment in RetouchAlignment::ALL {
                             ui.selectable_value(
                                 &mut app.inpaint.alignment,
                                 alignment,
                                 alignment.label(),
-                            );
+                            )
+                            .on_hover_text(retouch_alignment_help(alignment));
                         }
-                    });
+                    },
+                );
                 if previous_alignment != app.inpaint.alignment {
                     app.inpaint.aligned_offset = None;
                 }
-                ui.label(
-                    egui::RichText::new(match app.inpaint.alignment {
-                        RetouchAlignment::None => {
-                            "Source follows this stroke, then returns to the selected point."
-                        }
-                        RetouchAlignment::Aligned => {
-                            "Source keeps the same offset between separate strokes."
-                        }
-                        RetouchAlignment::Registered => {
-                            "Source and destination use the same image coordinates."
-                        }
-                        RetouchAlignment::Fixed => {
-                            "Every brush dab starts from the selected source point."
-                        }
-                    })
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-                );
                 if ui
                     .add_enabled(
                         !app.inpaint.processing(),
@@ -112,6 +114,7 @@ impl Sidebar {
                         })
                         .selected(app.inpaint.source_pick_active),
                     )
+                    .on_hover_text("Choose the source point used by Clone or Heal strokes.")
                     .clicked()
                 {
                     app.inpaint.source_pick_active = !app.inpaint.source_pick_active;

@@ -20,6 +20,12 @@ pub const SPACE_MD: f32 = 12.0;
 pub const SPACE_LG: f32 = 16.0;
 pub const CARD_GAP: f32 = SPACE_MD;
 pub const CONTENT_MARGIN: i8 = 12;
+pub const FORM_STACK_BREAKPOINT: f32 = 520.0;
+pub const HELP_BUTTON_EDGE: f32 = if cfg!(target_os = "android") {
+    CONTROL_HEIGHT
+} else {
+    28.0
+};
 pub const PANEL_TITLE_HEIGHT: f32 = 42.0;
 pub const PANEL_TITLE_TEXT_SIZE: f32 = 18.0;
 #[cfg(any(target_os = "android", test))]
@@ -219,9 +225,9 @@ impl PreviewBackdrop {
     pub(crate) const ALL: [Self; 5] = [
         Self::Black,
         Self::DarkGrey,
+        Self::MatchPhoto,
         Self::LightGrey,
         Self::White,
-        Self::MatchPhoto,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
@@ -395,8 +401,11 @@ pub fn card_frame(ui: &Ui) -> Frame {
 }
 
 pub fn content_card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let frame_width = f32::from(CONTENT_MARGIN) * 2.0 + 2.0;
+    let inner_width = (ui.available_width() - frame_width).max(1.0);
     card_frame(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
+        ui.set_width(inner_width);
+        ui.set_max_width(inner_width);
         add_contents(ui)
     })
 }
@@ -410,6 +419,92 @@ pub fn section_card<R>(
         ui.strong(title);
         add_contents(ui)
     })
+}
+
+pub fn section_card_with_help<R>(
+    ui: &mut Ui,
+    title: impl Into<RichText>,
+    help: &str,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<R> {
+    content_card(ui, |ui| {
+        strong_with_help(ui, title, help);
+        add_contents(ui)
+    })
+}
+
+/// A discoverable explanation affordance that works with a mouse and touch.
+///
+/// Hovering (or pressing and holding on a touch screen) shows an ordinary
+/// tooltip. Tapping the icon opens the same text in a persistent popup.
+pub fn help_button(ui: &mut Ui, help: &str) -> Response {
+    let popup_width = (ui.ctx().content_rect().width() - 48.0).clamp(180.0, 300.0);
+    let response = ui.add_sized(
+        [HELP_BUTTON_EDGE, HELP_BUTTON_EDGE],
+        egui::Button::new(
+            RichText::new(egui_phosphor::regular::INFO)
+                .size(16.0)
+                .color(ui.visuals().weak_text_color()),
+        )
+        .frame(false),
+    );
+    egui::Popup::menu(&response)
+        .width(popup_width)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_max_width(popup_width);
+            ui.add(egui::Label::new(help).wrap());
+        });
+    response.on_hover_text(help)
+}
+
+pub fn heading_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
+    let width = ui.available_width().max(1.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, HELP_BUTTON_EDGE),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.heading(title).on_hover_text(help);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                help_button(ui, help);
+            });
+        },
+    );
+}
+
+pub fn strong_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
+    let width = ui.available_width().max(1.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, HELP_BUTTON_EDGE),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.label(title.into().strong()).on_hover_text(help);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                help_button(ui, help);
+            });
+        },
+    );
+}
+
+pub fn checkbox_with_help(
+    ui: &mut Ui,
+    checked: &mut bool,
+    label: impl Into<egui::WidgetText>,
+    help: &str,
+) -> Response {
+    let width = ui.available_width().max(1.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, CONTROL_HEIGHT),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            let response = ui.checkbox(checked, label).on_hover_text(help);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                help_button(ui, help);
+            });
+            response
+        },
+    )
+    .inner
 }
 
 pub fn tab_button(ui: &mut Ui, label: &str, selected: bool, width: f32) -> Response {
@@ -511,17 +606,78 @@ pub fn form_combo(
     preferred_width: f32,
     add_contents: impl FnOnce(&mut Ui),
 ) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let width = preferred_width.min(ui.available_width().max(1.0));
+    if ui.available_width() < FORM_STACK_BREAKPOINT {
+        ui.vertical(|ui| {
+            ui.label(label);
+            let width = ui.available_width().max(1.0);
             egui::ComboBox::from_id_salt(id_salt)
                 .selected_text(selected_text)
                 .width(width)
                 .truncate()
                 .show_ui(ui, add_contents);
         });
-    });
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let width = preferred_width.min(ui.available_width().max(1.0));
+                egui::ComboBox::from_id_salt(id_salt)
+                    .selected_text(selected_text)
+                    .width(width)
+                    .truncate()
+                    .show_ui(ui, add_contents);
+            });
+        });
+    }
+}
+
+pub fn form_combo_with_help(
+    ui: &mut Ui,
+    label: &str,
+    id_salt: impl egui::AsIdSalt,
+    selected_text: impl Into<egui::WidgetText>,
+    preferred_width: f32,
+    help: &str,
+    add_contents: impl FnOnce(&mut Ui),
+) {
+    if ui.available_width() < FORM_STACK_BREAKPOINT {
+        ui.vertical(|ui| {
+            let width = ui.available_width().max(1.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, HELP_BUTTON_EDGE),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.label(label).on_hover_text(help);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        help_button(ui, help);
+                    });
+                },
+            );
+            let width = ui.available_width().max(1.0);
+            egui::ComboBox::from_id_salt(id_salt)
+                .selected_text(selected_text)
+                .width(width)
+                .truncate()
+                .show_ui(ui, add_contents)
+                .response
+                .on_hover_text(help);
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(label).on_hover_text(help);
+            help_button(ui, help);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let width = preferred_width.min(ui.available_width().max(1.0));
+                egui::ComboBox::from_id_salt(id_salt)
+                    .selected_text(selected_text)
+                    .width(width)
+                    .truncate()
+                    .show_ui(ui, add_contents)
+                    .response
+                    .on_hover_text(help);
+            });
+        });
+    }
 }
 
 pub fn install(ctx: &egui::Context) {

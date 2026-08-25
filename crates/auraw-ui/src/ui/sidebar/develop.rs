@@ -503,10 +503,10 @@ impl Sidebar {
             ui.add_space(4.0);
             ui.separator();
             ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new("Sensor-profiled noise reduction")
-                    .strong()
-                    .size(11.5),
+            crate::ui::theme::strong_with_help(
+                ui,
+                "Noise reduction",
+                "Sensor-profiled noise reduction uses the RAW's estimated a·signal+b sensor model. AI Denoise replaces these manual controls while enabled.",
             );
             ui.add_enabled_ui(!exposure.ai_denoise_enabled, |ui| {
                 changed |= adjustment_slider(
@@ -570,10 +570,10 @@ impl Sidebar {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new("Edge-aware capture sharpening for fine RAW detail")
-                    .strong()
-                    .size(11.5),
+            crate::ui::theme::strong_with_help(
+                ui,
+                "Capture sharpening",
+                "Edge-aware capture sharpening restores fine RAW detail while its radius, detail, and masking controls limit halos and noisy texture.",
             );
             changed |= adjustment_slider(
                 ui,
@@ -766,10 +766,10 @@ impl Sidebar {
     fn show_rendering(ui: &mut Ui, exposure: &mut ExposureParams, foldable: bool) -> bool {
         let mut changed = false;
         Self::adjustment_section(ui, "Advanced Rendering", false, foldable, |ui| {
-            ui.label(
-                egui::RichText::new("darktable sigmoid view transform")
-                    .strong()
-                    .size(11.5),
+            crate::ui::theme::strong_with_help(
+                ui,
+                "Sigmoid view transform",
+                "A darktable-compatible sigmoid view transform maps scene-referred values into the display range while controlling contrast, target white and black, and hue handling.",
             );
             changed |= adjustment_slider(
                 ui,

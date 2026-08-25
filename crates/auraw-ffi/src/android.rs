@@ -250,6 +250,19 @@ pub fn network_available(app: &AndroidApp) -> Result<bool, String> {
     .map_err(|error| format!("could not inspect Android network state: {error:#}"))
 }
 
+pub fn set_light_system_bars(app: &AndroidApp, light: bool) -> Result<(), String> {
+    with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni::jni_str!("setLightSystemBars"),
+            jni::jni_sig!((i32) -> void),
+            &[JValue::Int(i32::from(light))],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| format!("could not update Android system-bar appearance: {error:#}"))
+}
+
 pub fn open_camera_profile_folder(app: &AndroidApp) -> Result<(), String> {
     with_activity(app, |env, activity| {
         env.call_method(

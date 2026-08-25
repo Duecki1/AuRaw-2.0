@@ -7,6 +7,12 @@ impl AurawApp {
         }
         self.preferences.ui_design = design;
         crate::ui::theme::apply(&self.egui_ctx, design);
+        #[cfg(target_os = "android")]
+        if let Err(error) =
+            crate::android::set_light_system_bars(&self.android.android_app, !design.is_dark())
+        {
+            log::warn!("{error}");
+        }
         self.persist_performance_settings();
     }
 

@@ -15,10 +15,32 @@ use super::{adjustment_slider_with_reset, MaskEffect, Ui};
 use crate::pipeline::effect_params::{ColorParamSpec, FloatParamSpec};
 use eframe::egui;
 
+fn effect_description(effect: MaskEffect) -> Option<&'static str> {
+    match effect {
+        MaskEffect::LensBlur => {
+            Some("Uses an aperture-shaped scene-linear blur for natural bokeh.")
+        }
+        MaskEffect::LightRays => Some(
+            "The mask is the light source. Rays converge on the source point and travel beyond the mask.",
+        ),
+        MaskEffect::Fog => Some(
+            "Fog is generated in full-image coordinates and blended through the editable mask.",
+        ),
+        MaskEffect::Smoke => Some(
+            "Smoke is generated in full-image coordinates and blended through the editable mask.",
+        ),
+        _ => None,
+    }
+}
+
 fn effect_toolbar<T: Default>(ui: &mut Ui, effect: MaskEffect, settings: &mut T) -> bool {
     let mut reset = false;
+    let help = effect_description(effect);
     crate::ui::theme::toolbar_row(ui, |ui| {
-        ui.strong(format!("{} Effect", effect.label()));
+        let title = ui.strong(format!("{} Effect", effect.label()));
+        if let Some(help) = help {
+            title.on_hover_text(help);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             reset = crate::ui::icons::phosphor_icon_button(
                 ui,
@@ -27,6 +49,9 @@ fn effect_toolbar<T: Default>(ui: &mut Ui, effect: MaskEffect, settings: &mut T)
                 &format!("Reset {} settings", effect.label()),
             )
             .clicked();
+            if let Some(help) = help {
+                crate::ui::theme::help_button(ui, help);
+            }
         });
     });
     ui.add_space(4.0);
