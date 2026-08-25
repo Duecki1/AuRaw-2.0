@@ -1,3 +1,4 @@
+use super::state::{library_filename_matches, library_search_terms};
 use super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -154,6 +155,50 @@ fn thumbnail_selection_uses_unified_asset_ids() {
     assert!(!library.toggle_thumbnail_selection(&second));
     assert!(!library.has_selection());
     assert!(!library.selection_mode());
+}
+
+#[test]
+fn filename_search_is_case_insensitive_and_supports_comma_separated_fragments() {
+    let terms = library_search_terms(" DSC23824, dsc384384 , ");
+
+    assert!(library_filename_matches("DSC23824.CR3", &terms));
+    assert!(library_filename_matches("Dsc384384.NEF", &terms));
+    assert!(!library_filename_matches("DSC00001.ARW", &terms));
+    assert!(library_filename_matches(
+        "anything.dng",
+        &library_search_terms("  ")
+    ));
+}
+
+#[cfg(not(target_os = "android"))]
+#[test]
+fn selecting_search_matches_replaces_the_selection_with_every_visible_match() {
+    let context = egui::Context::default();
+    let mut library = LibraryState::new(&context);
+    library.entries = [
+        test_asset("DSC23824.CR3"),
+        test_asset("DSC384384.NEF"),
+        test_asset("holiday.ARW"),
+    ]
+    .into_iter()
+    .map(new_library_entry)
+    .collect();
+    library.selected_assets.insert(test_asset("holiday.ARW").id);
+    library.selection_mode = true;
+    *library.search_query_mut() = "dsc23824, DSC384384".to_owned();
+
+    assert_eq!(library.filtered_entry_indices(), vec![0, 1]);
+    assert_eq!(library.select_search_matches(), 2);
+    assert_eq!(library.selected_assets.len(), 2);
+    assert!(library
+        .selected_assets
+        .contains(&test_asset("DSC23824.CR3").id));
+    assert!(library
+        .selected_assets
+        .contains(&test_asset("DSC384384.NEF").id));
+    assert!(!library
+        .selected_assets
+        .contains(&test_asset("holiday.ARW").id));
 }
 
 #[test]

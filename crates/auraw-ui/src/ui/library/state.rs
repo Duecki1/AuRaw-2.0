@@ -48,6 +48,7 @@ impl LibraryState {
             render_edited_thumbnails_during_indexing,
             sort_order,
             thumbnail_size,
+            search_query: String::new(),
             selected_assets: HashSet::new(),
             selection_mode: false,
             image_clipboard: None,
@@ -122,6 +123,7 @@ impl LibraryState {
             render_edited_thumbnails_during_indexing,
             sort_order,
             thumbnail_size,
+            search_query: String::new(),
             selected_assets: HashSet::new(),
             selection_mode: false,
             image_clipboard: None,
@@ -186,6 +188,49 @@ impl LibraryState {
     pub(crate) fn clear_selection(&mut self) {
         self.selected_assets.clear();
         self.selection_mode = false;
+    }
+
+    pub(crate) fn search_query_mut(&mut self) -> &mut String {
+        &mut self.search_query
+    }
+
+    pub(crate) fn clear_search(&mut self) {
+        self.search_query.clear();
+    }
+
+    pub(crate) fn search_active(&self) -> bool {
+        !library_search_terms(&self.search_query).is_empty()
+    }
+
+    pub(super) fn filtered_entry_indices(&self) -> Vec<usize> {
+        let terms = library_search_terms(&self.search_query);
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                library_filename_matches(&entry.asset.display_name, &terms).then_some(index)
+            })
+            .collect()
+    }
+
+    pub(crate) fn select_search_matches(&mut self) -> usize {
+        let terms = library_search_terms(&self.search_query);
+        if terms.is_empty() {
+            return 0;
+        }
+
+        self.selected_assets = self
+            .entries
+            .iter()
+            .filter(|entry| library_filename_matches(&entry.asset.display_name, &terms))
+            .map(|entry| entry.asset.id.clone())
+            .collect();
+        self.selection_mode = !self.selected_assets.is_empty();
+
+        #[cfg(target_os = "android")]
+        crate::android::set_back_navigation_active(self.selection_mode);
+
+        self.selected_assets.len()
     }
 
     pub(super) fn toggle_thumbnail_selection(&mut self, asset_id: &LibraryAssetId) -> bool {
@@ -749,4 +794,21 @@ impl LibraryState {
             }
         }
     }
+}
+
+pub(super) fn library_search_terms(query: &str) -> Vec<String> {
+    query
+        .split(',')
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+pub(super) fn library_filename_matches(display_name: &str, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+    let display_name = display_name.to_lowercase();
+    terms.iter().any(|term| display_name.contains(term))
 }
