@@ -663,8 +663,6 @@ pub(crate) fn show_library_action_overlays(ui: &mut Ui, app: &mut AurawApp, fram
                 };
                 #[cfg(target_os = "android")]
                 let help = "Exports are saved to Pictures/AuRaw. File names are generated from each RAW name.";
-                ui.label(egui::RichText::new(help).small().color(ui.visuals().weak_text_color()));
-                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
                         close_export_dialog = true;
@@ -680,9 +678,10 @@ pub(crate) fn show_library_action_overlays(ui: &mut Ui, app: &mut AurawApp, fram
                         #[cfg(target_os = "android")]
                         { format!("Export {count} images") }
                     };
-                    if ui.button(label).clicked() {
+                    if ui.button(label).on_hover_text(help).clicked() {
                         confirm_export = true;
                     }
+                    crate::ui::theme::help_button(ui, help);
                 });
             });
     }

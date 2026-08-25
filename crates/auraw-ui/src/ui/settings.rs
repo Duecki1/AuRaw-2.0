@@ -61,7 +61,7 @@ impl Settings {
 
     fn show_content(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, content_width: f32) {
         #[cfg(target_os = "android")]
-        {
+        crate::ui::theme::toolbar_row(ui, |ui| {
             if crate::ui::top_bar::TopBar::back_icon_button(
                 ui,
                 crate::ui::theme::toolbar_icon_size(),
@@ -70,48 +70,56 @@ impl Settings {
             {
                 app.activate_tab(crate::app::AppTab::Library);
             }
-            ui.add_space(4.0);
-        }
-
+            ui.heading("Settings");
+        });
+        #[cfg(not(target_os = "android"))]
         ui.heading("Settings");
         crate::ui::theme::card_gap(ui);
 
         Self::group(ui, content_width, |ui| {
-            ui.heading("Appearance");
-            ui.add(
-                egui::Label::new(
-                    "Use one design across every screen. The choice is saved and applied immediately.",
-                )
-                .wrap(),
+            crate::ui::theme::heading_with_help(
+                ui,
+                "Appearance",
+                "Choose the design used across every screen and the canvas color shown around the photo. Changes are saved and applied immediately.",
             );
 
             ui.separator();
             let mut design = app.preferences.ui_design;
-            crate::ui::theme::form_combo(
+            crate::ui::theme::form_combo_with_help(
                 ui,
                 "Design",
                 "settings-ui-design",
                 design.label(),
                 220.0,
+                design.description(),
                 |ui| {
                     for option in crate::ui::theme::UiDesign::ALL {
-                        ui.selectable_value(&mut design, option, option.label());
+                        ui.selectable_value(&mut design, option, option.label())
+                            .on_hover_text(option.description());
                     }
                 },
             );
             if design != app.preferences.ui_design {
                 app.set_ui_design(design);
             }
-            ui.add(egui::Label::new(design.description()).wrap());
 
             ui.separator();
             let mut backdrop = app.preferences.preview_backdrop;
-            crate::ui::theme::form_combo(
+            let backdrop_help = match backdrop {
+                crate::ui::theme::PreviewBackdrop::MatchPhoto => {
+                    "Derives a quiet, low-contrast canvas color from each image without competing with the edit. Toolbars, sidebars, and panels keep the selected design."
+                }
+                _ => {
+                    "Changes only the canvas around the photo. Toolbars, sidebars, and panels keep the selected design."
+                }
+            };
+            crate::ui::theme::form_combo_with_help(
                 ui,
                 "Preview background",
                 "settings-preview-backdrop",
                 backdrop.label(),
                 220.0,
+                backdrop_help,
                 |ui| {
                     for option in crate::ui::theme::PreviewBackdrop::ALL {
                         ui.selectable_value(&mut backdrop, option, option.label());
@@ -121,42 +129,32 @@ impl Settings {
             if backdrop != app.preferences.preview_backdrop {
                 app.set_preview_backdrop(backdrop);
             }
-            ui.add(
-                egui::Label::new(match backdrop {
-                    crate::ui::theme::PreviewBackdrop::MatchPhoto => {
-                        "Match photo derives a quiet, low-contrast color from each image so the canvas changes without competing with the edit."
-                    }
-                    _ => {
-                        "This changes only the canvas around the photo; toolbars, sidebars, and panels keep the selected design."
-                    }
-                })
-                .wrap(),
-            );
         });
 
         crate::ui::theme::card_gap(ui);
 
         Self::group(ui, content_width, |ui| {
-            ui.heading("Interface");
-            ui.checkbox(&mut app.ui.expert_mode, "Expert mode")
-                .on_hover_text(
-                    "Show detailed creative-effect tuning, darktable-style rendering internals, and RAW reconstruction controls. Disabled by default.",
-                );
-            ui.add(
-                egui::Label::new(
-                    "The standard Develop view keeps only photographic controls visible.",
-                )
-                .wrap(),
+            crate::ui::theme::heading_with_help(
+                ui,
+                "Interface",
+                "Configure editing complexity, preview resolution, brush behavior, and library resource use.",
+            );
+            crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut app.ui.expert_mode,
+                "Expert mode",
+                "Shows detailed creative-effect tuning, darktable-style rendering internals, and RAW reconstruction controls. The standard Develop view keeps only photographic controls visible.",
             );
 
             ui.separator();
             let previous_quality = app.preview.quality;
-            crate::ui::theme::form_combo(
+            crate::ui::theme::form_combo_with_help(
                 ui,
                 "Preview quality",
                 "settings-preview-quality",
                 app.preview.quality.label(),
                 160.0,
+                "Controls preview render density relative to its physical screen size: Low 75%, Medium 100%, High 125%, and Max 150%. Zoom detail uses the same density.",
                 |ui| {
                     ui.selectable_value(&mut app.preview.quality, PreviewQuality::Low, "Low");
                     ui.selectable_value(&mut app.preview.quality, PreviewQuality::Medium, "Medium");
@@ -167,64 +165,50 @@ impl Settings {
             if app.preview.quality != previous_quality {
                 app.preview_quality_changed();
             }
-            ui.add(
-                egui::Label::new(
-                    "All levels follow the preview's physical screen size: Low 75%, Medium 100% (native density), High 125%, and Max 150%. Zoom detail uses the same density.",
-                )
-                .wrap(),
-            );
 
             ui.separator();
-            if ui
-                .checkbox(
-                    &mut app.preferences.image_relative_brush_size,
-                    "Keep brush size fixed to the image",
-                )
-                .on_hover_text(
-                    "When enabled, zooming changes the brush's on-screen size while it continues to cover the same area of the image. When disabled, the brush stays the same size on screen.",
-                )
+            if crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut app.preferences.image_relative_brush_size,
+                "Keep brush size fixed to the image",
+                "When enabled, the brush keeps the same image footprint at every zoom level. When disabled, it keeps the same on-screen footprint.",
+            )
                 .changed()
             {
                 app.persist_performance_settings();
             }
-            ui.add(
-                egui::Label::new(if app.preferences.image_relative_brush_size {
-                    "Brushes keep the same image footprint at every zoom level."
-                } else {
-                    "Brushes keep the same on-screen footprint at every zoom level."
-                })
-                .wrap(),
-            );
 
             ui.separator();
-            ui.strong("Library performance");
+            crate::ui::theme::strong_with_help(
+                ui,
+                "Library performance",
+                "Tune memory use and background preview generation. Conservative values are recommended on phones.",
+            );
             #[cfg(not(target_os = "android"))]
             {
                 let mut render_edited_thumbnails =
                     app.library.renders_edited_thumbnails_during_indexing();
-                if ui
-                    .checkbox(
-                        &mut render_edited_thumbnails,
-                        "Render edited thumbnails while indexing",
-                    )
-                    .on_hover_text(
-                        "Apply saved edits to library thumbnails during indexing. Disabled by default to keep indexing fast and memory use low.",
-                    )
+                if crate::ui::theme::checkbox_with_help(
+                    ui,
+                    &mut render_edited_thumbnails,
+                    "Render edited thumbnails while indexing",
+                    "Applies saved edits to library thumbnails during indexing. Turning it off keeps indexing faster and memory use lower; existing edited previews are still reused.",
+                )
                     .changed()
                 {
                     app.set_render_edited_thumbnails_during_indexing(render_edited_thumbnails);
                 }
-                ui.add(
-                    egui::Label::new(if render_edited_thumbnails {
-                        "Edited RAWs are rendered in the background after their original previews appear."
-                    } else {
-                        "Existing edited previews are reused. An orange refresh badge marks edited RAWs whose preview is missing or out of date."
-                    })
-                    .wrap(),
-                );
             }
 
             let mut raw_cache_files = app.develop.raw_cache_limit;
+            let raw_cache_help = if raw_cache_files == 0 {
+                "Decoded RAW reuse is disabled; only the current edit remains loaded. Zero disables the cache. The default is 2 on desktop and 1 on Android.".to_owned()
+            } else {
+                format!(
+                    "Keeps up to {raw_cache_files} decoded RAW {} in memory, including the current image, for faster switching. The default is 2 on desktop and 1 on Android.",
+                    if raw_cache_files == 1 { "file" } else { "files" }
+                )
+            };
             if adjustment_slider(
                 ui,
                 "Decoded RAW cache",
@@ -232,22 +216,10 @@ impl Settings {
                 0..=maximum_raw_cache_limit(),
                 0,
                 1.0,
-                Some(
-                    "Number of fully decoded RAW files kept in memory for faster switching. Zero disables the cache. The default is 2 on desktop and 1 on Android.",
-                ),
+                Some(&raw_cache_help),
             ) {
                 app.set_raw_cache_limit(raw_cache_files);
             }
-            let raw_cache_description = if raw_cache_files == 0 {
-                "Decoded RAW reuse is disabled; only the image currently being edited stays loaded."
-                    .to_owned()
-            } else {
-                format!(
-                    "Keeps up to {raw_cache_files} decoded RAW {} in memory, including the current image, for faster switching back to recent files.",
-                    if raw_cache_files == 1 { "file" } else { "files" }
-                )
-            };
-            ui.add(egui::Label::new(raw_cache_description).wrap());
 
             let mut thumbnail_workers = app.thumbnail_worker_count();
             if adjustment_slider(
@@ -258,29 +230,25 @@ impl Settings {
                 0,
                 1.0,
                 Some(
-                    "Concurrent background thumbnail jobs, including embedded previews, preview-less RAW fallback renders, and edited-thumbnail rendering when enabled above.",
+                    "Concurrent thumbnail jobs. Higher values fill the library faster but preview-less and edited jobs may unpack a full sensor and use substantial memory. Changing this restarts the queue.",
                 ),
             ) {
                 app.set_thumbnail_worker_count(thumbnail_workers);
             }
-            ui.add(
-                egui::Label::new(
-                    "Higher values fill the library faster, but preview-less jobs—and edited jobs when enabled—may unpack a full sensor and use substantial memory. Changing this restarts the current queue; the setting is saved across restarts.",
-                )
-                .wrap(),
-            );
 
             ui.separator();
-            ui.strong("Thumbnail cache");
-            ui.add(
-                egui::Label::new(
-                    "Delete generated library previews and rebuild them from the RAW files and saved edits.",
-                )
-                .wrap(),
+            crate::ui::theme::strong_with_help(
+                ui,
+                "Thumbnail cache",
+                "Delete generated library previews. AuRaw rebuilds them from the RAW files and saved edits when needed.",
             );
             let cache_size = app.thumbnail_cache_size_label();
             crate::ui::theme::action_row(ui, |ui| {
-                if ui.button("Clear thumbnail cache").clicked() {
+                if ui
+                    .button("Clear thumbnail cache")
+                    .on_hover_text("Delete generated previews and rebuild them when needed.")
+                    .clicked()
+                {
                     app.clear_thumbnail_cache();
                 }
                 ui.label(egui::RichText::new(cache_size).color(ui.visuals().weak_text_color()));
@@ -291,28 +259,30 @@ impl Settings {
         {
             crate::ui::theme::card_gap(ui);
             Self::group(ui, content_width, |ui| {
-                ui.heading("Display color management");
-                ui.add(
-                    egui::Label::new(
-                        "Use the active monitor ICC profile for the live preview. Matrix and LUT/CLUT profiles are converted once through LCMS2 into the GPU display LUT.",
-                    )
-                    .wrap(),
+                crate::ui::theme::heading_with_help(
+                    ui,
+                    "Display color management",
+                    "Uses the active monitor ICC profile for the live preview. Matrix and LUT/CLUT profiles are converted once through LCMS2 into the GPU display LUT.",
                 );
-                ui.add_space(4.0);
 
                 let mut enabled = app.preferences.display_color_management;
-                if ui
-                    .checkbox(&mut enabled, "Use monitor color profile")
-                    .on_hover_text(
-                        "Automatically follows the display containing the app window. Disable to render the preview as plain sRGB.",
-                    )
+                if crate::ui::theme::checkbox_with_help(
+                    ui,
+                    &mut enabled,
+                    "Use monitor color profile",
+                    "Automatically follows the display containing the app window. Disable to render the preview as plain sRGB.",
+                )
                     .changed()
                 {
                     app.set_display_color_management(enabled);
                 }
 
                 ui.separator();
-                ui.strong("Active display profile");
+                crate::ui::theme::strong_with_help(
+                    ui,
+                    "Active display profile",
+                    "The profile is rebuilt only when the selected monitor or profile changes; normal rendering uses one 3D-LUT lookup.",
+                );
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(&app.preferences.display_profile_label).strong(),
@@ -326,7 +296,11 @@ impl Settings {
                 }
 
                 ui.separator();
-                ui.strong("Manual override");
+                crate::ui::theme::strong_with_help(
+                    ui,
+                    "Manual override",
+                    "Choose a specific ICC profile instead of automatic per-monitor discovery. Linux Wayland-only sessions may require this because automatic Linux discovery uses X11 _ICC_PROFILE properties.",
+                );
                 if let Some(path) = app.preferences.display_profile_override.as_deref() {
                     ui.add(
                         egui::Label::new(
@@ -336,13 +310,13 @@ impl Settings {
                     );
                 } else {
                     ui.small("Automatic per-monitor discovery is enabled.");
-                    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
-                    ui.small(
-                        "Linux automatic discovery uses X11 _ICC_PROFILE properties; Wayland-only sessions can use a manual ICC override.",
-                    );
                 }
                 crate::ui::theme::action_row(ui, |ui| {
-                    if ui.button("Choose ICC…").clicked() {
+                    if ui
+                        .button("Choose ICC…")
+                        .on_hover_text("Choose a specific monitor ICC profile.")
+                        .clicked()
+                    {
                         app.choose_display_profile_override();
                     }
                     if ui
@@ -350,54 +324,67 @@ impl Settings {
                             app.preferences.display_profile_override.is_some(),
                             egui::Button::new("Use automatic"),
                         )
+                        .on_hover_text("Return to automatic per-monitor profile discovery.")
                         .clicked()
                     {
                         app.clear_display_profile_override();
                     }
                 });
-                ui.small(
-                    "The profile is rebuilt only when the selected monitor/profile changes; normal rendering is a single 3D-LUT lookup.",
-                );
             });
         }
 
         crate::ui::theme::card_gap(ui);
         Self::group(ui, content_width, |ui| {
-            ui.heading("Copy & paste adjustments");
-            ui.add(
-                egui::Label::new(
-                    "Choose which edit categories Library > Copy Adjustments stores for later pasting. The selection is remembered across restarts.",
-                )
-                .wrap(),
+            crate::ui::theme::heading_with_help(
+                ui,
+                "Copy & paste adjustments",
+                "Choose which categories Library > Copy Adjustments stores for later pasting. The selection is remembered across restarts.",
             );
-            ui.add_space(4.0);
 
             let mut settings = app.preferences.adjustment_copy_settings;
             let mut changed = false;
-            changed |= ui
-                .checkbox(&mut settings.adjustments, "Adjustments")
-                .on_hover_text("Global light, color, white-balance temperature/tint, tone curve, effects, color mixer, and RAW adjustment values.")
+            changed |= crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut settings.adjustments,
+                "Adjustments",
+                "Global light, color, white-balance temperature/tint, tone curve, effects, color mixer, and RAW adjustment values.",
+            )
                 .changed();
-            changed |= ui
-                .checkbox(&mut settings.geometry, "Geometry")
-                .on_hover_text("Crop, rotation, straighten, perspective, flips, and geometry transforms. Disabled by default.")
+            changed |= crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut settings.geometry,
+                "Geometry",
+                "Crop, rotation, straighten, perspective, flips, and geometry transforms. Disabled by default.",
+            )
                 .changed();
-            changed |= ui
-                .checkbox(&mut settings.camera_profile, "Camera profile")
-                .on_hover_text("The per-image camera/DCP profile selection. Enabled by default.")
+            changed |= crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut settings.camera_profile,
+                "Camera profile",
+                "The per-image camera/DCP profile selection. Enabled by default.",
+            )
+            .changed();
+            changed |= crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut settings.masks,
+                "Normal masks",
+                "Brush, radial-gradient, and linear-gradient mask components, including local adjustments. Mixed groups are split so disabling this never copies their manual components.",
+            )
                 .changed();
-            changed |= ui
-                .checkbox(&mut settings.masks, "Normal masks")
-                .on_hover_text("Brush, radial-gradient, and linear-gradient mask components, including their local adjustments. Mixed mask groups are split so disabling this never copies their manual components.")
+            changed |= crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut settings.ai_masks,
+                "AI masks",
+                "Subject, background, object, luminance-range, and color-range components. Source-dependent results are marked for regeneration on the destination image.",
+            )
                 .changed();
-            changed |= ui
-                .checkbox(&mut settings.ai_masks, "AI masks")
-                .on_hover_text("Subject, background, object, luminance-range, and color-range components. Generated/source-dependent results are marked for regeneration on the destination image.")
-                .changed();
-            changed |= ui
-                .checkbox(&mut settings.lens_correction, "Lens correction")
-                .on_hover_text("Lens correction enabled state and selected lens profile.")
-                .changed();
+            changed |= crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut settings.lens_correction,
+                "Lens correction",
+                "Lens correction enabled state and selected lens profile.",
+            )
+            .changed();
             if changed {
                 app.set_adjustment_copy_settings(settings);
             }
@@ -405,23 +392,32 @@ impl Settings {
 
         crate::ui::theme::card_gap(ui);
         Self::group(ui, content_width, |ui| {
-            ui.heading("RAW color profiles");
-            ui.add(
-                    egui::Label::new(
-                        "Choose how AuRaw builds the camera-to-working color transform and whether it applies DCP color rendering stages."
-                    )
-                    .wrap(),
-                );
-            ui.add_space(4.0);
+            crate::ui::theme::heading_with_help(
+                ui,
+                "RAW color profiles",
+                "Choose how AuRaw builds the camera-to-working color transform and whether it applies DCP color-rendering stages.",
+            );
 
             let previous_mode = app.preferences.camera_profile_mode;
             let mut mode = previous_mode;
-            crate::ui::theme::form_combo(
+            let profile_mode_help = match mode {
+                CameraProfileMode::Automatic => {
+                    "Uses the RAW's embedded camera matrix by default. A DCP selected for an individual image remains explicit."
+                }
+                CameraProfileMode::DcpProfiles => {
+                    "Searches the configured folder for this camera. If no safe DCP match exists, AuRaw falls back to the embedded camera matrix."
+                }
+                CameraProfileMode::MatrixOnly => {
+                    "Ignores DCP look tables, hue/saturation maps, and profile tone curves and uses the camera/DNG/LibRaw matrix path."
+                }
+            };
+            crate::ui::theme::form_combo_with_help(
                 ui,
                 "Profile mode",
                 "settings-camera-profile-mode",
                 mode.label(),
                 190.0,
+                profile_mode_help,
                 |ui| {
                     ui.selectable_value(&mut mode, CameraProfileMode::Automatic, "Automatic");
                     ui.selectable_value(
@@ -440,28 +436,18 @@ impl Settings {
                 app.set_camera_profile_mode(mode);
             }
 
-            let description = match app.preferences.camera_profile_mode {
-                    CameraProfileMode::Automatic => {
-                        "Automatic uses the RAW's embedded camera matrix by default. A DCP chosen for an individual image remains explicit."
-                    }
-                    CameraProfileMode::DcpProfiles => {
-                        "Use DCP profiles searches the folder below for this camera. If no safe match exists, AuRaw falls back to the camera matrix."
-                    }
-                    CameraProfileMode::MatrixOnly => {
-                        "Embedded matrix only ignores DCP look tables, hue/saturation maps, and profile tone curves and uses the camera/DNG/LibRaw matrix path."
-                    }
-                };
-            ui.add(egui::Label::new(description).wrap());
-
             ui.separator();
-            ui.strong("Camera profile folder");
+            #[cfg(target_os = "android")]
+            let camera_folder_help = "Choose a top-level CameraProfiles folder with Android's system picker. AuRaw recursively imports only .dcp files into private persistent storage, groups matches by camera, and exposes them in Develop.";
+            #[cfg(not(target_os = "android"))]
+            let camera_folder_help = "Choose a top-level CameraProfiles folder. AuRaw searches subfolders recursively. Auto-detect checks Adobe Camera Raw's standard install location on Windows and macOS.";
+            crate::ui::theme::strong_with_help(ui, "Camera profile folder", camera_folder_help);
             #[cfg(target_os = "android")]
             if let Some(label) = &app.android.camera_profile_folder_importing_label {
                 ui.add(
                     egui::Label::new(egui::RichText::new(format!("Importing {label}…")).strong())
                         .wrap(),
                 );
-                ui.small("Copying .dcp files into AuRaw's persistent private storage. Large Adobe CameraProfiles trees can take a moment.");
             } else if let Some(path) = &app.preferences.camera_profile_folder {
                 ui.add(
                     egui::Label::new(
@@ -475,7 +461,6 @@ impl Settings {
                     )
                     .wrap(),
                 );
-                ui.small("Android keeps a private persistent copy of the selected .dcp files so profiles remain available after restart.");
                 let _ = path;
             } else {
                 ui.small("No external DCP folder selected.");
@@ -514,12 +499,17 @@ impl Settings {
 
                 if ui
                     .add_enabled(choose_enabled, egui::Button::new(choose_label))
+                    .on_hover_text(camera_folder_help)
                     .clicked()
                 {
                     app.choose_camera_profile_folder();
                 }
                 #[cfg(not(target_os = "android"))]
-                if ui.button("Auto-detect Adobe").clicked() {
+                if ui
+                    .button("Auto-detect Adobe")
+                    .on_hover_text("Check Adobe Camera Raw's standard CameraProfiles location.")
+                    .clicked()
+                {
                     app.auto_detect_camera_profile_folder();
                 }
                 let can_clear = app.preferences.camera_profile_folder.is_some()
@@ -528,72 +518,59 @@ impl Settings {
                 let can_clear = can_clear && !app.android.picker_pending;
                 if ui
                     .add_enabled(can_clear, egui::Button::new("Clear"))
+                    .on_hover_text("Stop using the configured external DCP profile folder.")
                     .clicked()
                 {
                     app.clear_camera_profile_folder();
                 }
             });
-            #[cfg(not(target_os = "android"))]
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(
-                            "Choose the top-level profile root (for example CameraProfiles). AuRaw searches every subfolder recursively. Auto-detect checks Adobe Camera Raw's standard CameraProfiles install location on Windows and macOS."
-                        )
-                        .small(),
-                    )
-                    .wrap(),
-                );
-            #[cfg(target_os = "android")]
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(
-                            "Choose the top-level CameraProfiles folder with Android's system folder picker. AuRaw recursively imports only .dcp files, then groups all matches by camera and exposes multiple profiles in Develop."
-                        )
-                        .small(),
-                    )
-                    .wrap(),
-                );
         });
 
         #[cfg(not(target_os = "android"))]
         {
             crate::ui::theme::card_gap(ui);
             Self::group(ui, content_width, |ui| {
-                ui.heading("AI models");
+                crate::ui::theme::heading_with_help(
+                    ui,
+                    "AI models",
+                    "Configure local inference acceleration, Subject mask quality, and the trusted ONNX Runtime library used by AI tools.",
+                );
                 let mut acceleration = app.ai.gpu_acceleration;
-                if ui
-                    .checkbox(
-                        &mut acceleration,
-                        "Use GPU acceleration when available",
-                    )
-                    .on_hover_text(
-                        "Allow AI masks and AI denoise to use a supported GPU execution provider. CPU fallback remains automatic.",
-                    )
+                if crate::ui::theme::checkbox_with_help(
+                    ui,
+                    &mut acceleration,
+                    "Use GPU acceleration when available",
+                    "Allows AI masks and AI denoise to use a supported GPU execution provider. CPU fallback remains automatic. Turn this off if GPU inference causes driver errors, instability, or incorrect results.",
+                )
                     .changed()
                 {
                     app.set_ai_gpu_acceleration(acceleration);
                 }
-                ui.add(
-                    egui::Label::new(
-                        "Enabled by default. Turn this off if GPU-backed AI inference causes driver errors, instability, or incorrect results; AI tools will then run on CPU.",
-                    )
-                    .wrap(),
-                );
 
                 ui.separator();
-                ui.strong("Subject masks");
+                crate::ui::theme::strong_with_help(
+                    ui,
+                    "Subject masks",
+                    "Quality applies to newly generated and rerun Subject and Not Subject masks.",
+                );
                 let previous_quality = app.ai.birefnet_quality;
                 let mut quality = previous_quality;
+                let quality_help = format!(
+                    "{} This quality applies to newly generated and rerun Subject and Not Subject masks.",
+                    quality.model().explanation
+                );
                 ui.add_enabled_ui(app.birefnet_quality_change_enabled(), |ui| {
-                    crate::ui::theme::form_combo(
+                    crate::ui::theme::form_combo_with_help(
                         ui,
                         "Subject mask quality",
                         "settings-subject-mask-quality",
                         quality.label(),
                         180.0,
+                        &quality_help,
                         |ui| {
                             for option in crate::ai_masks::BiRefNetQuality::ALL {
-                                ui.selectable_value(&mut quality, option, option.label());
+                                ui.selectable_value(&mut quality, option, option.label())
+                                    .on_hover_text(option.model().explanation);
                             }
                         },
                     );
@@ -601,20 +578,14 @@ impl Settings {
                 if quality != previous_quality {
                     app.set_birefnet_quality(quality);
                 }
-                ui.add(egui::Label::new(quality.model().explanation).wrap());
-                ui.small(
-                    "This quality is used for newly generated and rerun Subject / Not Subject masks.",
-                );
 
                 ui.separator();
-                ui.strong("ONNX Runtime");
                 let runtime_help = if cfg!(target_os = "windows") {
                     "Choose a trusted ONNX Runtime 1.18 or newer onnxruntime.dll that matches this AuRaw build's CPU architecture. AuRaw validates the DLL in an isolated helper process before AI tools use it. GPU provider libraries and their dependencies must remain beside it."
                 } else {
                     "Choose a trusted ONNX Runtime 1.18 or newer shared library built for your hardware. AuRaw never downloads or dynamically loads a native runtime without this explicit selection. GPU provider libraries and their dependencies must remain beside it."
                 };
-                ui.add(egui::Label::new(runtime_help).wrap());
-                ui.add_space(4.0);
+                crate::ui::theme::strong_with_help(ui, "ONNX Runtime", runtime_help);
                 if let Some(path) = &app.ai.runtime_path {
                     ui.label("Selected runtime:");
                     ui.add(
@@ -634,7 +605,11 @@ impl Settings {
                     );
                 }
                 crate::ui::theme::action_row(ui, |ui| {
-                    if ui.button("Choose ONNX Runtime…").clicked() {
+                    if ui
+                        .button("Choose ONNX Runtime…")
+                        .on_hover_text(runtime_help)
+                        .clicked()
+                    {
                         app.choose_onnx_runtime();
                     }
                     if ui
@@ -642,40 +617,33 @@ impl Settings {
                             app.ai.runtime_path.is_some(),
                             eframe::egui::Button::new("Clear"),
                         )
+                        .on_hover_text("Forget the selected runtime. AI tools remain unavailable until another trusted runtime is selected and AuRaw is restarted.")
                         .clicked()
                     {
                         app.clear_onnx_runtime();
                     }
                 });
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(
-                            "Restart AuRaw after changing this library. The runtime is loaded once per process.",
-                        )
-                        .small(),
-                    )
-                    .wrap(),
-                );
             });
         }
 
         crate::ui::theme::card_gap(ui);
         Self::group(ui, content_width, |ui| {
-            ui.heading("Legal & attributions");
+            crate::ui::theme::heading_with_help(
+                ui,
+                "Legal & attributions",
+                "Adapted code, bundled data, native libraries, optional AI models, Rust crates, fonts, and icons retain their listed upstream terms and notices.",
+            );
             ui.strong(format!("AuRaw {}", env!("CARGO_PKG_VERSION")));
             ui.label("Copyright (C) 2026 Duecki and AuRaw contributors");
             ui.label(format!("Licensed under {PROJECT_LICENSE_ID}."));
             ui.hyperlink_to("Project source and license", PROJECT_REPOSITORY);
-            ui.add_space(4.0);
-            ui.add(
-                egui::Label::new(
-                    "Adapted code, bundled data and native libraries retain their upstream notices. Optional AI models retain their separately listed terms. Resolved Rust crates and bundled fonts/icons are listed with their complete license texts below.",
-                )
-                .wrap(),
-            );
 
             crate::ui::theme::action_row(ui, |ui| {
-                if ui.button("Copy all legal text").clicked() {
+                if ui
+                    .button("Copy all legal text")
+                    .on_hover_text("Copy the project license and every bundled third-party notice.")
+                    .clicked()
+                {
                     let legal_text = format!(
                         "{PROJECT_NOTICE}\n\n{PROJECT_LICENSE}\n\n{THIRD_PARTY_NOTICES}\n\n{RUST_DEPENDENCY_LICENSES}"
                     );
@@ -709,18 +677,19 @@ impl Settings {
 
         crate::ui::theme::card_gap(ui);
         Self::group(ui, content_width, |ui| {
-            ui.heading("Diagnostics");
-            ui.add(
-                egui::Label::new(
-                    "Open the same RAW and run an export on each device, then use Copy log. The report includes Android, GPU/backend, RAW calibration, fingerprints, and timing information.",
-                )
-                .wrap(),
+            crate::ui::theme::heading_with_help(
+                ui,
+                "Diagnostics",
+                "For comparisons, open the same RAW and run an export on each device, then copy the log. It includes platform, GPU/backend, RAW calibration, fingerprints, and timing information.",
             );
-            ui.add_space(4.0);
 
             let mut diagnostic_log = diagnostics_snapshot_with_ai_backends();
             crate::ui::theme::action_row(ui, |ui| {
-                if ui.button("Copy log").clicked() {
+                if ui
+                    .button("Copy log")
+                    .on_hover_text("Copy the complete diagnostic report.")
+                    .clicked()
+                {
                     #[cfg(target_os = "android")]
                     match app.copy_text_to_clipboard("AuRaw diagnostics", &diagnostic_log) {
                         Ok(()) => {
@@ -733,7 +702,11 @@ impl Settings {
                     #[cfg(not(target_os = "android"))]
                     ui.ctx().copy_text(diagnostic_log.clone());
                 }
-                if ui.button("Clear events").clicked() {
+                if ui
+                    .button("Clear events")
+                    .on_hover_text("Clear recorded runtime events from the diagnostic report.")
+                    .clicked()
+                {
                     crate::diagnostics::clear();
                     diagnostic_log = diagnostics_snapshot_with_ai_backends();
                 }
@@ -741,15 +714,20 @@ impl Settings {
 
             let rows = match layout {
                 ScreenLayout::Horizontal => 16,
-                ScreenLayout::Vertical => 12,
+                ScreenLayout::Vertical => 10,
             };
             let mut diagnostic_view = diagnostic_log.as_str();
-            ui.add(
-                egui::TextEdit::multiline(&mut diagnostic_view)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_rows(rows)
-                    .desired_width(f32::INFINITY),
-            );
+            egui::CollapsingHeader::new("View diagnostic log")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut diagnostic_view)
+                            .font(egui::TextStyle::Monospace)
+                            .interactive(false)
+                            .desired_rows(rows)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
         });
 
         if !app.ui.expert_mode {
@@ -760,16 +738,13 @@ impl Settings {
         let mut changed = false;
 
         Self::group(ui, content_width, |ui| {
-            ui.heading("Highlight reconstruction");
-            ui.add(
-                egui::Label::new(
-                    "Reconstruct clipped sensor channels before demosaicing to avoid pink or grey highlights.",
-                )
-                .wrap(),
+            crate::ui::theme::heading_with_help(
+                ui,
+                "Highlight reconstruction",
+                "Reconstructs clipped sensor channels before demosaicing to avoid pink or grey highlights.",
             );
-            ui.add_space(4.0);
 
-            crate::ui::theme::form_combo(
+            crate::ui::theme::form_combo_with_help(
                 ui,
                 "Method",
                 "settings-highlight-reconstruction-method",
@@ -779,6 +754,7 @@ impl Settings {
                     HighlightReconstructionMethod::InpaintOpposed => "Inpaint opposed",
                 },
                 180.0,
+                "Choose the sensor-channel reconstruction algorithm. LCh is faster; Inpaint opposed can recover more difficult clipped regions.",
                 |ui| {
                     changed |= ui
                         .selectable_value(
@@ -829,8 +805,11 @@ impl Settings {
                 }
             });
 
-            ui.add_space(4.0);
-            if ui.button("Restore reconstruction defaults").clicked() {
+            if ui
+                .button("Restore reconstruction defaults")
+                .on_hover_text("Reset the method, threshold, and strength to their defaults.")
+                .clicked()
+            {
                 app.reset_highlight_reconstruction_settings();
             }
         });

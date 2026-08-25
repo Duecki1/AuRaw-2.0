@@ -303,14 +303,27 @@ impl Sidebar {
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    match app.ui.sidebar_tab {
-                        SidebarTab::Adjustments => Self::show_adjustments(ui, app, layout, frame),
-                        SidebarTab::Crop => Self::show_crop(ui, app),
-                        SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
-                        SidebarTab::Inpainting => Self::show_inpainting(ui, app, layout, frame),
-                        SidebarTab::Export => Self::show_export(ui, app, frame),
-                    }
-                    ui.add_space(10.0);
+                    let content_width = ui.available_width().max(1.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(content_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(content_width);
+                            ui.set_max_width(content_width);
+                            match app.ui.sidebar_tab {
+                                SidebarTab::Adjustments => {
+                                    Self::show_adjustments(ui, app, layout, frame)
+                                }
+                                SidebarTab::Crop => Self::show_crop(ui, app),
+                                SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
+                                SidebarTab::Inpainting => {
+                                    Self::show_inpainting(ui, app, layout, frame)
+                                }
+                                SidebarTab::Export => Self::show_export(ui, app, frame),
+                            }
+                            ui.add_space(10.0);
+                        },
+                    );
                 });
         });
     }

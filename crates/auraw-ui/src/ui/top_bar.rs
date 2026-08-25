@@ -41,10 +41,21 @@ impl TopBar {
         let Some(progress) = app.library.thumbnail_background_progress() else {
             return;
         };
+        #[cfg(target_os = "android")]
+        if progress.paused {
+            return;
+        }
         let fraction = progress.completed as f32 / progress.total.max(1) as f32;
+        #[cfg(not(target_os = "android"))]
         let label = format!("Previews {}/{}", progress.completed, progress.total);
+        #[cfg(target_os = "android")]
+        let label = format!("{}/{}", progress.completed, progress.total);
+        #[cfg(not(target_os = "android"))]
+        let width = 112.0;
+        #[cfg(target_os = "android")]
+        let width = 72.0;
         let response = ui.add_sized(
-            [112.0, theme::CONTROL_HEIGHT],
+            [width, theme::CONTROL_HEIGHT],
             egui::ProgressBar::new(fraction)
                 .text(label)
                 .animate(!progress.paused),

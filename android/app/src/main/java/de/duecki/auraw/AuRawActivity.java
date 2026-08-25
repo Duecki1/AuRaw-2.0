@@ -13,6 +13,7 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.view.View;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.widget.Toast;
 import android.window.OnBackInvokedDispatcher;
 
@@ -126,6 +127,28 @@ public final class AuRawActivity extends NativeActivity {
         } else {
             nativeOnSystemInsetsChanged(0, 0, 0, 0);
         }
+    }
+
+    @SuppressWarnings("deprecation")
+    public void setLightSystemBars(int lightFlag) {
+        final boolean light = lightFlag != 0;
+        runOnUiThread(() -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowInsetsController controller = getWindow().getInsetsController();
+                if (controller != null) {
+                    int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    controller.setSystemBarsAppearance(light ? mask : 0, mask);
+                }
+            } else {
+                View decorView = getWindow().getDecorView();
+                int mask = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                        | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                int visibility = decorView.getSystemUiVisibility();
+                decorView.setSystemUiVisibility(
+                        light ? visibility | mask : visibility & ~mask);
+            }
+        });
     }
 
     @SuppressWarnings("deprecation")

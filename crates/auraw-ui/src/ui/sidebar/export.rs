@@ -7,13 +7,18 @@ pub(crate) fn export_settings_controls(
 ) {
     #[cfg(target_os = "android")]
     let _ = fallback_picker_directory;
-    crate::ui::theme::section_card(ui, "Image sizing", |ui| {
-        crate::ui::theme::form_combo(
+    crate::ui::theme::section_card_with_help(
+        ui,
+        "Image sizing",
+        "Export the complete processed image or constrain one dimension or percentage. Batch sizing is calculated independently for every selected image.",
+        |ui| {
+        crate::ui::theme::form_combo_with_help(
             ui,
             "Resize to fit",
             "export-resize-mode",
             settings.resize_mode.label(),
             150.0,
+            "Original preserves the processed dimensions. Other modes constrain the selected edge, dimension, or percentage while preserving aspect ratio.",
             |ui| {
                 for mode in [
                     ExportResizeMode::Original,
@@ -29,9 +34,7 @@ pub(crate) fn export_settings_controls(
         );
 
         match settings.resize_mode {
-            ExportResizeMode::Original => {
-                ui.label("Exports the complete processed image.");
-            }
+            ExportResizeMode::Original => {}
             ExportResizeMode::Percentage => {
                 ui.horizontal(|ui| {
                     ui.label("Scale");
@@ -68,7 +71,7 @@ pub(crate) fn export_settings_controls(
                 match settings.checked_output_dimensions(width, height) {
                     Ok((output_width, output_height)) => {
                         ui.label(format!(
-                            "Source: {width}×{height}  →  Export: {output_width}×{output_height}"
+                            "Source: {width}×{height}  ·  Export: {output_width}×{output_height}"
                         ));
                     }
                     Err(error) => {
@@ -78,23 +81,22 @@ pub(crate) fn export_settings_controls(
             } else {
                 ui.label("Open a RAW file to calculate export dimensions.");
             }
-        } else {
-            ui.label(
-                egui::RichText::new("Sizing is applied independently to each selected image.")
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            );
         }
     });
 
     crate::ui::theme::card_gap(ui);
-    crate::ui::theme::section_card(ui, "Precision", |ui| {
-        crate::ui::theme::form_combo(
+    crate::ui::theme::section_card_with_help(
+        ui,
+        "Precision",
+        "Choose the channel precision written to the exported file. Higher precision preserves more editing latitude but produces larger files.",
+        |ui| {
+        crate::ui::theme::form_combo_with_help(
             ui,
             "Bit depth",
             "export-bit-depth",
             settings.bit_depth.label(),
             150.0,
+            "8-bit is broadly compatible; 16-bit retains more tonal precision; 32-bit float writes a scene-linear master.",
             |ui| {
                 for depth in [
                     ExportBitDepth::Eight,
@@ -108,8 +110,12 @@ pub(crate) fn export_settings_controls(
     });
 
     crate::ui::theme::card_gap(ui);
-    crate::ui::theme::section_card(ui, "Color profile", |ui| {
-        crate::ui::theme::form_combo(
+    crate::ui::theme::section_card_with_help(
+        ui,
+        "Color profile",
+        "Embeds the output color space used to interpret exported pixels. Float masters always use linear Rec.2020.",
+        |ui| {
+        crate::ui::theme::form_combo_with_help(
             ui,
             "Output profile",
             "export-output-profile",
@@ -119,6 +125,7 @@ pub(crate) fn export_settings_controls(
                 settings.color_profile.label()
             },
             150.0,
+            "sRGB is the broadly compatible default. Desktop builds can embed a selected custom ICC profile. Float masters always embed linear Rec.2020.",
             |ui| {
                 ui.add_enabled_ui(!settings.bit_depth.is_float(), |ui| {
                     ui.selectable_value(
@@ -136,13 +143,9 @@ pub(crate) fn export_settings_controls(
             },
         );
 
-        if settings.bit_depth.is_float() {
-            ui.label(
-                egui::RichText::new("Float masters embed a linear Rec.2020 ICC profile.")
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            );
-        } else if settings.color_profile == ExportColorProfile::CustomIcc {
+        if !settings.bit_depth.is_float()
+            && settings.color_profile == ExportColorProfile::CustomIcc
+        {
             #[cfg(not(target_os = "android"))]
             {
                 if ui.button("Choose ICC profile…").clicked() {
@@ -182,10 +185,12 @@ pub(crate) fn export_settings_controls(
 
     crate::ui::theme::card_gap(ui);
     crate::ui::theme::section_card(ui, "Metadata", |ui| {
-        ui.checkbox(&mut settings.keep_metadata, "Keep metadata")
-            .on_hover_text(
-                "Embeds available source, camera, lens, exposure, creator, original-size, software, and normalized-orientation metadata in the exported image.",
-            );
+        crate::ui::theme::checkbox_with_help(
+            ui,
+            &mut settings.keep_metadata,
+            "Keep metadata",
+            "Embeds available source, camera, lens, exposure, creator, original-size, software, and normalized-orientation metadata in the exported image.",
+        );
     });
 
     crate::ui::theme::card_gap(ui);

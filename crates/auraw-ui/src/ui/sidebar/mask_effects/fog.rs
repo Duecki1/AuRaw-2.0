@@ -5,10 +5,6 @@ use eframe::egui::Ui;
 pub(crate) fn show(ui: &mut Ui, settings: &mut FogEffectSettings) -> bool {
     let mut changed = effect_toolbar(ui, MaskEffect::Fog, settings);
     super::super::Sidebar::adjustment_section(ui, MaskEffect::Fog.label(), true, false, |ui| {
-        ui.small(
-            "Fog is generated in full-image coordinates and blended through the editable mask.",
-        );
-        ui.add_space(3.0);
         changed |= effect_slider(ui, &mut settings.amount, fog::AMOUNT);
         changed |= effect_slider(ui, &mut settings.density, fog::DENSITY);
         changed |= effect_slider(ui, &mut settings.scale, fog::SCALE);
