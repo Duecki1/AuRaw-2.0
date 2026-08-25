@@ -19,9 +19,11 @@ impl LibraryState {
         }
         self.platform.folder = folder;
         let selected_folder = self.platform.folder.clone();
-        self.platform.expanded_folders
+        self.platform
+            .expanded_folders
             .extend(android_folder_ancestors(&selected_folder));
-        let location = android_library_location_label(&self.platform.root_location, &selected_folder);
+        let location =
+            android_library_location_label(&self.platform.root_location, &selected_folder);
         self.location = Some(location);
         self.entries.clear();
         self.entry_indices.clear();

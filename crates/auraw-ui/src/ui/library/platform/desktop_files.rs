@@ -1,6 +1,9 @@
 use super::super::*;
 
-pub(in crate::ui::library) fn copy_file_create_new(source: &Path, destination: &Path) -> io::Result<()> {
+pub(in crate::ui::library) fn copy_file_create_new(
+    source: &Path,
+    destination: &Path,
+) -> io::Result<()> {
     let mut input = OpenOptions::new().read(true).open(source)?;
     let mut output = OpenOptions::new()
         .write(true)
@@ -120,7 +123,10 @@ pub(in crate::ui::library) fn remove_local_raw_bundle(raw_path: &Path) -> Result
     Ok(())
 }
 
-pub(in crate::ui::library) fn rename_raw_bundle(source_raw: &Path, requested_name: &str) -> Result<PathBuf, String> {
+pub(in crate::ui::library) fn rename_raw_bundle(
+    source_raw: &Path,
+    requested_name: &str,
+) -> Result<PathBuf, String> {
     validate_library_item_name(requested_name, true)?;
     let parent = source_raw
         .parent()
@@ -199,7 +205,10 @@ pub(in crate::ui::library) fn rename_raw_bundle(source_raw: &Path, requested_nam
     Ok(destination_raw)
 }
 
-pub(in crate::ui::library) fn import_raw_into_folder(source: &Path, folder: &Path) -> Result<RawImportOutcome, String> {
+pub(in crate::ui::library) fn import_raw_into_folder(
+    source: &Path,
+    folder: &Path,
+) -> Result<RawImportOutcome, String> {
     let original_name = source
         .file_name()
         .map(OsString::from)
@@ -320,7 +329,10 @@ pub(in crate::ui::library) fn path_entry_exists(path: &Path) -> bool {
     }
 }
 
-pub(in crate::ui::library) fn unique_folder_destination(parent: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, String> {
+pub(in crate::ui::library) fn unique_folder_destination(
+    parent: &Path,
+    name: &std::ffi::OsStr,
+) -> Result<PathBuf, String> {
     for number in 0..=10_000usize {
         let file_name = if number == 0 {
             OsString::from(name)
@@ -344,7 +356,10 @@ pub(in crate::ui::library) fn unique_folder_destination(parent: &Path, name: &st
     ))
 }
 
-pub(in crate::ui::library) fn copy_directory_create_new(source: &Path, destination: &Path) -> Result<(), String> {
+pub(in crate::ui::library) fn copy_directory_create_new(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), String> {
     let source_metadata = fs::symlink_metadata(source)
         .map_err(|error| format!("Could not inspect {}: {error}", source.display()))?;
     if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
@@ -429,7 +444,10 @@ pub(in crate::ui::library) fn copy_directory_create_new(source: &Path, destinati
     Ok(())
 }
 
-pub(in crate::ui::library) fn import_folder_into_library(source: &Path, folder: &Path) -> Result<PathBuf, String> {
+pub(in crate::ui::library) fn import_folder_into_library(
+    source: &Path,
+    folder: &Path,
+) -> Result<PathBuf, String> {
     let source_name = source
         .file_name()
         .ok_or_else(|| format!("{} has no folder name", source.display()))?;
@@ -444,7 +462,9 @@ pub(in crate::ui::library) fn import_folder_into_library(source: &Path, folder: 
     Ok(destination)
 }
 
-pub(in crate::ui::library) fn folder_operation_progress_status(operation: &LibraryFolderOperation) -> String {
+pub(in crate::ui::library) fn folder_operation_progress_status(
+    operation: &LibraryFolderOperation,
+) -> String {
     match operation {
         LibraryFolderOperation::Create { parent, .. } => {
             format!("Creating a folder in {}…", parent.display())

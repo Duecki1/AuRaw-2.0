@@ -4,9 +4,6 @@
 #import auraw::basic_adjustments as BasicAdjustments
 #import auraw::tone_common as ToneCommon
 
-// Quarter/eighth-resolution image analysis. One pass creates a log-luminance
-// guide and histogram, two separable bilateral passes make the guide
-// edge-aware, and one tiny reduction pass extracts robust percentiles.
 
 struct ToneHistogram {
     bins: array<atomic<u32>, 256>,
@@ -73,12 +70,6 @@ fn tone_source_scene_at(pos: vec2<i32>) -> vec3<f32> {
 fn tone_unexposed_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = tone_source_scene_at(pos);
 
-    // Sensor black calibration has already happened per CFA plane. Tone
-    // statistics are measured after camera characterization and fixed DNG
-    // rendering exposure only. Profile LookTable and ProfileToneCurve are
-    // excluded so H/S/W/B, Contrast, curves, and presence controls keep stable
-    // scene semantics across profiles. User Exposure is reintroduced
-    // analytically by tonemap.wgsl.
     var working = Color::cam_to_working(camera_rgb);
     if Common::camera_uniforms._pad_0_field > 0.5 {
         working = BasicAdjustments::apply_temperature_tint_values(
@@ -135,9 +126,6 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             count = count + 1.0;
 
-            // Histogram every source pixel rather than the cell average. This
-            // preserves small specular highlights and makes the 99.5th
-            // percentile independent of the reduced guide resolution.
             let histogram_min = Common::camera_uniforms.tone_histogram_bounds.xy;
             let histogram_max = Common::camera_uniforms.tone_histogram_bounds.zw;
             if x >= histogram_min.x && y >= histogram_min.y
@@ -151,9 +139,6 @@ fn tone_guide_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let average_ev = log_sum / max(count, 1.0);
 
-    // Retain a bounded trace of small highlights without allowing one hot
-    // pixel to lift the entire guide cell. Average up to the four brightest
-    // samples, then cap their influence relative to the cell mean.
     let bright_count = min(count, 4.0);
     var bright_sum = brightest.x;
     if bright_count > 1.0 { bright_sum = bright_sum + brightest.y; }

@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 Markesteijn X-Trans demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// Markesteijn algorithm credit: Frank Markesteijn (via dcraw and darktable).
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 
-// Read-only derivative inputs and homogeneity helpers for the 3x3 response
-// maps. Storage outputs remain in the entry-point shader.
 @group(0) @binding(27) var mark_drv_0_3_read: texture_2d<f32>;
 @group(0) @binding(28) var mark_drv_4_7_read: texture_2d<f32>;
 

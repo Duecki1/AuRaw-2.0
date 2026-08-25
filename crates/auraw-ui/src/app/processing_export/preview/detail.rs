@@ -246,11 +246,13 @@ impl AurawApp {
                 &render_state.device,
                 &params,
                 ProcessingStage::Raw,
-                &self.inpaint.edits,
-                &full_raw,
-                &self.develop.target_exposure,
-                [x0 as f32, y0 as f32],
-                [crop_width as f32, crop_height as f32],
+                RemoveSceneContext::new(
+                    &self.inpaint.edits,
+                    &full_raw,
+                    &self.develop.target_exposure,
+                    [x0 as f32, y0 as f32],
+                    [crop_width as f32, crop_height as f32],
+                ),
             ) {
                 self.ui.notice = Some(format!(
                     "Could not apply Remove to zoomed preview: {error:#}"
@@ -335,11 +337,13 @@ impl AurawApp {
             &render_state.device,
             &params,
             ProcessingStage::Raw,
-            &self.inpaint.edits,
-            &full_raw,
-            &self.develop.target_exposure,
-            [x0 as f32, y0 as f32],
-            [crop_width as f32, crop_height as f32],
+            RemoveSceneContext::new(
+                &self.inpaint.edits,
+                &full_raw,
+                &self.develop.target_exposure,
+                [x0 as f32, y0 as f32],
+                [crop_width as f32, crop_height as f32],
+            ),
         ) {
             self.ui.notice = Some(format!(
                 "Could not apply Remove to zoomed preview: {error:#}"

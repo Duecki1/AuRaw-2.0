@@ -96,7 +96,9 @@ impl Develop {
         }
         let min_ratio = (SPLIT_MIN_PANE_WIDTH / usable_width).min(0.45);
         let max_ratio = 1.0 - min_ratio;
-        app.develop_ui.reference.split_ratio = app.develop_ui.reference
+        app.develop_ui.reference.split_ratio = app
+            .develop_ui
+            .reference
             .split_ratio
             .clamp(min_ratio, max_ratio);
 
@@ -347,7 +349,9 @@ fn sync_reference_texture(app: &mut AurawApp, context: &egui::Context) {
         return;
     };
 
-    let event = app.develop_ui.reference
+    let event = app
+        .develop_ui
+        .reference
         .preview_receiver
         .as_ref()
         .and_then(|receiver| match receiver.try_recv() {
@@ -417,7 +421,9 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
             painter.rect_filled(rect, 0.0, crate::ui::theme::CANVAS_BACKDROP);
 
             if let Some(texture) = app.develop_ui.reference.texture.as_ref() {
-                let texture_size = app.develop_ui.reference
+                let texture_size = app
+                    .develop_ui
+                    .reference
                     .texture_size
                     .map(|[width, height]| egui::vec2(width as f32, height as f32))
                     .unwrap_or_else(|| texture.size_vec2());

@@ -50,6 +50,33 @@ const TONE_STATS_SIZE_BYTES: u64 = 2 * std::mem::size_of::<[f32; 4]>() as u64;
 const DESKTOP_GPU_WORKING_SET_LIMIT_BYTES: u64 = 1_500 * 1024 * 1024;
 const ANDROID_GPU_WORKING_SET_LIMIT_BYTES: u64 = 384 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+pub struct RemoveSceneContext<'a> {
+    pub edits: &'a RemoveEditState,
+    pub source_raw: &'a LoadedRaw,
+    pub exposure: &'a ExposureParams,
+    pub source_origin: [f32; 2],
+    pub source_size: [f32; 2],
+}
+
+impl<'a> RemoveSceneContext<'a> {
+    pub const fn new(
+        edits: &'a RemoveEditState,
+        source_raw: &'a LoadedRaw,
+        exposure: &'a ExposureParams,
+        source_origin: [f32; 2],
+        source_size: [f32; 2],
+    ) -> Self {
+        Self {
+            edits,
+            source_raw,
+            exposure,
+            source_origin,
+            source_size,
+        }
+    }
+}
+
 fn remove_patch_coverage(patch: &RemovePatch, x: f32, y: f32) -> u8 {
     if patch.alpha.is_empty() || patch.bounds.width == 0 || patch.bounds.height == 0 {
         return 0;
@@ -1765,9 +1792,25 @@ impl RawGpuPipeline {
         })
     }
 
-    pub fn output_snapshot(&self) -> GpuOutputSnapshot {
+    pub fn output_snapshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> GpuOutputSnapshot {
+        let texture = create_processing_texture(
+            device,
+            texture_size(self.width, self.height),
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            "auraw output snapshot",
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auraw output snapshot encoder"),
+        });
+        encoder.copy_texture_to_texture(
+            copy_texture(&self.out_texture),
+            copy_texture(&texture),
+            texture_size(self.width, self.height),
+        );
+        queue.submit(Some(encoder.finish()));
         GpuOutputSnapshot {
-            texture: self.out_texture.clone(),
+            texture,
             width: self.width,
             height: self.height,
         }
@@ -2513,23 +2556,11 @@ impl RawGpuPipeline {
         device: &wgpu::Device,
         params: &GpuParams,
         stage: ProcessingStage,
-        edits: &RemoveEditState,
-        source_raw: &LoadedRaw,
-        exposure: &ExposureParams,
-        source_origin: [f32; 2],
-        source_size: [f32; 2],
+        remove: RemoveSceneContext<'_>,
     ) -> Result<()> {
         self.dispatch_stage(queue, device, params, stage);
         if stage == ProcessingStage::Raw {
-            self.upload_remove_scene_patches(
-                queue,
-                device,
-                edits,
-                source_raw,
-                exposure,
-                source_origin,
-                source_size,
-            )?;
+            self.upload_remove_scene_patches(queue, device, remove)?;
         }
         Ok(())
     }
@@ -2539,28 +2570,14 @@ impl RawGpuPipeline {
         queue: &wgpu::Queue,
         device: &wgpu::Device,
         params: &GpuParams,
-        edits: &RemoveEditState,
-        source_raw: &LoadedRaw,
-        exposure: &ExposureParams,
-        source_origin: [f32; 2],
-        source_size: [f32; 2],
+        remove: RemoveSceneContext<'_>,
     ) -> Result<()> {
         for stage in [
             ProcessingStage::Raw,
             ProcessingStage::Tone,
             ProcessingStage::Output,
         ] {
-            self.dispatch_stage_with_remove(
-                queue,
-                device,
-                params,
-                stage,
-                edits,
-                source_raw,
-                exposure,
-                source_origin,
-                source_size,
-            )?;
+            self.dispatch_stage_with_remove(queue, device, params, stage, remove)?;
         }
         Ok(())
     }
@@ -2652,23 +2669,9 @@ impl RawGpuPipeline {
         queue: &wgpu::Queue,
         device: &wgpu::Device,
         params: &GpuParams,
-        edits: &RemoveEditState,
-        source_raw: &LoadedRaw,
-        exposure: &ExposureParams,
-        source_origin: [f32; 2],
-        source_size: [f32; 2],
+        remove: RemoveSceneContext<'_>,
     ) -> Result<()> {
-        self.dispatch_stage_with_remove(
-            queue,
-            device,
-            params,
-            ProcessingStage::Raw,
-            edits,
-            source_raw,
-            exposure,
-            source_origin,
-            source_size,
-        )?;
+        self.dispatch_stage_with_remove(queue, device, params, ProcessingStage::Raw, remove)?;
         self.upload_params(queue, params);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw Remove-aware export tone tile"),
@@ -2720,23 +2723,9 @@ impl RawGpuPipeline {
         queue: &wgpu::Queue,
         device: &wgpu::Device,
         params: &GpuParams,
-        edits: &RemoveEditState,
-        source_raw: &LoadedRaw,
-        exposure: &ExposureParams,
-        source_origin: [f32; 2],
-        source_size: [f32; 2],
+        remove: RemoveSceneContext<'_>,
     ) -> Result<()> {
-        self.dispatch_stage_with_remove(
-            queue,
-            device,
-            params,
-            ProcessingStage::Raw,
-            edits,
-            source_raw,
-            exposure,
-            source_origin,
-            source_size,
-        )?;
+        self.dispatch_stage_with_remove(queue, device, params, ProcessingStage::Raw, remove)?;
         self.upload_params(queue, params);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auraw Remove-aware tiled export encoder"),
@@ -2827,17 +2816,19 @@ impl RawGpuPipeline {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn upload_remove_scene_patches(
         &self,
         queue: &wgpu::Queue,
         device: &wgpu::Device,
-        edits: &RemoveEditState,
-        source_raw: &LoadedRaw,
-        exposure: &ExposureParams,
-        source_origin: [f32; 2],
-        source_size: [f32; 2],
+        remove: RemoveSceneContext<'_>,
     ) -> Result<()> {
+        let RemoveSceneContext {
+            edits,
+            source_raw,
+            exposure,
+            source_origin,
+            source_size,
+        } = remove;
         if edits.is_empty() || source_size[0] <= 0.0 || source_size[1] <= 0.0 {
             return Ok(());
         }

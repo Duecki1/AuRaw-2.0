@@ -663,7 +663,9 @@ pub(super) fn crop_workspace_screen_to_source(
     ]
 }
 
-pub(super) fn source_uv_bbox(points: impl IntoIterator<Item = [f32; 2]>) -> crate::app::PreviewUvRect {
+pub(super) fn source_uv_bbox(
+    points: impl IntoIterator<Item = [f32; 2]>,
+) -> crate::app::PreviewUvRect {
     let mut min = [1.0_f32, 1.0_f32];
     let mut max = [0.0_f32, 0.0_f32];
     for point in points {
@@ -1220,7 +1222,11 @@ pub(super) fn constrain_crop_corner_aspect(
     handle: CropHandle,
 ) -> Option<[f32; 4]> {
     let raw = app.develop.loaded_raw.as_ref()?;
-    let ratio = app.develop.geometry.aspect_ratio.value(raw.width, raw.height)?;
+    let ratio = app
+        .develop
+        .geometry
+        .aspect_ratio
+        .value(raw.width, raw.height)?;
     let normalized_ratio = ratio / (raw.width.max(1) as f32 / raw.height.max(1) as f32);
     if !normalized_ratio.is_finite() || normalized_ratio <= f32::EPSILON {
         return None;
@@ -1269,11 +1275,20 @@ pub(super) fn constrain_crop_corner_aspect(
     })
 }
 
-pub(super) fn constrain_crop_aspect(app: &AurawApp, mut crop: [f32; 4], handle: CropHandle) -> [f32; 4] {
+pub(super) fn constrain_crop_aspect(
+    app: &AurawApp,
+    mut crop: [f32; 4],
+    handle: CropHandle,
+) -> [f32; 4] {
     let Some(raw) = app.develop.loaded_raw.as_ref() else {
         return crop;
     };
-    let Some(ratio) = app.develop.geometry.aspect_ratio.value(raw.width, raw.height) else {
+    let Some(ratio) = app
+        .develop
+        .geometry
+        .aspect_ratio
+        .value(raw.width, raw.height)
+    else {
         return crop;
     };
     let normalized_ratio = ratio / (raw.width.max(1) as f32 / raw.height.max(1) as f32);
@@ -1310,7 +1325,12 @@ pub(super) fn fitted_image_size(available: egui::Vec2, image_aspect: f32) -> egu
     }
 }
 
-pub(super) fn zoomed_image_rect(outer_rect: Rect, base_size: egui::Vec2, zoom: f32, center: [f32; 2]) -> Rect {
+pub(super) fn zoomed_image_rect(
+    outer_rect: Rect,
+    base_size: egui::Vec2,
+    zoom: f32,
+    center: [f32; 2],
+) -> Rect {
     let size = base_size * zoom;
     let min = Pos2::new(
         outer_rect.center().x - center[0] * size.x,
@@ -1367,7 +1387,10 @@ pub(super) fn clamp_preview_center(center: &mut [f32; 2], viewport: egui::Vec2, 
     }
 }
 
-pub(super) fn preview_uv_changed(left: crate::app::PreviewUvRect, right: crate::app::PreviewUvRect) -> bool {
+pub(super) fn preview_uv_changed(
+    left: crate::app::PreviewUvRect,
+    right: crate::app::PreviewUvRect,
+) -> bool {
     left.min
         .into_iter()
         .chain(left.max)

@@ -1,4 +1,3 @@
-
 use crate::execution_provider::{
     ai_acceleration_enabled, create_session_with_fallback, FallbackSession, ModelSource,
     SessionOptions,
@@ -86,7 +85,11 @@ impl<S> RuntimeSlot<S> {
         } else if let Some(active) = self.active.as_mut() {
             active.retention = retention;
         }
-        Ok(&mut self.active.as_mut().expect("AI session was just created").session)
+        Ok(&mut self
+            .active
+            .as_mut()
+            .expect("AI session was just created")
+            .session)
     }
 
     fn reconcile(
@@ -328,13 +331,42 @@ mod tests {
         assert_eq!(&*events.lock().unwrap(), &["create low".to_owned()]);
     }
 
+    #[test]
+    fn different_model_drops_previous_before_create() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut slot = RuntimeSlot::default();
+        slot.ensure_model(AiModel::BiRefNetLow, interactive_masks(), 0, true, || {
+            Ok::<_, ()>(DropLog {
+                label: "low",
+                events: Arc::clone(&events),
+            })
+        })
+        .unwrap();
+        slot.ensure_model(AiModel::ViTMatte, interactive_masks(), 0, true, || {
+            events.lock().unwrap().push("create vitmatte".to_owned());
+            Ok::<_, ()>(DropLog {
+                label: "vitmatte",
+                events: Arc::clone(&events),
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            &*events.lock().unwrap(),
+            &["drop low".to_owned(), "create vitmatte".to_owned()]
+        );
+        assert_eq!(slot.active_model(), Some(AiModel::ViTMatte));
+    }
 
     #[test]
     fn only_one_session_can_be_resident() {
         let mut slot = RuntimeSlot::default();
-        slot.ensure_model(AiModel::BiRefNetMedium, interactive_masks(), 0, true, || {
-            Ok::<_, ()>(())
-        })
+        slot.ensure_model(
+            AiModel::BiRefNetMedium,
+            interactive_masks(),
+            0,
+            true,
+            || Ok::<_, ()>(()),
+        )
         .unwrap();
         assert_eq!(slot.active_model(), Some(AiModel::BiRefNetMedium));
         slot.ensure_model(AiModel::SamEncoder, interactive_masks(), 0, true, || {
@@ -358,9 +390,13 @@ mod tests {
     #[test]
     fn one_shot_model_unloads_after_inference() {
         let mut slot = RuntimeSlot::default();
-        slot.ensure_model(AiModel::RawNindBayer, ModelRetention::OneShot, 0, true, || {
-            Ok::<_, ()>(())
-        })
+        slot.ensure_model(
+            AiModel::RawNindBayer,
+            ModelRetention::OneShot,
+            0,
+            true,
+            || Ok::<_, ()>(()),
+        )
         .unwrap();
         slot.reconcile(Some(AiRuntimeContext::Masks), 0, true);
         assert_eq!(slot.active_model(), None);
@@ -448,4 +484,14 @@ mod tests {
         assert_eq!(slot.active_model(), Some(AiModel::BiRefNetHigh));
     }
 
+    #[test]
+    fn provider_policy_change_invalidates_current_session() {
+        let mut slot = RuntimeSlot::default();
+        slot.ensure_model(AiModel::ViTMatte, interactive_masks(), 4, true, || {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        slot.reconcile(Some(AiRuntimeContext::Masks), 5, false);
+        assert_eq!(slot.active_model(), None);
+    }
 }

@@ -1,8 +1,15 @@
-
 use super::*;
 
-pub const SAM21_ENCODER_MODEL_URL: &str = "https://huggingface.co/akiyamanx/sam2.1-hiera-tiny-onnx/resolve/main/sam2.1_hiera_tiny.encoder.onnx";
-pub const SAM21_DECODER_MODEL_URL: &str = "https://huggingface.co/akiyamanx/sam2.1-hiera-tiny-onnx/resolve/main/sam2.1_hiera_tiny.decoder.onnx";
+pub const SAM21_ENCODER_MODEL_URL: &str = concat!(
+    "https://huggingface.co/akiyamanx/sam2.1-hiera-tiny-onnx/resolve/",
+    "aa11669045f8d82c74e46f8f77c9b56792c90ebb/",
+    "sam2.1_hiera_tiny.encoder.onnx"
+);
+pub const SAM21_DECODER_MODEL_URL: &str = concat!(
+    "https://huggingface.co/akiyamanx/sam2.1-hiera-tiny-onnx/resolve/",
+    "aa11669045f8d82c74e46f8f77c9b56792c90ebb/",
+    "sam2.1_hiera_tiny.decoder.onnx"
+);
 pub const SAM21_ENCODER_SHA256_HEX: &str =
     "667384d1e686de6828b841ac8a24db0fafa2b3452494225f82eeedac56141230";
 pub const SAM21_DECODER_SHA256_HEX: &str =
@@ -96,22 +103,32 @@ pub struct ObjectMaskResult {
 #[derive(Debug)]
 pub enum ObjectMaskEvent {
     DownloadProgress(ModelDownloadProgress),
-    Inferencing {
-        decoder_only: bool,
-    },
+    Inferencing { decoder_only: bool },
     Finished(Result<ObjectMaskResult, String>),
 }
 
-pub fn spawn_object_mask(
-    encoder_path: PathBuf,
-    decoder_path: PathBuf,
-    vitmatte_path: PathBuf,
-    allow_download: bool,
-    runtime_path: Option<PathBuf>,
-    runtime_sha256: Option<String>,
-    request: ObjectMaskRequest,
-    cancellation: Arc<AtomicBool>,
-) -> mpsc::Receiver<ObjectMaskEvent> {
+pub struct ObjectMaskWorkerRequest {
+    pub encoder_path: PathBuf,
+    pub decoder_path: PathBuf,
+    pub vitmatte_path: PathBuf,
+    pub allow_download: bool,
+    pub runtime_path: Option<PathBuf>,
+    pub runtime_sha256: Option<String>,
+    pub inference: ObjectMaskRequest,
+    pub cancellation: Arc<AtomicBool>,
+}
+
+pub fn spawn_object_mask(worker: ObjectMaskWorkerRequest) -> mpsc::Receiver<ObjectMaskEvent> {
+    let ObjectMaskWorkerRequest {
+        encoder_path,
+        decoder_path,
+        vitmatte_path,
+        allow_download,
+        runtime_path,
+        runtime_sha256,
+        inference,
+        cancellation,
+    } = worker;
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
     let spawn = std::thread::Builder::new()
@@ -142,7 +159,7 @@ pub fn spawn_object_mask(
                         },
                     )?;
                     ensure_ai_not_cancelled(&cancellation)?;
-                    let decoder_only = request.cache.is_some();
+                    let decoder_only = inference.cache.is_some();
                     let _ = worker_sender.send(ObjectMaskEvent::Inferencing { decoder_only });
                     infer_object_mask(
                         &encoder_path,
@@ -150,7 +167,7 @@ pub fn spawn_object_mask(
                         &vitmatte_path,
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
-                        request,
+                        inference,
                     )
                 })()
             }))
@@ -1483,6 +1500,14 @@ mod object_mask_tests {
         for value in [SAM21_ENCODER_SHA256_HEX, SAM21_DECODER_SHA256_HEX] {
             assert_eq!(value.len(), 64);
             assert!(value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
+    }
+
+    #[test]
+    fn sam_model_urls_are_immutable_revision_pins() {
+        for url in [SAM21_ENCODER_MODEL_URL, SAM21_DECODER_MODEL_URL] {
+            assert!(url.contains("/resolve/aa11669045f8d82c74e46f8f77c9b56792c90ebb/"));
+            assert!(!url.contains("/resolve/main/"));
         }
     }
 

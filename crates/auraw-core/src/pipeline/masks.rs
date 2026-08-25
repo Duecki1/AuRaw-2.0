@@ -7,11 +7,11 @@ use std::sync::Arc;
 mod effects;
 
 pub use effects::{
-    params as effect_params,
-    BlurEffectSettings, EdgeGlowEffectSettings, FogEffectSettings, GlowEffectSettings,
-    LensBlurEffectSettings, LightRaysEffectSettings, MaskEffect, MaskEffectCategory,
-    MaskEffectSettings, MotionBlurEffectSettings, NeonEffectSettings, PixelateEffectSettings,
-    RadialBlurEffectSettings, RadialBlurMode, SmokeEffectSettings, TiltShiftEffectSettings,
+    params as effect_params, BlurEffectSettings, EdgeGlowEffectSettings, FogEffectSettings,
+    GlowEffectSettings, LensBlurEffectSettings, LightRaysEffectSettings, MaskEffect,
+    MaskEffectCategory, MaskEffectSettings, MotionBlurEffectSettings, NeonEffectSettings,
+    PixelateEffectSettings, RadialBlurEffectSettings, RadialBlurMode, SmokeEffectSettings,
+    TiltShiftEffectSettings,
 };
 
 pub const MAX_LOCAL_MASKS: usize = 32;
@@ -53,6 +53,7 @@ pub enum MaskKind {
     Linear,
     Subject,
     Background,
+    #[serde(alias = "Landscape")]
     Object,
     LuminanceRange,
     ColorRange,
@@ -102,7 +103,6 @@ impl MaskKind {
         )
     }
 }
-
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum MaskCombineMode {
@@ -355,6 +355,7 @@ pub enum MaskGeometry {
         grow: f32,
         feather: f32,
     },
+    #[serde(alias = "Landscape")]
     Object {
         mask: Option<MaskImage>,
         #[serde(default)]
@@ -456,10 +457,6 @@ impl MaskGeometry {
                 edge_refine: default_object_edge_refine(),
                 strokes: Vec::new(),
             },
-                mask: None,
-                grow: 0.0,
-                feather: 0.0,
-            },
             MaskKind::LuminanceRange => Self::LuminanceRange {
                 source: None,
                 low: 0.2,
@@ -484,8 +481,7 @@ impl MaskGeometry {
             Self::Fullscreen => true,
             Self::Brush { dabs, .. } => !dabs.is_empty(),
             Self::Radial { initialized, .. } | Self::Linear { initialized, .. } => *initialized,
-                mask.is_some()
-            }
+            Self::Ai { mask, .. } | Self::Object { mask, .. } => mask.is_some(),
             Self::LuminanceRange { source, .. } => source.is_some(),
             Self::ColorRange {
                 source, sampled, ..
@@ -1051,11 +1047,14 @@ impl MaskStack {
         let Some(mask) = self.masks.get_mut(mask_index) else {
             return false;
         };
-        if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len() {
+        if mask.components.len() >= MAX_MASK_COMPONENTS || component_index >= mask.components.len()
+        {
             return false;
         }
         component.name = copied_name(&component.name, |candidate| {
-            mask.components.iter().any(|component| component.name == candidate)
+            mask.components
+                .iter()
+                .any(|component| component.name == candidate)
         });
         if invert {
             component.common.toggle_invert();
@@ -1483,7 +1482,9 @@ fn component_shape_margin_pixels(component: &MaskComponent, image_edge: f32) -> 
             + 2.0
     };
     match &component.geometry {
-        MaskGeometry::Ai { grow, feather, .. }
+        MaskGeometry::Ai { grow, feather, .. } | MaskGeometry::Object { grow, feather, .. } => {
+            shape_margin(*grow, *feather)
+        }
         MaskGeometry::LuminanceRange { grow, .. } | MaskGeometry::ColorRange { grow, .. } => {
             shape_margin(*grow, 0.0)
         }
@@ -1753,9 +1754,9 @@ pub fn rasterize_brush_dabs(
         MaskRasterSpace::new(width, height, image_width, image_height),
         dabs,
     )
-        .into_iter()
-        .map(|value| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
-        .collect()
+    .into_iter()
+    .map(|value| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+    .collect()
 }
 
 fn rasterize_brush(space: MaskRasterSpace, dabs: &[BrushDab]) -> Vec<f32> {

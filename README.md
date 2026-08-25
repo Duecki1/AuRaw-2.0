@@ -58,4 +58,6 @@ Architecture and format notes:
 ## License
 
 AuRaw is GPL-3.0-or-later. See [COPYING](COPYING), [NOTICE.md](NOTICE.md), and
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Complete resolved Rust
+dependency, font, and icon terms are in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

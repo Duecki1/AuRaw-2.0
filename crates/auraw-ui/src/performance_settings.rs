@@ -518,5 +518,4 @@ mod tests {
             assert_eq!(settings.preview_quality, expected);
         }
     }
-
 }

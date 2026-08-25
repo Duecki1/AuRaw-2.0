@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The heal solver includes an adaptation of GIMP 3.0.4 app/paint/gimpheal.c.
+// Copyright the GIMP contributors.
+// Copyright (C) 2026 AuRaw contributors (Rust adaptation).
+
 use crate::execution_provider::SessionOptions;
 use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
 use crate::model_install::ModelInstallSpec;
@@ -7,10 +12,10 @@ use crate::pipeline::{
     pipeline_scene_to_working_rec2020, plan_remove_context_crop, rasterize_remove_brush,
     remove_model_srgb_to_canonical_scene, remove_model_view_gain, remove_scene_to_model_srgb,
     render_remove_scene_crop, render_remove_scene_crop_resized,
-    working_rec2020_to_canonical_remove_scene, DevelopedCropJob, ExposureParams,
-    GeometryTransform, GpuProgramPrewarm, LoadedRaw, MaskStack, NativeRect, RemoveBrushStroke,
-    RemoveEditState, RemoveMask, RemovePatch, RemoveStroke, ResizedRemoveSceneCrop,
-    RetouchAlignment, RetouchStroke, RetouchTool, ToneStatisticsSnapshot, BIG_LAMA_INPUT_EDGE,
+    working_rec2020_to_canonical_remove_scene, DevelopedCropJob, ExposureParams, GeometryTransform,
+    GpuProgramPrewarm, LoadedRaw, MaskStack, NativeRect, RemoveBrushStroke, RemoveEditState,
+    RemoveMask, RemovePatch, RemoveStroke, ResizedRemoveSceneCrop, RetouchAlignment, RetouchStroke,
+    RetouchTool, ToneStatisticsSnapshot, BIG_LAMA_INPUT_EDGE,
 };
 use crate::ModelDownloadProgress;
 use anyhow::{Context, Result};
@@ -119,9 +124,7 @@ pub fn spawn_remove(request: RemoveRequest) -> mpsc::Receiver<RemoveEvent> {
     receiver
 }
 
-/// Runs clone/heal locally. Unlike Remove, this path never initializes ONNX or
-/// downloads a model; only the small native scene regions touched by the brush
-/// are rendered and cached as a non-destructive patch.
+/// Local clone/heal path; never initializes or downloads an ONNX model.
 pub fn spawn_retouch(request: RetouchRequest) -> mpsc::Receiver<RemoveEvent> {
     let (sender, receiver) = mpsc::channel();
     let worker = sender.clone();
@@ -770,8 +773,7 @@ fn perceptual_decode_signed(value: f32) -> f32 {
     }
 }
 
-/// Port of GIMP's checkerboard Gauss-Seidel/SOR healing solver. The solved
-/// field is destination minus source in perceptual RGB, matching gimpheal.c.
+/// Port of GIMP 3.0.4's `app/paint/gimpheal.c` solver.
 fn gimp_heal_laplace_loop(
     pixels: &mut [f32],
     width: usize,
@@ -1115,9 +1117,9 @@ mod tests {
             &raw,
             &ExposureParams::default(),
             destination_bounds,
-            &vec![0.2; 4 * 4 * 3],
+            &[0.2; 4 * 4 * 3],
             source_bounds,
-            &vec![0.8; 4 * 4 * 3],
+            &[0.8; 4 * 4 * 3],
             &RemoveBrushStroke {
                 points: vec![RemoveBrushPoint {
                     x: 5.5,

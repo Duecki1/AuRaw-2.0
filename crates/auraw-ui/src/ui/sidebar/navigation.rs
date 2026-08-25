@@ -388,7 +388,10 @@ impl Sidebar {
     }
 
     #[cfg(target_os = "android")]
+    pub(crate) fn show_android_landscape_primary_tabs(ui: &mut Ui, app: &mut AurawApp) {
+        use egui_phosphor::regular;
 
+        ui.set_width(Self::ANDROID_LANDSCAPE_TOOL_RAIL_WIDTH);
         ui.spacing_mut().item_spacing.y = 0.0;
         let previous = app.ui.sidebar_tab;
         ui.vertical_centered(|ui| {

@@ -1,22 +1,19 @@
 use crate::ai_masks::{
-    spawn_object_mask, spawn_subject_mask, BiRefNetQuality,
-    ObjectInferenceCache, ObjectMaskEvent,
-    ObjectMaskRequest, SubjectMaskEvent, SubjectMaskWorkerRequest, SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
+    spawn_object_mask, spawn_subject_mask, BiRefNetQuality, ObjectInferenceCache, ObjectMaskEvent,
+    ObjectMaskRequest, ObjectMaskWorkerRequest, SubjectMaskEvent, SubjectMaskWorkerRequest,
+    SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
 };
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
-    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
-    lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_export, BrushMode, CameraProfileMode, ExportEvent, ExportFormat,
-    ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
-    GpuParams, GpuProgramPrewarm,
-    LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind,
-    MaskRgbImage,
-    MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
-    RawGpuProgramTemplate, RemoveBrushPoint, RemoveBrushStroke, RemoveEditState,
-    RetouchAlignment, RetouchStroke, RetouchTool, SubjectRefinement, TiledExportJob, TileSpec, EXPORT_TILE_HALO,
-    MAX_LOCAL_MASKS,
+    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
+    load_raw_file_with_profile_selection, spawn_tiled_export, BrushMode, CameraProfileMode,
+    ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
+    GpuParams, GpuProgramPrewarm, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage,
+    MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
+    RawGpuPipeline, RawGpuProgramTemplate, RemoveBrushPoint, RemoveBrushStroke, RemoveEditState,
+    RemoveSceneContext, RetouchAlignment, RetouchStroke, RetouchTool, SubjectRefinement, TileSpec,
+    TiledExportJob, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::remove::{spawn_remove, spawn_retouch, RemoveEvent, RemoveRequest, RetouchRequest};
 use crate::sidecar::{
@@ -825,7 +822,7 @@ struct LensCorrectionTaskRequest {
     cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
 }
 
-type GeneratedAiMaskTargets = (bool, VecDeque<(usize, usize)>, VecDeque<(usize, usize)>);
+type GeneratedAiMaskTargets = (bool, VecDeque<(usize, usize)>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ForegroundOperationKind {
@@ -838,7 +835,11 @@ pub(crate) enum ForegroundOperationKind {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ForegroundProgressValue {
     Indeterminate,
-    Units { completed: u64, total: u64, unit: Option<String> },
+    Units {
+        completed: u64,
+        total: u64,
+        unit: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -864,7 +865,11 @@ impl ForegroundProgress {
         phase: impl Into<String>,
     ) -> Self {
         Self {
-            value: ForegroundProgressValue::Units { completed, total, unit: unit.into() },
+            value: ForegroundProgressValue::Units {
+                completed,
+                total,
+                unit: unit.into(),
+            },
             phase: phase.into(),
             detail: None,
         }
@@ -1199,10 +1204,7 @@ impl AurawApp {
             && self.ai.library_mask_refresh.is_none()
             && matches!(
                 self.foreground_operation_kind(),
-                Some(
-                    ForegroundOperationKind::SubjectMask
-                        | ForegroundOperationKind::ObjectMask
-                )
+                Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
             )
         {
             self.cancel_foreground_operation();
@@ -1268,10 +1270,12 @@ impl AurawApp {
             self.retire_egui_texture(texture_id);
         }
         for texture_id in [
-            self.preview.detail
+            self.preview
+                .detail
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
-            self.preview.navigation
+            self.preview
+                .navigation
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
         ]
@@ -1289,18 +1293,18 @@ impl AurawApp {
     }
 }
 
+mod eframe_impl;
+mod foreground;
+mod inpainting;
+mod library_adjustments;
 mod lifecycle;
 mod masks_ai;
-mod inpainting;
 mod processing_export;
-mod library_adjustments;
 mod sidecar_persistence;
-mod foreground;
-mod eframe_impl;
 
-use lifecycle::needs_canonical_mask_source;
 #[cfg(not(target_os = "android"))]
 use lifecycle::install_missing_range_sources;
+use lifecycle::needs_canonical_mask_source;
 use sidecar_persistence::sidecar_interaction_active;
 
 #[cfg(test)]

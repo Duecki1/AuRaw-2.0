@@ -1,5 +1,3 @@
-// Position-dependent zoom/spin gather for Radial Blur. Trail extent is capped
-// in reference pixels so tiled exports only need a finite, predictable halo.
 
 const MASK_RADIAL_BLUR_SAMPLE_COUNT: u32 = 25u;
 

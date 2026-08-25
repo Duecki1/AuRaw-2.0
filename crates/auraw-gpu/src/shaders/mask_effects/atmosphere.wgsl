@@ -1,6 +1,3 @@
-// Deterministic procedural atmosphere for the non-destructive Fog and Smoke
-// mask effects. Every field is evaluated in full-image coordinates, making the
-// pattern invariant under viewport crops and independently rendered tiles.
 
 fn atmosphere_hash(position: vec2<f32>) -> f32 {
     let signed_cell = vec2<i32>(position);

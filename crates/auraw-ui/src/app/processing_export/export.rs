@@ -67,7 +67,10 @@ pub(super) fn clear_export_task(slot: &mut Option<ExportTask>) {
     *slot = None;
 }
 
-pub(in crate::app) fn export_source_stem(current_path: Option<&std::path::Path>, current_label: Option<&str>) -> String {
+pub(in crate::app) fn export_source_stem(
+    current_path: Option<&std::path::Path>,
+    current_label: Option<&str>,
+) -> String {
     current_label
         .and_then(|label| std::path::Path::new(label).file_stem())
         .and_then(std::ffi::OsStr::to_str)
@@ -175,11 +178,9 @@ impl AurawApp {
             .current_path
             .as_deref()
             .and_then(|path| path.parent());
-        let Some(path) = crate::ui::choose_export_file_path(
-            format,
-            &default_name,
-            initial_directory,
-        ) else {
+        let Some(path) =
+            crate::ui::choose_export_file_path(format, &default_name, initial_directory)
+        else {
             return;
         };
         self.start_export(path, frame, format);
@@ -312,7 +313,9 @@ impl AurawApp {
             self.ui.notice = Some("eframe is not running with the wgpu backend.".to_owned());
             return None;
         };
-        let source_file_name = self.develop.current_path
+        let source_file_name = self
+            .develop
+            .current_path
             .as_ref()
             .and_then(|source| source.file_name())
             .and_then(|name| name.to_str())
@@ -368,9 +371,7 @@ impl AurawApp {
         kind: ExportTaskKind,
     ) -> Result<(), String> {
         let cancellation = match (kind, self.export.task.as_ref()) {
-            (ExportTaskKind::Single, None) => {
-                Arc::new(std::sync::atomic::AtomicBool::new(false))
-            }
+            (ExportTaskKind::Single, None) => Arc::new(std::sync::atomic::AtomicBool::new(false)),
             (ExportTaskKind::Single, Some(_)) => {
                 return Err("another export is already active".to_owned());
             }
@@ -436,11 +437,19 @@ impl AurawApp {
             return;
         }
         let label = if task.total > 1 {
-            format!("Exporting {} / {}", task.completed.min(task.total), task.total)
+            format!(
+                "Exporting {} / {}",
+                task.completed.min(task.total),
+                task.total
+            )
         } else {
             format!("Exporting {:.0}%", task.progress.clamp(0.0, 1.0) * 100.0)
         };
-        if ui.small_button(label).on_hover_text("Show export progress").clicked() {
+        if ui
+            .small_button(label)
+            .on_hover_text("Show export progress")
+            .clicked()
+        {
             self.restore_export_task();
         }
     }
@@ -448,7 +457,9 @@ impl AurawApp {
     #[cfg(target_os = "android")]
     pub(crate) fn sync_android_export_notification(&self) {
         let Some(task) = self.export.task.as_ref() else {
-            if let Err(error) = crate::android::clear_background_task_notification(&self.android.android_app) {
+            if let Err(error) =
+                crate::android::clear_background_task_notification(&self.android.android_app)
+            {
                 log::warn!("{error}");
             }
             return;
@@ -459,7 +470,11 @@ impl AurawApp {
             "AuRaw export"
         };
         let detail = (task.total > 1).then(|| {
-            format!("{} / {} images complete", task.completed.min(task.total), task.total)
+            format!(
+                "{} / {} images complete",
+                task.completed.min(task.total),
+                task.total
+            )
         });
         let percent = (task.progress.clamp(0.0, 1.0) * 100.0).round() as i32;
         if let Err(error) = crate::android::update_background_task_notification(
@@ -497,8 +512,12 @@ impl AurawApp {
             .show(ctx, |ui| {
                 if total > 1 {
                     ui.label(
-                        egui::RichText::new(format!("{} / {} images complete", completed.min(total), total))
-                            .strong(),
+                        egui::RichText::new(format!(
+                            "{} / {} images complete",
+                            completed.min(total),
+                            total
+                        ))
+                        .strong(),
                     );
                 } else {
                     ui.label(egui::RichText::new("Exporting image").strong());
@@ -540,9 +559,16 @@ impl AurawApp {
     }
 
     pub(in crate::app) fn poll_export_worker(&mut self, _frame: &eframe::Frame) {
-        let (events, disconnected) = match self.export.task.as_ref().and_then(|task| task.receiver.as_ref()) {
+        let (events, disconnected) = match self
+            .export
+            .task
+            .as_ref()
+            .and_then(|task| task.receiver.as_ref())
+        {
             Some(ExportTaskReceiver::Tiled(receiver)) => {
-                drain_worker_events(Some(receiver), |event| matches!(event, ExportEvent::Finished(_)))
+                drain_worker_events(Some(receiver), |event| {
+                    matches!(event, ExportEvent::Finished(_))
+                })
             }
             _ => return,
         };
@@ -556,7 +582,9 @@ impl AurawApp {
                     completed_tiles,
                     total_tiles,
                 } => {
-                    let batch_current = self.export.batch
+                    let batch_current = self
+                        .export
+                        .batch
                         .as_ref()
                         .is_some_and(|batch| batch.current.is_some());
                     if let Some(task) = self.export.task.as_mut() {
@@ -597,7 +625,9 @@ impl AurawApp {
                         task.phase = "Finalizing export…".to_owned();
                     }
                     let is_batch = self.export.batch.is_some();
-                    let was_cancelled = self.export.task
+                    let was_cancelled = self
+                        .export
+                        .task
                         .as_ref()
                         .is_some_and(|task| task.cancelling);
 
@@ -619,7 +649,9 @@ impl AurawApp {
                                     .as_ref()
                                     .and_then(|task| task.destination.clone());
                                 match destination {
-                                    Some(ExportDestination::AndroidDirect { path: direct_path }) => {
+                                    Some(ExportDestination::AndroidDirect {
+                                        path: direct_path,
+                                    }) => {
                                         debug_assert_eq!(path, direct_path);
                                         match crate::android::finalize_direct_export(
                                             &self.android.android_app,
@@ -629,7 +661,8 @@ impl AurawApp {
                                                 if is_batch {
                                                     android_batch_result = Some(Ok(()));
                                                 } else {
-                                                    self.ui.notice = Some(format!("Exported to {location}"));
+                                                    self.ui.notice =
+                                                        Some(format!("Exported to {location}"));
                                                     clear_export_task(&mut self.export.task);
                                                 }
                                             }
@@ -639,7 +672,8 @@ impl AurawApp {
                                                 } else {
                                                     clear_export_task(&mut self.export.task);
                                                 }
-                                                self.ui.notice = Some(format!("Export failed: {error}"));
+                                                self.ui.notice =
+                                                    Some(format!("Export failed: {error}"));
                                                 log::error!("Android direct export finalize failed: {error}");
                                             }
                                         }
@@ -658,10 +692,14 @@ impl AurawApp {
                                         ) {
                                             Ok(()) => {
                                                 self.export.publish_pending = true;
-                                                self.ui.notice = Some("Saving to Pictures/AuRaw…".to_owned());
+                                                self.ui.notice =
+                                                    Some("Saving to Pictures/AuRaw…".to_owned());
                                                 if let Some(task) = self.export.task.as_mut() {
-                                                    task.phase = "Publishing to Pictures/AuRaw…".to_owned();
-                                                    task.progress = task.progress.max(EXPORT_MAX_INCOMPLETE_FRACTION);
+                                                    task.phase =
+                                                        "Publishing to Pictures/AuRaw…".to_owned();
+                                                    task.progress = task
+                                                        .progress
+                                                        .max(EXPORT_MAX_INCOMPLETE_FRACTION);
                                                 }
                                             }
                                             Err(error) => {
@@ -671,7 +709,8 @@ impl AurawApp {
                                                 } else {
                                                     clear_export_task(&mut self.export.task);
                                                 }
-                                                self.ui.notice = Some(format!("Export failed: {error}"));
+                                                self.ui.notice =
+                                                    Some(format!("Export failed: {error}"));
                                             }
                                         }
                                     }
@@ -691,7 +730,9 @@ impl AurawApp {
                         Err(error) => {
                             #[cfg(target_os = "android")]
                             {
-                                crate::android::cancel_all_direct_exports(&self.android.android_app);
+                                crate::android::cancel_all_direct_exports(
+                                    &self.android.android_app,
+                                );
                                 if is_batch {
                                     android_batch_result = Some(Err(error.clone()));
                                 } else {
@@ -724,7 +765,8 @@ impl AurawApp {
             {
                 crate::android::cancel_all_direct_exports(&self.android.android_app);
                 if self.export.batch.is_some() {
-                    android_batch_result = Some(Err("export worker stopped unexpectedly".to_owned()));
+                    android_batch_result =
+                        Some(Err("export worker stopped unexpectedly".to_owned()));
                 } else {
                     clear_export_task(&mut self.export.task);
                 }

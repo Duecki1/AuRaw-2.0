@@ -1,0 +1,7 @@
+SPDX-FileCopyrightText: 2010-2026 darktable developers
+SPDX-FileCopyrightText: 2026 AuRaw contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+This compact white-balance preset snapshot is derived from darktable's
+white-balance preset database. See THIRD_PARTY_NOTICES.md for the pinned
+upstream version and full attribution.

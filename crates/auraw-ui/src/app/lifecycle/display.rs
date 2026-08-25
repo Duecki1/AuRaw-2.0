@@ -77,12 +77,17 @@ impl AurawApp {
                 ]
             })
         });
-        let screen_changed = match (screen_point, self.preferences.display_profile_last_screen_point) {
+        let screen_changed = match (
+            screen_point,
+            self.preferences.display_profile_last_screen_point,
+        ) {
             (Some(current), Some(previous)) => current != previous,
             (Some(_), None) | (None, Some(_)) => true,
             (None, None) => false,
         };
-        let elapsed = self.preferences.display_profile_last_probe
+        let elapsed = self
+            .preferences
+            .display_profile_last_probe
             .map(|instant| instant.elapsed())
             .unwrap_or(Duration::MAX);
         if elapsed < Duration::from_secs(1)

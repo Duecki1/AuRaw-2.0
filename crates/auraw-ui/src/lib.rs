@@ -1,4 +1,3 @@
-
 pub mod diagnostics {
     pub use auraw_core::diagnostics::*;
 }

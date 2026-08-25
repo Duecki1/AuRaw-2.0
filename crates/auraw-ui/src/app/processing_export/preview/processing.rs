@@ -16,11 +16,7 @@ impl AurawApp {
 
     pub(crate) fn apply_white_balance_area(&mut self, area: [[f32; 2]; 2]) -> bool {
         let result = self.develop.loaded_raw.as_ref().and_then(|raw| {
-            raw.white_balance_offsets_from_area(
-                area[0],
-                area[1],
-                self.develop.exposure.black_point,
-            )
+            raw.white_balance_offsets_from_area(area[0], area[1], self.develop.exposure.black_point)
         });
         self.develop_ui.white_balance_picker_active = false;
         self.develop_ui.white_balance_picker_drag = None;
@@ -43,7 +39,9 @@ impl AurawApp {
         let Some(stage) = self.preview.detail_pending_stage else {
             return;
         };
-        let Some(detail) = self.preview.detail
+        let Some(detail) = self
+            .preview
+            .detail
             .as_ref()
             .filter(|detail| detail.revision == self.preview.revision)
         else {
@@ -98,12 +96,14 @@ impl AurawApp {
         );
         let full_frame_tone_pipeline = if normal_tone_is_current {
             self.preview.gpu_pipeline.as_ref().or_else(|| {
-                self.preview.navigation
+                self.preview
+                    .navigation
                     .as_ref()
                     .map(|preview| &preview.pipeline)
             })
         } else {
-            self.preview.navigation
+            self.preview
+                .navigation
                 .as_ref()
                 .map(|preview| &preview.pipeline)
                 .or(self.preview.gpu_pipeline.as_ref())
@@ -145,13 +145,20 @@ impl AurawApp {
             &render_state.device,
             &params,
             stage,
-            &self.inpaint.edits,
-            full_raw,
-            &self.develop.target_exposure,
-            [detail.source_origin[0] as f32, detail.source_origin[1] as f32],
-            [detail.source_size[0] as f32, detail.source_size[1] as f32],
+            RemoveSceneContext::new(
+                &self.inpaint.edits,
+                full_raw,
+                &self.develop.target_exposure,
+                [
+                    detail.source_origin[0] as f32,
+                    detail.source_origin[1] as f32,
+                ],
+                [detail.source_size[0] as f32, detail.source_size[1] as f32],
+            ),
         ) {
-            self.ui.notice = Some(format!("Could not apply Remove to zoomed preview: {error:#}"));
+            self.ui.notice = Some(format!(
+                "Could not apply Remove to zoomed preview: {error:#}"
+            ));
             self.preview.detail_pending_stage = None;
             return;
         }
@@ -178,7 +185,8 @@ impl AurawApp {
         let Some(stage) = self.preview.pending_stage else {
             return;
         };
-        let (Some(raw), Some(pipeline)) = (&self.develop.preview_raw, &self.preview.gpu_pipeline) else {
+        let (Some(raw), Some(pipeline)) = (&self.develop.preview_raw, &self.preview.gpu_pipeline)
+        else {
             self.preview.pending_stage = None;
             return;
         };
@@ -193,7 +201,9 @@ impl AurawApp {
                 if !self.masks.dirty_layers[layer] {
                     continue;
                 }
-                let bytes = self.masks.stack
+                let bytes = self
+                    .masks
+                    .stack
                     .rasterize_layer_f16(layer, edge, edge, raw.width, raw.height);
                 if let Err(error) = pipeline.update_mask_layer(&render_state.queue, layer, &bytes) {
                     upload_error = Some(format!("Could not update local mask: {error:#}"));
@@ -227,11 +237,13 @@ impl AurawApp {
             &render_state.device,
             &params,
             stage,
-            &self.inpaint.edits,
-            full_raw,
-            &self.develop.target_exposure,
-            [0.0, 0.0],
-            [full_raw.width as f32, full_raw.height as f32],
+            RemoveSceneContext::new(
+                &self.inpaint.edits,
+                full_raw,
+                &self.develop.target_exposure,
+                [0.0, 0.0],
+                [full_raw.width as f32, full_raw.height as f32],
+            ),
         ) {
             self.ui.notice = Some(format!("Could not apply Remove to preview: {error:#}"));
             self.preview.pending_stage = None;

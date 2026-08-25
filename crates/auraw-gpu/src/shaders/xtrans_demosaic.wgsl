@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 Markesteijn X-Trans demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// Markesteijn algorithm credit: Frank Markesteijn (via dcraw and darktable).
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 #import auraw::xtrans::seed::{xtrans_seed_channel}
 #import auraw::xtrans::markesteijn_interpolate::{mark13_pass1, mark13_pass3}
@@ -7,9 +13,6 @@
 #import auraw::xtrans::markesteijn_homogeneity::{MARK_HOMO_MARGIN, mark_local_homogeneity}
 #import auraw::xtrans::markesteijn_accumulate::{mark_accumulate}
 
-// Grouped X-Trans entry points. Stage implementation lives in composable
-// naga_oil modules; write bindings stay here so the existing work-format
-// specialization and pipeline/bind-group contracts remain unchanged.
 
 @group(0) @binding(4) var xtrans_seed_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 

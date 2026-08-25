@@ -64,18 +64,19 @@ fn high_quality_shaders_validate() {
 
 #[test]
 fn point_curve_packing_is_shared_between_global_and_local_uniforms() {
-    let mut curve = PointCurve::default();
-    curve.points = [
-        [0.0, 0.0],
-        [0.2, 0.1],
-        [0.4, 0.5],
-        [0.7, 0.8],
-        [1.0, 1.0],
-        [1.0, 1.0],
-        [1.0, 1.0],
-        [1.0, 1.0],
-    ];
-    curve.len = 5;
+    let curve = PointCurve {
+        points: [
+            [0.0, 0.0],
+            [0.2, 0.1],
+            [0.4, 0.5],
+            [0.7, 0.8],
+            [1.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 1.0],
+        ],
+        len: 5,
+    };
 
     let packed = pack_point_curve(&curve);
     assert_eq!(packed.pairs[0], [0.0, 0.0, 0.2, 0.1]);

@@ -2,18 +2,10 @@ package de.duecki.auraw;
 
 import android.os.ParcelFileDescriptor;
 
-/** Explicit ownership handoff helpers for descriptors transferred to Rust. */
 final class NativeFileDescriptors {
     private NativeFileDescriptors() {}
 
-    /**
-     * Detaches a descriptor and transfers sole close responsibility to native code.
-     *
-     * <p>The parcel descriptor is always closed on this side. After a successful
-     * detach that close does not close the raw descriptor; it only releases the
-     * Java wrapper. This makes the ownership boundary explicit and leak-safe if
-     * an exception occurs before the handoff completes.
-     */
+    // Success transfers sole close ownership to Rust; Java always releases its wrapper.
     static int detach(ParcelFileDescriptor descriptor, String missingDescriptorMessage)
             throws Exception {
         if (descriptor == null) {
@@ -30,7 +22,6 @@ final class NativeFileDescriptors {
         }
     }
 
-    /** Closes a descriptor when a Java-to-Rust callback could not accept ownership. */
     static void closeTransferred(int fd) {
         if (fd < 0) {
             return;
@@ -38,7 +29,6 @@ final class NativeFileDescriptors {
         try {
             ParcelFileDescriptor.adoptFd(fd).close();
         } catch (Exception ignored) {
-            // Ownership cleanup is best effort after a failed callback.
         }
     }
 }

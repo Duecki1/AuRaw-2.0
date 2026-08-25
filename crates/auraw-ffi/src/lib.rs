@@ -1,4 +1,3 @@
-
 #[unsafe(no_mangle)]
 pub extern "C" fn auraw_abi_version() -> u32 {
     1
