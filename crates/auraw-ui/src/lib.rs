@@ -57,9 +57,14 @@ fn native_options() -> eframe::NativeOptions {
     }
 
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        // TESTING: disabled entirely. wgpu's VK_EXT_memory_budget gate fails resource
+        // creation on Linux/NVIDIA while VRAM is physically free (the driver reports
+        // near-full usage on device-local heaps, and wgpu checks every device-local
+        // heap because the allocator cannot pin a target heap). Genuine physical OOM
+        // is still surfaced by the driver without this gate.
         setup.instance_descriptor.memory_budget_thresholds = eframe::wgpu::MemoryBudgetThresholds {
-            for_resource_creation: Some(70),
-            for_device_loss: Some(97),
+            for_resource_creation: None,
+            for_device_loss: None,
         };
         setup.device_descriptor = std::sync::Arc::new(|adapter| {
             let info = adapter.get_info();
