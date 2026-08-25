@@ -297,6 +297,27 @@ fn sparse_gallery_does_not_stretch_above_target_height() {
         .iter()
         .all(|rect| rect.height() <= 160.0 + f32::EPSILON));
     assert!(height <= 160.0 + f32::EPSILON);
+    assert!(rects.last().unwrap().right() < 1200.0);
+}
+
+#[test]
+fn normal_justified_row_grows_slightly_to_fill_the_viewport() {
+    let assets = [test_asset("portrait.CR3"), test_asset("landscape.CR3")];
+    let mut entries = assets
+        .into_iter()
+        .map(new_library_entry)
+        .collect::<Vec<_>>();
+    entries[0].layout_size = Some([2, 3]);
+    entries[1].layout_size = Some([3, 2]);
+
+    let available_width = 368.0;
+    let target_height = 150.0;
+    let (rects, height) = justified_thumbnail_layout(&entries, available_width, target_height, 6.0);
+
+    assert_eq!(rects.len(), 2);
+    assert!(height > target_height);
+    assert!(height <= target_height * MAX_JUSTIFIED_ROW_HEIGHT_SCALE);
+    assert!((rects.last().unwrap().right() - available_width).abs() < 0.01);
 }
 
 #[test]

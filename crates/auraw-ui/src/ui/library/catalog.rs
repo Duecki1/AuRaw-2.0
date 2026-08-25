@@ -1,5 +1,11 @@
 use super::*;
 
+/// Normal justified galleries allow modest row-height variation so discrete
+/// aspect-ratio combinations can still reach both edges of the viewport. Rows
+/// requiring more growth than this are genuinely sparse and retain their
+/// natural width instead of turning a handful of thumbnails into huge tiles.
+pub(super) const MAX_JUSTIFIED_ROW_HEIGHT_SCALE: f32 = 4.0 / 3.0;
+
 pub(super) fn send_scan_failure(
     sender: &mpsc::SyncSender<ScanEvent>,
     generation: u64,
@@ -179,8 +185,12 @@ fn justified_thumbnail_layout_from_aspects(
         let gaps_width = gap * (item_count.saturating_sub(1) as f32);
         let justified_height =
             ((available_width - gaps_width).max(1.0) / aspect_sum.max(f32::EPSILON)).max(1.0);
-        let row_is_justified = justified_height <= target_height;
-        let row_height = justified_height.min(target_height);
+        let row_is_justified = justified_height <= target_height * MAX_JUSTIFIED_ROW_HEIGHT_SCALE;
+        let row_height = if row_is_justified {
+            justified_height
+        } else {
+            target_height
+        };
         let mut x = 0.0;
 
         for (row_offset, aspect) in row_aspects.iter().copied().enumerate() {
