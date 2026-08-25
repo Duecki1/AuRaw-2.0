@@ -133,7 +133,7 @@ impl Sidebar {
             }
         });
 
-        ui.add_space(crate::ui::theme::CARD_GAP);
+        crate::ui::theme::card_gap(ui);
         crate::ui::theme::section_card(ui, "Brush", |ui| {
             ui.add_enabled_ui(!app.inpaint.processing(), |ui| {
                 adjustment_slider(
@@ -178,7 +178,7 @@ impl Sidebar {
             }
         });
 
-        ui.add_space(crate::ui::theme::CARD_GAP);
+        crate::ui::theme::card_gap(ui);
         let history_title = format!("{} stroke history", app.inpaint.tool.label());
         crate::ui::theme::section_card(ui, &history_title, |ui| {
             app.inpaint.hovered_stroke = None;

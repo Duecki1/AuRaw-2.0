@@ -87,7 +87,7 @@ pub(crate) fn export_settings_controls(
         }
     });
 
-    ui.add_space(crate::ui::theme::CARD_GAP);
+    crate::ui::theme::card_gap(ui);
     crate::ui::theme::section_card(ui, "Precision", |ui| {
         crate::ui::theme::form_combo(
             ui,
@@ -107,7 +107,7 @@ pub(crate) fn export_settings_controls(
         );
     });
 
-    ui.add_space(crate::ui::theme::CARD_GAP);
+    crate::ui::theme::card_gap(ui);
     crate::ui::theme::section_card(ui, "Color profile", |ui| {
         crate::ui::theme::form_combo(
             ui,
@@ -180,7 +180,7 @@ pub(crate) fn export_settings_controls(
         }
     });
 
-    ui.add_space(crate::ui::theme::CARD_GAP);
+    crate::ui::theme::card_gap(ui);
     crate::ui::theme::section_card(ui, "Metadata", |ui| {
         ui.checkbox(&mut settings.keep_metadata, "Keep metadata")
             .on_hover_text(
@@ -188,7 +188,7 @@ pub(crate) fn export_settings_controls(
             );
     });
 
-    ui.add_space(crate::ui::theme::CARD_GAP);
+    crate::ui::theme::card_gap(ui);
     crate::ui::theme::section_card(ui, "JPEG", |ui| {
         adjustment_slider(
             ui,

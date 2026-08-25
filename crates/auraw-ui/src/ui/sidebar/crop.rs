@@ -63,7 +63,7 @@ impl Sidebar {
             }
         });
 
-        ui.add_space(crate::ui::theme::CARD_GAP);
+        crate::ui::theme::card_gap(ui);
         crate::ui::theme::section_card(ui, "Rotation", |ui| {
             ui.horizontal(|ui| {
                 if crate::ui::icons::icon_toggle_button(
@@ -114,7 +114,7 @@ impl Sidebar {
             }
         });
 
-        ui.add_space(crate::ui::theme::CARD_GAP);
+        crate::ui::theme::card_gap(ui);
         crate::ui::theme::section_card(ui, "Transform", |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut app.develop.geometry.flip_horizontal, "Flip horizontal");

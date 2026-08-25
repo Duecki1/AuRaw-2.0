@@ -29,6 +29,7 @@ use crate::ui::library::{Library, LibraryAdjustmentClipboard, LibraryState};
 use crate::ui::preview::Preview;
 use crate::ui::settings::Settings;
 use crate::ui::sidebar::Sidebar;
+use crate::ui::theme::{PreviewBackdrop, UiDesign};
 use crate::ui::top_bar::TopBar;
 use eframe::{egui, wgpu};
 use serde::{Deserialize, Serialize};
@@ -997,6 +998,8 @@ pub(crate) struct DevelopUiState {
 
 pub(crate) struct PreferencesState {
     pub(crate) image_relative_brush_size: bool,
+    pub(crate) ui_design: UiDesign,
+    pub(crate) preview_backdrop: PreviewBackdrop,
     pub(crate) adjustment_copy_settings: AdjustmentCopySettings,
     pub(crate) performance_settings_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
@@ -1027,6 +1030,7 @@ pub(crate) struct UiState {
     pub(crate) sidebar_tab: SidebarTab,
     pub(crate) status: String,
     pub(crate) expert_mode: bool,
+    pub(crate) adaptive_preview_backdrop: egui::Color32,
     pub(crate) notice: Option<String>,
     pub(crate) thumbnail_cache_size: Option<Result<u64, String>>,
     pub(crate) thumbnail_cache_size_receiver: Option<mpsc::Receiver<Result<u64, String>>>,

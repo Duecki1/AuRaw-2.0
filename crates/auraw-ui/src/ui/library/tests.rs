@@ -484,11 +484,12 @@ fn develop_loading_thumbnail_uses_resident_pixels_without_queuing_decode() {
     library.entries.push(entry);
     library.rebuild_entry_indices();
 
-    let (_, size) = library
+    let (_, size, adaptive_backdrop) = library
         .desktop_loading_thumbnail_for_path(&path, &context)
         .expect("resident thumbnail");
 
     assert_eq!(size, [512, 341]);
+    assert!(adaptive_backdrop.is_some());
     assert!(library.entries[0].texture_is_resident);
     assert!(!library.entries[0].thumbnail_queued);
 }

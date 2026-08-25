@@ -60,10 +60,6 @@ impl Settings {
     }
 
     fn show_content(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, content_width: f32) {
-        if layout == ScreenLayout::Vertical {
-            ui.spacing_mut().item_spacing = egui::vec2(7.0, 6.0);
-        }
-
         #[cfg(target_os = "android")]
         {
             if crate::ui::top_bar::TopBar::back_icon_button(
@@ -78,7 +74,67 @@ impl Settings {
         }
 
         ui.heading("Settings");
-        ui.add_space(4.0);
+        crate::ui::theme::card_gap(ui);
+
+        Self::group(ui, content_width, |ui| {
+            ui.heading("Appearance");
+            ui.add(
+                egui::Label::new(
+                    "Use one design across every screen. The choice is saved and applied immediately.",
+                )
+                .wrap(),
+            );
+
+            ui.separator();
+            let mut design = app.preferences.ui_design;
+            crate::ui::theme::form_combo(
+                ui,
+                "Design",
+                "settings-ui-design",
+                design.label(),
+                220.0,
+                |ui| {
+                    for option in crate::ui::theme::UiDesign::ALL {
+                        ui.selectable_value(&mut design, option, option.label());
+                    }
+                },
+            );
+            if design != app.preferences.ui_design {
+                app.set_ui_design(design);
+            }
+            ui.add(egui::Label::new(design.description()).wrap());
+
+            ui.separator();
+            let mut backdrop = app.preferences.preview_backdrop;
+            crate::ui::theme::form_combo(
+                ui,
+                "Preview background",
+                "settings-preview-backdrop",
+                backdrop.label(),
+                220.0,
+                |ui| {
+                    for option in crate::ui::theme::PreviewBackdrop::ALL {
+                        ui.selectable_value(&mut backdrop, option, option.label());
+                    }
+                },
+            );
+            if backdrop != app.preferences.preview_backdrop {
+                app.set_preview_backdrop(backdrop);
+            }
+            ui.add(
+                egui::Label::new(match backdrop {
+                    crate::ui::theme::PreviewBackdrop::MatchPhoto => {
+                        "Match photo derives a quiet, low-contrast color from each image so the canvas changes without competing with the edit."
+                    }
+                    _ => {
+                        "This changes only the canvas around the photo; toolbars, sidebars, and panels keep the selected design."
+                    }
+                })
+                .wrap(),
+            );
+        });
+
+        crate::ui::theme::card_gap(ui);
 
         Self::group(ui, content_width, |ui| {
             ui.heading("Interface");
@@ -233,7 +289,7 @@ impl Settings {
 
         #[cfg(not(target_os = "android"))]
         {
-            ui.add_space(8.0);
+            crate::ui::theme::card_gap(ui);
             Self::group(ui, content_width, |ui| {
                 ui.heading("Display color management");
                 ui.add(
@@ -305,7 +361,7 @@ impl Settings {
             });
         }
 
-        ui.add_space(8.0);
+        crate::ui::theme::card_gap(ui);
         Self::group(ui, content_width, |ui| {
             ui.heading("Copy & paste adjustments");
             ui.add(
@@ -347,7 +403,7 @@ impl Settings {
             }
         });
 
-        ui.add_space(8.0);
+        crate::ui::theme::card_gap(ui);
         Self::group(ui, content_width, |ui| {
             ui.heading("RAW color profiles");
             ui.add(
@@ -501,7 +557,7 @@ impl Settings {
 
         #[cfg(not(target_os = "android"))]
         {
-            ui.add_space(8.0);
+            crate::ui::theme::card_gap(ui);
             Self::group(ui, content_width, |ui| {
                 ui.heading("AI models");
                 let mut acceleration = app.ai.gpu_acceleration;
@@ -603,7 +659,7 @@ impl Settings {
             });
         }
 
-        ui.add_space(8.0);
+        crate::ui::theme::card_gap(ui);
         Self::group(ui, content_width, |ui| {
             ui.heading("Legal & attributions");
             ui.strong(format!("AuRaw {}", env!("CARGO_PKG_VERSION")));
@@ -651,7 +707,7 @@ impl Settings {
                 .show(ui, |ui| Self::legal_text(ui, RUST_DEPENDENCY_LICENSES, 18));
         });
 
-        ui.add_space(8.0);
+        crate::ui::theme::card_gap(ui);
         Self::group(ui, content_width, |ui| {
             ui.heading("Diagnostics");
             ui.add(
@@ -700,7 +756,7 @@ impl Settings {
             return;
         }
 
-        ui.add_space(8.0);
+        crate::ui::theme::card_gap(ui);
         let mut changed = false;
 
         Self::group(ui, content_width, |ui| {
@@ -785,7 +841,8 @@ impl Settings {
     }
 
     fn group(ui: &mut Ui, total_width: f32, contents: impl FnOnce(&mut Ui)) {
-        let inner_width = (total_width - 26.0).max(1.0);
+        let frame_width = f32::from(crate::ui::theme::CONTENT_MARGIN) * 2.0 + 2.0;
+        let inner_width = (total_width - frame_width).max(1.0);
         crate::ui::theme::card_frame(ui).show(ui, |ui| {
             ui.set_width(inner_width);
             ui.set_max_width(inner_width);

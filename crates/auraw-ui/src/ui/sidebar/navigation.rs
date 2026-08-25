@@ -12,7 +12,10 @@ fn mobile_tab_text_geometry(height: f32) -> (f32, f32, f32, f32) {
 impl Sidebar {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
         ui.take_available_width();
-        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+        ui.spacing_mut().item_spacing = egui::vec2(
+            crate::ui::theme::SPACE_SM,
+            crate::ui::theme::SPACE_SM,
+        );
 
         if layout == ScreenLayout::Vertical {
             Self::show_vertical_mobile_shell(ui, app, frame);
@@ -655,7 +658,7 @@ impl Sidebar {
                 },
             );
         });
-        ui.add_space(crate::ui::theme::CARD_GAP);
+        crate::ui::theme::card_gap(ui);
 
         if selection != previous {
             app.select_camera_profile_for_current(selection, frame);
@@ -679,6 +682,6 @@ impl Sidebar {
                 contents(ui);
             }
         });
-        ui.add_space(crate::ui::theme::CARD_GAP);
+        crate::ui::theme::card_gap(ui);
     }
 }

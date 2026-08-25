@@ -37,7 +37,7 @@ impl LibraryState {
         &mut self,
         uri: &str,
         context: &egui::Context,
-    ) -> Option<(egui::TextureHandle, [u32; 2])> {
+    ) -> Option<(egui::TextureHandle, [u32; 2], Option<egui::Color32>)> {
         let asset_id = LibraryAssetId::Android(uri.to_owned());
         let index = self.entry_indices.get(&asset_id).copied()?;
         self.restore_resident_thumbnail_texture(index, context);

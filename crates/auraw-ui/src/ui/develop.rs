@@ -408,8 +408,9 @@ fn sync_reference_texture(app: &mut AurawApp, context: &egui::Context) {
 }
 
 fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
+    let backdrop = app.preview_backdrop_color();
     egui::Frame::new()
-        .fill(crate::ui::theme::CANVAS_BACKDROP)
+        .fill(backdrop)
         .stroke(Stroke::new(
             1.0,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
@@ -418,7 +419,7 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
             let available = ui.available_size();
             let (rect, _) = ui.allocate_exact_size(available, Sense::hover());
             let painter = ui.painter_at(rect);
-            painter.rect_filled(rect, 0.0, crate::ui::theme::CANVAS_BACKDROP);
+            painter.rect_filled(rect, 0.0, backdrop);
 
             if let Some(texture) = app.develop_ui.reference.texture.as_ref() {
                 let texture_size = app
@@ -441,7 +442,7 @@ fn show_reference_pane(ui: &mut Ui, app: &mut AurawApp) {
                     Align2::CENTER_CENTER,
                     "Loading reference…",
                     FontId::proportional(13.0),
-                    ui.visuals().weak_text_color(),
+                    crate::ui::theme::text_on_backdrop(backdrop),
                 );
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(80));

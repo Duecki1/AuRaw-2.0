@@ -1,6 +1,30 @@
 use super::*;
 
 impl AurawApp {
+    pub(crate) fn set_ui_design(&mut self, design: crate::ui::theme::UiDesign) {
+        if self.preferences.ui_design == design {
+            return;
+        }
+        self.preferences.ui_design = design;
+        crate::ui::theme::apply(&self.egui_ctx, design);
+        self.persist_performance_settings();
+    }
+
+    pub(crate) fn set_preview_backdrop(&mut self, backdrop: crate::ui::theme::PreviewBackdrop) {
+        if self.preferences.preview_backdrop == backdrop {
+            return;
+        }
+        self.preferences.preview_backdrop = backdrop;
+        self.persist_performance_settings();
+        self.egui_ctx.request_repaint();
+    }
+
+    pub(crate) fn preview_backdrop_color(&self) -> egui::Color32 {
+        self.preferences
+            .preview_backdrop
+            .color(self.ui.adaptive_preview_backdrop)
+    }
+
     pub(crate) fn set_raw_cache_limit(&mut self, limit: usize) {
         let limit = limit.min(maximum_raw_cache_limit());
         if self.develop.raw_cache_limit == limit {
@@ -217,6 +241,8 @@ impl AurawApp {
             library_sort_order: self.library.sort_order(),
             preview_quality: self.preview.quality,
             image_relative_brush_size: self.preferences.image_relative_brush_size,
+            ui_design: self.preferences.ui_design,
+            preview_backdrop: self.preferences.preview_backdrop,
             birefnet_quality: self.ai.birefnet_quality,
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: self.ai.gpu_acceleration,

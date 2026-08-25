@@ -199,6 +199,8 @@ impl AurawApp {
             },
             preferences: PreferencesState {
                 image_relative_brush_size: performance.image_relative_brush_size,
+                ui_design: performance.ui_design,
+                preview_backdrop: performance.preview_backdrop,
                 adjustment_copy_settings: performance.adjustment_copy_settings,
                 performance_settings_path,
                 #[cfg(not(target_os = "android"))]
@@ -232,6 +234,7 @@ impl AurawApp {
                 desktop_picker_receiver: None,
                 status: "Open a RAW or TIFF file to get started.".to_owned(),
                 expert_mode: false,
+                adaptive_preview_backdrop: crate::ui::theme::CANVAS_BACKDROP,
                 notice: None,
             },
             library: LibraryState::new_desktop_with_preferences(
@@ -266,6 +269,7 @@ impl AurawApp {
             Arc::clone(&gpu_export_prewarm),
         );
         let mut app = Self::empty(&cc.egui_ctx);
+        crate::ui::theme::apply(&cc.egui_ctx, app.preferences.ui_design);
         app.preview.gpu_prewarm_receiver = gpu_preview_prewarm_receiver;
         app.export.gpu_prewarm = Some(gpu_export_prewarm);
         app
@@ -469,6 +473,8 @@ impl AurawApp {
             },
             preferences: PreferencesState {
                 image_relative_brush_size: performance.image_relative_brush_size,
+                ui_design: performance.ui_design,
+                preview_backdrop: performance.preview_backdrop,
                 adjustment_copy_settings: performance.adjustment_copy_settings,
                 performance_settings_path,
                 #[cfg(not(target_os = "android"))]
@@ -500,6 +506,7 @@ impl AurawApp {
                 sidebar_tab: SidebarTab::default(),
                 status: "Open a RAW or TIFF file to get started.".to_owned(),
                 expert_mode: false,
+                adaptive_preview_backdrop: crate::ui::theme::CANVAS_BACKDROP,
                 notice: None,
             },
             library: LibraryState::new_android_with_workers(
@@ -521,6 +528,7 @@ impl AurawApp {
                 pending_android_profile_reload: None,
             },
         };
+        crate::ui::theme::apply(&cc.egui_ctx, app.preferences.ui_design);
         app
     }
 }

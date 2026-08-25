@@ -185,6 +185,7 @@ impl eframe::App for AurawApp {
                         egui::Panel::right("develop_tool_rail")
                             .resizable(false)
                             .exact_size(Sidebar::DESKTOP_TOOL_RAIL_WIDTH)
+                            .frame(crate::ui::theme::panel_frame(ui))
                             .show(ui, |ui| Sidebar::show_desktop_tool_rail(ui, self));
 
                         if self.develop_ui.sidebar_open {
@@ -197,6 +198,7 @@ impl eframe::App for AurawApp {
                                 .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
                                 .max_size(panel_max)
                                 .default_size(sidebar_size.min(panel_max))
+                                .frame(crate::ui::theme::panel_frame(ui))
                                 .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
                         }
                     }
@@ -205,6 +207,7 @@ impl eframe::App for AurawApp {
                     egui::Panel::right("develop_android_landscape_primary_tabs")
                         .resizable(false)
                         .exact_size(Sidebar::ANDROID_LANDSCAPE_TOOL_RAIL_WIDTH)
+                        .frame(crate::ui::theme::panel_frame(ui))
                         .show(ui, |ui| {
                             Sidebar::show_android_landscape_primary_tabs(ui, self)
                         });
@@ -214,6 +217,7 @@ impl eframe::App for AurawApp {
                         .resizable(true)
                         .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
                         .default_size(sidebar_size)
+                        .frame(crate::ui::theme::panel_frame(ui))
                         .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
 
                     #[cfg(not(target_os = "android"))]
@@ -221,6 +225,7 @@ impl eframe::App for AurawApp {
                         egui::Panel::right("develop_horizontal_mask_strip")
                             .resizable(false)
                             .exact_size(Sidebar::HORIZONTAL_MASK_STRIP_WIDTH)
+                            .frame(crate::ui::theme::panel_frame(ui))
                             .show(ui, |ui| {
                                 Sidebar::show_horizontal_mask_strip(ui, self, frame)
                             });
@@ -230,6 +235,7 @@ impl eframe::App for AurawApp {
                         egui::Panel::right("develop_horizontal_mask_strip")
                             .resizable(false)
                             .exact_size(Sidebar::HORIZONTAL_MASK_STRIP_WIDTH)
+                            .frame(crate::ui::theme::panel_frame(ui))
                             .show(ui, |ui| {
                                 Sidebar::show_horizontal_mask_strip(ui, self, frame)
                             });
@@ -240,12 +246,14 @@ impl eframe::App for AurawApp {
                         .resizable(true)
                         .min_size(ScreenLayout::MIN_VERTICAL_SIDEBAR_HEIGHT)
                         .default_size(sidebar_size)
+                        .frame(crate::ui::theme::panel_frame(ui))
                         .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
 
                     if self.ui.sidebar_tab == SidebarTab::Masks {
                         egui::Panel::bottom("develop_vertical_mask_strip")
                             .resizable(false)
                             .exact_size(Sidebar::VERTICAL_MASK_STRIP_HEIGHT)
+                            .frame(crate::ui::theme::panel_frame(ui))
                             .show(ui, |ui| Sidebar::show_vertical_mask_strip(ui, self, frame));
                     }
                 }
@@ -267,6 +275,7 @@ impl eframe::App for AurawApp {
                 .min_size(220.0)
                 .max_size((viewport_size.x * 0.45).max(220.0))
                 .default_size(260.0)
+                .frame(crate::ui::theme::panel_frame(ui))
                 .show(ui, |ui| Library::show_folder_sidebar(ui, self));
             #[cfg(target_os = "android")]
             egui::Panel::left("library_folder_sidebar")
@@ -276,10 +285,20 @@ impl eframe::App for AurawApp {
                         .clamp(220.0, 380.0)
                         .min(viewport_size.x.max(1.0)),
                 )
+                .frame(crate::ui::theme::panel_frame(ui))
                 .show(ui, |ui| Library::show_folder_sidebar(ui, self));
         }
 
-        let _central = egui::CentralPanel::default().show(ui, |ui| match self.ui.active_tab {
+        let central_panel = if self.ui.active_tab == AppTab::Develop {
+            egui::CentralPanel::default().frame(
+                egui::Frame::new()
+                    .fill(self.preview_backdrop_color())
+                    .inner_margin(egui::Margin::same(0)),
+            )
+        } else {
+            egui::CentralPanel::default()
+        };
+        let _central = central_panel.show(ui, |ui| match self.ui.active_tab {
             AppTab::Library => Library::show(ui, self, frame),
             AppTab::Develop => {
                 #[cfg(not(target_os = "android"))]

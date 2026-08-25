@@ -151,7 +151,7 @@ impl TopBar {
                     let search_response = ui
                         .add_sized(
                             [search_width, theme::CONTROL_HEIGHT],
-                            egui::TextEdit::singleline(app.library.search_query_mut()).hint_text(
+                            theme::singleline_text_edit(app.library.search_query_mut()).hint_text(
                                 format!(
                                     "{} Search filenames…",
                                     egui_phosphor::regular::MAGNIFYING_GLASS

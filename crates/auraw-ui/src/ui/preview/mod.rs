@@ -26,6 +26,43 @@ fn white_balance_picker_owns_canvas(sidebar_tab: SidebarTab, picker_active: bool
     sidebar_tab == SidebarTab::Adjustments && picker_active
 }
 
+fn show_centered_preview_message(
+    ui: &mut Ui,
+    available: egui::Vec2,
+    backdrop: Color32,
+    title: &str,
+    detail: Option<&str>,
+    spinning: bool,
+) {
+    let (rect, _) = ui.allocate_exact_size(available, Sense::hover());
+    let text_color = crate::ui::theme::text_on_backdrop(backdrop);
+    let title_offset = if detail.is_some() { -11.0 } else { 8.0 };
+    let spinner_offset = if detail.is_some() { -40.0 } else { -20.0 };
+    if spinning {
+        let spinner_rect = Rect::from_center_size(
+            rect.center() + egui::vec2(0.0, spinner_offset),
+            egui::Vec2::splat(20.0),
+        );
+        ui.put(spinner_rect, egui::Spinner::new().size(18.0));
+    }
+    ui.painter_at(rect).text(
+        rect.center() + egui::vec2(0.0, title_offset),
+        egui::Align2::CENTER_CENTER,
+        title,
+        egui::FontId::proportional(20.0),
+        text_color,
+    );
+    if let Some(detail) = detail {
+        ui.painter_at(rect).text(
+            rect.center() + egui::vec2(0.0, 15.0),
+            egui::Align2::CENTER_CENTER,
+            detail,
+            egui::FontId::proportional(14.0),
+            text_color.gamma_multiply(0.74),
+        );
+    }
+}
+
 mod canvas;
 mod interaction;
 mod overlays;
@@ -45,6 +82,9 @@ pub struct Preview;
 impl Preview {
     pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         let available = ui.available_size();
+        let backdrop = app.preview_backdrop_color();
+        ui.painter()
+            .rect_filled(ui.available_rect_before_wrap(), 0.0, backdrop);
         if app.preview_base_pipeline().is_none() && app.preview_is_preparing() {
             app.refresh_develop_loading_thumbnail(ui.ctx());
         }
@@ -66,17 +106,23 @@ impl Preview {
                 if show_loading_thumbnail(ui, app, available) {
                     return;
                 }
-                ui.centered_and_justified(|ui| {
-                    ui.spinner();
-                    ui.label("Preparing preview…");
-                });
+                show_centered_preview_message(
+                    ui,
+                    available,
+                    backdrop,
+                    "Preparing preview…",
+                    None,
+                    true,
+                );
             } else {
-                ui.centered_and_justified(|ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.heading("No image open");
-                        ui.label("Open a RAW from the Library to start developing.");
-                    });
-                });
+                show_centered_preview_message(
+                    ui,
+                    available,
+                    backdrop,
+                    "No image open",
+                    Some("Open a RAW from the Library to start developing."),
+                    false,
+                );
             }
             return;
         };
