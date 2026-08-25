@@ -210,7 +210,7 @@ impl Sidebar {
         {
             let mask = &mut app.masks.stack.masks[mask_index];
             effect_changed |= Self::show_mask_effect_picker(ui, &mut mask.effect);
-            ui.add_space(crate::ui::theme::CARD_GAP);
+            crate::ui::theme::card_gap(ui);
 
             match orientation {
                 MaskStripOrientation::Horizontal => {

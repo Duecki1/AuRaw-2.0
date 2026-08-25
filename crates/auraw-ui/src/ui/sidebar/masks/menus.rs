@@ -260,7 +260,7 @@ impl Sidebar {
             .show(ctx, |ui| {
                 let response = ui.add_sized(
                     [ui.available_width(), ui.spacing().interact_size.y],
-                    egui::TextEdit::singleline(&mut dialog.name),
+                    crate::ui::theme::singleline_text_edit(&mut dialog.name),
                 );
                 if dialog.request_focus {
                     response.request_focus();

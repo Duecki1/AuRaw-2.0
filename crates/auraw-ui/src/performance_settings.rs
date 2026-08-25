@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 14;
+const SETTINGS_VERSION: u32 = 15;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +23,10 @@ pub(crate) struct PerformanceSettings {
     pub preview_quality: crate::app::PreviewQuality,
     #[serde(default)]
     pub image_relative_brush_size: bool,
+    #[serde(default)]
+    pub ui_design: crate::ui::theme::UiDesign,
+    #[serde(default)]
+    pub preview_backdrop: crate::ui::theme::PreviewBackdrop,
     #[serde(default)]
     pub birefnet_quality: crate::ai_masks::BiRefNetQuality,
     #[cfg(not(target_os = "android"))]
@@ -111,6 +115,8 @@ impl Default for PerformanceSettings {
             library_sort_order: crate::ui::library::LibrarySortOrder::default(),
             preview_quality: crate::app::PreviewQuality::default(),
             image_relative_brush_size: false,
+            ui_design: crate::ui::theme::UiDesign::default(),
+            preview_backdrop: crate::ui::theme::PreviewBackdrop::default(),
             birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: true,
@@ -306,6 +312,8 @@ mod tests {
             library_sort_order: crate::ui::library::LibrarySortOrder::NameAscending,
             preview_quality: crate::app::PreviewQuality::High,
             image_relative_brush_size: true,
+            ui_design: crate::ui::theme::UiDesign::DaylightBlue,
+            preview_backdrop: crate::ui::theme::PreviewBackdrop::White,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: false,
@@ -353,6 +361,11 @@ mod tests {
         );
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::High);
         assert!(settings.image_relative_brush_size);
+        assert_eq!(settings.ui_design, crate::ui::theme::UiDesign::DaylightBlue);
+        assert_eq!(
+            settings.preview_backdrop,
+            crate::ui::theme::PreviewBackdrop::White
+        );
         assert_eq!(
             settings.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::High
@@ -418,6 +431,11 @@ mod tests {
 
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
         assert!(!settings.image_relative_brush_size);
+        assert_eq!(settings.ui_design, crate::ui::theme::UiDesign::MidnightPink);
+        assert_eq!(
+            settings.preview_backdrop,
+            crate::ui::theme::PreviewBackdrop::DarkGrey
+        );
         assert!(!settings.render_edited_thumbnails_during_indexing);
         assert_eq!(
             settings.birefnet_quality,
@@ -450,6 +468,8 @@ mod tests {
             library_sort_order: crate::ui::library::LibrarySortOrder::SmallestFirst,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             image_relative_brush_size: true,
+            ui_design: crate::ui::theme::UiDesign::Porcelain,
+            preview_backdrop: crate::ui::theme::PreviewBackdrop::MatchPhoto,
             render_edited_thumbnails_during_indexing: true,
             ..Default::default()
         };
@@ -478,6 +498,11 @@ mod tests {
             crate::ai_masks::BiRefNetQuality::High
         );
         assert!(restored.image_relative_brush_size);
+        assert_eq!(restored.ui_design, crate::ui::theme::UiDesign::Porcelain);
+        assert_eq!(
+            restored.preview_backdrop,
+            crate::ui::theme::PreviewBackdrop::MatchPhoto
+        );
         assert!(restored.render_edited_thumbnails_during_indexing);
         #[cfg(not(target_os = "android"))]
         {

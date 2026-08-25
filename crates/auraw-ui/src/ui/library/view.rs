@@ -50,7 +50,7 @@ impl Library {
             });
         });
 
-        ui.add_space(crate::ui::theme::CARD_GAP);
+        crate::ui::theme::card_gap(ui);
         crate::ui::theme::card_frame(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let tree_height = ui.available_height().max(32.0);

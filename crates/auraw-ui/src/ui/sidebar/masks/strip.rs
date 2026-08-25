@@ -26,7 +26,7 @@ impl Sidebar {
                     app.request_update_all_ai_masks(frame);
                 }
             });
-            ui.add_space(crate::ui::theme::CARD_GAP);
+            crate::ui::theme::card_gap(ui);
         }
 
         if app.masks.stack.masks.is_empty() {

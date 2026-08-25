@@ -16,13 +16,17 @@ impl LibraryState {
     pub(super) fn loading_thumbnail_for_index(
         &self,
         index: usize,
-    ) -> Option<(egui::TextureHandle, [u32; 2])> {
+    ) -> Option<(egui::TextureHandle, [u32; 2], Option<egui::Color32>)> {
         let entry = self.entries.get(index)?;
         let texture = entry.texture.clone()?;
         let size = entry.thumbnail_size.unwrap_or_else(|| {
             let [width, height] = texture.size();
             [width as u32, height as u32]
         });
-        Some((texture, size))
+        let adaptive_backdrop = entry
+            .resident_thumbnail
+            .as_ref()
+            .map(|thumbnail| crate::ui::theme::adaptive_backdrop_from_rgba(&thumbnail.rgba));
+        Some((texture, size, adaptive_backdrop))
     }
 }

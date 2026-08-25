@@ -35,7 +35,7 @@ impl LibraryState {
         &mut self,
         path: &Path,
         context: &egui::Context,
-    ) -> Option<(egui::TextureHandle, [u32; 2])> {
+    ) -> Option<(egui::TextureHandle, [u32; 2], Option<egui::Color32>)> {
         let index = self.filmstrip_index_for_path(path)?;
         self.restore_resident_thumbnail_texture(index, context);
         self.loading_thumbnail_for_index(index)

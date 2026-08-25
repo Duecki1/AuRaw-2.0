@@ -180,7 +180,7 @@ pub(super) fn show_android_library_folder_dialog(ui: &mut Ui, app: &mut AurawApp
             .show(ui.ctx(), |ui| {
                 ui.label("Folder name");
                 let response = ui.add(
-                    egui::TextEdit::singleline(&mut dialog.name)
+                    crate::ui::theme::singleline_text_edit(&mut dialog.name)
                         .desired_width(f32::INFINITY)
                         .id_source("android-library-folder-name-input"),
                 );
@@ -239,7 +239,7 @@ pub(super) fn show_library_folder_dialogs(ui: &mut Ui, app: &mut AurawApp) {
             .show(ui.ctx(), |ui| {
                 ui.label("Folder name");
                 let response = ui.add(
-                    egui::TextEdit::singleline(&mut dialog.name)
+                    crate::ui::theme::singleline_text_edit(&mut dialog.name)
                         .desired_width(320.0)
                         .id_source("library-folder-name-input"),
                 );
@@ -381,7 +381,7 @@ pub(super) fn show_library_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp, fram
             .show(ui.ctx(), |ui| {
                 ui.label("RAW filename");
                 let response = ui.add(
-                    egui::TextEdit::singleline(&mut dialog.name)
+                    crate::ui::theme::singleline_text_edit(&mut dialog.name)
                         .desired_width(320.0)
                         .id_source("library-raw-name-input"),
                 );

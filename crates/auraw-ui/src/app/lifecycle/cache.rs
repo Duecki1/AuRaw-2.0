@@ -55,14 +55,18 @@ impl AurawApp {
         const LOADING_THUMBNAIL_EDGE: u32 = 512;
 
         self.develop_ui.loading_thumbnail.clear();
+        self.ui.adaptive_preview_backdrop = crate::ui::theme::CANVAS_BACKDROP;
         self.develop_ui.loading_thumbnail.path = Some(path.to_owned());
 
-        if let Some((texture, size)) = self
+        if let Some((texture, size, adaptive_backdrop)) = self
             .library
             .desktop_loading_thumbnail_for_path(path, &self.egui_ctx)
         {
             self.develop_ui.loading_thumbnail.texture = Some(texture);
             self.develop_ui.loading_thumbnail.texture_size = Some(size);
+            if let Some(color) = adaptive_backdrop {
+                self.ui.adaptive_preview_backdrop = color;
+            }
         }
 
         if self.develop_ui.loading_thumbnail.texture.is_some() {
@@ -95,12 +99,15 @@ impl AurawApp {
 
         self.library.poll(context);
         if self.develop_ui.loading_thumbnail.texture.is_none() {
-            if let Some((texture, size)) = self
+            if let Some((texture, size, adaptive_backdrop)) = self
                 .library
                 .desktop_loading_thumbnail_for_path(&path, context)
             {
                 self.develop_ui.loading_thumbnail.texture = Some(texture);
                 self.develop_ui.loading_thumbnail.texture_size = Some(size);
+                if let Some(color) = adaptive_backdrop {
+                    self.ui.adaptive_preview_backdrop = color;
+                }
             }
         }
 
@@ -127,6 +134,8 @@ impl AurawApp {
         }
         match result {
             Ok(Some(thumbnail)) => {
+                self.ui.adaptive_preview_backdrop =
+                    crate::ui::theme::adaptive_backdrop_from_rgba(&thumbnail.rgba);
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [thumbnail.width as usize, thumbnail.height as usize],
                     &thumbnail.rgba,
@@ -150,13 +159,17 @@ impl AurawApp {
     #[cfg(target_os = "android")]
     pub(in crate::app) fn prepare_android_develop_loading_thumbnail(&mut self, uri: &str) {
         self.develop_ui.loading_thumbnail.clear();
+        self.ui.adaptive_preview_backdrop = crate::ui::theme::CANVAS_BACKDROP;
         self.develop_ui.loading_thumbnail.source_uri = Some(uri.to_owned());
-        if let Some((texture, size)) = self
+        if let Some((texture, size, adaptive_backdrop)) = self
             .library
             .android_loading_thumbnail_for_uri(uri, &self.egui_ctx)
         {
             self.develop_ui.loading_thumbnail.texture = Some(texture);
             self.develop_ui.loading_thumbnail.texture_size = Some(size);
+            if let Some(color) = adaptive_backdrop {
+                self.ui.adaptive_preview_backdrop = color;
+            }
         }
     }
 
@@ -167,12 +180,15 @@ impl AurawApp {
         };
         self.library.poll(context);
         if self.develop_ui.loading_thumbnail.texture.is_none() {
-            if let Some((texture, size)) = self
+            if let Some((texture, size, adaptive_backdrop)) = self
                 .library
                 .android_loading_thumbnail_for_uri(&uri, context)
             {
                 self.develop_ui.loading_thumbnail.texture = Some(texture);
                 self.develop_ui.loading_thumbnail.texture_size = Some(size);
+                if let Some(color) = adaptive_backdrop {
+                    self.ui.adaptive_preview_backdrop = color;
+                }
             }
         }
     }
