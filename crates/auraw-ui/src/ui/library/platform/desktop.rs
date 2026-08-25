@@ -254,7 +254,9 @@ pub(super) fn apply_library_folder_ui_action(
                 return;
             };
             if clipboard.mode == LibraryFolderClipboardMode::Cut
-                && app.develop.current_path
+                && app
+                    .develop
+                    .current_path
                     .as_ref()
                     .is_some_and(|path| path.starts_with(&clipboard.path))
             {
@@ -285,7 +287,9 @@ pub(super) fn apply_library_folder_ui_action(
             );
         }
         LibraryFolderUiAction::Rename(source) => {
-            if app.develop.current_path
+            if app
+                .develop
+                .current_path
                 .as_ref()
                 .is_some_and(|path| path.starts_with(&source))
             {
@@ -314,7 +318,9 @@ pub(super) fn apply_library_folder_ui_action(
             source,
             destination_parent,
         } => {
-            if app.develop.current_path
+            if app
+                .develop
+                .current_path
                 .as_ref()
                 .is_some_and(|path| path.starts_with(&source))
             {

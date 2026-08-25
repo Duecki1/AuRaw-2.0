@@ -13,7 +13,10 @@ impl LibraryState {
         true
     }
 
-    pub(super) fn loading_thumbnail_for_index(&self, index: usize) -> Option<(egui::TextureHandle, [u32; 2])> {
+    pub(super) fn loading_thumbnail_for_index(
+        &self,
+        index: usize,
+    ) -> Option<(egui::TextureHandle, [u32; 2])> {
         let entry = self.entries.get(index)?;
         let texture = entry.texture.clone()?;
         let size = entry.thumbnail_size.unwrap_or_else(|| {

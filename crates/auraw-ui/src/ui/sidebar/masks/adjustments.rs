@@ -43,11 +43,6 @@ impl Sidebar {
                     app.report_ai_mask_error(error);
                 }
             }
-            MaskKind::Landscape => {
-                if let Err(error) = app.capture_mask_source(frame) {
-                    app.report_ai_mask_error(error);
-                }
-            }
             MaskKind::LuminanceRange | MaskKind::ColorRange => {
                 if let Err(error) = app.capture_mask_source(frame) {
                     app.ui.status = error;

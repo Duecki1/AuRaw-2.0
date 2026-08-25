@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 Markesteijn X-Trans demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// Markesteijn algorithm credit: Frank Markesteijn (via dcraw and darktable).
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 #import auraw::xtrans::markesteijn_candidates::{
@@ -9,7 +15,6 @@
     mark_set_component,
 }
 
-// Read-only homogeneity maps and final directional-selection helpers.
 @group(0) @binding(29) var mark_homo_0_3_read: texture_2d<f32>;
 @group(0) @binding(30) var mark_homo_4_7_read: texture_2d<f32>;
 
@@ -44,8 +49,6 @@ fn mark_accumulate(pos: vec2<i32>) -> vec3<f32> {
     }
     let cutoff = maximum - floor(maximum / 8.0);
 
-    // Markesteijn-3 keeps one of each opposing pair when their homogeneity
-    // differs, avoiding a blurred average of incompatible directions.
     for (var index = 0u; index < 4u; index = index + 1u) {
         if hm[index] < hm[index + 4u] {
             hm[index] = 0.0;

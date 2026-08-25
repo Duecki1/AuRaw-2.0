@@ -207,7 +207,6 @@ fn masks_contain_content_aware_components(masks: &MaskStack) -> bool {
             .iter()
             .any(|component| match (component.kind, &component.geometry) {
                 (MaskKind::Subject | MaskKind::Background, MaskGeometry::Ai { .. }) => true,
-                (MaskKind::Landscape, MaskGeometry::Landscape { .. }) => true,
                 (MaskKind::Object, MaskGeometry::Object { strokes, .. }) => strokes
                     .iter()
                     .any(|stroke| stroke.positive && !stroke.points.is_empty()),
@@ -399,18 +398,14 @@ mod base64_arc_bytes {
 
 fn generated_mask(geometry: &MaskGeometry) -> Option<&Option<MaskImage>> {
     match geometry {
-        MaskGeometry::Ai { mask, .. }
-        | MaskGeometry::Landscape { mask, .. }
-        | MaskGeometry::Object { mask, .. } => Some(mask),
+        MaskGeometry::Ai { mask, .. } | MaskGeometry::Object { mask, .. } => Some(mask),
         _ => None,
     }
 }
 
 fn generated_mask_mut(geometry: &mut MaskGeometry) -> Option<&mut Option<MaskImage>> {
     match geometry {
-        MaskGeometry::Ai { mask, .. }
-        | MaskGeometry::Landscape { mask, .. }
-        | MaskGeometry::Object { mask, .. } => Some(mask),
+        MaskGeometry::Ai { mask, .. } | MaskGeometry::Object { mask, .. } => Some(mask),
         _ => None,
     }
 }
@@ -1323,9 +1318,6 @@ fn estimate_sidecar_bytes(masks: &MaskStack) -> Result<u64, SidecarError> {
                 }
                 MaskGeometry::Ai {
                     mask: Some(image), ..
-                }
-                | MaskGeometry::Landscape {
-                    mask: Some(image), ..
                 } => add_unique_mask_asset_bound(
                     &mut estimated,
                     image,
@@ -1387,9 +1379,6 @@ fn measure_sidecar_dynamic_bytes(masks: &MaskStack) -> Result<u64, SidecarError>
                     checked_add_scaled(&mut measured, dabs.len(), BRUSH_DAB_HEADROOM)?
                 }
                 MaskGeometry::Ai {
-                    mask: Some(image), ..
-                }
-                | MaskGeometry::Landscape {
                     mask: Some(image), ..
                 } => add_unique_mask_asset_measured(
                     &mut measured,

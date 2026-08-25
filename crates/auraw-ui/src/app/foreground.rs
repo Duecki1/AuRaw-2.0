@@ -34,7 +34,6 @@ impl ForegroundOperationKind {
         match self {
             Self::SubjectMask => "Preparing subject mask",
             Self::ObjectMask => "Preparing object mask",
-            Self::LandscapeMask => "Preparing landscape mask",
             Self::AiDenoise => "Applying AI denoise",
             Self::LensCorrection => "Applying lens correction",
         }
@@ -43,7 +42,9 @@ impl ForegroundOperationKind {
 
 impl AurawApp {
     pub(crate) fn foreground_operation_kind(&self) -> Option<ForegroundOperationKind> {
-        self.foreground_operation.as_ref().map(|operation| operation.kind)
+        self.foreground_operation
+            .as_ref()
+            .map(|operation| operation.kind)
     }
 
     pub(crate) fn foreground_operation_is(&self, kind: ForegroundOperationKind) -> bool {
@@ -106,7 +107,11 @@ impl AurawApp {
                     ForegroundProgressValue::Indeterminate => {
                         ui.add(egui::ProgressBar::new(0.0).animate(!cancelling));
                     }
-                    ForegroundProgressValue::Units { completed, total, ref unit } => {
+                    ForegroundProgressValue::Units {
+                        completed,
+                        total,
+                        ref unit,
+                    } => {
                         if total == 0 {
                             ui.add(egui::ProgressBar::new(0.0).animate(!cancelling));
                         } else {
@@ -123,7 +128,10 @@ impl AurawApp {
                     ui.label(egui::RichText::new("Stopping at the next safe point…").small());
                 }
                 ui.add_space(8.0);
-                if ui.add_enabled(!cancelling, egui::Button::new("Cancel")).clicked() {
+                if ui
+                    .add_enabled(!cancelling, egui::Button::new("Cancel"))
+                    .clicked()
+                {
                     cancel = true;
                 }
             });
@@ -139,7 +147,6 @@ impl AurawApp {
         match self.foreground_operation_kind() {
             Some(ForegroundOperationKind::SubjectMask) => self.poll_subject_worker(),
             Some(ForegroundOperationKind::ObjectMask) => self.poll_object_worker(),
-            Some(ForegroundOperationKind::LandscapeMask) => self.poll_landscape_worker(),
             Some(ForegroundOperationKind::AiDenoise) => self.poll_ai_denoise_worker(),
             Some(ForegroundOperationKind::LensCorrection) => {
                 self.poll_lens_correction_worker(frame)
@@ -178,9 +185,18 @@ mod tests {
     #[test]
     fn only_one_foreground_operation_can_occupy_the_slot() {
         let mut slot = None;
-        assert!(try_install_foreground_operation(&mut slot, test_operation(7)));
-        assert!(!try_install_foreground_operation(&mut slot, test_operation(7)));
-        assert_eq!(slot.as_ref().map(|operation| operation.kind), Some(ForegroundOperationKind::SubjectMask));
+        assert!(try_install_foreground_operation(
+            &mut slot,
+            test_operation(7)
+        ));
+        assert!(!try_install_foreground_operation(
+            &mut slot,
+            test_operation(7)
+        ));
+        assert_eq!(
+            slot.as_ref().map(|operation| operation.kind),
+            Some(ForegroundOperationKind::SubjectMask)
+        );
     }
 
     #[test]

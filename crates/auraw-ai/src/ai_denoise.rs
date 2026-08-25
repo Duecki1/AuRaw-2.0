@@ -1,10 +1,9 @@
-
 use crate::execution_provider::{FallbackSession, SessionOptions};
-use crate::model_runtime::{acquire_model_session, AiModel, ModelRetention};
 use crate::model_artifact::{
     ensure_artifact, install_artifact_from_reader, verify_artifact, ArtifactSize, DownloadOptions,
     ModelArtifact,
 };
+use crate::model_runtime::{acquire_model_session, AiModel, ModelRetention};
 use anyhow::{Context, Result};
 use auraw_gpu::wgpu;
 use ort::value::Tensor;
@@ -377,11 +376,7 @@ fn update_digest_cancelable(
 
 pub fn models_are_verified(model_dir: &Path) -> bool {
     verify_artifact(&model_dir.join("model_bayer.onnx"), BAYER_MODEL_ARTIFACT).is_ok()
-        && verify_artifact(
-            &model_dir.join("model_linear.onnx"),
-            LINEAR_MODEL_ARTIFACT,
-        )
-        .is_ok()
+        && verify_artifact(&model_dir.join("model_linear.onnx"), LINEAR_MODEL_ARTIFACT).is_ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1462,11 +1457,7 @@ mod tests {
 
     #[test]
     fn bayer_remosaic_selects_only_the_channel_at_each_rggb_site() {
-        let model_rgb = [
-            0.1, 0.2, 0.3, 0.4,
-            0.5, 0.6, 0.7, 0.8,
-            0.9, 1.0, 0.4, 0.2,
-        ];
+        let model_rgb = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.4, 0.2];
         let (mosaic, cfa) = remosaic_bayer_pixels(&model_rgb, 2, [1.0; 3]).unwrap();
         let expected = [0.1f32, 0.6, 0.7, 0.2].map(|value| (value * 65_535.0).round() as u16);
         assert_eq!(mosaic, expected);
@@ -1475,11 +1466,7 @@ mod tests {
 
     #[test]
     fn bayer_remosaic_reverses_model_daylight_white_balance() {
-        let model_rgb = [
-            0.8, 0.8, 0.8, 0.8,
-            0.6, 0.6, 0.6, 0.6,
-            0.4, 0.4, 0.4, 0.4,
-        ];
+        let model_rgb = [0.8, 0.8, 0.8, 0.8, 0.6, 0.6, 0.6, 0.6, 0.4, 0.4, 0.4, 0.4];
         let (mosaic, _) = remosaic_bayer_pixels(&model_rgb, 2, [2.0, 1.0, 4.0]).unwrap();
         let expected = [0.4f32, 0.6, 0.6, 0.1].map(|value| (value * 65_535.0).round() as u16);
         assert_eq!(mosaic, expected);

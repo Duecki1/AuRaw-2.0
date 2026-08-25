@@ -46,7 +46,9 @@ impl AurawApp {
 
         #[cfg(target_os = "android")]
         let cached_raws = match selection.as_ref() {
-            Some(requested) => self.preview.lens_corrected_cache
+            Some(requested) => self
+                .preview
+                .lens_corrected_cache
                 .as_ref()
                 .filter(|(cached, quality, _, _)| {
                     cached == requested && *quality == self.preview.quality
@@ -54,7 +56,9 @@ impl AurawApp {
                 .map(|(_, _, full_raw, preview_raw)| {
                     (Arc::clone(full_raw), Arc::clone(preview_raw))
                 }),
-            None => self.preview.lens_original_cache
+            None => self
+                .preview
+                .lens_original_cache
                 .as_ref()
                 .filter(|(quality, _)| *quality == self.preview.quality)
                 .map(|(_, preview_raw)| (Arc::clone(&original_raw), Arc::clone(preview_raw))),
@@ -79,7 +83,10 @@ impl AurawApp {
         });
     }
 
-    pub(in crate::app) fn start_lens_correction_task(&mut self, request: LensCorrectionTaskRequest) {
+    pub(in crate::app) fn start_lens_correction_task(
+        &mut self,
+        request: LensCorrectionTaskRequest,
+    ) {
         if self.foreground_operation_active() {
             self.develop.lens_correction_dirty = true;
             return;
@@ -118,16 +125,9 @@ impl AurawApp {
                     } else {
                         let original_raw = Arc::clone(&request.original_raw);
                         let full_raw = if let Some(selection) = request.selection.as_ref() {
-                            Arc::new(
-                                apply_lensfun_correction(&original_raw, selection).map_err(
-                                    |error| {
-                                        format!(
-                                            "Could not apply {}: {error:#}",
-                                            selection.label()
-                                        )
-                                    },
-                                )?,
-                            )
+                            Arc::new(apply_lensfun_correction(&original_raw, selection).map_err(
+                                |error| format!("Could not apply {}: {error:#}", selection.label()),
+                            )?)
                         } else {
                             original_raw
                         };
@@ -176,7 +176,8 @@ impl AurawApp {
                     receiver: ForegroundOperationReceiver::LensCorrection(receiver),
                     context: ForegroundOperationContext::LensCorrection,
                 });
-                self.egui_ctx.request_repaint_after(Duration::from_millis(50));
+                self.egui_ctx
+                    .request_repaint_after(Duration::from_millis(50));
             }
             Err(error) => {
                 self.develop.lens_correction.enabled = self.develop.lens_correction.applied;
@@ -217,7 +218,9 @@ impl AurawApp {
             }
         }
         if finished.is_none() && disconnected {
-            finished = Some(Err("Lens-correction worker stopped unexpectedly.".to_owned()));
+            finished = Some(Err(
+                "Lens-correction worker stopped unexpectedly.".to_owned()
+            ));
         }
         let Some(result) = finished else {
             self.foreground_operation = Some(operation);
@@ -253,25 +256,33 @@ impl AurawApp {
                 self.ui.notice = Some("The preview pipeline is unavailable.".to_owned());
                 return;
             };
-            if let Err(error) =
-                pipeline.upload_raw_tile(&render_state.queue, &prepared.preview_raw)
+            if let Err(error) = pipeline.upload_raw_tile(&render_state.queue, &prepared.preview_raw)
             {
                 self.ui.notice = Some(format!(
                     "Could not update the lens-corrected preview pixels: {error:#}"
                 ));
                 return;
             }
-            let params = GpuParams::new(&self.develop.exposure, &self.masks.stack, &prepared.preview_raw)
-                .with_vignette_geometry(self.develop.geometry);
+            let params = GpuParams::new(
+                &self.develop.exposure,
+                &self.masks.stack,
+                &prepared.preview_raw,
+            )
+            .with_vignette_geometry(self.develop.geometry);
             if let Err(error) = pipeline.recompute_with_remove(
                 &render_state.queue,
                 &render_state.device,
                 &params,
-                &self.inpaint.edits,
-                &prepared.full_raw,
-                &self.develop.exposure,
-                [0.0, 0.0],
-                [prepared.full_raw.width as f32, prepared.full_raw.height as f32],
+                RemoveSceneContext::new(
+                    &self.inpaint.edits,
+                    &prepared.full_raw,
+                    &self.develop.exposure,
+                    [0.0, 0.0],
+                    [
+                        prepared.full_raw.width as f32,
+                        prepared.full_raw.height as f32,
+                    ],
+                ),
             ) {
                 self.ui.notice = Some(format!("Could not apply Remove to lens preview: {error:#}"));
                 return;
@@ -284,18 +295,20 @@ impl AurawApp {
                     Arc::clone(&prepared.preview_raw),
                 ));
             } else {
-                self.preview.lens_original_cache = Some((
-                    prepared.preview_quality,
-                    Arc::clone(&prepared.preview_raw),
-                ));
+                self.preview.lens_original_cache =
+                    Some((prepared.preview_quality, Arc::clone(&prepared.preview_raw)));
             }
         }
 
         #[cfg(not(target_os = "android"))]
         {
             let preview_masks = self.masks.stack.clone();
-            let params = GpuParams::new(&self.develop.exposure, &preview_masks, &prepared.preview_raw)
-                .with_vignette_geometry(self.develop.geometry);
+            let params = GpuParams::new(
+                &self.develop.exposure,
+                &preview_masks,
+                &prepared.preview_raw,
+            )
+            .with_vignette_geometry(self.develop.geometry);
             let mut pipeline = match RawGpuPipeline::new_headless_with_quality(
                 &render_state.device,
                 &render_state.queue,
@@ -305,13 +318,17 @@ impl AurawApp {
             ) {
                 Ok(pipeline) => pipeline,
                 Err(error) => {
-                    self.ui.notice =
-                        Some(format!("Could not rebuild the corrected GPU preview: {error:#}"));
+                    self.ui.notice = Some(format!(
+                        "Could not rebuild the corrected GPU preview: {error:#}"
+                    ));
                     return;
                 }
             };
-            if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
-                self.ui.notice = Some(format!("Could not prepare the preview color profile: {error:#}"));
+            if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline)
+            {
+                self.ui.notice = Some(format!(
+                    "Could not prepare the preview color profile: {error:#}"
+                ));
                 return;
             }
             if let Err(error) = Self::upload_preview_masks(
@@ -327,13 +344,20 @@ impl AurawApp {
                 &render_state.queue,
                 &render_state.device,
                 &params,
-                &self.inpaint.edits,
-                &prepared.full_raw,
-                &self.develop.exposure,
-                [0.0, 0.0],
-                [prepared.full_raw.width as f32, prepared.full_raw.height as f32],
+                RemoveSceneContext::new(
+                    &self.inpaint.edits,
+                    &prepared.full_raw,
+                    &self.develop.exposure,
+                    [0.0, 0.0],
+                    [
+                        prepared.full_raw.width as f32,
+                        prepared.full_raw.height as f32,
+                    ],
+                ),
             ) {
-                self.ui.notice = Some(format!("Could not apply Remove to corrected preview: {error:#}"));
+                self.ui.notice = Some(format!(
+                    "Could not apply Remove to corrected preview: {error:#}"
+                ));
                 return;
             }
 
@@ -347,8 +371,7 @@ impl AurawApp {
             self.preview.gpu_pipeline = Some(pipeline);
         }
 
-        if !operation.accepts_result(self.persistence.sidecar_generation)
-        {
+        if !operation.accepts_result(self.persistence.sidecar_generation) {
             return;
         }
 

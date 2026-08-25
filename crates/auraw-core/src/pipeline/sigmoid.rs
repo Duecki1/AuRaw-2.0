@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 sigmoid.
+// Copyright (C) 2020-2026 darktable developers.
+// Copyright (C) 2026 AuRaw contributors (Rust adaptation).
 
 pub const MIDDLE_GREY: f32 = 0.1845;
 const CONTRAST_SLOPE_CALIBRATION: f32 = 0.9939394;

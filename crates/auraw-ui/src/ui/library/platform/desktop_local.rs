@@ -282,7 +282,12 @@ impl LibraryState {
         self.open_folder_at(root, selected, context);
     }
 
-    pub(in crate::ui::library) fn open_folder_at(&mut self, root: PathBuf, folder: PathBuf, context: &egui::Context) {
+    pub(in crate::ui::library) fn open_folder_at(
+        &mut self,
+        root: PathBuf,
+        folder: PathBuf,
+        context: &egui::Context,
+    ) {
         let folder_changed = self.folder.as_ref() != Some(&folder);
         let root_changed = self.root_folder.as_ref() != Some(&root);
         if root_changed {
@@ -316,9 +321,7 @@ impl LibraryState {
         let Some(root) = self.root_folder.as_ref() else {
             return false;
         };
-        if !folder.starts_with(root)
-            || self.folder.as_ref() == Some(&folder)
-        {
+        if !folder.starts_with(root) || self.folder.as_ref() == Some(&folder) {
             return false;
         }
 
@@ -331,5 +334,4 @@ impl LibraryState {
         self.refresh(context);
         true
     }
-
 }

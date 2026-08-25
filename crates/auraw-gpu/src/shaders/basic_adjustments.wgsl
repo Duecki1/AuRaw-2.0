@@ -1,10 +1,6 @@
 #import auraw::common as Common
 #import auraw::color as Color
 
-// Scene-linear operations that intentionally happen before the final
-// scene-to-display transform. Global white balance is assembled into the
-// camera/DCP transform on the CPU; the Bradford transform below remains useful
-// for local post-profile temperature/tint adjustments.
 
 fn apply_temperature_tint_values(
     rgb: vec3<f32>,
@@ -17,10 +13,6 @@ fn apply_temperature_tint_values(
         return rgb;
     }
 
-    // Work in Bradford cone responses so temperature follows the blue-yellow
-    // daylight axis and tint follows the green-magenta axis. The transform is
-    // normalized to keep the adapted reference white at Y=1, avoiding an
-    // unwanted exposure change while the user adjusts white balance.
     let gains = exp2(vec3<f32>(
         0.22 * temperature + 0.08 * tint,
         -0.24 * tint,
@@ -38,10 +30,6 @@ fn apply_temperature_tint_values(
 }
 
 fn apply_exposure(rgb: vec3<f32>) -> vec3<f32> {
-    // Sensor black calibration is applied while normalizing each CFA plane in
-    // raw_sampling.wgsl/highlights.wgsl. Exposure is therefore a pure
-    // scene-linear gain here; subtracting black in working RGB changes hue and
-    // destroys near-black channel relationships.
     return rgb * exp2(Common::scene_tone_uniforms.exposure);
 }
 
@@ -53,7 +41,6 @@ fn circular_hue_distance(a: f32, b: f32) -> f32 {
 fn perceptual_control(value: f32) -> f32 {
     let normalized = clamp(value / 100.0, -1.0, 1.0);
     let magnitude = abs(normalized);
-    // Keep fine control around zero while still reaching the full endpoint.
     return sign(normalized) * (0.78 * magnitude + 0.22 * magnitude * magnitude);
 }
 
@@ -76,17 +63,11 @@ fn apply_saturation_vibrance(rgb: vec3<f32>) -> vec3<f32> {
     let relative_chroma = chroma / max(0.030 + 0.40 * max(lab.x, 0.0), 0.045);
     let content_saturation = clamp(relative_chroma, 0.0, 1.0);
 
-    // Saturation is deliberately obvious throughout its full UI range. Positive
-    // values use a smooth exponential response, while -100 reaches a genuinely
-    // monochrome result instead of stopping at a weak partial desaturation.
     var saturation_factor = max(1.0 + saturation, 0.0);
     if saturation > 0.0 {
         saturation_factor = exp2(saturation * 0.72);
     }
 
-    // Vibrance favours muted colours but still produces a visible change on an
-    // ordinary photograph. Very small chroma is gated as noise, skin is softly
-    // protected, and already vivid colours receive a smaller positive boost.
     var vibrance_factor = 1.0;
     if vibrance >= 0.0 {
         let muted_weight = pow(1.0 - content_saturation, 0.72);

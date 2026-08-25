@@ -167,11 +167,7 @@ pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
                 file_len,
             };
 
-            if matches!(
-                tag,
-                33421
-                    | 33422
-            ) {
+            if matches!(tag, 33421 | 33422) {
                 return Ok(TiffContainerKind::Sensor);
             }
 
@@ -257,11 +253,7 @@ fn scalar_u64(file: &mut File, field: TiffFieldRef) -> Result<Option<u64>> {
     Ok(integer_values(file, field, 1)?.into_iter().next())
 }
 
-fn integer_values(
-    file: &mut File,
-    field: TiffFieldRef,
-    limit: usize,
-) -> Result<Vec<u64>> {
+fn integer_values(file: &mut File, field: TiffFieldRef, limit: usize) -> Result<Vec<u64>> {
     let TiffFieldRef {
         order,
         field_type,

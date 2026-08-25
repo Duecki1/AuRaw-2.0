@@ -124,48 +124,46 @@ pub(super) fn show_ai_mask_refresh_progress(
     };
     let mut minimize = false;
     let mut cancel = false;
-    crate::ui::responsive_popup(
-        egui::Window::new("Regenerating AI masks"),
-        ui.ctx(),
-        360.0,
-    )
-    .id(egui::Id::new("library-ai-mask-refresh-progress"))
-    .collapsible(false)
-    .resizable(false)
-    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-    .show(ui.ctx(), |ui| {
-        ui.label(egui::RichText::new(format!("{completed} / {total} AI masks updated")).strong());
-        ui.add_space(6.0);
-        ui.add(
-            egui::ProgressBar::new(fraction)
-                .show_percentage()
-                .animate(completed < total),
-        );
-        if let Some(name) = current_name {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(format!("Refreshing {name}…"));
-            });
-        }
-        if failed > 0 {
+    crate::ui::responsive_popup(egui::Window::new("Regenerating AI masks"), ui.ctx(), 360.0)
+        .id(egui::Id::new("library-ai-mask-refresh-progress"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ui.ctx(), |ui| {
             ui.label(
-                egui::RichText::new(format!(
-                    "{failed} {} failed",
-                    if failed == 1 { "image" } else { "images" }
-                ))
-                .small()
-                .color(ui.visuals().warn_fg_color),
+                egui::RichText::new(format!("{completed} / {total} AI masks updated")).strong(),
             );
-        }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if allow_minimize {
-                minimize = ui.button("Minimize").clicked();
+            ui.add_space(6.0);
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .show_percentage()
+                    .animate(completed < total),
+            );
+            if let Some(name) = current_name {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("Refreshing {name}…"));
+                });
             }
-            cancel = ui.button("Cancel").clicked();
+            if failed > 0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{failed} {} failed",
+                        if failed == 1 { "image" } else { "images" }
+                    ))
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if allow_minimize {
+                    minimize = ui.button("Minimize").clicked();
+                }
+                cancel = ui.button("Cancel").clicked();
+            });
         });
-    });
     (minimize, cancel)
 }
 
@@ -339,7 +337,9 @@ pub(super) fn show_library_folder_dialogs(ui: &mut Ui, app: &mut AurawApp) {
     }
     if confirm_delete {
         if let (Some(root), Some(target)) = (app.library.root_folder.clone(), delete_target) {
-            if let Some(current) = app.develop.current_path
+            if let Some(current) = app
+                .develop
+                .current_path
                 .clone()
                 .filter(|current| current.starts_with(&target))
             {
@@ -367,11 +367,7 @@ pub(super) fn validate_library_item_name(name: &str, raw: bool) -> Result<(), St
     Ok(())
 }
 
-pub(super) fn show_library_raw_name_dialog(
-    ui: &mut Ui,
-    app: &mut AurawApp,
-    frame: &eframe::Frame,
-) {
+pub(super) fn show_library_raw_name_dialog(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
     #[cfg(target_os = "android")]
     let _ = frame;
     let mut close = false;

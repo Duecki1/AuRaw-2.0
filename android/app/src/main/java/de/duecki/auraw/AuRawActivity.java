@@ -21,7 +21,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
-/** Thin Android/JNI bridge. Stateful storage work lives in focused delegates. */
 public final class AuRawActivity extends NativeActivity {
     private static final int OPEN_RAW_DOCUMENT = 1001;
     private static final int OPEN_CAMERA_PROFILE_FOLDER = 1003;
@@ -31,7 +30,6 @@ public final class AuRawActivity extends NativeActivity {
     private ExportPublisher exportPublisher;
     private TaskNotificationController taskNotificationController;
 
-    /** True when Android currently exposes any usable network transport. */
     public boolean isNetworkAvailable() {
         ConnectivityManager connectivity =
                 (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -57,9 +55,7 @@ public final class AuRawActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // NativeActivity may start the Rust thread during creation. Install the
-        // notification bridge before the other delegates so early task updates
-        // cannot observe a partially initialized Activity.
+        // NativeActivity may start Rust during creation, so install this bridge first.
         taskNotificationController = new TaskNotificationController(this);
         AndroidStorageAccess storageAccess = new ActivityStorageAccess(this);
         storageManager = new StorageManager(storageAccess, new StorageManager.Callbacks() {
@@ -161,13 +157,11 @@ public final class AuRawActivity extends NativeActivity {
             String cachedPath, String displayName, int profileCount, String error);
     private static native void nativeOnExportPublished(String location, String error);
 
-    /** Called from Rust's egui button. */
     public void openRawDocument() {
         runOnUiThread(() -> startActivityForResult(
                 storageManager.createRawDocumentPickerIntent(), OPEN_RAW_DOCUMENT));
     }
 
-    /** Opens Android's Storage Access Framework tree picker for DCP profile roots. */
     public void openCameraProfileFolder() {
         runOnUiThread(() -> startActivityForResult(
                 profileImporter.createFolderPickerIntent(), OPEN_CAMERA_PROFILE_FOLDER));
@@ -183,7 +177,6 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    /** Mirrors the active Rust task into Android's notification shade. */
     public void updateBackgroundTaskNotification(
             String title,
             String phase,
@@ -204,7 +197,6 @@ public final class AuRawActivity extends NativeActivity {
                 queuedCount);
     }
 
-    /** Removes AuRaw's task-progress notification after the queue becomes idle. */
     public void clearBackgroundTaskNotification() {
         TaskNotificationController controller = taskNotificationController;
         if (controller != null) {
@@ -212,7 +204,6 @@ public final class AuRawActivity extends NativeActivity {
         }
     }
 
-    /** Copies text through Android's native clipboard service. */
     public void copyTextToClipboard(String label, String text) {
         final String safeLabel = label == null || label.isEmpty()
                 ? "AuRaw diagnostics"
@@ -230,7 +221,6 @@ public final class AuRawActivity extends NativeActivity {
         });
     }
 
-    /** Device information displayed in AuRaw's in-app diagnostic log. */
     public String deviceDiagnostics() {
         return "manufacturer=" + Build.MANUFACTURER
                 + "\nbrand=" + Build.BRAND
@@ -250,7 +240,6 @@ public final class AuRawActivity extends NativeActivity {
         return new File(getCacheDir(), "gpu-pipeline-cache").getAbsolutePath();
     }
 
-    /** Materializes the bundled Lensfun XML files because its native API requires paths. */
     public String lensfunDatabaseDir() throws IOException {
         File destination = new File(getFilesDir(), "lensfun");
         copyAssetTree("lensfun", destination);

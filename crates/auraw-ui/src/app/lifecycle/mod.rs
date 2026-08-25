@@ -229,7 +229,6 @@ pub(super) fn needs_canonical_mask_source(masks: &MaskStack) -> bool {
                 MaskGeometry::LuminanceRange { source: None, .. }
                     | MaskGeometry::ColorRange { source: None, .. }
                     | MaskGeometry::Object { .. }
-                    | MaskGeometry::Landscape { .. }
             )
         })
     })

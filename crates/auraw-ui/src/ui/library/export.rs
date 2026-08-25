@@ -59,7 +59,10 @@ pub(super) fn unique_library_export_path(
 }
 
 #[cfg(not(target_os = "android"))]
-pub(super) fn library_export_jobs(paths: &[PathBuf], format: ExportFormat) -> Option<Vec<(PathBuf, PathBuf)>> {
+pub(super) fn library_export_jobs(
+    paths: &[PathBuf],
+    format: ExportFormat,
+) -> Option<Vec<(PathBuf, PathBuf)>> {
     if paths.is_empty() {
         return None;
     }
@@ -70,11 +73,8 @@ pub(super) fn library_export_jobs(paths: &[PathBuf], format: ExportFormat) -> Op
             .and_then(|name| name.to_str())
             .map(|name| format!("{name}-auraw.{}", format.extension()))
             .unwrap_or_else(|| format!("auraw-export.{}", format.extension()));
-        let destination = crate::ui::choose_export_file_path(
-            format,
-            &default_name,
-            source.parent(),
-        )?;
+        let destination =
+            crate::ui::choose_export_file_path(format, &default_name, source.parent())?;
         return Some(vec![(source.clone(), destination)]);
     }
 

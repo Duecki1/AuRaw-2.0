@@ -189,7 +189,6 @@ impl Sidebar {
         let mut effect_changed = false;
         let mut request_subject = false;
         let mut request_object = false;
-        let mut request_landscape = false;
         let mut brush_mode = app.masks.brush_mode;
         let selected_is_subject = app.masks.stack.masks[mask_index]
             .components
@@ -234,7 +233,6 @@ impl Sidebar {
                                 &mut clear_refinement,
                             ),
                             &mut request_object,
-                            &mut request_landscape,
                         );
                     });
 
@@ -269,15 +267,14 @@ impl Sidebar {
                             (MaskSection::ColorMixer, "Color Mixer", false),
                         ] {
                             Self::adjustment_section(ui, label, default_open, true, |ui| {
-                                let (section_changed, _) =
-                                    Self::show_local_mask_adjustment_section(
-                                        ui,
-                                        &mut mask.adjustments,
-                                        section,
-                                        &mut local_curve_tab,
-                                        &mut local_color_grade_tab,
-                                        &mut local_hsl_mixer_color,
-                                    );
+                                let (section_changed, _) = Self::show_local_mask_adjustment_section(
+                                    ui,
+                                    &mut mask.adjustments,
+                                    section,
+                                    &mut local_curve_tab,
+                                    &mut local_color_grade_tab,
+                                    &mut local_hsl_mixer_color,
+                                );
                                 adjustments_changed |= section_changed;
                             });
                         }
@@ -346,7 +343,6 @@ impl Sidebar {
                                                 &mut clear_refinement,
                                             ),
                                             &mut request_object,
-                                            &mut request_landscape,
                                         );
                                     },
                                 );
@@ -386,7 +382,6 @@ impl Sidebar {
                                     &mut clear_refinement,
                                 ),
                                 &mut request_object,
-                                &mut request_landscape,
                             );
                         });
                         adjustments_changed |= Self::show_mask_effect_settings(ui, mask);
@@ -400,7 +395,8 @@ impl Sidebar {
         app.develop_ui.hsl_mixer_color = local_hsl_mixer_color;
         app.masks.brush_mode = brush_mode;
         app.masks.subject_refinement_active = refinement_active;
-        let refinement_settings_changed = app.masks.stack.subject_refinement.size != refinement_size
+        let refinement_settings_changed = app.masks.stack.subject_refinement.size
+            != refinement_size
             || app.masks.stack.subject_refinement.feather != refinement_feather
             || app.masks.stack.subject_refinement.flow != refinement_flow;
         app.masks.stack.subject_refinement.size = refinement_size;
@@ -417,9 +413,6 @@ impl Sidebar {
         }
         if request_object {
             app.request_object_mask(mask_index, component_index);
-        }
-        if request_landscape {
-            app.request_landscape_mask(frame, mask_index, component_index);
         }
         Self::apply_mask_geometry_change(ui, app, mask_index, geometry_changed);
         if effect_changed {

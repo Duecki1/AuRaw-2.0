@@ -18,7 +18,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Publishes completed exports through MediaStore or the Android 8/9 legacy path. */
 final class ExportPublisher {
     static final int WRITE_EXPORT_PERMISSION = 1002;
     private static final String EXPORT_RELATIVE_PATH =
@@ -30,7 +29,6 @@ final class ExportPublisher {
 
     private final AuRawActivity activity;
     private final Callbacks callbacks;
-    /** Permission callbacks and publish requests may arrive from different bridge threads. */
     private final AtomicReference<PendingLegacyExport> pendingLegacyExport = new AtomicReference<>();
 
     ExportPublisher(AuRawActivity activity, Callbacks callbacks) {
@@ -38,7 +36,6 @@ final class ExportPublisher {
         this.callbacks = callbacks;
     }
 
-    /** Creates a pending MediaStore destination and transfers its writable fd to Rust. */
     String createPendingExport(String requestedName, String mimeType) throws Exception {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             return "";
@@ -73,7 +70,6 @@ final class ExportPublisher {
         }
     }
 
-    /** Publishes or deletes a MediaStore destination previously created above. */
     void finishPendingExport(String uriText, int successFlag) throws Exception {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || uriText == null || uriText.isEmpty()) {
             return;
@@ -93,7 +89,6 @@ final class ExportPublisher {
         }
     }
 
-    /** Publishes a completed cache image to Pictures/AuRaw without showing a picker. */
     void publishImage(String cachedPath, String displayName, String mimeType) {
         activity.runOnUiThread(() -> beginPublishImage(cachedPath, displayName, mimeType));
     }

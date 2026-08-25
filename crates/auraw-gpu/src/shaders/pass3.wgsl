@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 RCD demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// RCD credits: Luis Sanz Rodriguez, Ingo Weyrich, and Hanno Schwalm.
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 
-// Bayer RCD stage 3: interpolate the opposite red/blue channel at red/blue
-// photosites from diagonal colour differences and the P/Q discriminator.
 @group(0) @binding(7) var tex2_read: texture_2d<f32>;
 @group(0) @binding(8) var tex3_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 

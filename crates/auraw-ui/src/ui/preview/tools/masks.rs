@@ -1,8 +1,8 @@
+use super::super::*;
 use super::brush::{
     sample_brush_stroke, BrushStrokeSamples, OBJECT_BRUSH_MINIMUM_SPACING_FRACTION,
     STANDARD_BRUSH_MINIMUM_SPACING_FRACTION,
 };
-use super::super::*;
 
 impl Preview {
     pub(in crate::ui::preview) fn handle_mask_interaction(
@@ -15,7 +15,9 @@ impl Preview {
         source_height: u32,
         response: &egui::Response,
     ) {
-        let lens_geometry = app.develop.loaded_raw
+        let lens_geometry = app
+            .develop
+            .loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.clone());
         let Some(mask_index) = app.masks.stack.selected_mask else {
@@ -28,7 +30,9 @@ impl Preview {
             app.masks.active_tool = None;
             return;
         };
-        let Some(kind) = app.masks.stack
+        let Some(kind) = app
+            .masks
+            .stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -51,7 +55,9 @@ impl Preview {
         app.masks.active_tool = Some(kind);
         let geometry_can_leave_image = matches!(kind, MaskKind::Radial | MaskKind::Linear)
             && (app.masks.drag.is_some()
-                || app.masks.stack
+                || app
+                    .masks
+                    .stack
                     .masks
                     .get(mask_index)
                     .and_then(|mask| mask.components.get(component_index))
@@ -83,7 +89,9 @@ impl Preview {
             let object_stroke_finished = primary_released
                 && !subject_refining
                 && kind == MaskKind::Object
-                && app.masks.stack
+                && app
+                    .masks
+                    .stack
                     .masks
                     .get(mask_index)
                     .and_then(|mask| mask.components.get(component_index))
@@ -112,7 +120,8 @@ impl Preview {
         let brush_tool_size = if subject_refining {
             Some(app.masks.stack.subject_refinement.size)
         } else {
-            app.masks.stack
+            app.masks
+                .stack
                 .masks
                 .get(mask_index)
                 .and_then(|mask| mask.components.get(component_index))
@@ -198,7 +207,9 @@ impl Preview {
             }
             return;
         }
-        let color_was_sampled = app.masks.stack
+        let color_was_sampled = app
+            .masks
+            .stack
             .masks
             .get(mask_index)
             .and_then(|mask| mask.components.get(component_index))
@@ -229,7 +240,9 @@ impl Preview {
             changed |= app.restart_refined_object_mask_for_stroke(mask_index, component_index);
         }
 
-        if let Some(component) = app.masks.stack
+        if let Some(component) = app
+            .masks
+            .stack
             .masks
             .get_mut(mask_index)
             .and_then(|mask| mask.components.get_mut(component_index))
@@ -246,7 +259,10 @@ impl Preview {
                     },
                     MaskKind::Brush,
                 ) => {
-                    let opacity = app.masks.brush_mode.dab_opacity(*opacity_enabled, *brush_opacity);
+                    let opacity = app
+                        .masks
+                        .brush_mode
+                        .dab_opacity(*opacity_enabled, *brush_opacity);
                     let Some(stroke) = brush_samples.as_ref() else {
                         return;
                     };
@@ -399,13 +415,7 @@ impl Preview {
                     }
                     _ => {}
                 },
-                (
-                    MaskGeometry::Object {
-                        strokes,
-                        ..
-                    },
-                    MaskKind::Object,
-                ) => {
+                (MaskGeometry::Object { strokes, .. }, MaskKind::Object) => {
                     let Some(sampled) = brush_samples.as_ref() else {
                         return;
                     };
@@ -474,7 +484,9 @@ impl Preview {
         source_width: u32,
         source_height: u32,
     ) {
-        let lens_geometry = app.develop.loaded_raw
+        let lens_geometry = app
+            .develop
+            .loaded_raw
             .as_ref()
             .and_then(|raw| raw.lens_geometry.clone());
         let Some(mask_index) = app.masks.stack.selected_mask else {
@@ -580,7 +592,8 @@ impl Preview {
         }
 
         if let Some(component) = selected_component.and_then(|index| {
-            app.masks.stack
+            app.masks
+                .stack
                 .masks
                 .get(mask_index)
                 .and_then(|mask| mask.components.get(index))
@@ -747,14 +760,23 @@ impl Preview {
         }
 
         let refining_subject = app.masks.subject_refinement_active
-            && app.masks.stack.selected_component().is_some_and(|component| {
-                matches!(component.kind, MaskKind::Subject | MaskKind::Background)
-                    && component.enabled
-            });
+            && app
+                .masks
+                .stack
+                .selected_component()
+                .is_some_and(|component| {
+                    matches!(component.kind, MaskKind::Subject | MaskKind::Background)
+                        && component.enabled
+                });
         if refining_subject
-            || app.masks.stack.selected_component().is_some_and(|component| {
-                matches!(component.kind, MaskKind::Brush | MaskKind::Object) && component.enabled
-            })
+            || app
+                .masks
+                .stack
+                .selected_component()
+                .is_some_and(|component| {
+                    matches!(component.kind, MaskKind::Brush | MaskKind::Object)
+                        && component.enabled
+                })
         {
             if let Some(pointer) = ui
                 .ctx()
@@ -964,7 +986,8 @@ impl Preview {
                 texture.id(),
                 image_rect,
                 app.develop.geometry,
-                app.develop.loaded_raw
+                app.develop
+                    .loaded_raw
                     .as_ref()
                     .and_then(|raw| raw.lens_geometry.as_deref()),
                 source_width,
@@ -988,33 +1011,45 @@ impl Preview {
             }
             MaskKind::Brush => return,
             MaskKind::Object
-                if app.masks.stack.selected_component().is_some_and(|component| {
-                    matches!(&component.geometry, MaskGeometry::Object { mask: None, .. })
-                }) =>
+                if app
+                    .masks
+                    .stack
+                    .selected_component()
+                    .is_some_and(|component| {
+                        matches!(&component.geometry, MaskGeometry::Object { mask: None, .. })
+                    }) =>
             {
                 "Paint through the middle of the object part"
             }
             MaskKind::Radial
-                if !app.masks.stack
+                if !app
+                    .masks
+                    .stack
                     .selected_component()
                     .is_some_and(|component| component.geometry.is_initialized()) =>
             {
                 "Drag from the center to create a radial gradient"
             }
             MaskKind::Linear
-                if !app.masks.stack
+                if !app
+                    .masks
+                    .stack
                     .selected_component()
                     .is_some_and(|component| component.geometry.is_initialized()) =>
             {
                 "Drag across the image to create a linear gradient"
             }
             MaskKind::ColorRange
-                if !app.masks.stack.selected_component().is_some_and(|component| {
-                    matches!(
-                        &component.geometry,
-                        MaskGeometry::ColorRange { sampled: true, .. }
-                    )
-                }) =>
+                if !app
+                    .masks
+                    .stack
+                    .selected_component()
+                    .is_some_and(|component| {
+                        matches!(
+                            &component.geometry,
+                            MaskGeometry::ColorRange { sampled: true, .. }
+                        )
+                    }) =>
             {
                 "Drag on the image to sample a color"
             }

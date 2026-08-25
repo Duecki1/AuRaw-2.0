@@ -184,7 +184,8 @@ impl AurawApp {
             "{}|profile:{}|folder:{}|selection:{}",
             raw_cache_key_for_target(&sidecar_target),
             self.preferences.camera_profile_mode.cache_key(),
-            self.preferences.camera_profile_folder
+            self.preferences
+                .camera_profile_folder
                 .as_deref()
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -261,14 +262,11 @@ impl AurawApp {
         self.ai.mask_update_active = false;
         self.ai.mask_update_subject_pending = false;
         self.ai.mask_update_object_queue.clear();
-        self.ai.mask_update_landscape_queue.clear();
         self.ai.mask_update_failed = false;
         self.ai.subject_consent_open = false;
         self.ai.object_consent_open = false;
         self.ai.object_pending_target = None;
         self.ai.object_cache = None;
-        self.ai.landscape_consent_open = false;
-        self.ai.landscape_pending_target = None;
         self.masks.dirty_layers = [false; MAX_LOCAL_MASKS];
         self.masks.detail_dirty_layers = [false; MAX_LOCAL_MASKS];
         self.masks.navigation_dirty_layers = [false; MAX_LOCAL_MASKS];
@@ -787,11 +785,13 @@ impl AurawApp {
                             &queue,
                             &device,
                             &params,
-                            &remove_edits,
-                            &full_raw,
-                            &rendered_exposure,
-                            [0.0, 0.0],
-                            [full_raw.width as f32, full_raw.height as f32],
+                            RemoveSceneContext::new(
+                                &remove_edits,
+                                &full_raw,
+                                &rendered_exposure,
+                                [0.0, 0.0],
+                                [full_raw.width as f32, full_raw.height as f32],
+                            ),
                         )
                         .map_err(|error| {
                             format!("initial Remove scene integration failed: {error:#}")
@@ -852,7 +852,9 @@ impl AurawApp {
     }
 
     pub(in crate::app) fn poll_load_worker(&mut self, frame: &eframe::Frame) {
-        let received = self.develop.load_receiver
+        let received = self
+            .develop
+            .load_receiver
             .as_ref()
             .map(|receiver| receiver.try_recv());
         let event = match received {
@@ -886,7 +888,8 @@ impl AurawApp {
         match result {
             Ok(mut loaded) => {
                 let Some(render_state) = frame.wgpu_render_state() else {
-                    self.ui.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+                    self.ui.notice =
+                        Some("eframe is not running with the wgpu backend.".to_owned());
                     self.on_library_ai_mask_refresh_load_finished(false, frame);
                     #[cfg(target_os = "android")]
                     if batch_owned_load {
@@ -990,7 +993,9 @@ impl AurawApp {
                         };
                         self.preview.lens_original_cache = None;
                     } else {
-                        self.preview.lens_original_cache = self.develop.preview_raw
+                        self.preview.lens_original_cache = self
+                            .develop
+                            .preview_raw
                             .as_ref()
                             .map(|raw| (self.preview.quality, Arc::clone(raw)));
                         self.preview.lens_corrected_cache = None;

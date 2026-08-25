@@ -8,10 +8,14 @@ impl AurawApp {
         let render_state = frame
             .wgpu_render_state()
             .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-        let raw = self.develop.preview_raw
+        let raw = self
+            .develop
+            .preview_raw
             .as_ref()
             .ok_or_else(|| "The preview image is not available yet.".to_owned())?;
-        let pipeline = self.preview.gpu_pipeline
+        let pipeline = self
+            .preview
+            .gpu_pipeline
             .as_ref()
             .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
 
@@ -42,7 +46,10 @@ impl AurawApp {
         };
         #[cfg(not(target_os = "android"))]
         let display_restore = pipeline
-            .write_output_transform(&render_state.queue, &self.preferences.display_output_transform)
+            .write_output_transform(
+                &render_state.queue,
+                &self.preferences.display_output_transform,
+            )
             .map_err(|error| format!("Could not restore the preview color output: {error:#}"));
         pipeline.recompute(&render_state.queue, &render_state.device, &restore_params);
 
@@ -71,12 +78,16 @@ impl AurawApp {
             let render_state = frame
                 .wgpu_render_state()
                 .ok_or_else(|| "The GPU preview is not available.".to_owned())?;
-            let program_template = self.preview.gpu_pipeline
+            let program_template = self
+                .preview
+                .gpu_pipeline
                 .as_ref()
                 .map(RawGpuPipeline::program_template)
                 .or_else(|| self.preview.program_template.clone())
                 .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
-            let full_raw = self.develop.loaded_raw
+            let full_raw = self
+                .develop
+                .loaded_raw
                 .as_ref()
                 .ok_or_else(|| "The original RAW is not available.".to_owned())?;
             let source_edge = ai_mask_source_proxy_edge(full_raw.width, full_raw.height);
@@ -96,21 +107,17 @@ impl AurawApp {
             let params = GpuParams::new(&reference_exposure, &reference_masks, &raw);
             let reference_pipeline_result =
                 RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
-                &render_state.device,
-                &render_state.queue,
-                &raw,
-                &params,
-                ProcessingQuality::Preview,
-                &program_template,
-                64,
-            );
+                    &render_state.device,
+                    &render_state.queue,
+                    &raw,
+                    &params,
+                    ProcessingQuality::Preview,
+                    &program_template,
+                    64,
+                );
             let reference_pipeline = match reference_pipeline_result {
                 Ok(pipeline) => pipeline,
-                Err(error)
-                    if error
-                        .to_string()
-                        .contains("GPU pipelines already reserve") =>
-                {
+                Err(error) if error.to_string().contains("GPU pipelines already reserve") => {
                     crate::diagnostics::record(format!(
                         "Dedicated AI mask-source graph exceeded the coexistence budget; using the active preview graph: {error:#}"
                     ));
@@ -137,12 +144,11 @@ impl AurawApp {
                 .map_err(|error| {
                     format!("Could not read the original RAW for masking: {error:#}")
                 })?;
-            let source = MaskRgbImage::new(
-                reference_pipeline.width,
-                reference_pipeline.height,
-                rgba,
-            )
-            .ok_or_else(|| "The canonical mask source has invalid dimensions.".to_owned())?;
+            let source =
+                MaskRgbImage::new(reference_pipeline.width, reference_pipeline.height, rgba)
+                    .ok_or_else(|| {
+                        "The canonical mask source has invalid dimensions.".to_owned()
+                    })?;
             self.masks.source_cache = Some(source);
             Ok(())
         }

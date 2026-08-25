@@ -1,10 +1,10 @@
 use crate::app::{AppTab, AurawApp};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::{
-    apply_lensfun_correction, build_proxy, is_supported_raw_path,
-    lensfun_catalog, load_raw_display_dimensions, load_raw_file_with_profile_selection,
-    load_raw_thumbnail, mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry, MaskRgbImage,
-    MaskStack, ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,
+    apply_lensfun_correction, build_proxy, is_supported_raw_path, lensfun_catalog,
+    load_raw_display_dimensions, load_raw_file_with_profile_selection, load_raw_thumbnail,
+    mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry, MaskRgbImage, MaskStack,
+    ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,
 };
 use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};
@@ -47,13 +47,13 @@ use platform::*;
 use storage::*;
 use thumbnails::*;
 
-pub use view::Library;
 #[cfg(not(target_os = "android"))]
 pub(crate) use actions::{
     apply_library_action, library_image_context_menu, show_library_action_overlays,
 };
 #[cfg(not(target_os = "android"))]
 pub(crate) use thumbnails::{load_desktop_cached_thumbnail, load_desktop_reference_preview};
+pub use view::Library;
 
 const THUMBNAIL_EDGE: u32 = 512;
 const MAX_LIBRARY_FILES: usize = 20_000;
@@ -561,8 +561,14 @@ enum LibraryFolderOperation {
 #[cfg(not(target_os = "android"))]
 enum LibraryFolderOperationResult {
     Created(PathBuf),
-    Copied { source: PathBuf, destination: PathBuf },
-    Moved { source: PathBuf, destination: PathBuf },
+    Copied {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    Moved {
+        source: PathBuf,
+        destination: PathBuf,
+    },
     Deleted(PathBuf),
 }
 
@@ -693,6 +699,7 @@ pub(crate) struct LibraryState {
     render_edited_thumbnails_during_indexing: bool,
     sort_order: LibrarySortOrder,
     thumbnail_size: LibraryThumbnailSize,
+    search_query: String,
     selected_assets: HashSet<LibraryAssetId>,
     selection_mode: bool,
     image_clipboard: Option<ImageClipboard>,

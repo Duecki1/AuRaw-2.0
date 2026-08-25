@@ -144,6 +144,38 @@ impl TopBar {
 
                 ui.separator();
                 if app.ui.active_tab == AppTab::Library {
+                    let search_width = if compact { 142.0 } else { 210.0 };
+                    let focus_search = ui.input(|input| {
+                        input.modifiers.command && input.key_pressed(egui::Key::F)
+                    });
+                    let search_response = ui
+                        .add_sized(
+                            [search_width, theme::CONTROL_HEIGHT],
+                            egui::TextEdit::singleline(app.library.search_query_mut()).hint_text(
+                                format!(
+                                    "{} Search filenames…",
+                                    egui_phosphor::regular::MAGNIFYING_GLASS
+                                ),
+                            ),
+                        )
+                        .on_hover_text(
+                            "Filter by filename. Separate names with commas and press Enter to select every match (Ctrl/Cmd+F).",
+                        );
+                    if focus_search {
+                        search_response.request_focus();
+                    }
+                    let select_matches = search_response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    let clear_search = search_response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Escape));
+                    if select_matches {
+                        app.library.select_search_matches();
+                    }
+                    if clear_search {
+                        app.library.clear_search();
+                        search_response.surrender_focus();
+                    }
+
                     let open = if compact {
                         crate::ui::icons::phosphor_icon_button(
                             ui,

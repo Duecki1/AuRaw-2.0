@@ -1,11 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 dual demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// Dual-demosaic credits: Ingo Weyrich and Hanno Schwalm.
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 
-// Robust low-frequency branch for dual demosaic. This is a clean-room,
-// gradient/noise-aware reconstruction rather than a port of VNG/LMMSE code.
-// Pass 1 builds a full-resolution green guide from symmetric same-colour
-// support. Pass 2 reconstructs red/blue as robust colour differences against
-// that guide. The alpha channel stores confidence for the final high/low blend.
 @group(0) @binding(20) var dual_green_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 @group(0) @binding(21) var dual_green_read: texture_2d<f32>;
 @group(0) @binding(22) var dual_low_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
@@ -48,10 +49,6 @@ fn dual_green_estimate(pos: vec2<i32>) -> DualEstimate {
     var pair_support = 0.0;
     var pair_gradient = 0.0;
 
-    // Symmetric green pairs act as directional estimates. Low-gradient pairs
-    // receive more weight, which is VNG-like in spirit while remaining a
-    // separate clean-room formulation. The fallback guarantees coverage for
-    // irregular X-Trans neighbourhoods and image borders.
     for (var dy = -4; dy <= 4; dy = dy + 1) {
         for (var dx = -4; dx <= 4; dx = dx + 1) {
             if dx == 0 && dy == 0 { continue; }

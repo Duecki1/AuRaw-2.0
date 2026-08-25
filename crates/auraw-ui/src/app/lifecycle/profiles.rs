@@ -61,9 +61,9 @@ impl AurawApp {
             self.preferences.last_camera_profile = None;
             self.develop.raw_cache.clear();
             #[cfg(target_os = "android")]
-            if let Err(error) =
-                crate::android::clear_camera_profile_folder_picker_location(&self.android.android_app)
-            {
+            if let Err(error) = crate::android::clear_camera_profile_folder_picker_location(
+                &self.android.android_app,
+            ) {
                 log::warn!("{error}");
             }
             if self.persist_performance_settings() {
@@ -159,7 +159,9 @@ impl AurawApp {
             return;
         };
         if let Some(selected) = selection.as_ref() {
-            let embedded_matrix = self.preferences.camera_profile_folder
+            let embedded_matrix = self
+                .preferences
+                .camera_profile_folder
                 .as_ref()
                 .is_some_and(|root| selected == root);
             let is_available = self.develop.loaded_raw.as_ref().is_some_and(|raw| {
@@ -190,7 +192,9 @@ impl AurawApp {
         #[cfg(not(target_os = "android"))]
         {
             let crate::sidecar::SidecarTarget::Desktop { raw_path } = sidecar_target;
-            let label = self.develop.current_label
+            let label = self
+                .develop
+                .current_label
                 .clone()
                 .unwrap_or_else(|| raw_path.display().to_string());
             let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
@@ -223,8 +227,11 @@ impl AurawApp {
                     return;
                 }
             };
-            match crate::android::open_library_document(&self.android.android_app, &raw_uri, &display_name)
-            {
+            match crate::android::open_library_document(
+                &self.android.android_app,
+                &raw_uri,
+                &display_name,
+            ) {
                 Ok(()) => {
                     self.android.pending_android_profile_reload = Some((selection, edit_override));
                     self.android.picker_pending = true;
@@ -232,7 +239,8 @@ impl AurawApp {
                     self.ui.status = format!("Applying camera profile to {display_name}…");
                 }
                 Err(error) => {
-                    self.ui.notice = Some(format!("Could not reload RAW for camera profile: {error}"));
+                    self.ui.notice =
+                        Some(format!("Could not reload RAW for camera profile: {error}"));
                 }
             }
         }

@@ -29,7 +29,10 @@ const ROW_BOTTOM_SPACE: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug)]
 pub enum SliderGradient {
-    HueDegrees { start: f32, end: f32 },
+    HueDegrees {
+        start: f32,
+        end: f32,
+    },
     ChannelHue {
         left: egui::Color32,
         center: egui::Color32,
@@ -38,7 +41,9 @@ pub enum SliderGradient {
     Brightness,
     Temperature,
     Tint,
-    CameraTint { neutral_fraction: f32 },
+    CameraTint {
+        neutral_fraction: f32,
+    },
     Colorfulness,
     Saturation(egui::Color32),
     Luminance(egui::Color32),
@@ -576,7 +581,11 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
         }
         SliderGradient::Brightness => {
             if t <= 0.5 {
-                lerp_color(crate::ui::theme::BRIGHTNESS_SHADOW, crate::ui::theme::BRIGHTNESS_MID, t * 2.0)
+                lerp_color(
+                    crate::ui::theme::BRIGHTNESS_SHADOW,
+                    crate::ui::theme::BRIGHTNESS_MID,
+                    t * 2.0,
+                )
             } else {
                 lerp_color(
                     crate::ui::theme::BRIGHTNESS_MID,
@@ -602,7 +611,11 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
         }
         SliderGradient::Tint => {
             if t <= 0.5 {
-                lerp_color(crate::ui::theme::TINT_GREEN, crate::ui::theme::TINT_NEUTRAL, t * 2.0)
+                lerp_color(
+                    crate::ui::theme::TINT_GREEN,
+                    crate::ui::theme::TINT_NEUTRAL,
+                    t * 2.0,
+                )
             } else {
                 lerp_color(
                     crate::ui::theme::TINT_NEUTRAL,
@@ -619,7 +632,11 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
                 } else {
                     t / neutral
                 };
-                lerp_color(crate::ui::theme::TINT_MAGENTA, crate::ui::theme::TINT_NEUTRAL, u)
+                lerp_color(
+                    crate::ui::theme::TINT_MAGENTA,
+                    crate::ui::theme::TINT_NEUTRAL,
+                    u,
+                )
             } else {
                 let span = 1.0 - neutral;
                 let u = if span <= f32::EPSILON {
@@ -627,7 +644,11 @@ fn gradient_color_at(gradient: SliderGradient, fraction: f32) -> egui::Color32 {
                 } else {
                     (t - neutral) / span
                 };
-                lerp_color(crate::ui::theme::TINT_NEUTRAL, crate::ui::theme::TINT_GREEN, u)
+                lerp_color(
+                    crate::ui::theme::TINT_NEUTRAL,
+                    crate::ui::theme::TINT_GREEN,
+                    u,
+                )
             }
         }
         SliderGradient::Colorfulness => {

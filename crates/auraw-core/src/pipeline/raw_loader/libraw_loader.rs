@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Camera-matrix normalization and temperature/tint handling follow
+// darktable 5.6.0 and the related Ansel/dcraw implementations.
+// Copyright (C) 2010-2026 darktable developers and the Ansel/dcraw authors.
+// Copyright (C) 2026 AuRaw contributors (Rust adaptation).
+
 use super::super::noise::NoiseProfile;
 use super::{
     validate_raw_dimensions, CameraColorModel, CameraProfile, CameraProfileCandidate,
@@ -1141,8 +1147,8 @@ unsafe fn loaded_raw_from_context(
     let cdesc = cdesc4(iparams);
     let cfa_map = canonical_cfa_map(cdesc)?;
     let physical_black_levels = black_levels(color.black, &color.cblack);
-    let (width, height, raw_pixels, color_indices, black_levels_per_pixel) = copy_active_pixels(
-        ActivePixelCopy {
+    let (width, height, raw_pixels, color_indices, black_levels_per_pixel) =
+        copy_active_pixels(ActivePixelCopy {
             raw: ctx.raw,
             raw_image: rawdata.raw_image,
             raw_dimensions: [raw_width, raw_height],
@@ -1155,8 +1161,7 @@ unsafe fn loaded_raw_from_context(
             cfa_map,
             shared_black: color.black,
             cblack: &color.cblack,
-        },
-    )?;
+        })?;
     let physical_wb = white_balance(color.cam_mul, cdesc);
     let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
     let calibration_compatible = dcp_profile

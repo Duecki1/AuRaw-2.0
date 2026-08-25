@@ -4,8 +4,8 @@ use super::{
     mask_atlas_edge, required_export_tile_halo, CfaKind, ExposureParams, GeometryTransform,
     GpuParams, GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack,
     NativeRect, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
-    RawGpuProgramTemplate, RemoveEditState, TilePlan, TileSpec, ToneStatisticsSnapshot,
-    EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
+    RawGpuProgramTemplate, RemoveEditState, RemoveSceneContext, TilePlan, TileSpec,
+    ToneStatisticsSnapshot, EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
 };
 use crate::file_ops::replace_file;
 use anyhow::{Context, Result};
@@ -27,8 +27,6 @@ pub enum ExportFormat {
     Tiff,
 }
 
-/// One developed scene crop rendered at a bounded working resolution.
-///
 /// `width` and `height` describe `pixels`; the pixels still cover the complete
 /// native crop supplied to [`render_remove_scene_crop_resized`].
 pub struct ResizedRemoveSceneCrop {
@@ -38,10 +36,6 @@ pub struct ResizedRemoveSceneCrop {
 }
 
 /// Renders a complete native Remove crop through one bounded GPU pipeline.
-///
-/// This is intentionally separate from [`render_remove_scene_crop`]: Big-LaMa
-/// uses the bounded path, while Clone and Heal retain their native-resolution
-/// source and destination renders.
 pub fn render_remove_scene_crop_resized(
     job: DevelopedCropJob,
     maximum_edge: u32,
@@ -142,11 +136,13 @@ pub fn render_remove_scene_crop_resized(
     pipeline.upload_remove_scene_patches(
         &job.queue,
         &job.device,
-        &job.remove,
-        &job.raw,
-        &job.exposure,
-        [job.crop.x as f32, job.crop.y as f32],
-        [job.crop.width as f32, job.crop.height as f32],
+        RemoveSceneContext::new(
+            &job.remove,
+            &job.raw,
+            &job.exposure,
+            [job.crop.x as f32, job.crop.y as f32],
+            [job.crop.width as f32, job.crop.height as f32],
+        ),
     )?;
     let pixels = pipeline.read_scene_texture_blocking(&job.device, &job.queue)?;
     Ok(ResizedRemoveSceneCrop {
@@ -229,11 +225,13 @@ pub fn render_remove_scene_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
     pipeline.upload_remove_scene_patches(
         &job.queue,
         &job.device,
-        &job.remove,
-        &job.raw,
-        &job.exposure,
-        [tile.global_origin_x as f32, tile.global_origin_y as f32],
-        [tile.padded_width as f32, tile.padded_height as f32],
+        RemoveSceneContext::new(
+            &job.remove,
+            &job.raw,
+            &job.exposure,
+            [tile.global_origin_x as f32, tile.global_origin_y as f32],
+            [tile.padded_width as f32, tile.padded_height as f32],
+        ),
     )?;
     let scene = pipeline.read_scene_texture_blocking(&job.device, &job.queue)?;
     let mut crop = vec![0.0f32; job.crop.width as usize * job.crop.height as usize * 3];
@@ -1230,11 +1228,13 @@ where
                 queue,
                 device,
                 &tone_params,
-                remove,
-                raw,
-                exposure,
-                [tile.global_origin_x as f32, tile.global_origin_y as f32],
-                [tile.padded_width as f32, tile.padded_height as f32],
+                RemoveSceneContext::new(
+                    remove,
+                    raw,
+                    exposure,
+                    [tile.global_origin_x as f32, tile.global_origin_y as f32],
+                    [tile.padded_width as f32, tile.padded_height as f32],
+                ),
             )
             .with_context(|| format!("apply Remove to tone-analysis tile {}", index + 1))?;
     }
@@ -1317,11 +1317,13 @@ where
                     queue,
                     device,
                     &params,
-                    remove,
-                    raw,
-                    exposure,
-                    [tile.global_origin_x as f32, tile.global_origin_y as f32],
-                    [tile.padded_width as f32, tile.padded_height as f32],
+                    RemoveSceneContext::new(
+                        remove,
+                        raw,
+                        exposure,
+                        [tile.global_origin_x as f32, tile.global_origin_y as f32],
+                        [tile.padded_width as f32, tile.padded_height as f32],
+                    ),
                 )
                 .with_context(|| format!("apply Remove to export tile {}", global_index + 1))?;
             let readback = tile_pipeline

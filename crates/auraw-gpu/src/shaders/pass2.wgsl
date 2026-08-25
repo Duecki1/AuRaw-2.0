@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 RCD demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// RCD credits: Luis Sanz Rodriguez, Ingo Weyrich, and Hanno Schwalm.
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 
-// Bayer RCD stage 2. This follows darktable's ratio-corrected green stage:
-// directional HPF discrimination, low-pass ratios, then diagonal P/Q HPFs.
 @group(0) @binding(5) var tex1_read: texture_2d<f32>;
 @group(0) @binding(6) var tex2_write: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
 
@@ -39,7 +43,6 @@ fn rcd_green_candidate(pos: vec2<i32>, axis: vec2<i32>, lpfi: f32) -> vec2<f32> 
 }
 
 fn rcd_diagonal_stat(pos: vec2<i32>, axis: vec2<i32>) -> f32 {
-    // darktable sums three squared high-pass responses on each diagonal.
     let a = rcd_axis_hpf(pos - axis, axis);
     let b = rcd_axis_hpf(pos, axis);
     let c = rcd_axis_hpf(pos + axis, axis);
@@ -65,12 +68,10 @@ fn bayer_rcd_green(@builtin(global_invocation_id) gid: vec3<u32>) {
           + textureLoad(tex1_read, Common::clamp_pos(pos + vec2<i32>(-1,  1)), 0).x
           + textureLoad(tex1_read, Common::clamp_pos(pos + vec2<i32>( 1,  1)), 0).x
         );
-        // Use the more decisive discriminator, as in the reference code.
         let vh = select(vh_center, vh_neighbours,
             abs(0.5 - vh_center) < abs(0.5 - vh_neighbours));
         green = mix(vertical.x, horizontal.x, vh);
 
-        // Keep the ratio correction bounded by the immediate measured greens.
         let lo = min(
             min(RawSampling::raw_cfa_at(pos + vec2<i32>(-1, 0)), RawSampling::raw_cfa_at(pos + vec2<i32>(1, 0))),
             min(RawSampling::raw_cfa_at(pos + vec2<i32>(0, -1)), RawSampling::raw_cfa_at(pos + vec2<i32>(0, 1)))

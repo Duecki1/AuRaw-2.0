@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Adapted from darktable 5.6.0 Markesteijn X-Trans demosaicing.
+// Copyright (C) 2010-2026 darktable developers.
+// Markesteijn algorithm credit: Frank Markesteijn (via dcraw and darktable).
+// Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
 #import auraw::common as Common
 #import auraw::raw_sampling as RawSampling
 
-// Markesteijn passes 1 and 3 share this read surface and directional
-// interpolation/refinement helpers.
 @group(0) @binding(5) var markesteijn_read_13: texture_2d<f32>;
 
 fn mark13_load(pos: vec2<i32>) -> vec3<f32> {
@@ -50,9 +54,6 @@ fn mark13_green_axis(pos: vec2<i32>, axis: vec2<i32>, measured_channel: u32) -> 
     let m2 = mark13_load(pos - 2 * axis);
     let p2 = mark13_load(pos + 2 * axis);
 
-    // High-order coefficients are the constants used by Markesteijn's initial
-    // green interpolation. The color-channel correction keeps the estimate
-    // anchored to the measured red/blue sample.
     let base = 0.6796875 * (m1.g + p1.g) - 0.1796875 * (m2.g + p2.g);
     let c0 = mark13_component(center, measured_channel);
     let cm = mark13_component(m2, measured_channel);

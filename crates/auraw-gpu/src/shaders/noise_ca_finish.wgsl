@@ -5,15 +5,8 @@ virtual fn finish_reference_at(_pos: vec2<i32>) -> vec3<f32> {
 #import auraw::common as Common
 #import auraw::noise as Noise
 
-// Keep the virtual declaration at byte zero. naga_oil 0.22 consumes leading
-// whitespace while removing `virtual`; after a line comment that would place
-// the rewritten `fn` header inside the comment and leave its body at globals.
-// The CFA-specific finishing shader overrides this fallback in each entrypoint.
-
-// Shared post-demosaic noise reduction and lateral chromatic-aberration
-// correction. Each finishing shader supplies finish_reference_at() so the
-// algorithms stay identical while sampling their native reference texture.
-
+// Keep the virtual declaration at byte zero: naga_oil 0.22 mishandles it after
+// leading line comments. CFA entrypoints override this fallback.
 fn finish_warped_pos(pos: vec2<i32>, amount: f32) -> vec2<f32> {
     let local_extent = vec2<f32>(f32(Common::camera_uniforms.width - 1u), f32(Common::camera_uniforms.height - 1u));
     let origin = vec2<f32>(f32(Common::camera_uniforms.tile_origin_x), f32(Common::camera_uniforms.tile_origin_y));
@@ -79,8 +72,6 @@ fn finish_apply_sensor_denoise(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
             signal_sum += sample_signal * range_weight;
             signal_weights += range_weight;
         }
-        // Balanced/High fill the missing positions of the 5x5 signal support
-        // instead of sampling only axes and diagonals.
         if scale == 1 {
             for (var direction_index = 0; direction_index < 8; direction_index = direction_index + 1) {
                 let offset = Noise::NR_KNIGHT_DIRECTIONS[direction_index];

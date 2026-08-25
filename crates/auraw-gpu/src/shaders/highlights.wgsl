@@ -1,11 +1,9 @@
-#import auraw::common as Common
-
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Pre-demosaic highlight reconstruction adapted from darktable 5.6.0.
-// The inpaint-opposed path follows src/iop/hlreconstruct/opposed.c and the
-// highlights_opposed kernel in data/kernels/basic.cl.
+// Adapted from darktable 5.6.0 hlreconstruct/opposed code.
 // Copyright (C) 2010-2026 darktable developers.
 // Copyright (C) 2026 AuRaw contributors (WGSL adaptation).
+
+#import auraw::common as Common
 
 @group(0) @binding(3) var reconstructed_raw_write: texture_storage_2d<r32float, write>;
 
@@ -49,8 +47,6 @@ fn lch_common_clip() -> f32 {
     return max(Common::camera_uniforms.highlight_clip, 0.01) * max(min_wb, 1e-6);
 }
 
-// Bayer opponent-colour reconstruction from darktable's LCh method. It is
-// retained as an optional compatibility choice; X-Trans falls back to opposed.
 fn lch_reconstructed_cfa_at(pos: vec2<i32>) -> f32 {
     let center = Common::clamp_pos(pos);
     let center_color = highlight_color_at(center);
@@ -128,9 +124,6 @@ fn lch_reconstructed_cfa_at(pos: vec2<i32>) -> f32 {
     return mix(original, max(recovered, 0.0), strength);
 }
 
-// darktable calculates every channel mean in the local 3x3 raw-RGB cube,
-// moves those means into cube-root space, and defines a channel's reference as
-// the arithmetic mean of both opposing channels before cubing it again.
 fn inpaint_opposed_refavg(pos: vec2<i32>) -> f32 {
     let center = Common::clamp_pos(pos);
     let color = highlight_color_at(center);

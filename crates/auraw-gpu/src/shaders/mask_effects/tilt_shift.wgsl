@@ -1,4 +1,3 @@
-// Full-image focus band plus a smooth circular defocus gather for Tilt-Shift.
 
 const MASK_TILT_SHIFT_SAMPLE_COUNT: u32 = 24u;
 const MASK_TILT_SHIFT_GOLDEN_ANGLE: f32 = 2.39996323;

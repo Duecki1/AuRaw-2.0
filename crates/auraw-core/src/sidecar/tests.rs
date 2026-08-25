@@ -777,6 +777,58 @@ fn schema_seven_mask_defaults_to_adjustment_effect() {
 }
 
 #[test]
+fn schema_eleven_landscape_mask_migrates_to_object_mask() {
+    let mut edits = sample_edits();
+    let mut masks = MaskStack::default();
+    masks.add_mask(MaskKind::Object);
+    masks.masks[0].name = "Select Landscape".to_owned();
+    masks.masks[0].adjustments.exposure = 1.25;
+    if let MaskGeometry::Object {
+        mask,
+        grow,
+        feather,
+        ..
+    } = &mut masks.masks[0].components[0].geometry
+    {
+        *mask = MaskImage::new(2, 2, vec![0, 64, 192, 255]);
+        *grow = 0.2;
+        *feather = 0.35;
+    }
+    edits.masks = Arc::new(masks);
+
+    let encoded = encode(edits).unwrap();
+    let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    document["schema_version"] = 11.into();
+    let component = document
+        .pointer_mut("/edits/masks/masks/0/components/0")
+        .unwrap();
+    component["kind"] = "Landscape".into();
+    let geometry = component["geometry"].as_object_mut().unwrap();
+    let mut landscape = geometry.remove("Object").unwrap();
+    landscape["category"] = "Sky".into();
+    geometry.insert("Landscape".to_owned(), landscape);
+
+    let loaded = decode(&serde_json::to_vec(&document).unwrap()).unwrap();
+    assert!(loaded.migrated);
+    let mask = &loaded.edits.masks.masks[0];
+    assert_eq!(mask.name, "Select Landscape");
+    assert_eq!(mask.adjustments.exposure, 1.25);
+    assert_eq!(mask.components[0].kind, MaskKind::Object);
+    let MaskGeometry::Object {
+        mask: Some(image),
+        grow,
+        feather,
+        ..
+    } = &mask.components[0].geometry
+    else {
+        panic!("legacy landscape mask did not migrate to a raster object mask");
+    };
+    assert_eq!(image.pixels.as_ref(), &[0, 64, 192, 255]);
+    assert_eq!(*grow, 0.2);
+    assert_eq!(*feather, 0.35);
+}
+
+#[test]
 fn generated_masks_are_deduplicated_compressed_and_copy_on_write_after_loading() {
     let mut edits = sample_edits();
     let mut masks = MaskStack::default();

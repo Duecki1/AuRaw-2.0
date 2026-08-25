@@ -1,3 +1,4 @@
+use super::state::{library_filename_matches, library_search_terms};
 use super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,12 +53,8 @@ fn install_test_developed_thumbnail(raw: &Path) {
     let fingerprint = crate::sidecar::desktop_sidecar_fingerprint(raw)
         .unwrap()
         .expect("test RAW should have an edit sidecar");
-    crate::sidecar::save_developed_thumbnail_cache(
-        raw,
-        &test_developed_thumbnail(),
-        fingerprint,
-    )
-    .unwrap();
+    crate::sidecar::save_developed_thumbnail_cache(raw, &test_developed_thumbnail(), fingerprint)
+        .unwrap();
 }
 
 #[cfg(not(target_os = "android"))]
@@ -117,7 +114,9 @@ fn unified_asset_keeps_identity_locator_and_metadata_together() {
     #[cfg(not(target_os = "android"))]
     assert_eq!(asset.desktop_path(), Some(Path::new("photo.CR3")));
     #[cfg(target_os = "android")]
-    assert!(asset.android_uri().is_some_and(|uri| uri.starts_with("content://")));
+    assert!(asset
+        .android_uri()
+        .is_some_and(|uri| uri.starts_with("content://")));
 }
 
 #[test]
@@ -156,6 +155,50 @@ fn thumbnail_selection_uses_unified_asset_ids() {
     assert!(!library.toggle_thumbnail_selection(&second));
     assert!(!library.has_selection());
     assert!(!library.selection_mode());
+}
+
+#[test]
+fn filename_search_is_case_insensitive_and_supports_comma_separated_fragments() {
+    let terms = library_search_terms(" DSC23824, dsc384384 , ");
+
+    assert!(library_filename_matches("DSC23824.CR3", &terms));
+    assert!(library_filename_matches("Dsc384384.NEF", &terms));
+    assert!(!library_filename_matches("DSC00001.ARW", &terms));
+    assert!(library_filename_matches(
+        "anything.dng",
+        &library_search_terms("  ")
+    ));
+}
+
+#[cfg(not(target_os = "android"))]
+#[test]
+fn selecting_search_matches_replaces_the_selection_with_every_visible_match() {
+    let context = egui::Context::default();
+    let mut library = LibraryState::new(&context);
+    library.entries = [
+        test_asset("DSC23824.CR3"),
+        test_asset("DSC384384.NEF"),
+        test_asset("holiday.ARW"),
+    ]
+    .into_iter()
+    .map(new_library_entry)
+    .collect();
+    library.selected_assets.insert(test_asset("holiday.ARW").id);
+    library.selection_mode = true;
+    *library.search_query_mut() = "dsc23824, DSC384384".to_owned();
+
+    assert_eq!(library.filtered_entry_indices(), vec![0, 1]);
+    assert_eq!(library.select_search_matches(), 2);
+    assert_eq!(library.selected_assets.len(), 2);
+    assert!(library
+        .selected_assets
+        .contains(&test_asset("DSC23824.CR3").id));
+    assert!(library
+        .selected_assets
+        .contains(&test_asset("DSC384384.NEF").id));
+    assert!(!library
+        .selected_assets
+        .contains(&test_asset("holiday.ARW").id));
 }
 
 #[test]
@@ -201,10 +244,16 @@ fn middle_elision_is_readable() {
 
 #[test]
 fn thumbnail_size_and_responsive_mobile_target_remain_stable() {
-    assert_eq!(LibraryThumbnailSize::default(), LibraryThumbnailSize::Medium);
+    assert_eq!(
+        LibraryThumbnailSize::default(),
+        LibraryThumbnailSize::Medium
+    );
     assert_eq!(LibraryThumbnailSize::Small.scale(), 1.0);
     assert!(LibraryThumbnailSize::Large.scale() > LibraryThumbnailSize::Medium.scale());
-    assert_eq!(responsive_thumbnail_target_height(400.0, 800.0, 3.0, true), 120.0);
+    assert_eq!(
+        responsive_thumbnail_target_height(400.0, 800.0, 3.0, true),
+        120.0
+    );
 }
 
 #[test]
@@ -220,8 +269,7 @@ fn import_fab_is_square_bottom_right_and_uses_plus_icon() {
     );
     assert_eq!(
         rect.right_bottom(),
-        bounds.right_bottom()
-            - eframe::egui::Vec2::splat(crate::ui::theme::FLOATING_ACTION_MARGIN)
+        bounds.right_bottom() - eframe::egui::Vec2::splat(crate::ui::theme::FLOATING_ACTION_MARGIN)
     );
     assert_eq!(library_import_icon(), egui_phosphor::regular::PLUS);
 }
@@ -239,10 +287,15 @@ fn justified_rows_rebalance_to_avoid_sparse_tail() {
 #[test]
 fn sparse_gallery_does_not_stretch_above_target_height() {
     let assets = [test_asset("one.CR3"), test_asset("two.CR3")];
-    let entries = assets.into_iter().map(new_library_entry).collect::<Vec<_>>();
+    let entries = assets
+        .into_iter()
+        .map(new_library_entry)
+        .collect::<Vec<_>>();
     let (rects, height) = justified_thumbnail_layout(&entries, 1200.0, 160.0, 8.0);
     assert_eq!(rects.len(), 2);
-    assert!(rects.iter().all(|rect| rect.height() <= 160.0 + f32::EPSILON));
+    assert!(rects
+        .iter()
+        .all(|rect| rect.height() <= 160.0 + f32::EPSILON));
     assert!(height <= 160.0 + f32::EPSILON);
 }
 
@@ -277,7 +330,10 @@ fn image_paste_summary_is_platform_neutral() {
 fn raw_names_require_safe_supported_extensions() {
     assert!(validate_library_item_name("photo.CR3", true).is_ok());
     for invalid in ["", " photo.CR3", "nested/photo.CR3", "photo.jpg"] {
-        assert!(validate_library_item_name(invalid, true).is_err(), "accepted {invalid:?}");
+        assert!(
+            validate_library_item_name(invalid, true).is_err(),
+            "accepted {invalid:?}"
+        );
     }
 }
 
@@ -636,7 +692,7 @@ fn thumbnail_workers_process_the_entire_catalog_without_view_requests() {
     let generation = 7;
     let assets = ["one.dng", "two.dng", "three.dng"]
         .into_iter()
-        .map(|name| test_asset(name))
+        .map(test_asset)
         .collect::<Vec<_>>();
     let expected = assets
         .iter()
@@ -838,6 +894,28 @@ fn stale_edited_preview_does_not_schedule_development_when_index_rendering_is_di
     worker.join().unwrap();
 }
 
+#[cfg(not(target_os = "android"))]
+#[test]
+fn disabled_index_rendering_still_reuses_a_fresh_edited_thumbnail() {
+    let root = unique_temp_dir("library-fresh-edited-thumbnail");
+    let raw = root.join("edited.dng");
+    fs::write(&raw, b"raw").unwrap();
+    fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"saved edits").unwrap();
+    install_test_developed_thumbnail(&raw);
+
+    let loaded =
+        load_desktop_library_thumbnail(&test_asset(raw), ThumbnailLoadStage::RawPreview, false)
+            .expect(
+                "a fresh edited thumbnail should remain usable when index rendering is disabled",
+            );
+
+    assert!(loaded.developed);
+    assert!(!loaded.developed_thumbnail_stale);
+    assert!(!loaded.developed_render_pending);
+    assert_eq!([loaded.thumbnail.width, loaded.thumbnail.height], [16, 12]);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn resident_thumbnail_is_bounded_and_keeps_aspect_ratio() {
     let thumbnail = RawThumbnail {
@@ -916,19 +994,28 @@ fn shared_clipboard_flow_copies_and_moves_raw_sidecar_bundles() {
 
     let asset = LibraryAsset::from_desktop_path(raw.clone(), 9, 1, None);
     let copy = run_image_paste(
-        ImageClipboard { mode: ImageClipboardMode::Copy, assets: vec![asset.clone()] },
+        ImageClipboard {
+            mode: ImageClipboardMode::Copy,
+            assets: vec![asset.clone()],
+        },
         LibraryTransferDestination::LocalFolder(destination.clone()),
     );
     assert!(copy.result.is_ok());
     assert!(!copy.clear_clipboard);
     let copied = destination.join("photo.CR3");
     assert_eq!(fs::read(&copied).unwrap(), b"raw-bytes");
-    assert_eq!(fs::read(crate::sidecar::sidecar_path_for_raw(&copied)).unwrap(), b"sidecar-bytes");
+    assert_eq!(
+        fs::read(crate::sidecar::sidecar_path_for_raw(&copied)).unwrap(),
+        b"sidecar-bytes"
+    );
     assert_test_developed_thumbnail(&copied);
     assert!(raw.exists());
 
     let cut = run_image_paste(
-        ImageClipboard { mode: ImageClipboardMode::Cut, assets: vec![asset] },
+        ImageClipboard {
+            mode: ImageClipboardMode::Cut,
+            assets: vec![asset],
+        },
         LibraryTransferDestination::LocalFolder(destination.clone()),
     );
     assert!(cut.result.is_ok());
@@ -937,7 +1024,10 @@ fn shared_clipboard_flow_copies_and_moves_raw_sidecar_bundles() {
     assert!(!crate::sidecar::sidecar_path_for_raw(&raw).exists());
     let moved = destination.join("photo (1).CR3");
     assert_eq!(fs::read(&moved).unwrap(), b"raw-bytes");
-    assert_eq!(fs::read(crate::sidecar::sidecar_path_for_raw(&moved)).unwrap(), b"sidecar-bytes");
+    assert_eq!(
+        fs::read(crate::sidecar::sidecar_path_for_raw(&moved)).unwrap(),
+        b"sidecar-bytes"
+    );
     assert_test_developed_thumbnail(&moved);
 
     fs::remove_dir_all(root).unwrap();
@@ -1055,7 +1145,10 @@ fn rename_raw_keeps_matching_sidecar() {
     assert!(!raw.exists());
     assert!(!crate::sidecar::sidecar_path_for_raw(&raw).exists());
     assert_eq!(fs::read(&renamed).unwrap(), b"raw");
-    assert_eq!(fs::read(crate::sidecar::sidecar_path_for_raw(&renamed)).unwrap(), b"sidecar");
+    assert_eq!(
+        fs::read(crate::sidecar::sidecar_path_for_raw(&renamed)).unwrap(),
+        b"sidecar"
+    );
     assert_test_developed_thumbnail(&renamed);
     assert!(crate::sidecar::load_developed_thumbnail_cache(&raw, 512)
         .unwrap()
@@ -1068,7 +1161,10 @@ fn rename_raw_keeps_matching_sidecar() {
 fn folder_names_are_single_safe_path_components() {
     assert!(validate_folder_name("Photos 2026").is_ok());
     for invalid in ["", " ", ".", "..", "../outside", "nested/folder", "/tmp"] {
-        assert!(validate_folder_name(invalid).is_err(), "accepted {invalid:?}");
+        assert!(
+            validate_folder_name(invalid).is_err(),
+            "accepted {invalid:?}"
+        );
     }
 }
 
@@ -1084,14 +1180,23 @@ fn folder_operations_stay_inside_library_and_protect_root() {
     fs::create_dir(&outside).unwrap();
 
     assert!(run_folder_operation(LibraryFolderOperation::Create {
-        root: root.clone(), parent: outside, name: "escape".to_owned(),
-    }).is_err());
+        root: root.clone(),
+        parent: outside,
+        name: "escape".to_owned(),
+    })
+    .is_err());
     assert!(run_folder_operation(LibraryFolderOperation::Delete {
-        root: root.clone(), target: root.clone(),
-    }).is_err());
+        root: root.clone(),
+        target: root.clone(),
+    })
+    .is_err());
     assert!(run_folder_operation(LibraryFolderOperation::Move {
-        root: root.clone(), source, destination_parent: child, new_name: None,
-    }).is_err());
+        root: root.clone(),
+        source,
+        destination_parent: child,
+        new_name: None,
+    })
+    .is_err());
     assert!(root.is_dir());
     fs::remove_dir_all(base).unwrap();
 }
@@ -1105,7 +1210,10 @@ fn recursive_folder_copy_never_overwrites_and_rejects_symlinks() {
     fs::create_dir_all(source.join("nested")).unwrap();
     fs::write(source.join("nested/photo.dng"), b"raw").unwrap();
     copy_directory_create_new(&source, &destination).unwrap();
-    assert_eq!(fs::read(destination.join("nested/photo.dng")).unwrap(), b"raw");
+    assert_eq!(
+        fs::read(destination.join("nested/photo.dng")).unwrap(),
+        b"raw"
+    );
     assert!(copy_directory_create_new(&source, &destination).is_err());
 
     #[cfg(unix)]
@@ -1158,7 +1266,10 @@ fn folder_scan_only_includes_direct_raw_children() {
     fs::write(root.join("ignore.jpg"), b"jpeg").unwrap();
 
     let (assets, warnings, truncated) = scan_folder(&root, || false).unwrap().unwrap();
-    let names = assets.iter().map(|asset| asset.display_name.as_str()).collect::<Vec<_>>();
+    let names = assets
+        .iter()
+        .map(|asset| asset.display_name.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(warnings, 0);
     assert!(!truncated);
     assert_eq!(names, vec!["one.DNG"]);
@@ -1171,17 +1282,25 @@ fn folder_scan_retains_newest_files_after_limit() {
     let root = unique_temp_dir("library-limit-test");
     let epoch = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     for (name, age) in [
-        ("oldest.dng", 1), ("newest.dng", 5), ("middle.dng", 3),
-        ("older.dng", 2), ("newer.dng", 4),
+        ("oldest.dng", 1),
+        ("newest.dng", 5),
+        ("middle.dng", 3),
+        ("older.dng", 2),
+        ("newer.dng", 4),
     ] {
         let path = root.join(name);
         fs::write(&path, b"raw").unwrap();
         let file = fs::OpenOptions::new().write(true).open(path).unwrap();
-        file.set_times(fs::FileTimes::new().set_modified(epoch + Duration::from_secs(age))).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(epoch + Duration::from_secs(age)))
+            .unwrap();
     }
 
-    let (assets, warnings, truncated) = scan_folder_with_limit(&root, 3, || false).unwrap().unwrap();
-    let names = assets.iter().map(|asset| asset.display_name.as_str()).collect::<Vec<_>>();
+    let (assets, warnings, truncated) =
+        scan_folder_with_limit(&root, 3, || false).unwrap().unwrap();
+    let names = assets
+        .iter()
+        .map(|asset| asset.display_name.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(names, ["newest.dng", "newer.dng", "middle.dng"]);
     assert_eq!(warnings, 0);
     assert!(truncated);

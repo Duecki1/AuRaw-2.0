@@ -1,8 +1,3 @@
-// Radial, mask-emitted crepuscular rays. The selected mask is an emission
-// field, not a clipping boundary: output pixels trace back toward a separately
-// editable light-source point and gather masked energy along that path.
-// Sampling a fixed full-image atlas makes this operation independent of the
-// current viewport and of the export tile geometry.
 
 const LIGHT_RAY_MIN_TAP_COUNT: u32 = 16u;
 const LIGHT_RAY_MAX_TAP_COUNT: u32 = 40u;
@@ -32,9 +27,6 @@ fn light_ray_angular_pattern(
     variation: f32,
     softness: f32,
 ) -> f32 {
-    // Integer angular frequencies meet continuously at +/-pi. Combining three
-    // harmonics avoids the regular "sunburst" look of a single sine wave while
-    // remaining deterministic between preview and export.
     let primary_frequency = floor(clamp(ray_count, 4.0, 96.0) + 0.5);
     let secondary_frequency = max(floor(primary_frequency * 0.53 + 0.5), 2.0);
     let detail_frequency = primary_frequency * 2.0 + 3.0;
@@ -65,8 +57,6 @@ fn light_ray_path_energy(
     let radial_pixels = (output_uv - source_uv) * full_size;
     let radial_length = length(radial_pixels);
     let normalized_length = radial_length / max(min(full_size.x, full_size.y), 1.0);
-    // Nearby pixels need fewer samples, while very long shafts receive enough
-    // taps to avoid breaking into widely separated mask echoes.
     let tap_count = u32(clamp(
         ceil(f32(LIGHT_RAY_MIN_TAP_COUNT) + normalized_length * 16.0),
         f32(LIGHT_RAY_MIN_TAP_COUNT),
@@ -86,8 +76,6 @@ fn light_ray_path_energy(
         }
         let progress = (f32(tap) + 0.5) / f32(tap_count);
         let base_uv = mix(output_uv, source_uv, progress);
-        // The lateral fan converges at both the receiving pixel and the source,
-        // so Spread widens a shaft without moving its vanishing point.
         let remaining_radius = radial_length * (1.0 - progress);
         let bow = sin(LIGHT_RAY_PI * progress);
         let side_uv_offset = perpendicular
@@ -155,8 +143,6 @@ fn apply_light_rays(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
             tertiary.z / 100.0,
             softness,
         );
-        // Exponential compression keeps large source masks controllable while
-        // still making narrow openings produce a strong, visible shaft.
         let shaft = (1.0 - exp(-gathered * 7.0))
             * distance_falloff * angular_pattern;
         let color = mask_effect_picker_color_to_working(secondary.xyz);

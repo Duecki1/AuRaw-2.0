@@ -110,7 +110,7 @@ jobs:
 
           cp "target/${{ matrix.target }}/release/auraw" "$executable"
           chmod +x "$executable"
-          cp COPYING THIRD_PARTY_NOTICES.md README.md "$contents/Resources/"
+          cp COPYING NOTICE.md THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md README.md "$contents/Resources/"
 
           icon_source="packaging/icons/auraw-1024.png"
           iconset="$contents/Resources/AuRaw.iconset"

@@ -20,6 +20,14 @@ pub(super) fn sidecar_interaction_active(ctx: &egui::Context) -> bool {
     ctx.input(|input| input.pointer.any_down()) || ctx.egui_wants_keyboard_input()
 }
 
+fn edited_preview_is_current_for_thumbnail(
+    original_requested: bool,
+    original_rendered_state: Option<(bool, u64)>,
+    preview_revision: u64,
+) -> bool {
+    !original_requested && original_rendered_state == Some((false, preview_revision))
+}
+
 impl AurawApp {
     pub(crate) fn report_mask_persistence_limit(
         &mut self,
@@ -35,7 +43,11 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
-    pub(super) fn report_sidecar_save_failure(&mut self, revision: Option<u64>, detail: impl AsRef<str>) {
+    pub(super) fn report_sidecar_save_failure(
+        &mut self,
+        revision: Option<u64>,
+        detail: impl AsRef<str>,
+    ) {
         self.persistence.sidecar_save_feedback_until = None;
         if let Some(revision) = revision {
             self.persistence.sidecar_failed_revision = Some(revision);
@@ -95,14 +107,18 @@ impl AurawApp {
 
     pub(super) fn capture_sidecar_edit_state(&self) -> SidecarEditState {
         let masks = self.committed_mask_state_for_persistence();
-        let camera_profile = self.develop.selected_camera_profile.as_ref().and_then(|selected| {
-            let root = self.preferences.camera_profile_folder.as_ref()?;
-            if selected == root {
-                return Some(std::path::PathBuf::from("."));
-            }
-            let relative = selected.strip_prefix(root).ok()?;
-            (!relative.as_os_str().is_empty()).then(|| relative.to_path_buf())
-        });
+        let camera_profile = self
+            .develop
+            .selected_camera_profile
+            .as_ref()
+            .and_then(|selected| {
+                let root = self.preferences.camera_profile_folder.as_ref()?;
+                if selected == root {
+                    return Some(std::path::PathBuf::from("."));
+                }
+                let relative = selected.strip_prefix(root).ok()?;
+                (!relative.as_os_str().is_empty()).then(|| relative.to_path_buf())
+            });
         SidecarEditState {
             exposure: self.develop.exposure,
             geometry: self.develop.geometry.sanitized(),
@@ -123,10 +139,13 @@ impl AurawApp {
     pub(super) fn begin_sidecar_open(&mut self) -> u64 {
         self.commit_edit_history_now();
         let revision = self.edit_commit_revision();
-        let pending_latest = self.persistence.sidecar_pending
+        let pending_latest = self
+            .persistence
+            .sidecar_pending
             .iter_mut()
             .find(|request| {
-                request.generation == self.persistence.sidecar_generation && request.revision == revision
+                request.generation == self.persistence.sidecar_generation
+                    && request.revision == revision
             })
             .map(|request| request.explicit = true)
             .is_some();
@@ -157,13 +176,16 @@ impl AurawApp {
         }
         self.persistence.sidecar_target = Some(target);
         self.persistence.sidecar_failed_revision = None;
-        self.persistence.sidecar_saved_revision = (!needs_rewrite).then(|| self.edit_commit_revision());
+        self.persistence.sidecar_saved_revision =
+            (!needs_rewrite).then(|| self.edit_commit_revision());
         if needs_rewrite {
             self.queue_current_sidecar_save(false);
             self.start_next_sidecar_save();
         } else {
             #[cfg(not(target_os = "android"))]
-            if self.persistence.sidecar_target
+            if self
+                .persistence
+                .sidecar_target
                 .as_ref()
                 .is_some_and(|target| match target {
                     crate::sidecar::SidecarTarget::Desktop { raw_path } => {
@@ -192,7 +214,9 @@ impl AurawApp {
         if !explicit
             && (self.persistence.sidecar_saved_revision == Some(revision)
                 || self.persistence.sidecar_failed_revision == Some(revision)
-                || self.persistence.sidecar_in_flight
+                || self
+                    .persistence
+                    .sidecar_in_flight
                     .is_some_and(|job| job.generation == generation && job.revision == revision)
                 || self.persistence.sidecar_pending.iter().any(|request| {
                     request.generation == generation && request.revision == revision
@@ -208,7 +232,9 @@ impl AurawApp {
             explicit,
             edits: self.capture_sidecar_edit_state(),
         };
-        if let Some(index) = self.persistence.sidecar_pending
+        if let Some(index) = self
+            .persistence
+            .sidecar_pending
             .iter()
             .position(|pending| pending.generation == generation)
         {
@@ -219,7 +245,11 @@ impl AurawApp {
         }
     }
 
-    pub(super) fn schedule_sidecar_autosave(&mut self, ctx: &egui::Context, interaction_active: bool) {
+    pub(super) fn schedule_sidecar_autosave(
+        &mut self,
+        ctx: &egui::Context,
+        interaction_active: bool,
+    ) {
         if self.develop.loaded_raw.is_none() || self.persistence.sidecar_target.is_none() {
             self.persistence.sidecar_autosave_deadline = None;
             return;
@@ -227,20 +257,25 @@ impl AurawApp {
 
         let generation = self.persistence.sidecar_generation;
         let revision = self.edit_commit_revision();
-        let revision_is_covered = self.persistence.sidecar_saved_revision == Some(revision)
-            || self.persistence.sidecar_failed_revision == Some(revision)
-            || self.persistence.sidecar_in_flight
-                .is_some_and(|job| job.generation == generation && job.revision == revision)
-            || self.persistence.sidecar_pending
-                .iter()
-                .any(|request| request.generation == generation && request.revision == revision);
+        let revision_is_covered =
+            self.persistence.sidecar_saved_revision == Some(revision)
+                || self.persistence.sidecar_failed_revision == Some(revision)
+                || self
+                    .persistence
+                    .sidecar_in_flight
+                    .is_some_and(|job| job.generation == generation && job.revision == revision)
+                || self.persistence.sidecar_pending.iter().any(|request| {
+                    request.generation == generation && request.revision == revision
+                });
         if revision_is_covered {
             self.persistence.sidecar_autosave_deadline = None;
             self.start_next_sidecar_save();
             return;
         }
 
-        let stale_pending = self.persistence.sidecar_pending
+        let stale_pending = self
+            .persistence
+            .sidecar_pending
             .iter()
             .any(|request| request.generation == generation && request.revision != revision);
         if stale_pending && !interaction_active {
@@ -251,7 +286,8 @@ impl AurawApp {
         }
 
         let now = Instant::now();
-        let deadline = autosave_deadline(self.persistence.sidecar_autosave_deadline, generation, now);
+        let deadline =
+            autosave_deadline(self.persistence.sidecar_autosave_deadline, generation, now);
         self.persistence.sidecar_autosave_deadline = Some(deadline);
         if now < deadline.due_at {
             ctx.request_repaint_after(deadline.due_at.duration_since(now));
@@ -304,11 +340,8 @@ impl AurawApp {
     ) -> Result<(), String> {
         let was_current =
             self.detach_current_android_document_for_library_action(raw_uri, display_name);
-        let result = crate::android::remove_raw_sidecar(
-            &self.android.android_app,
-            raw_uri,
-            display_name,
-        );
+        let result =
+            crate::android::remove_raw_sidecar(&self.android.android_app, raw_uri, display_name);
         if was_current && result.is_ok() {
             self.reload_android_library_document_after_reset(raw_uri, display_name);
         }
@@ -354,8 +387,11 @@ impl AurawApp {
     ) -> Result<(), String> {
         let was_current =
             self.detach_current_android_document_for_library_action(raw_uri, display_name);
-        let result =
-            crate::android::delete_library_document(&self.android.android_app, raw_uri, display_name);
+        let result = crate::android::delete_library_document(
+            &self.android.android_app,
+            raw_uri,
+            display_name,
+        );
         if result.is_err() && was_current {
             self.open_android_library_document(raw_uri, display_name);
         }
@@ -370,7 +406,8 @@ impl AurawApp {
         self.persistence.sidecar_saved_revision = None;
         self.persistence.sidecar_failed_revision = None;
         self.persistence.sidecar_autosave_deadline = None;
-        self.persistence.sidecar_pending
+        self.persistence
+            .sidecar_pending
             .retain(|request| request.generation != detached_generation);
         true
     }
@@ -380,15 +417,19 @@ impl AurawApp {
     }
 
     pub(crate) fn sidecar_save_in_progress(&self) -> bool {
-        self.persistence.sidecar_in_flight
+        self.persistence
+            .sidecar_in_flight
             .is_some_and(|job| job.generation == self.persistence.sidecar_generation)
-            || self.persistence.sidecar_pending
+            || self
+                .persistence
+                .sidecar_pending
                 .iter()
                 .any(|request| request.generation == self.persistence.sidecar_generation)
     }
 
     pub(crate) fn sidecar_save_succeeded_recently(&self) -> bool {
-        self.persistence.sidecar_save_feedback_until
+        self.persistence
+            .sidecar_save_feedback_until
             .is_some_and(|until| Instant::now() < until)
     }
 
@@ -415,11 +456,16 @@ impl AurawApp {
         if self.persistence.sidecar_in_flight.is_some() {
             return;
         }
-        if self.persistence.sidecar_pending.front().is_some_and(|request| {
-            !request.explicit
-                && request.generation == self.persistence.sidecar_generation
-                && sidecar_interaction_active(&self.egui_ctx)
-        }) {
+        if self
+            .persistence
+            .sidecar_pending
+            .front()
+            .is_some_and(|request| {
+                !request.explicit
+                    && request.generation == self.persistence.sidecar_generation
+                    && sidecar_interaction_active(&self.egui_ctx)
+            })
+        {
             self.egui_ctx
                 .request_repaint_after(SIDECAR_AUTOSAVE_ACTIVE_POLL);
             return;
@@ -473,7 +519,9 @@ impl AurawApp {
     }
 
     pub(super) fn poll_sidecar_save(&mut self) {
-        let received = self.persistence.sidecar_receiver
+        let received = self
+            .persistence
+            .sidecar_receiver
             .as_ref()
             .map(|receiver| receiver.try_recv());
         let event = match received {
@@ -481,7 +529,9 @@ impl AurawApp {
             Some(Err(mpsc::TryRecvError::Disconnected)) => {
                 let job = self.persistence.sidecar_in_flight.take();
                 self.persistence.sidecar_receiver = None;
-                if let Some(job) = job.filter(|job| job.generation == self.persistence.sidecar_generation) {
+                if let Some(job) =
+                    job.filter(|job| job.generation == self.persistence.sidecar_generation)
+                {
                     self.report_sidecar_save_failure(
                         Some(job.revision),
                         "the edit-save worker stopped unexpectedly",
@@ -510,7 +560,8 @@ impl AurawApp {
         if event.job.generation == self.persistence.sidecar_generation {
             match event.result {
                 Ok(location) => {
-                    let recovered_from_failure = self.persistence.sidecar_failed_revision.take().is_some();
+                    let recovered_from_failure =
+                        self.persistence.sidecar_failed_revision.take().is_some();
                     self.persistence.sidecar_saved_revision = Some(event.job.revision);
                     self.queue_developed_thumbnail_refresh(
                         event.job.generation,
@@ -629,7 +680,9 @@ impl AurawApp {
     }
 
     pub(super) fn poll_developed_thumbnail(&mut self, frame: &eframe::Frame) {
-        let received = self.persistence.developed_thumbnail_receiver
+        let received = self
+            .persistence
+            .developed_thumbnail_receiver
             .as_ref()
             .map(mpsc::Receiver::try_recv);
         match received {
@@ -672,7 +725,9 @@ impl AurawApp {
             return;
         }
         let current_revision = self.edit_commit_revision();
-        if current_revision != job.revision || self.persistence.sidecar_saved_revision != Some(job.revision) {
+        if current_revision != job.revision
+            || self.persistence.sidecar_saved_revision != Some(job.revision)
+        {
             self.persistence.developed_thumbnail_pending = None;
             return;
         }
@@ -684,24 +739,36 @@ impl AurawApp {
             return;
         }
 
+        if !edited_preview_is_current_for_thumbnail(
+            self.preview.original_requested,
+            self.preview.original_rendered_state,
+            self.preview.revision,
+        ) {
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
+        let Some(render_state) = frame.wgpu_render_state() else {
+            self.persistence.developed_thumbnail_pending = None;
+            log::warn!("cannot cache developed thumbnail without the wgpu backend");
+            return;
+        };
         let snapshot = if self.preview.pending_stage.is_none() {
-            self.preview.gpu_pipeline
+            self.preview
+                .gpu_pipeline
                 .as_ref()
-                .map(RawGpuPipeline::output_snapshot)
+                .map(|pipeline| pipeline.output_snapshot(&render_state.device, &render_state.queue))
         } else if self.preview.navigation_pending_stage.is_none() {
-            self.preview.navigation
-                .as_ref()
-                .map(|preview| preview.pipeline.output_snapshot())
+            self.preview.navigation.as_ref().map(|preview| {
+                preview
+                    .pipeline
+                    .output_snapshot(&render_state.device, &render_state.queue)
+            })
         } else {
             None
         };
         let Some(snapshot) = snapshot else {
             self.egui_ctx.request_repaint();
-            return;
-        };
-        let Some(render_state) = frame.wgpu_render_state() else {
-            self.persistence.developed_thumbnail_pending = None;
-            log::warn!("cannot cache developed thumbnail without the wgpu backend");
             return;
         };
         let device = render_state.device.clone();
@@ -725,10 +792,12 @@ impl AurawApp {
                     match &worker_target {
                         #[cfg(not(target_os = "android"))]
                         crate::sidecar::SidecarTarget::Desktop { raw_path } => {
-                            let fingerprint = crate::sidecar::desktop_sidecar_fingerprint(raw_path)?
-                                .ok_or_else(|| {
-                                    "edit sidecar disappeared before thumbnail capture".to_owned()
-                                })?;
+                            let fingerprint = crate::sidecar::desktop_sidecar_fingerprint(
+                                raw_path,
+                            )?
+                            .ok_or_else(|| {
+                                "edit sidecar disappeared before thumbnail capture".to_owned()
+                            })?;
                             crate::sidecar::save_developed_thumbnail_cache(
                                 raw_path,
                                 &thumbnail,
@@ -736,7 +805,7 @@ impl AurawApp {
                             )?;
                         }
                         #[cfg(target_os = "android")]
-                        crate::sidecar::SidecarTarget::Desktop { .. } => {},
+                        crate::sidecar::SidecarTarget::Desktop { .. } => {}
                         #[cfg(target_os = "android")]
                         crate::sidecar::SidecarTarget::Android {
                             raw_uri,
@@ -773,7 +842,9 @@ impl AurawApp {
         self.commit_edit_history_now();
         let revision = self.edit_commit_revision();
         for request in &mut self.persistence.sidecar_pending {
-            if request.generation == self.persistence.sidecar_generation && request.revision == revision {
+            if request.generation == self.persistence.sidecar_generation
+                && request.revision == revision
+            {
                 request.explicit = true;
             }
         }
@@ -782,7 +853,8 @@ impl AurawApp {
                 job.generation == self.persistence.sidecar_generation && job.revision == revision
             })
             && !self.persistence.sidecar_pending.iter().any(|request| {
-                request.generation == self.persistence.sidecar_generation && request.revision == revision
+                request.generation == self.persistence.sidecar_generation
+                    && request.revision == revision
             })
         {
             self.queue_current_sidecar_save(true);
@@ -791,7 +863,9 @@ impl AurawApp {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             self.start_next_sidecar_save();
-            if self.persistence.sidecar_in_flight.is_none() && self.persistence.sidecar_pending.is_empty() {
+            if self.persistence.sidecar_in_flight.is_none()
+                && self.persistence.sidecar_pending.is_empty()
+            {
                 break;
             }
             let Some(receiver) = self.persistence.sidecar_receiver.as_ref() else {
@@ -819,8 +893,12 @@ impl AurawApp {
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
         }
-        if self.persistence.sidecar_in_flight.is_some() || !self.persistence.sidecar_pending.is_empty() {
-            let revision = self.persistence.sidecar_in_flight
+        if self.persistence.sidecar_in_flight.is_some()
+            || !self.persistence.sidecar_pending.is_empty()
+        {
+            let revision = self
+                .persistence
+                .sidecar_in_flight
                 .filter(|job| job.generation == self.persistence.sidecar_generation)
                 .map(|job| job.revision);
             self.report_sidecar_save_failure(
@@ -874,5 +952,26 @@ mod sidecar_persistence_tests {
 
         assert_eq!(new.generation, 3);
         assert_eq!(new.due_at, switched_at + SIDECAR_AUTOSAVE_INTERVAL);
+    }
+
+    #[test]
+    fn developed_thumbnail_waits_for_edited_preview_after_before_after_use() {
+        let revision = 41;
+
+        assert!(!edited_preview_is_current_for_thumbnail(
+            true,
+            Some((true, revision)),
+            revision,
+        ));
+        assert!(!edited_preview_is_current_for_thumbnail(
+            false,
+            Some((true, revision)),
+            revision,
+        ));
+        assert!(edited_preview_is_current_for_thumbnail(
+            false,
+            Some((false, revision)),
+            revision,
+        ));
     }
 }

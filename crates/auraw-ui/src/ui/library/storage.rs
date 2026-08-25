@@ -84,10 +84,7 @@ pub(super) fn rename_asset(
     }
 }
 
-pub(super) fn delete_library_asset(
-    app: &mut AurawApp,
-    asset: &LibraryAsset,
-) -> Result<(), String> {
+pub(super) fn delete_library_asset(app: &mut AurawApp, asset: &LibraryAsset) -> Result<(), String> {
     #[cfg(not(target_os = "android"))]
     {
         let path = asset
@@ -156,7 +153,9 @@ pub(super) fn materialize_library_asset(
             let destination = crate::sidecar::sidecar_path_for_raw(&raw_path);
             let copy_result = fs::copy(&sidecar, &destination)
                 .map(|_| ())
-                .map_err(|error| format!("could not stage {} sidecar: {error}", asset.display_name));
+                .map_err(|error| {
+                    format!("could not stage {} sidecar: {error}", asset.display_name)
+                });
             let _ = fs::remove_file(sidecar);
             if let Err(error) = copy_result {
                 let _ = fs::remove_file(&raw_path);
@@ -192,7 +191,9 @@ pub(super) fn asset_is_at_destination(
     }
 }
 
-pub(super) fn duplicate_destination(asset: &LibraryAsset) -> Result<LibraryTransferDestination, String> {
+pub(super) fn duplicate_destination(
+    asset: &LibraryAsset,
+) -> Result<LibraryTransferDestination, String> {
     #[cfg(not(target_os = "android"))]
     {
         let parent = asset
@@ -294,7 +295,10 @@ pub(super) fn rollback_imported_library_asset(
         #[cfg(not(target_os = "android"))]
         ImportedLibraryAsset::Desktop(path) => {
             if let Err(error) = remove_local_raw_bundle(&path) {
-                log::warn!("could not roll back imported Library bundle {}: {error}", path.display());
+                log::warn!(
+                    "could not roll back imported Library bundle {}: {error}",
+                    path.display()
+                );
             }
         }
         #[cfg(target_os = "android")]

@@ -21,9 +21,7 @@ pub(in crate::app) fn batch_export_overall_fraction(
     let current_fraction = if has_current {
         tile_progress
             .and_then(|(tiles_done, tiles_total)| {
-                (tiles_total > 0).then(|| {
-                    (tiles_done as f32 / tiles_total as f32).clamp(0.0, 1.0)
-                })
+                (tiles_total > 0).then(|| (tiles_done as f32 / tiles_total as f32).clamp(0.0, 1.0))
             })
             .unwrap_or(0.0)
             * EXPORT_TILE_PHASE_WEIGHT
@@ -88,9 +86,8 @@ fn spawn_desktop_library_batch_export(
                 let request = match request {
                     Ok(request) => request,
                     Err(error) => {
-                        let _ = worker_sender.send(LibraryBatchExportEvent::ItemFinished {
-                            error: Some(error),
-                        });
+                        let _ = worker_sender
+                            .send(LibraryBatchExportEvent::ItemFinished { error: Some(error) });
                         repaint.request_repaint();
                         continue;
                     }
@@ -161,34 +158,34 @@ fn prepare_desktop_library_export_item(
 
     let (mut edits, requested_camera_profile, use_adaptive_detail_defaults) =
         match crate::sidecar::load_desktop(&job.source) {
-        Ok(Some(loaded)) => {
-            let requested = loaded
-                .edits
-                .camera_profile
-                .as_ref()
-                .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
-            let use_adaptive = false;
-            (loaded.edits, requested, use_adaptive)
-        }
-        Ok(None) => {
-            let mut edits = crate::sidecar::default_edit_state();
-            edits.exposure = default_exposure;
-            let requested = last_camera_profile
-                .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
-            (edits, requested, true)
-        }
-        Err(error) => {
-            log::warn!(
-                "ignoring invalid sidecar during batch export for {}: {error}",
-                job.source.display()
-            );
-            let mut edits = crate::sidecar::default_edit_state();
-            edits.exposure = default_exposure;
-            let requested = last_camera_profile
-                .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
-            (edits, requested, true)
-        }
-    };
+            Ok(Some(loaded)) => {
+                let requested = loaded
+                    .edits
+                    .camera_profile
+                    .as_ref()
+                    .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
+                let use_adaptive = false;
+                (loaded.edits, requested, use_adaptive)
+            }
+            Ok(None) => {
+                let mut edits = crate::sidecar::default_edit_state();
+                edits.exposure = default_exposure;
+                let requested = last_camera_profile
+                    .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
+                (edits, requested, true)
+            }
+            Err(error) => {
+                log::warn!(
+                    "ignoring invalid sidecar during batch export for {}: {error}",
+                    job.source.display()
+                );
+                let mut edits = crate::sidecar::default_edit_state();
+                edits.exposure = default_exposure;
+                let requested = last_camera_profile
+                    .and_then(|relative| camera_profile_folder.map(|root| root.join(relative)));
+                (edits, requested, true)
+            }
+        };
 
     let original_raw = {
         let _decode_guard = decode_gate
@@ -201,9 +198,7 @@ fn prepare_desktop_library_export_item(
             requested_camera_profile.as_deref(),
         )
         .map(Arc::new)
-        .map_err(|error| {
-            format!("{}: RAW decode failed: {error:#}", job.source.display())
-        })?
+        .map_err(|error| format!("{}: RAW decode failed: {error:#}", job.source.display()))?
     };
     if use_adaptive_detail_defaults {
         original_raw.apply_adaptive_detail_defaults(&mut edits.exposure);
@@ -230,12 +225,14 @@ fn prepare_desktop_library_export_item(
             })
             .or(catalog.auto_match);
         if let Some(selected) = selected {
-            Arc::new(apply_lensfun_correction(&original_raw, &selected).map_err(|error| {
-                format!(
-                    "{}: lens correction failed: {error:#}",
-                    job.source.display()
-                )
-            })?)
+            Arc::new(
+                apply_lensfun_correction(&original_raw, &selected).map_err(|error| {
+                    format!(
+                        "{}: lens correction failed: {error:#}",
+                        job.source.display()
+                    )
+                })?,
+            )
         } else {
             Arc::clone(&original_raw)
         }
@@ -269,14 +266,7 @@ fn prepare_desktop_library_export_item(
         })?;
         pipeline.recompute(queue, device, &neutral_params);
         let rgba = pipeline
-            .read_output_region_blocking(
-                device,
-                queue,
-                0,
-                0,
-                source_raw.width,
-                source_raw.height,
-            )
+            .read_output_region_blocking(device, queue, 0, 0, source_raw.width, source_raw.height)
             .map_err(|error| {
                 format!(
                     "{}: range-mask source readback failed: {error:#}",
@@ -469,7 +459,7 @@ impl AurawApp {
 
         if batch.cancel_requested {
             self.complete_android_library_batch_export_item(Err(
-                "batch export cancelled".to_owned(),
+                "batch export cancelled".to_owned()
             ));
             return;
         }
@@ -500,33 +490,29 @@ impl AurawApp {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let cache_file_name = format!(
-            "{stem}-auraw-{timestamp}.{}",
-            format.extension()
-        );
+        let cache_file_name = format!("{stem}-auraw-{timestamp}.{}", format.extension());
         let gallery_name = format!("{stem}-auraw.{}", format.extension());
-        let destination = match self.prepare_android_export_destination(
-            gallery_name,
-            cache_file_name,
-            format,
-        ) {
-            Ok(destination) => destination,
-            Err(error) => {
-                self.complete_android_library_batch_export_item(Err(format!(
-                    "{display_name}: {error}"
-                )));
-                return;
-            }
-        };
+        let destination =
+            match self.prepare_android_export_destination(gallery_name, cache_file_name, format) {
+                Ok(destination) => destination,
+                Err(error) => {
+                    self.complete_android_library_batch_export_item(Err(format!(
+                        "{display_name}: {error}"
+                    )));
+                    return;
+                }
+            };
         let cleanup = destination.clone();
         let mut start_error = None;
         let started = self
             .capture_export_task_request(destination, frame, format)
-            .and_then(|request| match self.start_export_task(request, ExportTaskKind::LibraryBatch) {
-                Ok(()) => Some(()),
-                Err(error) => {
-                    start_error = Some(error);
-                    None
+            .and_then(|request| {
+                match self.start_export_task(request, ExportTaskKind::LibraryBatch) {
+                    Ok(()) => Some(()),
+                    Err(error) => {
+                        start_error = Some(error);
+                        None
+                    }
                 }
             })
             .is_some();
@@ -575,9 +561,11 @@ impl AurawApp {
             }
         }
         self.update_library_batch_export_progress();
-        let finished_or_cancelled = self.export.batch.as_ref().is_some_and(|batch| {
-            batch.cancel_requested || batch.pending.is_empty()
-        });
+        let finished_or_cancelled = self
+            .export
+            .batch
+            .as_ref()
+            .is_some_and(|batch| batch.cancel_requested || batch.pending.is_empty());
         if finished_or_cancelled {
             self.finish_library_batch_export();
         }
@@ -669,7 +657,10 @@ impl AurawApp {
         };
         let pending = jobs
             .into_iter()
-            .map(|(source, destination)| LibraryBatchExportJob { source, destination })
+            .map(|(source, destination)| LibraryBatchExportJob {
+                source,
+                destination,
+            })
             .collect::<VecDeque<_>>();
         let total = pending.len();
         let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));

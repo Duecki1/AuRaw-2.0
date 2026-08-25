@@ -4,18 +4,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 
-/** Bounded stream copying that is safe for Android content providers. */
 final class BoundedStreams {
     private static final int BUFFER_BYTES = 256 * 1024;
 
     private BoundedStreams() {}
 
-    /**
-     * Copies at most {@code maximumBytes} and returns the copied byte count.
-     *
-     * <p>A zero-byte bulk read is followed by a one-byte read so a broken or
-     * slow content provider cannot cause an infinite no-progress loop.
-     */
+    // The one-byte fallback prevents an infinite loop on broken zero-read providers.
     static long copy(
             InputStream input,
             OutputStream output,
@@ -57,7 +51,6 @@ final class BoundedStreams {
     }
 }
 
-/** A domain-specific failure for an input that violates an explicit storage bound. */
 final class StorageLimitExceededException extends IllegalStateException {
     StorageLimitExceededException(String message) {
         super(message);

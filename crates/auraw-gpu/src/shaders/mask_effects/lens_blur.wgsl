@@ -1,5 +1,3 @@
-// Aperture-shaped, scene-linear gather for Lens Blur. The low-discrepancy
-// disk pattern avoids directional spokes without requiring a temporary image.
 
 const MASK_LENS_BLUR_SAMPLE_COUNT: u32 = 28u;
 const MASK_LENS_BLUR_GOLDEN_ANGLE: f32 = 2.39996323;

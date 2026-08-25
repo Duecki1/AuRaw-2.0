@@ -1,23 +1,19 @@
 use crate::ai_masks::{
-    spawn_landscape_mask, spawn_object_mask, spawn_subject_mask, BiRefNetQuality,
-    LandscapeMaskEvent, LandscapeMaskWorkerRequest, ObjectInferenceCache, ObjectMaskEvent,
-    ObjectMaskRequest, SubjectMaskEvent, SubjectMaskWorkerRequest, LANDSCAPE_MODEL_BYTES,
+    spawn_object_mask, spawn_subject_mask, BiRefNetQuality, ObjectInferenceCache, ObjectMaskEvent,
+    ObjectMaskRequest, ObjectMaskWorkerRequest, SubjectMaskEvent, SubjectMaskWorkerRequest,
     SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
 };
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
 use crate::pipeline::{
-    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy,
-    lensfun_catalog, load_raw_file_with_profile_selection,
-    spawn_tiled_export, BrushMode, CameraProfileMode, ExportEvent, ExportFormat,
-    ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
-    GpuParams, GpuProgramPrewarm,
-    LandscapeCategory, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage, MaskKind,
-    MaskRgbImage,
-    MaskStack, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
-    RawGpuProgramTemplate, RemoveBrushPoint, RemoveBrushStroke, RemoveEditState,
-    RetouchAlignment, RetouchStroke, RetouchTool, SubjectRefinement, TiledExportJob, TileSpec, EXPORT_TILE_HALO,
-    MAX_LOCAL_MASKS,
+    affected_stage, apply_lensfun_correction, build_proxy, build_region_proxy, lensfun_catalog,
+    load_raw_file_with_profile_selection, spawn_tiled_export, BrushMode, CameraProfileMode,
+    ExportEvent, ExportFormat, ExportMetadata, ExportSettings, ExposureParams, GeometryTransform,
+    GpuParams, GpuProgramPrewarm, LensfunCatalog, LensfunLens, LoadedRaw, MaskGeometry, MaskImage,
+    MaskKind, MaskRgbImage, MaskStack, ProcessingQuality, ProcessingStage, ProxySpec,
+    RawGpuPipeline, RawGpuProgramTemplate, RemoveBrushPoint, RemoveBrushStroke, RemoveEditState,
+    RemoveSceneContext, RetouchAlignment, RetouchStroke, RetouchTool, SubjectRefinement, TileSpec,
+    TiledExportJob, EXPORT_TILE_HALO, MAX_LOCAL_MASKS,
 };
 use crate::remove::{spawn_remove, spawn_retouch, RemoveEvent, RemoveRequest, RetouchRequest};
 use crate::sidecar::{
@@ -826,13 +822,12 @@ struct LensCorrectionTaskRequest {
     cached_raws: Option<(Arc<LoadedRaw>, Arc<LoadedRaw>)>,
 }
 
-type GeneratedAiMaskTargets = (bool, VecDeque<(usize, usize)>, VecDeque<(usize, usize)>);
+type GeneratedAiMaskTargets = (bool, VecDeque<(usize, usize)>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ForegroundOperationKind {
     SubjectMask,
     ObjectMask,
-    LandscapeMask,
     AiDenoise,
     LensCorrection,
 }
@@ -840,7 +835,11 @@ pub(crate) enum ForegroundOperationKind {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ForegroundProgressValue {
     Indeterminate,
-    Units { completed: u64, total: u64, unit: Option<String> },
+    Units {
+        completed: u64,
+        total: u64,
+        unit: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -866,7 +865,11 @@ impl ForegroundProgress {
         phase: impl Into<String>,
     ) -> Self {
         Self {
-            value: ForegroundProgressValue::Units { completed, total, unit: unit.into() },
+            value: ForegroundProgressValue::Units {
+                completed,
+                total,
+                unit: unit.into(),
+            },
             phase: phase.into(),
             detail: None,
         }
@@ -881,7 +884,6 @@ impl ForegroundProgress {
 enum ForegroundOperationReceiver {
     Subject(mpsc::Receiver<SubjectMaskEvent>),
     Object(mpsc::Receiver<ObjectMaskEvent>),
-    Landscape(mpsc::Receiver<LandscapeMaskEvent>),
     AiDenoise(mpsc::Receiver<crate::ai_denoise::AiDenoiseEvent>),
     LensCorrection(mpsc::Receiver<LensCorrectionEvent>),
 }
@@ -891,10 +893,6 @@ enum ForegroundOperationContext {
     Object {
         target: AiMaskTarget,
         inference_started: bool,
-    },
-    Landscape {
-        target: AiMaskTarget,
-        category: LandscapeCategory,
     },
     AiDenoise,
     LensCorrection,
@@ -1070,7 +1068,6 @@ pub(crate) struct AiState {
     pub(crate) mask_update_active: bool,
     pub(crate) mask_update_subject_pending: bool,
     pub(crate) mask_update_object_queue: VecDeque<(usize, usize)>,
-    pub(crate) mask_update_landscape_queue: VecDeque<(usize, usize)>,
     pub(crate) mask_update_failed: bool,
     #[cfg(not(target_os = "android"))]
     pub(crate) runtime_path: Option<PathBuf>,
@@ -1082,8 +1079,6 @@ pub(crate) struct AiState {
     pub(crate) object_pending_target: Option<(usize, usize)>,
     pub(crate) object_error_dialog: Option<String>,
     pub(crate) object_cache: Option<((usize, usize), ObjectInferenceCache)>,
-    pub(crate) landscape_consent_open: bool,
-    pub(crate) landscape_pending_target: Option<(usize, usize)>,
     pub(crate) denoise_consent_open: bool,
     pub(crate) denoise_resume_pending: bool,
 }
@@ -1209,11 +1204,7 @@ impl AurawApp {
             && self.ai.library_mask_refresh.is_none()
             && matches!(
                 self.foreground_operation_kind(),
-                Some(
-                    ForegroundOperationKind::SubjectMask
-                        | ForegroundOperationKind::ObjectMask
-                        | ForegroundOperationKind::LandscapeMask
-                )
+                Some(ForegroundOperationKind::SubjectMask | ForegroundOperationKind::ObjectMask)
             )
         {
             self.cancel_foreground_operation();
@@ -1279,10 +1270,12 @@ impl AurawApp {
             self.retire_egui_texture(texture_id);
         }
         for texture_id in [
-            self.preview.detail
+            self.preview
+                .detail
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
-            self.preview.navigation
+            self.preview
+                .navigation
                 .take()
                 .and_then(|preview| preview.pipeline.egui_texture_id),
         ]
@@ -1300,18 +1293,18 @@ impl AurawApp {
     }
 }
 
+mod eframe_impl;
+mod foreground;
+mod inpainting;
+mod library_adjustments;
 mod lifecycle;
 mod masks_ai;
-mod inpainting;
 mod processing_export;
-mod library_adjustments;
 mod sidecar_persistence;
-mod foreground;
-mod eframe_impl;
 
-use lifecycle::needs_canonical_mask_source;
 #[cfg(not(target_os = "android"))]
 use lifecycle::install_missing_range_sources;
+use lifecycle::needs_canonical_mask_source;
 use sidecar_persistence::sidecar_interaction_active;
 
 #[cfg(test)]

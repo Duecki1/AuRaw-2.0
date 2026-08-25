@@ -12,6 +12,6 @@ pub use export::{
 };
 pub use gpu::{
     GpuOutputSnapshot, GpuParams, GpuProgramPrewarm, ProcessingQuality, RawGpuPipeline,
-    RawGpuProgramTemplate, ToneStatisticsSnapshot,
+    RawGpuProgramTemplate, RemoveSceneContext, ToneStatisticsSnapshot,
 };
 pub use gpu_cache::PersistentGpuPipelineCache;
