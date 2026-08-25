@@ -247,6 +247,7 @@ impl AurawApp {
             library_sort_order: self.library.sort_order(),
             preview_quality: self.preview.quality,
             image_relative_brush_size: self.preferences.image_relative_brush_size,
+            show_develop_navigation_labels: self.preferences.show_develop_navigation_labels,
             ui_design: self.preferences.ui_design,
             preview_backdrop: self.preferences.preview_backdrop,
             birefnet_quality: self.ai.birefnet_quality,

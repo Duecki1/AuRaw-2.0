@@ -88,7 +88,10 @@ include!("sidebar/crop.rs");
 #[cfg(test)]
 mod tests {
     use super::masks::{mask_component_badge, mask_creation_icon};
-    use super::{mobile_tab_text_geometry, MaskCardSize, MaskCombineMode, MaskStripOrientation};
+    use super::{
+        mobile_tab_icon_geometry, mobile_tab_text_geometry, MaskCardSize, MaskCombineMode,
+        MaskStripOrientation,
+    };
 
     #[test]
     fn mask_badges_match_base_and_combine_semantics() {
@@ -141,6 +144,15 @@ mod tests {
             let stack_bottom = label_center + label_size * 0.5;
             assert!(((stack_top + stack_bottom) * 0.5 - height * 0.5).abs() < 0.001);
             assert!(icon_center < label_center);
+        }
+    }
+
+    #[test]
+    fn unlabeled_mobile_tab_icon_is_centered() {
+        for height in [44.0, 48.0, 52.0, 56.0] {
+            let (icon_size, icon_center) = mobile_tab_icon_geometry(height, false);
+            assert!((icon_center - height * 0.5).abs() < 0.001);
+            assert!((21.0..=25.0).contains(&icon_size));
         }
     }
 }

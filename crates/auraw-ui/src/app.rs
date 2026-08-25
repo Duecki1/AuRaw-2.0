@@ -998,6 +998,7 @@ pub(crate) struct DevelopUiState {
 
 pub(crate) struct PreferencesState {
     pub(crate) image_relative_brush_size: bool,
+    pub(crate) show_develop_navigation_labels: bool,
     pub(crate) ui_design: UiDesign,
     pub(crate) preview_backdrop: PreviewBackdrop,
     pub(crate) adjustment_copy_settings: AdjustmentCopySettings,

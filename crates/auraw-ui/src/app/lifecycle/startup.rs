@@ -199,6 +199,7 @@ impl AurawApp {
             },
             preferences: PreferencesState {
                 image_relative_brush_size: performance.image_relative_brush_size,
+                show_develop_navigation_labels: performance.show_develop_navigation_labels,
                 ui_design: performance.ui_design,
                 preview_backdrop: performance.preview_backdrop,
                 adjustment_copy_settings: performance.adjustment_copy_settings,
@@ -473,6 +474,7 @@ impl AurawApp {
             },
             preferences: PreferencesState {
                 image_relative_brush_size: performance.image_relative_brush_size,
+                show_develop_navigation_labels: performance.show_develop_navigation_labels,
                 ui_design: performance.ui_design,
                 preview_backdrop: performance.preview_backdrop,
                 adjustment_copy_settings: performance.adjustment_copy_settings,

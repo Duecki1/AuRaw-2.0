@@ -2,7 +2,6 @@ const COMPACT_PRIMARY_PANEL_HEIGHT: f32 = 52.0;
 const COMPACT_PRIMARY_TAB_HEIGHT: f32 = 48.0;
 const COMPACT_CONTEXT_PANEL_HEIGHT: f32 = 48.0;
 const COMPACT_CONTEXT_TAB_HEIGHT: f32 = 44.0;
-const COMPACT_CONTEXT_ACTION_WIDTH: f32 = 44.0;
 
 fn mobile_tab_text_geometry(height: f32) -> (f32, f32, f32, f32) {
     let icon_size = (height * 0.38).clamp(19.0, 23.0);
@@ -13,6 +12,15 @@ fn mobile_tab_text_geometry(height: f32) -> (f32, f32, f32, f32) {
     let icon_center = stack_top + icon_size * 0.5;
     let label_center = stack_top + icon_size + gap + label_size * 0.5;
     (icon_size, label_size, icon_center, label_center)
+}
+
+fn mobile_tab_icon_geometry(height: f32, show_label: bool) -> (f32, f32) {
+    if show_label {
+        let (icon_size, _, icon_center, _) = mobile_tab_text_geometry(height);
+        (icon_size, icon_center)
+    } else {
+        ((height * 0.5).clamp(21.0, 25.0), height * 0.5)
+    }
 }
 
 impl Sidebar {
@@ -60,6 +68,7 @@ impl Sidebar {
 
         egui::Panel::bottom("develop_portrait_primary_tabs")
             .resizable(false)
+            .show_separator_line(false)
             .exact_size(if compact {
                 COMPACT_PRIMARY_PANEL_HEIGHT
             } else {
@@ -71,6 +80,7 @@ impl Sidebar {
         if matches!(app.ui.sidebar_tab, SidebarTab::Adjustments | SidebarTab::Masks) {
             egui::Panel::bottom("develop_portrait_context_tabs")
                 .resizable(false)
+                .show_separator_line(false)
                 .exact_size(if compact {
                     COMPACT_CONTEXT_PANEL_HEIGHT
                 } else {
@@ -94,18 +104,26 @@ impl Sidebar {
             .stroke(egui::Stroke::NONE)
     }
 
-    fn paint_mobile_navigation_separators(ui: &Ui) {
+    fn paint_mobile_navigation_separator(ui: &Ui) {
         let rect = ui.max_rect();
         let stroke = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
         ui.painter().hline(rect.x_range(), rect.top(), stroke);
-        ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
     }
 
     fn show_mobile_primary_tabs(ui: &mut Ui, app: &mut AurawApp) {
         use egui_phosphor::regular;
 
-        Self::paint_mobile_navigation_separators(ui);
+        // Treat the two portrait navigation rows as one surface. The context
+        // row paints the outer divider when it is present; otherwise the
+        // primary row still needs to separate itself from the content.
+        if !matches!(
+            app.ui.sidebar_tab,
+            SidebarTab::Adjustments | SidebarTab::Masks
+        ) {
+            Self::paint_mobile_navigation_separator(ui);
+        }
         ui.spacing_mut().item_spacing.x = 0.0;
+        let show_labels = app.preferences.show_develop_navigation_labels;
         let tab_height = if crate::ui::theme::is_compact_portrait(ui) {
             COMPACT_PRIMARY_TAB_HEIGHT
         } else {
@@ -140,6 +158,7 @@ impl Sidebar {
                     ui,
                     icon,
                     label,
+                    show_labels,
                     app.ui.sidebar_tab == tab,
                     egui::vec2(item_width, tab_height),
                     tooltip,
@@ -154,58 +173,35 @@ impl Sidebar {
     }
 
     fn show_mobile_context_tabs(ui: &mut Ui, app: &mut AurawApp) {
-        use egui_phosphor::regular;
-
-        Self::paint_mobile_navigation_separators(ui);
+        Self::paint_mobile_navigation_separator(ui);
         let compact = crate::ui::theme::is_compact_portrait(ui);
         let tab_height = if compact {
             COMPACT_CONTEXT_TAB_HEIGHT
         } else {
             52.0
         };
-        let has_reset_action = compact && app.ui.sidebar_tab == SidebarTab::Adjustments;
-        let action_width = if has_reset_action {
-            COMPACT_CONTEXT_ACTION_WIDTH
-        } else {
-            0.0
-        };
-        let tabs_width = (ui.available_width() - action_width).max(1.0);
+        let tabs_width = ui.available_width().max(1.0);
 
         ui.spacing_mut().item_spacing.x = 0.0;
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(tabs_width, tab_height),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.set_width(tabs_width);
-                    egui::ScrollArea::horizontal()
-                        .id_salt("develop-portrait-context-tabs")
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                        )
-                        .show(ui, |ui| {
-                            Self::show_mobile_context_tab_items(ui, app, tab_height)
-                        });
-                },
-            );
-
-            if has_reset_action
-                && crate::ui::icons::phosphor_icon_button(
-                    ui,
-                    regular::ARROW_COUNTER_CLOCKWISE,
-                    egui::vec2(COMPACT_CONTEXT_ACTION_WIDTH, tab_height),
-                    "Reset all develop adjustments",
-                )
-                .clicked()
-            {
-                app.reset_develop_adjustments();
-            }
-        });
+        ui.allocate_ui_with_layout(
+            egui::vec2(tabs_width, tab_height),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_width(tabs_width);
+                egui::ScrollArea::horizontal()
+                    .id_salt("develop-portrait-context-tabs")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        Self::show_mobile_context_tab_items(ui, app, tab_height)
+                    });
+            },
+        );
     }
 
     fn show_mobile_context_tab_items(ui: &mut Ui, app: &mut AurawApp, tab_height: f32) {
         use egui_phosphor::regular;
 
+        let show_labels = app.preferences.show_develop_navigation_labels;
         ui.spacing_mut().item_spacing.x = 1.0;
         ui.horizontal(|ui| match app.ui.sidebar_tab {
             SidebarTab::Adjustments => {
@@ -227,6 +223,7 @@ impl Sidebar {
                         ui,
                         icon,
                         label,
+                        show_labels,
                         app.develop_ui.adjustment_section == section,
                         egui::vec2(Self::CONTEXT_TAB_WIDTH, tab_height),
                         label,
@@ -253,6 +250,7 @@ impl Sidebar {
                             ui,
                             icon,
                             label,
+                            show_labels,
                             app.develop_ui.adjustment_section == section,
                             egui::vec2(Self::CONTEXT_TAB_WIDTH, tab_height),
                             label,
@@ -292,6 +290,7 @@ impl Sidebar {
                         ui,
                         icon,
                         label,
+                        show_labels,
                         app.develop_ui.mask_section == section,
                         egui::vec2(Self::CONTEXT_TAB_WIDTH, tab_height),
                         label,
@@ -310,6 +309,7 @@ impl Sidebar {
         ui: &mut Ui,
         icon: &str,
         label: &str,
+        show_label: bool,
         selected: bool,
         size: egui::Vec2,
         tooltip: &str,
@@ -337,7 +337,7 @@ impl Sidebar {
         } else {
             visuals.weak_text_color()
         };
-        let (icon_size, label_size, icon_center, label_center) = mobile_tab_text_geometry(size.y);
+        let (icon_size, icon_center) = mobile_tab_icon_geometry(size.y, show_label);
         painter.text(
             egui::pos2(rect.center().x, rect.top() + icon_center),
             Align2::CENTER_CENTER,
@@ -345,13 +345,16 @@ impl Sidebar {
             FontId::proportional(icon_size),
             color,
         );
-        painter.text(
-            egui::pos2(rect.center().x, rect.top() + label_center),
-            Align2::CENTER_CENTER,
-            label,
-            FontId::proportional(label_size),
-            color,
-        );
+        if show_label {
+            let (_, label_size, _, label_center) = mobile_tab_text_geometry(size.y);
+            painter.text(
+                egui::pos2(rect.center().x, rect.top() + label_center),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(label_size),
+                color,
+            );
+        }
         response.on_hover_text(tooltip)
     }
 
@@ -485,6 +488,7 @@ impl Sidebar {
         ui.set_width(Self::ANDROID_LANDSCAPE_TOOL_RAIL_WIDTH);
         ui.spacing_mut().item_spacing.y = 0.0;
         let previous = app.ui.sidebar_tab;
+        let show_labels = app.preferences.show_develop_navigation_labels;
         ui.vertical_centered(|ui| {
             for (tab, icon, label, tooltip) in [
                 (
@@ -512,6 +516,7 @@ impl Sidebar {
                     ui,
                     icon,
                     label,
+                    show_labels,
                     app.ui.sidebar_tab == tab,
                     egui::vec2(56.0, 56.0),
                     tooltip,
@@ -665,6 +670,22 @@ impl Sidebar {
                 changed |= Self::show_rendering(ui, &mut app.develop.exposure, true);
                 changed |= Self::show_raw(ui, &mut app.develop.exposure, true);
             }
+        }
+
+        if layout == ScreenLayout::Vertical && crate::ui::theme::is_compact_portrait(ui) {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!(
+                        "{}  Reset all adjustments",
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                    ))
+                    .on_hover_text("Reset all develop adjustments")
+                    .clicked()
+                {
+                    app.reset_develop_adjustments();
+                }
+            });
+            ui.add_space(crate::ui::theme::SPACE_XS);
         }
 
         if changed {

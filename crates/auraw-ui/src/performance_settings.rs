@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 15;
+const SETTINGS_VERSION: u32 = 16;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +23,8 @@ pub(crate) struct PerformanceSettings {
     pub preview_quality: crate::app::PreviewQuality,
     #[serde(default)]
     pub image_relative_brush_size: bool,
+    #[serde(default)]
+    pub show_develop_navigation_labels: bool,
     #[serde(default)]
     pub ui_design: crate::ui::theme::UiDesign,
     #[serde(default)]
@@ -115,6 +117,7 @@ impl Default for PerformanceSettings {
             library_sort_order: crate::ui::library::LibrarySortOrder::default(),
             preview_quality: crate::app::PreviewQuality::default(),
             image_relative_brush_size: false,
+            show_develop_navigation_labels: false,
             ui_design: crate::ui::theme::UiDesign::default(),
             preview_backdrop: crate::ui::theme::PreviewBackdrop::default(),
             birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
@@ -312,6 +315,7 @@ mod tests {
             library_sort_order: crate::ui::library::LibrarySortOrder::NameAscending,
             preview_quality: crate::app::PreviewQuality::High,
             image_relative_brush_size: true,
+            show_develop_navigation_labels: true,
             ui_design: crate::ui::theme::UiDesign::DaylightBlue,
             preview_backdrop: crate::ui::theme::PreviewBackdrop::White,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
@@ -361,6 +365,7 @@ mod tests {
         );
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::High);
         assert!(settings.image_relative_brush_size);
+        assert!(settings.show_develop_navigation_labels);
         assert_eq!(settings.ui_design, crate::ui::theme::UiDesign::DaylightBlue);
         assert_eq!(
             settings.preview_backdrop,
@@ -431,6 +436,7 @@ mod tests {
 
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
         assert!(!settings.image_relative_brush_size);
+        assert!(!settings.show_develop_navigation_labels);
         assert_eq!(settings.ui_design, crate::ui::theme::UiDesign::MidnightPink);
         assert_eq!(
             settings.preview_backdrop,
@@ -468,6 +474,7 @@ mod tests {
             library_sort_order: crate::ui::library::LibrarySortOrder::SmallestFirst,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             image_relative_brush_size: true,
+            show_develop_navigation_labels: true,
             ui_design: crate::ui::theme::UiDesign::Porcelain,
             preview_backdrop: crate::ui::theme::PreviewBackdrop::MatchPhoto,
             render_edited_thumbnails_during_indexing: true,
@@ -498,6 +505,7 @@ mod tests {
             crate::ai_masks::BiRefNetQuality::High
         );
         assert!(restored.image_relative_brush_size);
+        assert!(restored.show_develop_navigation_labels);
         assert_eq!(restored.ui_design, crate::ui::theme::UiDesign::Porcelain);
         assert_eq!(
             restored.preview_backdrop,

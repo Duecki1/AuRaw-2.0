@@ -147,6 +147,18 @@ impl Settings {
             );
 
             ui.separator();
+            if crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut app.preferences.show_develop_navigation_labels,
+                "Show Develop navigation labels",
+                "Shows a short name below each icon in the Develop navigation bars. Leave this disabled for a quieter, more compact interface.",
+            )
+            .changed()
+            {
+                app.persist_performance_settings();
+            }
+
+            ui.separator();
             let previous_quality = app.preview.quality;
             crate::ui::theme::form_combo_with_help(
                 ui,
