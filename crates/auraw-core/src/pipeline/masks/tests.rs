@@ -1085,6 +1085,25 @@ fn zero_feather_object_mask_preserves_refined_alpha() {
 }
 
 #[test]
+fn tiny_feather_blurs_native_ai_mask_without_binary_stair_steps() {
+    let mut stack = MaskStack::default();
+    stack.add_mask(MaskKind::Subject);
+    if let MaskGeometry::Ai { mask, feather, .. } =
+        &mut stack.selected_component_mut().unwrap().geometry
+    {
+        *mask = MaskImage::new(5, 1, vec![0, 32, 127, 128, 255]);
+        *feather = 0.01;
+    } else {
+        panic!("subject mask used unexpected geometry");
+    }
+    let layer = stack.rasterize_layer(0, 5, 1, 5, 1);
+    assert!(layer[0] < layer[1]);
+    assert!(layer[1] < layer[2]);
+    assert!(layer[2] <= layer[3]);
+    assert!(layer[3] < layer[4]);
+}
+
+#[test]
 fn submask_components_can_be_reordered_with_insertion_indices() {
     let mut stack = MaskStack::default();
     stack.add_mask(MaskKind::Brush);

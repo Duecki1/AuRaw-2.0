@@ -157,7 +157,6 @@ const VITMATTE_INSTALL: ModelInstallSpec = ModelInstallSpec {
     download: VITMATTE_DOWNLOAD,
     progress_label: "ViTMatte edge-refinement model",
 };
-
 const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
     connect_timeout: Duration::from_secs(30),
     response_timeout: Duration::from_secs(30),
@@ -168,7 +167,6 @@ const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
 const VITMATTE_MAX_EDGE_DESKTOP: u32 = 2048;
 const VITMATTE_MAX_EDGE_ANDROID: u32 = 1024;
 const VITMATTE_SIZE_DIVISOR: u32 = 32;
-
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
@@ -529,11 +527,73 @@ fn infer_subject(
         rgba.len()
     );
     initialize_runtime(runtime_path, runtime_sha256)?;
-    let model = quality.model();
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
         .context("invalid preview image for BiRefNet")?;
+    let mask = subject_mask_two_pass(model_path, quality, &image)?;
+    Ok(SubjectMaskResult {
+        width,
+        height,
+        mask,
+    })
+}
+
+/// Full-frame BiRefNet followed by native-resolution crop passes. Keeping this
+/// orchestration in the subject worker means no edge detail is delegated to a
+/// separate trimap model after the coarse pass.
+fn subject_mask_two_pass(
+    model_path: &Path,
+    quality: BiRefNetQuality,
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let (width, height) = image.dimensions();
+    let coarse = infer_birefnet(model_path, quality, &image)?;
+    let mut mask = coarse.clone();
+    if let Some(crop) = mask_refine::mask_crop_above(&coarse, width, height, 5, 0.15) {
+        let crop_image =
+            image::imageops::crop_imm(image, crop.x, crop.y, crop.width, crop.height).to_image();
+        let crop_alpha = infer_birefnet(model_path, quality, &crop_image)?;
+        mask_refine::merge_crop_pass(&mut mask, width, crop, &crop_alpha, 8);
+
+        // A small, top-biased third pass gives hair and other wispy upper detail
+        // another full native-resolution crop without changing the global mask.
+        let top_height = (crop.height as f32 * 0.30).ceil() as u32;
+        if top_height >= 16 {
+            let hair_crop = mask_refine::expand_crop(
+                mask_refine::MaskCrop {
+                    x: crop.x,
+                    y: crop.y,
+                    width: crop.width,
+                    height: top_height,
+                },
+                width,
+                height,
+                0.15,
+            );
+            let hair_image = image::imageops::crop_imm(
+                image,
+                hair_crop.x,
+                hair_crop.y,
+                hair_crop.width,
+                hair_crop.height,
+            )
+            .to_image();
+            let hair_alpha = infer_birefnet(model_path, quality, &hair_image)?;
+            mask_refine::merge_crop_pass(&mut mask, width, hair_crop, &hair_alpha, 8);
+        }
+    }
+    mask_refine::guided_filter_color(image.as_raw(), &mut mask, width, height, 8, 1e-4)?;
+    mask_refine::harden_model_alpha(&mut mask);
+    Ok(mask)
+}
+
+pub(super) fn infer_birefnet(
+    model_path: &Path,
+    quality: BiRefNetQuality,
+    image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let model = quality.model();
     let resized = image::imageops::resize(
-        &image,
+        image,
         model.input_width,
         model.input_height,
         FilterType::Lanczos3,
@@ -563,12 +623,13 @@ fn infer_subject(
         |session| run_subject_session(session, input, model.input_width, model.input_height),
     )?;
 
-    let mask = restore_birefnet_output(&logits, output_width, output_height, width, height)?;
-    Ok(SubjectMaskResult {
-        width,
-        height,
-        mask,
-    })
+    restore_birefnet_output(
+        &logits,
+        output_width,
+        output_height,
+        image.width(),
+        image.height(),
+    )
 }
 
 fn run_subject_session(
@@ -742,18 +803,17 @@ struct MatteCrop {
 }
 
 fn matte_crop_for_mask(mask: &[u8], width: u32, height: u32) -> Option<MatteCrop> {
-    let width_usize = width as usize;
     let mut min_x = width;
     let mut min_y = height;
-    let mut max_x = 0u32;
-    let mut max_y = 0u32;
+    let mut max_x = 0;
+    let mut max_y = 0;
     let mut found = false;
     for (index, &value) in mask.iter().enumerate() {
         if value <= 4 {
             continue;
         }
-        let x = (index % width_usize) as u32;
-        let y = (index / width_usize) as u32;
+        let x = index as u32 % width;
+        let y = index as u32 / width;
         min_x = min_x.min(x);
         min_y = min_y.min(y);
         max_x = max_x.max(x);
@@ -763,19 +823,17 @@ fn matte_crop_for_mask(mask: &[u8], width: u32, height: u32) -> Option<MatteCrop
     if !found {
         return None;
     }
-    let subject_width = max_x - min_x + 1;
-    let subject_height = max_y - min_y + 1;
-    let margin = ((subject_width.max(subject_height) as f32 * 0.08).round() as u32)
+    let margin = (((max_x - min_x + 1).max(max_y - min_y + 1) as f32 * 0.08).round() as u32)
         .clamp(24, width.max(height).max(24));
-    let x0 = min_x.saturating_sub(margin);
-    let y0 = min_y.saturating_sub(margin);
+    let x = min_x.saturating_sub(margin);
+    let y = min_y.saturating_sub(margin);
     let x1 = max_x.saturating_add(margin).min(width - 1);
     let y1 = max_y.saturating_add(margin).min(height - 1);
     Some(MatteCrop {
-        x: x0,
-        y: y0,
-        width: x1 - x0 + 1,
-        height: y1 - y0 + 1,
+        x,
+        y,
+        width: x1 - x + 1,
+        height: y1 - y + 1,
     })
 }
 
@@ -784,48 +842,29 @@ fn build_vitmatte_trimap(mask: &[u8], width: usize, height: usize) -> Vec<u8> {
     for y in 0..height {
         for x in 0..width {
             let index = y * width + x;
-            let value = mask[index];
-            let foreground = value >= 128;
-            let mut boundary = (96..=160).contains(&value);
-            if !boundary {
-                let min_y = y.saturating_sub(1);
-                let max_y = (y + 1).min(height - 1);
-                let min_x = x.saturating_sub(1);
-                let max_x = (x + 1).min(width - 1);
-                'neighbors: for ny in min_y..=max_y {
-                    for nx in min_x..=max_x {
-                        if (mask[ny * width + nx] >= 128) != foreground {
-                            boundary = true;
-                            break 'neighbors;
-                        }
-                    }
-                }
-            }
-            unknown[index] = boundary;
+            let foreground = mask[index] >= 128;
+            unknown[index] = (96..=160).contains(&mask[index])
+                || (y.saturating_sub(1)..=(y + 1).min(height - 1)).any(|ny| {
+                    (x.saturating_sub(1)..=(x + 1).min(width - 1))
+                        .any(|nx| (mask[ny * width + nx] >= 128) != foreground)
+                });
         }
     }
-
     let radius = ((width.min(height) as f32 / 64.0).round() as usize).clamp(6, 24);
     for _ in 0..radius {
         let source = unknown.clone();
-        unknown
-            .par_chunks_mut(width)
-            .enumerate()
-            .for_each(|(y, row)| {
-                for (x, value) in row.iter_mut().enumerate() {
-                    if *value {
-                        continue;
-                    }
-                    let min_y = y.saturating_sub(1);
-                    let max_y = (y + 1).min(height - 1);
-                    let min_x = x.saturating_sub(1);
-                    let max_x = (x + 1).min(width - 1);
-                    *value =
-                        (min_y..=max_y).any(|ny| (min_x..=max_x).any(|nx| source[ny * width + nx]));
+        for y in 0..height {
+            for x in 0..width {
+                let index = y * width + x;
+                if !unknown[index] {
+                    unknown[index] = (y.saturating_sub(1)..=(y + 1).min(height - 1)).any(|ny| {
+                        (x.saturating_sub(1)..=(x + 1).min(width - 1))
+                            .any(|nx| source[ny * width + nx])
+                    });
                 }
-            });
+            }
+        }
     }
-
     mask.iter()
         .zip(unknown)
         .map(|(&value, unknown)| {
@@ -840,10 +879,6 @@ fn build_vitmatte_trimap(mask: &[u8], width: usize, height: usize) -> Vec<u8> {
         .collect()
 }
 
-fn padded_to_divisor(value: u32, divisor: u32) -> u32 {
-    value.div_ceil(divisor) * divisor
-}
-
 fn refine_mask_with_vitmatte(
     model_path: &Path,
     rgba: &[u8],
@@ -852,80 +887,58 @@ fn refine_mask_with_vitmatte(
     coarse_mask: &[u8],
     strength: f32,
 ) -> Result<Vec<u8>> {
-    let pixels = usize::try_from(u64::from(width) * u64::from(height))
-        .context("ViTMatte source dimensions overflow")?;
+    let pixels = usize::try_from(u64::from(width) * u64::from(height))?;
     anyhow::ensure!(
         coarse_mask.len() == pixels,
         "ViTMatte coarse-mask size mismatch"
     );
-    anyhow::ensure!(
-        rgba.len() == pixels.saturating_mul(4),
-        "ViTMatte RGB size mismatch"
-    );
+    anyhow::ensure!(rgba.len() == pixels * 4, "ViTMatte RGB size mismatch");
     let Some(crop) = matte_crop_for_mask(coarse_mask, width, height) else {
         return Ok(coarse_mask.to_vec());
     };
-
     let source = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba.to_vec())
         .context("invalid ViTMatte source image")?;
     let crop_image =
         image::imageops::crop_imm(&source, crop.x, crop.y, crop.width, crop.height).to_image();
-    let full_mask_image = ImageBuffer::<Luma<u8>, _>::from_raw(width, height, coarse_mask.to_vec())
+    let full_mask = ImageBuffer::<Luma<u8>, _>::from_raw(width, height, coarse_mask.to_vec())
         .context("invalid ViTMatte coarse mask")?;
     let crop_mask =
-        image::imageops::crop_imm(&full_mask_image, crop.x, crop.y, crop.width, crop.height)
-            .to_image();
-
+        image::imageops::crop_imm(&full_mask, crop.x, crop.y, crop.width, crop.height).to_image();
     let max_edge = if cfg!(target_os = "android") {
         VITMATTE_MAX_EDGE_ANDROID
     } else {
         VITMATTE_MAX_EDGE_DESKTOP
     };
     let scale = (max_edge as f64 / crop.width.max(crop.height) as f64).min(1.0);
-    let model_width = ((crop.width as f64 * scale).round() as u32).max(1);
-    let model_height = ((crop.height as f64 * scale).round() as u32).max(1);
-    let resized_image = if model_width == crop.width && model_height == crop.height {
-        crop_image
-    } else {
-        image::imageops::resize(&crop_image, model_width, model_height, FilterType::Lanczos3)
-    };
-    let resized_mask = if model_width == crop.width && model_height == crop.height {
-        crop_mask
-    } else {
-        image::imageops::resize(&crop_mask, model_width, model_height, FilterType::Lanczos3)
-    };
-    let trimap = build_vitmatte_trimap(
-        resized_mask.as_raw(),
-        model_width as usize,
-        model_height as usize,
-    );
+    let model_width = (crop.width as f64 * scale).round().max(1.0) as u32;
+    let model_height = (crop.height as f64 * scale).round().max(1.0) as u32;
+    let image =
+        image::imageops::resize(&crop_image, model_width, model_height, FilterType::Lanczos3);
+    let mask = image::imageops::resize(&crop_mask, model_width, model_height, FilterType::Lanczos3);
+    let trimap = build_vitmatte_trimap(mask.as_raw(), model_width as usize, model_height as usize);
     if !trimap.contains(&128) {
         return Ok(coarse_mask.to_vec());
     }
-
-    let padded_width = padded_to_divisor(model_width, VITMATTE_SIZE_DIVISOR);
-    let padded_height = padded_to_divisor(model_height, VITMATTE_SIZE_DIVISOR);
-    let plane = usize::try_from(u64::from(padded_width) * u64::from(padded_height))
-        .context("ViTMatte padded dimensions overflow")?;
-    let mut input = vec![0.0f32; plane * 4];
+    let padded_width = model_width.div_ceil(VITMATTE_SIZE_DIVISOR) * VITMATTE_SIZE_DIVISOR;
+    let padded_height = model_height.div_ceil(VITMATTE_SIZE_DIVISOR) * VITMATTE_SIZE_DIVISOR;
+    let plane = padded_width as usize * padded_height as usize;
+    let mut values = vec![0.0; plane * 4];
     for y in 0..model_height as usize {
         for x in 0..model_width as usize {
             let source_index = y * model_width as usize + x;
-            let pixel = resized_image.as_raw();
-            let rgba_index = source_index * 4;
             let destination = y * padded_width as usize + x;
-            input[destination] = pixel[rgba_index] as f32 / 127.5 - 1.0;
-            input[plane + destination] = pixel[rgba_index + 1] as f32 / 127.5 - 1.0;
-            input[plane * 2 + destination] = pixel[rgba_index + 2] as f32 / 127.5 - 1.0;
-            input[plane * 3 + destination] = trimap[source_index] as f32 / 255.0;
+            let rgba_index = source_index * 4;
+            values[destination] = image.as_raw()[rgba_index] as f32 / 127.5 - 1.0;
+            values[plane + destination] = image.as_raw()[rgba_index + 1] as f32 / 127.5 - 1.0;
+            values[plane * 2 + destination] = image.as_raw()[rgba_index + 2] as f32 / 127.5 - 1.0;
+            values[plane * 3 + destination] = trimap[source_index] as f32 / 255.0;
         }
     }
     let input = Tensor::from_array((
         [1usize, 4, padded_height as usize, padded_width as usize],
-        input,
+        values,
     ))
     .context("create ViTMatte input tensor")?;
-
     let (output_width, output_height, alpha) = with_model_session(
         AiModel::ViTMatte,
         model_path,
@@ -933,39 +946,32 @@ fn refine_mask_with_vitmatte(
         mask_model_retention(cache_object_ai_sessions()),
         |session| run_vitmatte_session(session, input),
     )?;
-
-    let alpha_image =
-        ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, alpha)
-            .context("invalid ViTMatte alpha buffer")?;
-    let alpha_crop = image::imageops::crop_imm(
-        &alpha_image,
+    let alpha = ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, alpha)
+        .context("invalid ViTMatte alpha buffer")?;
+    let alpha = image::imageops::crop_imm(
+        &alpha,
         0,
         0,
         model_width.min(output_width),
         model_height.min(output_height),
     )
     .to_image();
-    let alpha_full =
-        image::imageops::resize(&alpha_crop, crop.width, crop.height, FilterType::Lanczos3);
-    let trimap_image =
-        ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(model_width, model_height, trimap)
-            .context("invalid ViTMatte trimap buffer")?;
-    let trimap_full =
-        image::imageops::resize(&trimap_image, crop.width, crop.height, FilterType::Nearest);
-
+    let alpha = image::imageops::resize(&alpha, crop.width, crop.height, FilterType::Lanczos3);
+    let trimap = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(model_width, model_height, trimap)
+        .context("invalid ViTMatte trimap buffer")?;
+    let trimap = image::imageops::resize(&trimap, crop.width, crop.height, FilterType::Nearest);
     let mut output = coarse_mask.to_vec();
-    let strength = strength.clamp(0.0, 1.0);
     for y in 0..crop.height as usize {
         for x in 0..crop.width as usize {
             let crop_index = y * crop.width as usize + x;
-            if trimap_full.as_raw()[crop_index] != 128 {
-                continue;
+            if trimap.as_raw()[crop_index] == 128 {
+                let index = (crop.y as usize + y) * width as usize + crop.x as usize + x;
+                let predicted = alpha.as_raw()[crop_index].clamp(0.0, 1.0) * 255.0;
+                output[index] = (coarse_mask[index] as f32 * (1.0 - strength.clamp(0.0, 1.0))
+                    + predicted * strength.clamp(0.0, 1.0))
+                .round()
+                .clamp(0.0, 255.0) as u8;
             }
-            let target = (crop.y as usize + y) * width as usize + crop.x as usize + x;
-            let predicted = (alpha_full.as_raw()[crop_index].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-            let coarse = coarse_mask[target] as f32;
-            let refined = coarse * (1.0 - strength) + predicted as f32 * strength;
-            output[target] = refined.clamp(0.0, 255.0).round() as u8;
         }
     }
     Ok(output)
@@ -975,7 +981,7 @@ fn run_vitmatte_session(
     session: &mut FallbackSession,
     input: Tensor<f32>,
 ) -> Result<(u32, u32, Vec<f32>)> {
-    session.run_with_fallback("ViTMatte ONNX inference", |ort_session, _accelerated| {
+    session.run_with_fallback("ViTMatte ONNX inference", |ort_session, _| {
         let outputs = ort_session
             .run(ort::inputs![&input])
             .context("run ViTMatte ONNX inference")?;
@@ -983,30 +989,23 @@ fn run_vitmatte_session(
             .values()
             .next()
             .context("ViTMatte returned no output tensors")?;
-        let (shape, alphas) = output
+        let (shape, alpha) = output
             .try_extract_tensor::<f32>()
             .context("read ViTMatte output tensor")?;
         anyhow::ensure!(
             shape.len() == 4 && shape[0] == 1 && shape[1] == 1,
-            "unexpected ViTMatte output shape {shape:?}; expected [1, 1, H, W]"
+            "unexpected ViTMatte output shape {shape:?}"
         );
         let height = usize::try_from(shape[2]).context("ViTMatte output height is invalid")?;
         let width = usize::try_from(shape[3]).context("ViTMatte output width is invalid")?;
-        let elements = width
-            .checked_mul(height)
-            .context("ViTMatte output dimensions overflow")?;
         anyhow::ensure!(
-            alphas.len() == elements,
-            "ViTMatte output tensor length mismatch"
-        );
-        anyhow::ensure!(
-            alphas.iter().all(|value| value.is_finite()),
-            "ViTMatte output contains non-finite alpha values"
+            alpha.len() == width * height && alpha.iter().all(|value| value.is_finite()),
+            "invalid ViTMatte output"
         );
         Ok((
-            u32::try_from(width).context("ViTMatte output width exceeds u32")?,
-            u32::try_from(height).context("ViTMatte output height exceeds u32")?,
-            alphas.to_vec(),
+            u32::try_from(width)?,
+            u32::try_from(height)?,
+            alpha.to_vec(),
         ))
     })
 }
@@ -1107,41 +1106,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod vitmatte_tests {
-    use super::*;
-
-    #[test]
-    #[ignore = "manual integration probe requiring AURAW_TEST_VITMATTE and AURAW_TEST_ORT"]
-    fn pinned_vitmatte_refines_an_object_boundary() {
-        let vitmatte = PathBuf::from(std::env::var_os("AURAW_TEST_VITMATTE").unwrap());
-        let runtime = PathBuf::from(std::env::var_os("AURAW_TEST_ORT").unwrap());
-        let sha256 = sha256_file_hex(&runtime).unwrap();
-        initialize_runtime(Some(&runtime), Some(&sha256)).unwrap();
-
-        let width = 64;
-        let height = 64;
-        let mut rgba = vec![255u8; width * height * 4];
-        let mut coarse = vec![0u8; width * height];
-        for y in 0..height {
-            for x in 0..width {
-                let index = y * width + x;
-                let value = if x < width / 2 { 48 } else { 208 };
-                rgba[index * 4] = value;
-                rgba[index * 4 + 1] = value;
-                rgba[index * 4 + 2] = value;
-                coarse[index] = if x < width / 2 { 255 } else { 0 };
-            }
-        }
-
-        let refined =
-            refine_mask_with_vitmatte(&vitmatte, &rgba, width as u32, height as u32, &coarse, 1.0)
-                .unwrap();
-        assert_eq!(refined.len(), coarse.len());
-        assert!(refined.iter().any(|value| (1..=254).contains(value)));
-    }
-}
-
+mod mask_refine;
 mod object;
 
 pub use object::{
