@@ -6,8 +6,6 @@
 #import auraw::tone_common as ToneCommon
 #import auraw::tonemap as Tonemap
 
-
-
 struct HazeNeighborhood {
     dark_ratio: f32,
     airlight: vec3<f32>,
@@ -348,7 +346,6 @@ fn apply_vignette(pos: vec2<i32>, rgb: vec3<f32>) -> vec3<f32> {
     return mix(rgb, vec3<f32>(1.0), opacity);
 }
 
-
 fn apply_local_scene_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) -> vec3<f32> {
     var rgb = input_rgb;
     let count = min(Common::scene_tone_uniforms.mask_counts.x, 32u);
@@ -421,7 +418,6 @@ fn apply_local_creative_mask_effect_nodes(pos: vec2<i32>, input_rgb: vec3<f32>) 
     }
     return rgb;
 }
-
 
 @compute @workgroup_size(8, 8, 1)
 fn apply_scene_effects_node(@builtin(global_invocation_id) gid: vec3<u32>) {

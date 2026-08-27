@@ -7,7 +7,7 @@ plugins {
 def repositoryRoot = rootProject.projectDir.parentFile
 def cargoManifest = new File(repositoryRoot, "Cargo.toml")
 
-def loadWorkspaceMetadata = {
+def loadCargoMetadata = {
     if (!cargoManifest.isFile()) {
         throw new GradleException("Cargo workspace manifest not found: ${cargoManifest}")
     }
@@ -32,10 +32,16 @@ def loadWorkspaceMetadata = {
     if (!(document?.metadata instanceof Map)) {
         throw new GradleException("Cargo metadata did not contain workspace metadata.")
     }
-    return document.metadata
+    return document
 }
 
-def workspaceMetadata = loadWorkspaceMetadata()
+def cargoMetadata = loadCargoMetadata()
+def workspaceMetadata = cargoMetadata.metadata
+def aurawUiPackage = cargoMetadata.packages.find { it.name == "auraw-ui" }
+if (aurawUiPackage == null || !(aurawUiPackage.version instanceof String)) {
+    throw new GradleException("Cargo metadata did not contain the auraw-ui package version.")
+}
+def aurawVersionName = aurawUiPackage.version
 def requireMetadata = { String key, Class expectedType ->
     if (!workspaceMetadata.containsKey(key)) {
         throw new GradleException(
@@ -105,7 +111,7 @@ android {
         minSdk aurawMinSdk
         targetSdk aurawTargetSdk
         versionCode aurawVersionCode
-        versionName "0.1.0"
+        versionName aurawVersionName
         ndk {
             abiFilters(*aurawAbis)
         }

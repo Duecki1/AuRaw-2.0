@@ -142,8 +142,7 @@ fn selection_actions_are_shared_and_single_item_actions_stay_guarded() {
 #[cfg(not(target_os = "android"))]
 #[test]
 fn thumbnail_selection_uses_unified_asset_ids() {
-    let context = egui::Context::default();
-    let mut library = LibraryState::new(&context);
+    let mut library = LibraryState::new();
     let first = LibraryAssetId::Desktop(PathBuf::from("one.CR3"));
     let second = LibraryAssetId::Desktop(PathBuf::from("two.NEF"));
 
@@ -173,8 +172,7 @@ fn filename_search_is_case_insensitive_and_supports_comma_separated_fragments() 
 #[cfg(not(target_os = "android"))]
 #[test]
 fn selecting_search_matches_replaces_the_selection_with_every_visible_match() {
-    let context = egui::Context::default();
-    let mut library = LibraryState::new(&context);
+    let mut library = LibraryState::new();
     library.entries = [
         test_asset("DSC23824.CR3"),
         test_asset("DSC384384.NEF"),
@@ -393,7 +391,7 @@ fn decoded_preview_does_not_change_reserved_gallery_geometry() {
 fn opening_a_library_folder_records_it_before_async_scanning() {
     let root = unique_temp_dir("library-open-folder").join("not-created");
     let context = eframe::egui::Context::default();
-    let mut library = LibraryState::new(&context);
+    let mut library = LibraryState::new();
 
     library.open_folder(root.clone(), &context);
 
@@ -409,7 +407,7 @@ fn desktop_subfolder_navigation_keeps_the_chosen_root() {
     let nested = root.join("year").join("shoot");
     let outside = root.with_extension("outside");
     let context = eframe::egui::Context::default();
-    let mut library = LibraryState::new(&context);
+    let mut library = LibraryState::new();
 
     library.open_folder(root.clone(), &context);
     assert!(library.select_folder(nested.clone(), &context));
@@ -431,7 +429,7 @@ fn restoring_a_library_reopens_and_reveals_its_selected_subfolder() {
     let selected = parent.join("shoot");
     fs::create_dir_all(&selected).unwrap();
     let context = eframe::egui::Context::default();
-    let mut library = LibraryState::new(&context);
+    let mut library = LibraryState::new();
 
     library.restore_folder(root.clone(), Some(selected.clone()), &context);
 
@@ -472,7 +470,7 @@ fn desktop_folder_tree_contains_nested_directories_and_ignores_symlinks() {
 #[test]
 fn evicted_thumbnail_restores_from_resident_pixels_without_reloading() {
     let context = eframe::egui::Context::default();
-    let mut library = LibraryState::new(&context);
+    let mut library = LibraryState::new();
     let mut entry = new_library_entry(test_asset("resident-restore.dng"));
     entry.thumbnail_size = Some([512, 341]);
     entry.resident_thumbnail = Some(RawThumbnail {
@@ -493,7 +491,7 @@ fn evicted_thumbnail_restores_from_resident_pixels_without_reloading() {
 #[test]
 fn develop_loading_thumbnail_uses_resident_pixels_without_queuing_decode() {
     let context = eframe::egui::Context::default();
-    let mut library = LibraryState::new(&context);
+    let mut library = LibraryState::new();
     let path = PathBuf::from("develop-loading-resident.dng");
     let mut entry = new_library_entry(test_asset(path.clone()));
     entry.thumbnail_size = Some([512, 341]);
@@ -519,7 +517,7 @@ fn develop_loading_thumbnail_uses_resident_pixels_without_queuing_decode() {
 #[test]
 fn resetting_adjustments_allows_an_unedited_thumbnail_to_replace_the_developed_one() {
     let context = eframe::egui::Context::default();
-    let mut library = LibraryState::new(&context);
+    let mut library = LibraryState::new();
     let path = PathBuf::from("reset-preview.dng");
     let mut entry = new_library_entry(test_asset(path.clone()));
     entry.texture = Some(context.load_texture(
@@ -953,8 +951,7 @@ fn resident_thumbnail_is_bounded_and_keeps_aspect_ratio() {
 #[cfg(not(target_os = "android"))]
 #[test]
 fn library_exposes_its_shared_decode_gate_and_resumes_in_library() {
-    let context = eframe::egui::Context::default();
-    let mut library = LibraryState::new(&context);
+    let mut library = LibraryState::new();
     let first = library.decode_gate();
     let second = library.decode_gate();
     assert!(Arc::ptr_eq(&first, &second));
@@ -1150,6 +1147,69 @@ fn partial_cut_keeps_only_failed_assets_on_clipboard() {
     let remaining = completion.remaining_clipboard.unwrap();
     assert_eq!(remaining.assets.len(), 1);
     assert_eq!(remaining.assets[0].desktop_path(), Some(missing.as_path()));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(not(target_os = "android"))]
+#[test]
+fn broken_developed_thumbnail_cache_does_not_block_raw_bundle_operations() {
+    let root = unique_temp_dir("library-broken-developed-thumbnail-test");
+    let source = root.join("source");
+    let destination = root.join("destination");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(&destination).unwrap();
+
+    let copied_source = source.join("copy.CR3");
+    fs::write(&copied_source, b"copy-raw").unwrap();
+    fs::write(
+        crate::sidecar::sidecar_path_for_raw(&copied_source),
+        b"copy-sidecar",
+    )
+    .unwrap();
+    install_test_developed_thumbnail(&copied_source);
+    fs::write(
+        crate::sidecar::developed_thumbnail_path_for_raw(&copied_source),
+        b"not-a-jpeg",
+    )
+    .unwrap();
+
+    let copied = copy_raw_bundle_to_folder(
+        &copied_source,
+        copied_source.file_name().unwrap(),
+        &destination,
+    )
+    .unwrap();
+    assert_eq!(fs::read(&copied).unwrap(), b"copy-raw");
+    assert_eq!(
+        fs::read(crate::sidecar::sidecar_path_for_raw(&copied)).unwrap(),
+        b"copy-sidecar"
+    );
+    assert!(crate::sidecar::load_developed_thumbnail_cache(&copied, 512)
+        .unwrap()
+        .is_none());
+
+    let rename_source = source.join("before.NEF");
+    fs::write(&rename_source, b"rename-raw").unwrap();
+    fs::write(
+        crate::sidecar::sidecar_path_for_raw(&rename_source),
+        b"rename-sidecar",
+    )
+    .unwrap();
+    install_test_developed_thumbnail(&rename_source);
+    fs::write(
+        crate::sidecar::developed_thumbnail_path_for_raw(&rename_source),
+        b"not-a-jpeg",
+    )
+    .unwrap();
+
+    let renamed = rename_raw_bundle(&rename_source, "after.NEF").unwrap();
+    assert_eq!(fs::read(&renamed).unwrap(), b"rename-raw");
+    assert_eq!(
+        fs::read(crate::sidecar::sidecar_path_for_raw(&renamed)).unwrap(),
+        b"rename-sidecar"
+    );
+    assert!(!rename_source.exists());
+
     fs::remove_dir_all(root).unwrap();
 }
 

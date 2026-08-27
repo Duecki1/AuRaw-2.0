@@ -166,7 +166,7 @@ final class ThumbnailCache {
         }
     }
 
-    private static void trim(File directory) {
+    static void trim(File directory) {
         File[] legacyPngs = directory.listFiles(
                 (parent, name) -> name.endsWith(".png") || name.endsWith(".png.fingerprint"));
         if (legacyPngs != null) {
@@ -175,27 +175,41 @@ final class ThumbnailCache {
             }
         }
 
-        File[] thumbnails = directory.listFiles((parent, name) -> name.endsWith(".jpg"));
-        if (thumbnails != null && thumbnails.length > MAX_ENTRIES) {
-            Arrays.sort(
-                    thumbnails,
-                    (left, right) -> Long.compare(left.lastModified(), right.lastModified()));
-            int remove = thumbnails.length - MAX_ENTRIES;
-            for (int index = 0; index < remove; index++) {
-                deleteEntry(thumbnails[index]);
+        File[] fingerprints = directory.listFiles(
+                (parent, name) -> name.endsWith(".developed.jpg.fingerprint"));
+        if (fingerprints != null) {
+            for (File fingerprint : fingerprints) {
+                String name = fingerprint.getName();
+                String thumbnailName = name.substring(0, name.length() - ".fingerprint".length());
+                if (!new File(directory, thumbnailName).isFile()) {
+                    deleteFile(fingerprint);
+                }
             }
         }
 
-        File[] fingerprints = directory.listFiles(
-                (parent, name) -> name.endsWith(".developed.jpg.fingerprint"));
-        if (fingerprints == null) {
+        File[] thumbnails = directory.listFiles((parent, name) -> name.endsWith(".jpg"));
+        if (thumbnails == null || thumbnails.length == 0) {
             return;
         }
-        for (File fingerprint : fingerprints) {
-            String name = fingerprint.getName();
-            String thumbnailName = name.substring(0, name.length() - ".fingerprint".length());
-            if (!new File(directory, thumbnailName).isFile()) {
-                deleteFile(fingerprint);
+        Arrays.sort(
+                thumbnails,
+                (left, right) -> Long.compare(left.lastModified(), right.lastModified()));
+
+        int minimumRemovals = Math.max(0, thumbnails.length - MAX_ENTRIES);
+        long totalBytes = directorySize(directory);
+        for (int index = 0; index < thumbnails.length; index++) {
+            if (index >= minimumRemovals && totalBytes <= MAX_BYTES) {
+                break;
+            }
+            File thumbnail = thumbnails[index];
+            File fingerprint = new File(thumbnail.getPath() + ".fingerprint");
+            long removedBytes = Math.max(0L, thumbnail.length())
+                    + Math.max(0L, fingerprint.length());
+            deleteEntry(thumbnail);
+            if (!thumbnail.exists() && !fingerprint.exists()) {
+                totalBytes = Math.max(0L, totalBytes - removedBytes);
+            } else {
+                totalBytes = directorySize(directory);
             }
         }
     }

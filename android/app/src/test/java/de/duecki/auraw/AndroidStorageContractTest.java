@@ -87,6 +87,42 @@ public final class AndroidStorageContractTest {
     }
 
     @Test
+    public void generatedStorageNamesStayWithinFilesystemLimits() {
+        String unicodeRaw = "😀".repeat(100) + ".dng";
+        String rawName = AndroidStorageContract.safeRawName(unicodeRaw);
+        assertTrue(rawName.endsWith(".dng"));
+        assertTrue(rawName.getBytes(StandardCharsets.UTF_8).length <= AndroidStorageContract.MAX_RAW_NAME_BYTES);
+        assertTrue(AndroidStorageContract.importPartialName(rawName)
+                .getBytes(StandardCharsets.UTF_8).length <= 255);
+
+        String exportName = AndroidStorageContract.safeImageName(
+                "x".repeat(400) + ".PNG", "image/png");
+        assertTrue(exportName.endsWith(".PNG"));
+        assertTrue(exportName.getBytes(StandardCharsets.UTF_8).length <= AndroidStorageContract.MAX_EXPORT_NAME_BYTES);
+
+        String profileName = AndroidStorageContract.truncateUtf8PreservingExtension(
+                "é".repeat(200) + ".dcp", 180);
+        assertTrue(profileName.endsWith(".dcp"));
+        assertTrue(profileName.getBytes(StandardCharsets.UTF_8).length <= 180);
+    }
+
+    @Test
+    public void temporaryLibraryFileClassifierCoversOwnedPartialFilesOnly() {
+        assertTrue(AndroidStorageContract.isLibraryTemporaryFileName(
+                ".auraw-import-capture.dng.part"));
+        assertTrue(AndroidStorageContract.isLibraryTemporaryFileName(
+                ".auraw-sidecar-123.part"));
+        assertTrue(AndroidStorageContract.isLibraryTemporaryFileName(
+                ".auraw-migrate-old.nef.part"));
+        assertTrue(AndroidStorageContract.isLibraryTemporaryFileName(
+                ".auraw-move-old.nef.part"));
+        assertFalse(AndroidStorageContract.isLibraryTemporaryFileName("capture.dng"));
+        assertFalse(AndroidStorageContract.isLibraryTemporaryFileName("notes.part"));
+        assertFalse(AndroidStorageContract.isLibraryTemporaryFileName(
+                ".auraw-import-capture.dng"));
+    }
+
+    @Test
     public void sidecarsPublishAtomicallyAndRespectTheSizeLimit() throws Exception {
         File root = temporaryFolder.getRoot();
         File library = new File(root, ".library");
@@ -186,6 +222,27 @@ public final class AndroidStorageContractTest {
     }
 
     @Test
+    public void thumbnailTrimEnforcesThePersistentCacheByteBudget() throws Exception {
+        File directory = temporaryFolder.newFolder("thumbnail-cache");
+        File oldest = new File(directory, "oldest.raw.jpg");
+        File middle = new File(directory, "middle.developed.jpg");
+        File newest = new File(directory, "newest.raw.jpg");
+        writeSparseFile(oldest, 50L * 1024L * 1024L, 1_000L);
+        writeSparseFile(middle, 50L * 1024L * 1024L, 2_000L);
+        writeSparseFile(newest, 50L * 1024L * 1024L, 3_000L);
+        File middleFingerprint = new File(middle.getPath() + ".fingerprint");
+        Files.write(middleFingerprint.toPath(), new byte[] {1, 2, 3, 4});
+        assertTrue(middleFingerprint.setLastModified(2_000L));
+
+        ThumbnailCache.trim(directory);
+
+        assertFalse(oldest.exists());
+        assertTrue(middle.exists());
+        assertTrue(newest.exists());
+        assertTrue(directoryBytes(directory) <= 128L * 1024L * 1024L);
+    }
+
+    @Test
     public void boundedStreamsEnforceLimitsAndRecoverFromZeroProgressReads() throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         long copied = BoundedStreams.copy(
@@ -207,6 +264,23 @@ public final class AndroidStorageContractTest {
         } catch (StorageLimitExceededException expected) {
             assertEquals("too large", expected.getMessage());
         }
+    }
+
+    private static void writeSparseFile(File file, long bytes, long modified) throws Exception {
+        try (java.io.RandomAccessFile output = new java.io.RandomAccessFile(file, "rw")) {
+            output.setLength(bytes);
+        }
+        assertTrue(file.setLastModified(modified));
+    }
+
+    private static long directoryBytes(File directory) {
+        long bytes = 0L;
+        File[] entries = directory.listFiles();
+        assertTrue(entries != null);
+        for (File entry : entries) {
+            bytes += Math.max(0L, entry.length());
+        }
+        return bytes;
     }
 
     private static final class ZeroProgressInputStream extends InputStream {

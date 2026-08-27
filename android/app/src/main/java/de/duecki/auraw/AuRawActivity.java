@@ -8,9 +8,6 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
 import android.graphics.Insets;
-import android.net.ConnectivityManager;
-import android.net.Network;
-import android.net.NetworkCapabilities;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -30,24 +27,6 @@ public final class AuRawActivity extends NativeActivity {
     private ProfileImporter profileImporter;
     private ExportPublisher exportPublisher;
     private TaskNotificationController taskNotificationController;
-
-    public boolean isNetworkAvailable() {
-        ConnectivityManager connectivity =
-                (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (connectivity == null) {
-            return false;
-        }
-        Network activeNetwork = connectivity.getActiveNetwork();
-        if (activeNetwork == null) {
-            return false;
-        }
-        NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(activeNetwork);
-        return capabilities != null
-                && (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                        || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-                        || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                        || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN));
-    }
 
     static {
         System.loadLibrary("auraw");

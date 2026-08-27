@@ -198,7 +198,6 @@ impl ExportHarness<'_> {
             }
         }
         let output = finished.context("export worker exited without a completion event")?;
-        while receiver.recv().is_ok() {}
         println!(
             "wrote {} ({}x{}, sRGB PNG, {:?})",
             output.display(),
@@ -338,6 +337,9 @@ fn parse_args() -> Result<Args> {
     if suite_output.is_none() && !suite_only.is_empty() {
         bail!("--only requires --suite-output");
     }
+    if suite_output.is_none() && skip_existing {
+        bail!("--skip-existing requires --suite-output");
+    }
     for label in &suite_only {
         if !LIGHTROOM_COMPARISON_SUITE
             .iter()
@@ -347,7 +349,11 @@ fn parse_args() -> Result<Args> {
         }
     }
     if let Some(output) = &output {
-        if output.extension().and_then(|value| value.to_str()) != Some("png") {
+        if !output
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("png"))
+        {
             bail!("--output must use the .png extension");
         }
     }

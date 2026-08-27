@@ -132,7 +132,7 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
         });
     });
 
-    let wheel_response = ui.vertical_centered(|ui| {
+    ui.vertical_centered(|ui| {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let center = rect.center();
@@ -200,7 +200,6 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
             "Drag from the center to choose hue and saturation. Double-click the wheel to reset it.",
         )
     });
-    let _ = wheel_response;
 
     changed |= gradient_adjustment_slider(
         ui,

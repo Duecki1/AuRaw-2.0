@@ -353,10 +353,6 @@ impl eframe::App for AurawApp {
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
         #[cfg(target_os = "android")]
-        if self.ui.active_tab != AppTab::Library || self.library.folder_sidebar_open() {
-            ui.ctx().request_repaint_after(Duration::from_millis(120));
-        }
-        #[cfg(target_os = "android")]
         if self.android.picker_pending {
             ui.ctx().request_repaint_after(Duration::from_millis(120));
         }
@@ -386,10 +382,13 @@ impl eframe::App for AurawApp {
     fn on_exit(&mut self) {
         auraw_ai::set_active_ai_context(None);
         #[cfg(target_os = "android")]
-        if let Err(error) =
-            crate::android::clear_background_task_notification(&self.android.android_app)
         {
-            log::warn!("{error}");
+            if let Err(error) =
+                crate::android::clear_background_task_notification(&self.android.android_app)
+            {
+                log::warn!("{error}");
+            }
+            crate::android::uninstall_context();
         }
         self.persist_performance_settings();
         self.flush_sidecar_on_exit();

@@ -206,6 +206,14 @@ pub fn install_context(context: &egui::Context) {
     }
 }
 
+pub fn uninstall_context() {
+    if let Ok(mut installed) = EGUI_CONTEXT.lock() {
+        *installed = None;
+    }
+    BACK_NAVIGATION_ACTIVE.store(false, Ordering::Release);
+    BACK_REQUESTED.store(false, Ordering::Release);
+}
+
 pub fn set_back_navigation_active(active: bool) {
     BACK_NAVIGATION_ACTIVE.store(active, Ordering::Release);
 }
@@ -235,19 +243,6 @@ pub fn take_camera_profile_folder_result() -> Option<CameraProfileFolderResult> 
 
 pub fn take_export_publish_result() -> Option<ExportPublishResult> {
     export_results().lock().ok()?.pop_front()
-}
-
-pub fn network_available(app: &AndroidApp) -> Result<bool, String> {
-    with_activity(app, |env, activity| {
-        env.call_method(
-            activity,
-            jni::jni_str!("isNetworkAvailable"),
-            jni::jni_sig!(() -> boolean),
-            &[],
-        )?
-        .z()
-    })
-    .map_err(|error| format!("could not inspect Android network state: {error:#}"))
 }
 
 pub fn set_light_system_bars(app: &AndroidApp, light: bool) -> Result<(), String> {

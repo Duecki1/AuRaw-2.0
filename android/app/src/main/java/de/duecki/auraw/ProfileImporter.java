@@ -40,7 +40,6 @@ final class ProfileImporter {
     Intent createFolderPickerIntent() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                 | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         Uri initialUri = pickerLocations.readContentUri(CAMERA_PROFILE_PICKER_URI_KEY);
         if (initialUri != null) {
@@ -61,14 +60,6 @@ final class ProfileImporter {
         Uri treeUri = data.getData();
         String folderLabel = queryProfileFolderName(treeUri);
         callbacks.onImportStarted(folderLabel);
-        if ((data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
-            try {
-                storage.getContentResolver().takePersistableUriPermission(
-                        treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            } catch (SecurityException ignored) {
-                // Some providers permit this read but reject persistent grants.
-            }
-        }
         new Thread(
                 () -> importCameraProfileFolder(treeUri, folderLabel),
                 "AuRaw camera profile import")
@@ -255,16 +246,7 @@ final class ProfileImporter {
         if (name.isEmpty() || ".".equals(name) || "..".equals(name)) {
             name = "profile";
         }
-        if (name.length() > 180) {
-            int dot = name.toLowerCase(Locale.ROOT).endsWith(".dcp")
-                    ? name.length() - 4
-                    : -1;
-            if (dot > 0) {
-                name = name.substring(0, Math.min(dot, 176)) + ".dcp";
-            } else {
-                name = name.substring(0, 180);
-            }
-        }
+        name = AndroidStorageContract.truncateUtf8PreservingExtension(name, 180);
         return name;
     }
 

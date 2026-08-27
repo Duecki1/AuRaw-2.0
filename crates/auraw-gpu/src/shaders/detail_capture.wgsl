@@ -23,8 +23,6 @@ fn soft_detail_threshold(detail: f32, threshold: f32) -> f32 {
     return sign(detail) * max(abs(detail) - threshold, 0.0);
 }
 
-
-
 fn capture_detail_scale() -> f32 {
     let tuning = Common::effects_uniforms.capture_scale_sigma;
     return clamp(sqrt(presence_reference_scale()), tuning.x, tuning.y);

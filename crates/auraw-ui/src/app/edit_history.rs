@@ -288,13 +288,7 @@ impl EditHistory {
         self.committed_revision = self.committed_revision.wrapping_add(1);
     }
 
-    pub(super) fn can_undo(
-        &self,
-        exposure: &ExposureParams,
-        masks: &MaskStack,
-        lens: &LensCorrectionState,
-    ) -> bool {
-        let _ = (exposure, masks, lens);
+    pub(super) fn can_undo(&self) -> bool {
         !self.undo.is_empty()
             || self.interaction_pending
             || self.mask_interaction_pending
@@ -302,13 +296,7 @@ impl EditHistory {
             || self.mask_change_observed
     }
 
-    pub(super) fn can_redo(
-        &self,
-        exposure: &ExposureParams,
-        masks: &MaskStack,
-        lens: &LensCorrectionState,
-    ) -> bool {
-        let _ = (exposure, masks, lens);
+    pub(super) fn can_redo(&self) -> bool {
         !self.interaction_pending
             && !self.mask_interaction_pending
             && !self.change_observed
@@ -432,21 +420,11 @@ impl AurawApp {
     }
 
     pub(crate) fn can_undo_edit(&self) -> bool {
-        self.develop.loaded_raw.is_some()
-            && self.persistence.history.can_undo(
-                &self.develop.exposure,
-                &self.masks.stack,
-                &self.develop.lens_correction,
-            )
+        self.develop.loaded_raw.is_some() && self.persistence.history.can_undo()
     }
 
     pub(crate) fn can_redo_edit(&self) -> bool {
-        self.develop.loaded_raw.is_some()
-            && self.persistence.history.can_redo(
-                &self.develop.exposure,
-                &self.masks.stack,
-                &self.develop.lens_correction,
-            )
+        self.develop.loaded_raw.is_some() && self.persistence.history.can_redo()
     }
 
     pub(crate) fn undo_edit(&mut self) {
@@ -675,7 +653,7 @@ mod tests {
         history.observe(&exposure, &masks, &lens, false);
 
         assert!(history.undo.is_empty());
-        assert!(!history.can_undo(&exposure, &masks, &lens));
+        assert!(!history.can_undo());
         assert!(Arc::ptr_eq(&mask_contents, &history.current.masks));
         let materialized = history.current.materialize_masks();
         assert_eq!(materialized.selected_mask, None);
@@ -835,19 +813,19 @@ mod tests {
         history.observe(&exposure, &masks, &lens, false);
         let (restored, _, _) = history.undo(&exposure, &masks, &lens).unwrap();
         exposure = restored.exposure;
-        assert!(history.can_redo(&exposure, &masks, &lens));
+        assert!(history.can_redo());
 
         exposure.exposure = 0.9;
         history.note_change();
         history.observe(&exposure, &masks, &lens, true);
         exposure.exposure = 0.0;
         history.observe(&exposure, &masks, &lens, false);
-        assert!(history.can_redo(&exposure, &masks, &lens));
+        assert!(history.can_redo());
 
         exposure.exposure = 1.2;
         history.note_change();
         history.observe(&exposure, &masks, &lens, false);
-        assert!(!history.can_redo(&exposure, &masks, &lens));
+        assert!(!history.can_redo());
     }
 
     #[test]

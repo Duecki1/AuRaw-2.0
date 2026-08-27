@@ -239,7 +239,6 @@ impl AurawApp {
                 notice: None,
             },
             library: LibraryState::new_desktop_with_preferences(
-                ctx,
                 performance.thumbnail_workers,
                 performance.library_thumbnail_size,
                 performance.library_sort_order,
