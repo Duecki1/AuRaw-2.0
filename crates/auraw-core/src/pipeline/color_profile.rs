@@ -199,34 +199,6 @@ pub struct DcpMatrixSet {
     pub forward_matrix: Option<[[f32; 4]; 3]>,
 }
 
-impl DcpMatrixSet {
-    pub fn interpolate(first: &Self, second: &Self, weight: f32) -> Self {
-        let t = weight.clamp(0.0, 1.0);
-        Self {
-            illuminant: if t < 0.5 {
-                first.illuminant
-            } else {
-                second.illuminant
-            },
-            color_matrix: interpolate_optional_matrix_4x3(
-                first.color_matrix,
-                second.color_matrix,
-                t,
-            ),
-            camera_calibration: interpolate_optional_matrix_4x4(
-                first.camera_calibration,
-                second.camera_calibration,
-                t,
-            ),
-            forward_matrix: interpolate_optional_matrix_3x4(
-                first.forward_matrix,
-                second.forward_matrix,
-                t,
-            ),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct DcpProfileIdentity {
     pub name: Option<String>,
@@ -305,23 +277,6 @@ impl DcpProfile {
         }
     }
 
-    pub fn interpolated_matrices(&self, weight: f32) -> DcpMatrixSet {
-        DcpMatrixSet::interpolate(&self.matrices[0], &self.matrices[1], weight)
-    }
-
-    pub fn interpolation_weight_for_cct(&self, cct: f32) -> Option<f32> {
-        let first = dng_illuminant_cct(self.matrices[0].illuminant?)?;
-        let second = dng_illuminant_cct(self.matrices[1].illuminant?)?;
-        let first_mired = 1_000_000.0 / first;
-        let second_mired = 1_000_000.0 / second;
-        let scene_mired = 1_000_000.0 / cct.max(1.0);
-        let denominator = second_mired - first_mired;
-        if denominator.abs() < 1e-8 {
-            Some(0.0)
-        } else {
-            Some(((scene_mired - first_mired) / denominator).clamp(0.0, 1.0))
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -710,80 +665,6 @@ fn validate_profile_map_region(
         bail!("{label} extends past the packed GPU buffer");
     }
     Ok(end)
-}
-
-fn interpolate_optional_matrix_4x3(
-    first: Option<[[f32; 3]; 4]>,
-    second: Option<[[f32; 3]; 4]>,
-    weight: f32,
-) -> Option<[[f32; 3]; 4]> {
-    match (first, second) {
-        (Some(a), Some(b)) => Some(std::array::from_fn(|row| {
-            std::array::from_fn(|column| {
-                a[row][column] + (b[row][column] - a[row][column]) * weight
-            })
-        })),
-        (Some(matrix), None) | (None, Some(matrix)) => Some(matrix),
-        (None, None) => None,
-    }
-}
-
-fn interpolate_optional_matrix_3x4(
-    first: Option<[[f32; 4]; 3]>,
-    second: Option<[[f32; 4]; 3]>,
-    weight: f32,
-) -> Option<[[f32; 4]; 3]> {
-    match (first, second) {
-        (Some(a), Some(b)) => Some(std::array::from_fn(|row| {
-            std::array::from_fn(|column| {
-                a[row][column] + (b[row][column] - a[row][column]) * weight
-            })
-        })),
-        (Some(matrix), None) | (None, Some(matrix)) => Some(matrix),
-        (None, None) => None,
-    }
-}
-
-fn interpolate_optional_matrix_4x4(
-    first: Option<[[f32; 4]; 4]>,
-    second: Option<[[f32; 4]; 4]>,
-    weight: f32,
-) -> Option<[[f32; 4]; 4]> {
-    match (first, second) {
-        (Some(a), Some(b)) => Some(std::array::from_fn(|row| {
-            std::array::from_fn(|column| {
-                a[row][column] + (b[row][column] - a[row][column]) * weight
-            })
-        })),
-        (Some(matrix), None) | (None, Some(matrix)) => Some(matrix),
-        (None, None) => None,
-    }
-}
-
-fn dng_illuminant_cct(illuminant: u16) -> Option<f32> {
-    match illuminant {
-        1 => Some(5500.0),
-        2 => Some(4000.0),
-        3 => Some(2856.0),
-        4 => Some(5500.0),
-        9 => Some(5500.0),
-        10 => Some(6500.0),
-        11 => Some(7500.0),
-        12 => Some(6500.0),
-        13 => Some(5000.0),
-        14 => Some(4150.0),
-        15 => Some(3500.0),
-        16 => Some(3000.0),
-        17 => Some(2856.0),
-        18 => Some(4874.0),
-        19 => Some(6774.0),
-        20 => Some(5503.0),
-        21 => Some(6504.0),
-        22 => Some(7504.0),
-        23 => Some(5003.0),
-        24 => Some(3200.0),
-        _ => None,
-    }
 }
 
 fn checked_map_len(divisions: [u32; 3]) -> Result<usize> {

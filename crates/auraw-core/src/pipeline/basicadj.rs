@@ -304,13 +304,6 @@ impl ExposureParams {
         self.tone_curve_blue.sanitize();
     }
 
-    pub fn reset_tone_curves(&mut self) {
-        self.tone_curve.reset();
-        self.tone_curve_red.reset();
-        self.tone_curve_green.reset();
-        self.tone_curve_blue.reset();
-    }
-
     pub fn scene_referred_default() -> Self {
         Self::default()
     }

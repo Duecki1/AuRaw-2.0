@@ -1424,10 +1424,6 @@ impl GpuProgramPrewarm {
     }
 }
 
-pub struct ToneStatisticsSnapshot {
-    buffer: wgpu::Buffer,
-}
-
 pub struct RawGpuPipeline {
     pub egui_texture_id: Option<egui::TextureId>,
     pub width: u32,
@@ -1667,14 +1663,6 @@ impl RawGpuPipeline {
         }
     }
 
-    pub fn prewarm_preview_template(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        cfa_kind: CfaKind,
-    ) -> Result<Self> {
-        Self::prewarm_preview_template_with_cache(device, queue, cfa_kind, None)
-    }
-
     pub fn prewarm_preview_template_with_cache(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1894,28 +1882,6 @@ impl RawGpuPipeline {
             config: RawGpuPipelineConfig {
                 mask_atlas_edge_override: Some(mask_edge),
             },
-        })
-    }
-
-    pub fn new_headless_reusing_programs(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        raw: &LoadedRaw,
-        params: &GpuParams,
-        quality: ProcessingQuality,
-        template: &Self,
-    ) -> Result<Self> {
-        let program_template = template.program_template();
-        Self::new_internal(RawGpuPipelineBuild {
-            device,
-            queue,
-            renderer: None,
-            program_template: Some(&program_template),
-            pipeline_cache: program_template.pipeline_cache.clone(),
-            raw,
-            params,
-            quality,
-            config: RawGpuPipelineConfig::default(),
         })
     }
 
@@ -2407,15 +2373,6 @@ impl RawGpuPipeline {
         self.write_output_transform(queue, &transform)
     }
 
-    pub fn set_output_icc_profile(
-        &self,
-        queue: &wgpu::Queue,
-        profile_bytes: &[u8],
-        intent: RenderingIntent,
-    ) -> Result<()> {
-        self.set_display_icc_profile(queue, profile_bytes, intent)
-    }
-
     pub fn reset_display_to_srgb(&self, queue: &wgpu::Queue) -> Result<()> {
         self.write_output_transform(queue, &IccOutputTransform::srgb())
     }
@@ -2582,50 +2539,6 @@ impl RawGpuPipeline {
         Ok(())
     }
 
-    pub fn snapshot_tone_statistics(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> ToneStatisticsSnapshot {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("auraw tone statistics snapshot"),
-            size: TONE_STATS_SIZE_BYTES,
-            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw capture tone statistics"),
-        });
-        encoder.copy_buffer_to_buffer(
-            &self.tone_stats_buffer,
-            0,
-            &buffer,
-            0,
-            TONE_STATS_SIZE_BYTES,
-        );
-        queue.submit(Some(encoder.finish()));
-        ToneStatisticsSnapshot { buffer }
-    }
-
-    pub fn inherit_tone_statistics_snapshot(
-        &self,
-        queue: &wgpu::Queue,
-        device: &wgpu::Device,
-        snapshot: &ToneStatisticsSnapshot,
-    ) {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw inherit tone statistics snapshot"),
-        });
-        encoder.copy_buffer_to_buffer(
-            &snapshot.buffer,
-            0,
-            &self.tone_stats_buffer,
-            0,
-            TONE_STATS_SIZE_BYTES,
-        );
-        queue.submit(Some(encoder.finish()));
-    }
-
     pub fn inherit_tone_statistics(
         &self,
         queue: &wgpu::Queue,
@@ -2641,25 +2554,6 @@ impl RawGpuPipeline {
             &self.tone_stats_buffer,
             0,
             TONE_STATS_SIZE_BYTES,
-        );
-        queue.submit(Some(encoder.finish()));
-    }
-
-    pub fn accumulate_export_tone_tile(
-        &self,
-        queue: &wgpu::Queue,
-        device: &wgpu::Device,
-        params: &GpuParams,
-    ) {
-        self.upload_params(queue, params);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw native-resolution export tone tile"),
-        });
-        self.encode_raw_stage(&mut encoder, params);
-        self.encode_pass_range(
-            &mut encoder,
-            self.tone_prepare_pass_index,
-            self.tone_prepare_pass_index + 1,
         );
         queue.submit(Some(encoder.finish()));
     }
@@ -2694,27 +2588,6 @@ impl RawGpuPipeline {
             self.tone_reduce_pass_index,
             self.tone_reduce_pass_index + 1,
         );
-        queue.submit(Some(encoder.finish()));
-    }
-
-    pub fn dispatch_export_tile(
-        &self,
-        queue: &wgpu::Queue,
-        device: &wgpu::Device,
-        params: &GpuParams,
-    ) {
-        self.upload_params(queue, params);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auraw tiled export encoder"),
-        });
-
-        self.encode_raw_stage(&mut encoder, params);
-        self.encode_pass_range(
-            &mut encoder,
-            self.tone_prepare_pass_index,
-            self.tone_reduce_pass_index,
-        );
-        self.encode_output_stage(&mut encoder, params);
         queue.submit(Some(encoder.finish()));
     }
 

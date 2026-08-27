@@ -5,7 +5,7 @@ use super::{
     GpuParams, GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack,
     NativeRect, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
     RawGpuProgramTemplate, RemoveEditState, RemoveSceneContext, TilePlan, TileSpec,
-    ToneStatisticsSnapshot, EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
+    EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
 };
 use crate::file_ops::replace_file;
 use anyhow::{Context, Result};
@@ -520,7 +520,6 @@ pub struct DevelopedCropJob {
     pub masks: MaskStack,
     pub remove: RemoveEditState,
     pub crop: NativeRect,
-    pub tone_statistics: Option<Arc<ToneStatisticsSnapshot>>,
     pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
 
@@ -626,9 +625,6 @@ pub fn render_developed_linear_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
     )?;
     pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
     pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Tone);
-    if let Some(tone_statistics) = job.tone_statistics.as_deref() {
-        pipeline.inherit_tone_statistics_snapshot(&job.queue, &job.device, tone_statistics);
-    }
     pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Output);
     let mut rgb = pipeline.read_display_linear_region_blocking(
         &job.device,

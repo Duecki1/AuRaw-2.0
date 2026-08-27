@@ -49,10 +49,8 @@ cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Architecture and format notes:
+Architecture and development notes:
 
-- [Cargo workspace](docs/CARGO_WORKSPACE.md)
-- [TIFF contract](docs/TIFF.md)
 - [Development](docs/DEVELOPMENT.md)
 
 ## License

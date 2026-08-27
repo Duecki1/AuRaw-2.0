@@ -336,10 +336,6 @@ impl GeometryTransform {
         }
     }
 
-    pub fn set_full_crop(&mut self) {
-        self.crop = default_crop_rect();
-    }
-
     pub fn rotate_quarter_turn(&mut self, clockwise: bool) {
         self.quarter_turns = if clockwise {
             (self.quarter_turns + 1) % 4
