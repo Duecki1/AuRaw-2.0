@@ -13,6 +13,7 @@ pub const TOOLBAR_HEIGHT: f32 = if cfg!(target_os = "android") {
     DESKTOP_CONTROL_HEIGHT
 };
 pub const TOOLBAR_ICON_EDGE: f32 = CONTROL_HEIGHT;
+#[cfg(not(target_os = "android"))]
 pub const TOOL_RAIL_ICON_EDGE: f32 = 40.0;
 pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_SM: f32 = 8.0;
@@ -358,6 +359,7 @@ fn content_margin(ui: &Ui) -> i8 {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn tool_rail_icon_size() -> Vec2 {
     Vec2::splat(TOOL_RAIL_ICON_EDGE)
 }
@@ -533,6 +535,7 @@ pub fn checkbox_with_help(
     .inner
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn tab_button(ui: &mut Ui, label: &str, selected: bool, width: f32) -> Response {
     segmented_button(ui, RichText::new(label).strong(), selected, width)
 }

@@ -190,6 +190,7 @@ impl LibraryState {
         self.selection_mode = false;
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn search_query_mut(&mut self) -> &mut String {
         &mut self.search_query
     }
@@ -213,6 +214,7 @@ impl LibraryState {
             .collect()
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn select_search_matches(&mut self) -> usize {
         let terms = library_search_terms(&self.search_query);
         if terms.is_empty() {
@@ -252,6 +254,7 @@ impl LibraryState {
         self.render_edited_thumbnails_during_indexing
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn set_render_edited_thumbnails_during_indexing(
         &mut self,
         enabled: bool,

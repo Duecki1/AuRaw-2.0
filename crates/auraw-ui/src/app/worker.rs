@@ -1,6 +1,8 @@
+#[cfg(not(target_os = "android"))]
 use eframe::egui;
 use std::sync::mpsc;
 
+#[cfg(not(target_os = "android"))]
 pub(crate) fn spawn_ui_worker<T, F>(context: &egui::Context, work: F) -> mpsc::Receiver<T>
 where
     T: Send + 'static,

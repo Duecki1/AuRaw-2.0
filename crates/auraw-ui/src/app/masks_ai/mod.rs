@@ -1,8 +1,11 @@
 use super::*;
 
+#[cfg(not(target_os = "android"))]
 const AI_MASK_SOURCE_MAX_EDGE: u32 = 4096;
+#[cfg(not(target_os = "android"))]
 const AI_MASK_SOURCE_MAX_PIXELS: u64 = 12_000_000;
 
+#[cfg(not(target_os = "android"))]
 pub(super) fn ai_mask_source_proxy_edge(width: u32, height: u32) -> u32 {
     let longest = width.max(height).max(1);
     let shortest = width.min(height).max(1);

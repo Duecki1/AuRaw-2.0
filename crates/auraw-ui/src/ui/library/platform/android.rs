@@ -164,10 +164,6 @@ pub(in crate::ui::library) fn can_create_local_folder(_app: &AurawApp) -> bool {
     true
 }
 
-pub(in crate::ui::library) fn navigation_enabled(action_in_progress: bool) -> bool {
-    !action_in_progress
-}
-
 pub(in crate::ui::library) fn apply_local_toolbar_action(
     app: &mut AurawApp,
     action: super::LocalFolderToolbarAction,
@@ -223,10 +219,6 @@ pub(in crate::ui::library) fn show_local_folder_tree(
     if let Some(action) = requested_action {
         apply_android_library_folder_ui_action(app, action, ui.ctx());
     }
-}
-
-pub(in crate::ui::library) fn close_sidebar_after_navigation() -> bool {
-    true
 }
 
 pub(in crate::ui::library) fn show_sidebar_dialogs(_ui: &mut Ui, _app: &mut AurawApp) {}

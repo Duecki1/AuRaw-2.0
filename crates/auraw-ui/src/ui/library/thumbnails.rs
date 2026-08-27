@@ -366,6 +366,7 @@ pub(super) fn loaded_library_thumbnail(
     }
 }
 
+#[cfg(not(target_os = "android"))]
 pub(super) fn loaded_library_raw_preview_pending_development(
     thumbnail: RawThumbnail,
 ) -> LoadedLibraryThumbnail {

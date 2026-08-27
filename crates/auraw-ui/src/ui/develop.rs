@@ -1,7 +1,8 @@
 use crate::app::AurawApp;
+#[cfg(not(target_os = "android"))]
+use crate::ui::library::library_image_context_menu;
 use crate::ui::library::{
-    apply_library_action, library_image_context_menu, load_desktop_reference_preview,
-    DesktopFilmstripItem,
+    apply_library_action, load_desktop_reference_preview, DesktopFilmstripItem,
 };
 use crate::ui::preview::Preview;
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};

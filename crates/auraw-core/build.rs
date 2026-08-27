@@ -382,9 +382,6 @@ fn generate_bindings(header: &Path, include_paths: &[PathBuf], android_min_sdk: 
 fn android_abi(target: &str) -> Option<&'static str> {
     match target {
         "aarch64-linux-android" => Some("arm64-v8a"),
-        "armv7-linux-androideabi" => Some("armeabi-v7a"),
-        "i686-linux-android" => Some("x86"),
-        "x86_64-linux-android" => Some("x86_64"),
         _ => None,
     }
 }

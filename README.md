@@ -32,10 +32,10 @@ Install JDK 17, the Android SDK/NDK versions declared in `Cargo.toml`, CMake
 3.22.1, `libclang`, and `cargo-ndk` 4.1.2. Then run:
 
 ```sh
-rustup target add aarch64-linux-android x86_64-linux-android
+rustup target add aarch64-linux-android
 cargo install cargo-ndk --version 4.1.2 --locked
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-./gradlew assembleDebug -PaurawAbis=arm64-v8a,x86_64
+./gradlew assembleDebug
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 

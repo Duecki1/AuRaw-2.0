@@ -48,9 +48,9 @@ use storage::*;
 use thumbnails::*;
 
 #[cfg(not(target_os = "android"))]
-pub(crate) use actions::{
-    apply_library_action, library_image_context_menu, show_library_action_overlays,
-};
+pub(crate) use actions::library_image_context_menu;
+#[cfg(not(target_os = "android"))]
+pub(crate) use actions::{apply_library_action, show_library_action_overlays};
 #[cfg(not(target_os = "android"))]
 pub(crate) use thumbnails::{load_desktop_cached_thumbnail, load_desktop_reference_preview};
 pub use view::Library;
@@ -72,6 +72,7 @@ const THUMBNAIL_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const THUMBNAIL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_PROXY_EDGE: u32 = 1024;
+#[cfg(not(target_os = "android"))]
 pub(crate) const MAX_DESKTOP_THUMBNAIL_WORKERS: usize = 8;
 #[cfg(target_os = "android")]
 pub(crate) const MAX_ANDROID_THUMBNAIL_WORKERS: usize = 2;

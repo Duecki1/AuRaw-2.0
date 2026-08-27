@@ -1,7 +1,9 @@
 use crate::execution_provider::{CpuFallbackProfile, FallbackSession, SessionOptions};
 use crate::model_artifact::{ArtifactSize, DownloadOptions, ModelArtifact};
 use crate::model_install::ModelInstallSpec;
-use crate::model_runtime::{with_model_session, AiModel, AiRuntimeContext, ModelRetention};
+#[cfg(not(target_os = "android"))]
+use crate::model_runtime::AiRuntimeContext;
+use crate::model_runtime::{with_model_session, AiModel, ModelRetention};
 use crate::pipeline::MaskImage;
 use crate::ModelDownloadProgress;
 use anyhow::{Context, Result};
@@ -9,8 +11,9 @@ use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use ort::value::Tensor;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_os = "android"))]
+use std::fs::{self, File};
 use std::{
-    fs::{self, File},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -546,7 +549,7 @@ fn subject_mask_two_pass(
     image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
 ) -> Result<Vec<u8>> {
     let (width, height) = image.dimensions();
-    let coarse = infer_birefnet(model_path, quality, &image)?;
+    let coarse = infer_birefnet(model_path, quality, image)?;
     let mut mask = coarse.clone();
     if let Some(crop) = mask_refine::mask_crop_above(&coarse, width, height, 5, 0.15) {
         let crop_image =

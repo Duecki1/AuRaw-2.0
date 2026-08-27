@@ -13,6 +13,7 @@ pub(crate) enum LibraryAction {
     Delete(Vec<LibraryAsset>),
 }
 
+#[cfg(not(target_os = "android"))]
 pub(crate) fn library_image_context_menu(
     ui: &mut Ui,
     app: &AurawApp,

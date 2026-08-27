@@ -67,6 +67,7 @@ pub(super) fn clear_export_task(slot: &mut Option<ExportTask>) {
     *slot = None;
 }
 
+#[cfg(not(target_os = "android"))]
 pub(in crate::app) fn export_source_stem(
     current_path: Option<&std::path::Path>,
     current_label: Option<&str>,
@@ -339,6 +340,7 @@ impl AurawApp {
         })
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(in crate::app) fn start_export(
         &mut self,
         path: PathBuf,
@@ -714,7 +716,7 @@ impl AurawApp {
                                             }
                                         }
                                     }
-                                    Some(ExportDestination::File(_)) | None => {
+                                    None => {
                                         let error = "export destination state was lost".to_owned();
                                         if is_batch {
                                             android_batch_result = Some(Err(error.clone()));

@@ -342,6 +342,7 @@ impl AurawApp {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 pub(super) fn desktop_library_sidecar_edits(
     raw_path: &std::path::Path,
 ) -> Result<Option<SidecarEditState>, String> {

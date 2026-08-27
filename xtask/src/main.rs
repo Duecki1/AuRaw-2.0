@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use zip::ZipArchive;
 
-const ANDROID_64_BIT_ABIS: [&str; 2] = ["arm64-v8a", "x86_64"];
+const ANDROID_64_BIT_ABIS: [&str; 1] = ["arm64-v8a"];
 const CARGO_NDK_VERSION: &str = "4.1.2";
 
 fn main() -> ExitCode {
@@ -380,9 +380,8 @@ fn android_abi_config(abi: &str, api: u64) -> Result<(String, &'static str)> {
             format!("aarch64-linux-android{api}"),
             "aarch64-linux-android",
         )),
-        "x86_64" => Ok((format!("x86_64-linux-android{api}"), "x86_64-linux-android")),
         _ => Err(XtaskError::usage(format!(
-            "Unsupported ABI '{abi}' (use arm64-v8a or x86_64)"
+            "Unsupported ABI '{abi}' (use arm64-v8a)"
         ))),
     }
 }

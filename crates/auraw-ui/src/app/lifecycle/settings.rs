@@ -54,6 +54,7 @@ impl AurawApp {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn set_render_edited_thumbnails_during_indexing(&mut self, enabled: bool) {
         let context = self.egui_ctx.clone();
         if self

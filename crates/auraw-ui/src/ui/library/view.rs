@@ -254,164 +254,156 @@ impl Library {
                     ui.label("Tap + to import one or more RAW files.");
                 });
             });
-        } else {
-            if visible_indices
-                .as_ref()
-                .is_some_and(|indices| indices.is_empty())
-            {
-                ui.centered_and_justified(|ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.heading("No filenames match your search");
-                        ui.label("Try another name, or clear the search to show every RAW file.");
-                        ui.add_space(8.0);
-                        if ui.button("Clear Search").clicked() {
-                            app.library.clear_search();
-                        }
-                    });
+        } else if visible_indices
+            .as_ref()
+            .is_some_and(|indices| indices.is_empty())
+        {
+            ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("No filenames match your search");
+                    ui.label("Try another name, or clear the search to show every RAW file.");
+                    ui.add_space(8.0);
+                    if ui.button("Clear Search").clicked() {
+                        app.library.clear_search();
+                    }
                 });
-            } else {
-                #[cfg(not(target_os = "android"))]
-                let current_path = app.develop.current_path.clone();
-                let available = ui.available_width().max(1.0);
-                let available_height = ui.available_height().max(1.0);
-                let gap = 6.0;
-                let target_thumbnail_height = responsive_thumbnail_target_height(
+            });
+        } else {
+            #[cfg(not(target_os = "android"))]
+            let current_path = app.develop.current_path.clone();
+            let available = ui.available_width().max(1.0);
+            let available_height = ui.available_height().max(1.0);
+            let gap = 6.0;
+            let target_thumbnail_height = responsive_thumbnail_target_height(
+                available,
+                available_height,
+                ui.ctx().pixels_per_point(),
+                cfg!(target_os = "android"),
+            ) * app.library.thumbnail_size().scale();
+            let (placements, grid_height) = if let Some(indices) = &visible_indices {
+                justified_thumbnail_layout_for_indices(
+                    &app.library.entries,
+                    indices,
                     available,
-                    available_height,
-                    ui.ctx().pixels_per_point(),
-                    cfg!(target_os = "android"),
-                ) * app.library.thumbnail_size().scale();
-                let (placements, grid_height) = if let Some(indices) = &visible_indices {
-                    justified_thumbnail_layout_for_indices(
-                        &app.library.entries,
-                        indices,
-                        available,
-                        target_thumbnail_height,
-                        gap,
-                    )
-                } else {
-                    justified_thumbnail_layout(
-                        &app.library.entries,
-                        available,
-                        target_thumbnail_height,
-                        gap,
-                    )
-                };
+                    target_thumbnail_height,
+                    gap,
+                )
+            } else {
+                justified_thumbnail_layout(
+                    &app.library.entries,
+                    available,
+                    target_thumbnail_height,
+                    gap,
+                )
+            };
 
-                let mut protected_thumbnail_indices = HashSet::new();
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show_viewport(ui, |ui, viewport| {
-                        let (content_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(available, grid_height.max(1.0)),
-                            Sense::hover(),
-                        );
-                        let preload_viewport = viewport.expand(600.0);
+            let mut protected_thumbnail_indices = HashSet::new();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_viewport(ui, |ui, viewport| {
+                    let (content_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(available, grid_height.max(1.0)),
+                        Sense::hover(),
+                    );
+                    let preload_viewport = viewport.expand(600.0);
 
-                        for (placement_index, relative_rect) in
-                            placements.iter().copied().enumerate()
-                        {
-                            if !relative_rect.intersects(preload_viewport) {
-                                continue;
-                            }
-                            let index = visible_indices
-                                .as_ref()
-                                .map_or(placement_index, |indices| indices[placement_index]);
-                            protected_thumbnail_indices.insert(index);
-                            app.library.touch_and_request_thumbnail(index, ui.ctx());
-                            if !relative_rect.intersects(viewport) {
-                                continue;
-                            }
-                            let item_rect = relative_rect.translate(content_rect.min.to_vec2());
-                            let entry = &app.library.entries[index];
-                            let asset = entry.asset.clone();
-                            let selected = if app.library.selection_mode() {
-                                app.library.selected_assets.contains(&asset.id)
-                            } else {
-                                #[cfg(not(target_os = "android"))]
-                                {
-                                    current_path.as_deref() == asset.desktop_path()
-                                }
-                                #[cfg(target_os = "android")]
-                                {
-                                    false
-                                }
-                            };
-                            let response = thumbnail_tile(ui, entry, item_rect, selected);
-
-                            #[cfg(target_os = "android")]
-                            {
-                                let checkbox =
-                                    thumbnail_selection_checkbox(ui, entry, item_rect, selected);
-                                let checkbox_clicked = checkbox.clicked()
-                                    || (response.clicked()
-                                        && response.interact_pointer_pos().is_some_and(
-                                            |pointer| checkbox.rect.contains(pointer),
-                                        ));
-                                if checkbox_clicked {
-                                    let back_navigation_active =
-                                        app.library.toggle_thumbnail_selection(&asset.id);
-                                    crate::android::set_back_navigation_active(
-                                        back_navigation_active,
-                                    );
-                                } else if response.clicked() && !response.secondary_clicked() {
-                                    open_asset = Some(asset);
-                                }
-                            }
-
+                    for (placement_index, relative_rect) in placements.iter().copied().enumerate() {
+                        if !relative_rect.intersects(preload_viewport) {
+                            continue;
+                        }
+                        let index = visible_indices
+                            .as_ref()
+                            .map_or(placement_index, |indices| indices[placement_index]);
+                        protected_thumbnail_indices.insert(index);
+                        app.library.touch_and_request_thumbnail(index, ui.ctx());
+                        if !relative_rect.intersects(viewport) {
+                            continue;
+                        }
+                        let item_rect = relative_rect.translate(content_rect.min.to_vec2());
+                        let entry = &app.library.entries[index];
+                        let asset = entry.asset.clone();
+                        let selected = if app.library.selection_mode() {
+                            app.library.selected_assets.contains(&asset.id)
+                        } else {
                             #[cfg(not(target_os = "android"))]
                             {
-                                if response.clicked() && !response.secondary_clicked() {
-                                    if app.library.selection_mode() {
-                                        app.library.toggle_thumbnail_selection(&asset.id);
-                                    } else {
-                                        open_asset = Some(asset.clone());
-                                    }
-                                }
-                                if response.secondary_clicked()
-                                    && app.library.selection_mode()
-                                    && !app.library.selected_assets.contains(&asset.id)
-                                {
-                                    app.library.selected_assets.insert(asset.id.clone());
-                                }
-                                let context_assets = if app.library.selection_mode() {
-                                    app.library
-                                        .entries
-                                        .iter()
-                                        .filter(|candidate| {
-                                            app.library
-                                                .selected_assets
-                                                .contains(&candidate.asset.id)
-                                        })
-                                        .map(|candidate| candidate.asset.clone())
-                                        .collect::<Vec<_>>()
-                                } else {
-                                    vec![asset.clone()]
-                                };
-                                let mut select_from_context_menu = false;
-                                response.context_menu(|ui| {
-                                    if !app.library.selection_mode() {
-                                        if ui.button("Select").clicked() {
-                                            select_from_context_menu = true;
-                                            ui.close();
-                                        }
-                                        ui.separator();
-                                    }
-                                    if let Some(action) =
-                                        library_image_context_menu(ui, app, &asset, &context_assets)
-                                    {
-                                        library_action = Some(action);
-                                    }
-                                });
-                                if select_from_context_menu {
-                                    app.library.begin_selection();
-                                    app.library.selected_assets.insert(asset.id.clone());
-                                }
+                                current_path.as_deref() == asset.desktop_path()
+                            }
+                            #[cfg(target_os = "android")]
+                            {
+                                false
+                            }
+                        };
+                        let response = thumbnail_tile(ui, entry, item_rect, selected);
+
+                        #[cfg(target_os = "android")]
+                        {
+                            let checkbox =
+                                thumbnail_selection_checkbox(ui, entry, item_rect, selected);
+                            let checkbox_clicked = checkbox.clicked()
+                                || (response.clicked()
+                                    && response
+                                        .interact_pointer_pos()
+                                        .is_some_and(|pointer| checkbox.rect.contains(pointer)));
+                            if checkbox_clicked {
+                                let back_navigation_active =
+                                    app.library.toggle_thumbnail_selection(&asset.id);
+                                crate::android::set_back_navigation_active(back_navigation_active);
+                            } else if response.clicked() && !response.secondary_clicked() {
+                                open_asset = Some(asset);
                             }
                         }
-                    });
-                app.library.evict_old_textures(&protected_thumbnail_indices);
-            }
+
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            if response.clicked() && !response.secondary_clicked() {
+                                if app.library.selection_mode() {
+                                    app.library.toggle_thumbnail_selection(&asset.id);
+                                } else {
+                                    open_asset = Some(asset.clone());
+                                }
+                            }
+                            if response.secondary_clicked()
+                                && app.library.selection_mode()
+                                && !app.library.selected_assets.contains(&asset.id)
+                            {
+                                app.library.selected_assets.insert(asset.id.clone());
+                            }
+                            let context_assets = if app.library.selection_mode() {
+                                app.library
+                                    .entries
+                                    .iter()
+                                    .filter(|candidate| {
+                                        app.library.selected_assets.contains(&candidate.asset.id)
+                                    })
+                                    .map(|candidate| candidate.asset.clone())
+                                    .collect::<Vec<_>>()
+                            } else {
+                                vec![asset.clone()]
+                            };
+                            let mut select_from_context_menu = false;
+                            response.context_menu(|ui| {
+                                if !app.library.selection_mode() {
+                                    if ui.button("Select").clicked() {
+                                        select_from_context_menu = true;
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                }
+                                if let Some(action) =
+                                    library_image_context_menu(ui, app, &asset, &context_assets)
+                                {
+                                    library_action = Some(action);
+                                }
+                            });
+                            if select_from_context_menu {
+                                app.library.begin_selection();
+                                app.library.selected_assets.insert(asset.id.clone());
+                            }
+                        }
+                    }
+                });
+            app.library.evict_old_textures(&protected_thumbnail_indices);
         }
 
         let selected_assets = app

@@ -66,16 +66,16 @@ def aurawVersionCode = providers.gradleProperty("aurawVersionCode")
 
 def requestedAbis = providers.gradleProperty("aurawAbis")
     .orElse(providers.gradleProperty("aurawAbi"))
-    .getOrElse("arm64-v8a,x86_64")
+    .getOrElse("arm64-v8a")
 def aurawAbis = requestedAbis
     .split(",")
     .collect { it.trim() }
     .findAll { !it.isEmpty() }
     .unique()
-def supportedAbis = ["arm64-v8a", "x86_64"] as Set
+def supportedAbis = ["arm64-v8a"] as Set
 if (aurawAbis.isEmpty() || !supportedAbis.containsAll(aurawAbis)) {
     throw new GradleException(
-        "aurawAbis must contain arm64-v8a and/or x86_64; found '${requestedAbis}'"
+        "aurawAbis must be arm64-v8a; found '${requestedAbis}'"
     )
 }
 
@@ -183,24 +183,17 @@ def releaseRustTasks = []
 aurawAbis.each { abi ->
     def suffix = abiTaskSuffix(abi)
     debugRustTasks << tasks.register("buildRustDebug${suffix}", Exec) {
-        dependsOn("externalNativeBuildDebug")
+        dependsOn("buildCMakeDebug[${abi}][auraw_native_deps]")
         workingDir repositoryRoot
         environment "AURAW_NATIVE_DEPS_READY", "1"
         commandLine "cargo", "xtask", "build-android", abi, "debug"
     }
     releaseRustTasks << tasks.register("buildRustRelease${suffix}", Exec) {
-        dependsOn("externalNativeBuildRelease")
+        dependsOn("buildCMakeRelWithDebInfo[${abi}][auraw_native_deps]")
         workingDir repositoryRoot
         environment "AURAW_NATIVE_DEPS_READY", "1"
         commandLine "cargo", "xtask", "build-android", abi, "release"
     }
-}
-
-// Cargo shares a target directory and build-script outputs. Serialize ABI
-// invocations while still letting AGP build both CMake ABIs in parallel.
-for (int index = 1; index < debugRustTasks.size(); index++) {
-    debugRustTasks[index].configure { mustRunAfter(debugRustTasks[index - 1]) }
-    releaseRustTasks[index].configure { mustRunAfter(releaseRustTasks[index - 1]) }
 }
 
 tasks.register("buildRustDebug") {

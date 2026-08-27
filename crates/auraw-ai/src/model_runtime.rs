@@ -183,6 +183,7 @@ pub fn set_active_ai_context(context: Option<AiRuntimeContext>) {
     );
 }
 
+#[cfg(not(target_os = "android"))]
 pub(crate) fn invalidate_for_provider_change() {
     let generation = PROVIDER_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let _ = try_reconcile(

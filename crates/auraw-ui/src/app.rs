@@ -757,11 +757,10 @@ enum ExportTaskReceiver {
 
 #[derive(Clone, Debug)]
 enum ExportDestination {
+    #[cfg(not(target_os = "android"))]
     File(PathBuf),
     #[cfg(target_os = "android")]
-    AndroidDirect {
-        path: PathBuf,
-    },
+    AndroidDirect { path: PathBuf },
     #[cfg(target_os = "android")]
     AndroidGallery {
         path: PathBuf,
@@ -773,6 +772,7 @@ enum ExportDestination {
 impl ExportDestination {
     fn path(&self) -> &Path {
         match self {
+            #[cfg(not(target_os = "android"))]
             Self::File(path) => path,
             #[cfg(target_os = "android")]
             Self::AndroidDirect { path } | Self::AndroidGallery { path, .. } => path,
@@ -908,9 +908,6 @@ pub(crate) struct ForegroundOperation {
     receiver: ForegroundOperationReceiver,
     context: ForegroundOperationContext,
 }
-
-#[cfg(target_os = "android")]
-type AndroidAdjustmentPasteResult = (Vec<(String, String)>, Vec<(String, String)>, Vec<String>);
 
 #[derive(Clone, Debug, PartialEq)]
 struct AiMaskTarget {

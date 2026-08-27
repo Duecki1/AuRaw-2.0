@@ -303,6 +303,7 @@ impl AurawApp {
         self.start_next_sidecar_save();
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn detach_current_file_for_library_action(
         &mut self,
         raw_path: &std::path::Path,
