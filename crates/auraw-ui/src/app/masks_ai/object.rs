@@ -362,7 +362,7 @@ impl AurawApp {
                 if !succeeded {
                     self.ai.mask_update_object_queue.clear();
                 }
-                if let Some(message) = error_message.clone() {
+                if let Some(message) = error_message {
                     self.ui.notice = Some(message);
                 }
                 self.continue_ai_mask_update();

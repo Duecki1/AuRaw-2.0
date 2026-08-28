@@ -1194,20 +1194,20 @@ where
         .context("upload full-image Light Rays emission masks")?;
 
     let tone_analysis_started = Instant::now();
-    let mut tone_scratch = first_raw.clone();
+    let mut tile_scratch = first_raw;
     tile_pipeline.begin_export_tone_analysis(queue, device);
     for (index, tile) in plan.tiles.iter().copied().enumerate() {
         ensure_export_not_cancelled(cancellation)?;
         if index != 0 {
-            extract_padded_tile_into(raw, tile, &mut tone_scratch);
+            extract_padded_tile_into(raw, tile, &mut tile_scratch);
         }
         tile_pipeline
-            .upload_raw_tile(queue, &tone_scratch)
+            .upload_raw_tile(queue, &tile_scratch)
             .with_context(|| format!("upload tone-analysis tile {}", index + 1))?;
         let tone_params = GpuParams::new_for_tile(
             exposure,
             masks,
-            &tone_scratch,
+            &tile_scratch,
             tile.global_origin_x,
             tile.global_origin_y,
             raw.width,
@@ -1241,8 +1241,6 @@ where
         tone_analysis_started.elapsed().as_secs_f64(),
         plan.tile_count()
     ));
-
-    let mut tile_scratch = first_raw.clone();
 
     let total_tiles = plan.tile_count();
     let mut completed_tiles = 0usize;

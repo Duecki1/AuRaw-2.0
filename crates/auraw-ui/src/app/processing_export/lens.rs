@@ -236,7 +236,7 @@ impl AurawApp {
             Err(error) => {
                 if !error.contains("cancelled") {
                     self.develop.lens_correction.enabled = self.develop.lens_correction.applied;
-                    self.develop.lens_correction.catalog.status = error.clone();
+                    self.develop.lens_correction.catalog.status = error;
                     self.ui.notice =
                         Some("Lens correction failed; restored the previous preview.".to_owned());
                 }

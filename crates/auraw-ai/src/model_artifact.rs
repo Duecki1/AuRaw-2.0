@@ -153,7 +153,7 @@ pub(crate) fn verify_artifact(path: &Path, artifact: ModelArtifact) -> Result<()
 pub fn sha256_file_hex(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = Sha256Context::new(&SHA256);
-    let mut buffer = [0u8; IO_BUFFER_BYTES];
+    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
     loop {
         let read = file
             .read(&mut buffer)
@@ -407,7 +407,7 @@ where
     F: FnMut(u64, u64),
     C: FnMut() -> Result<()>,
 {
-    let mut buffer = [0u8; IO_BUFFER_BYTES];
+    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
     loop {
         cancellation().map_err(TransferError::Fatal)?;
         let read = reader

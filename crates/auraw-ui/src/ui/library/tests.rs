@@ -536,7 +536,7 @@ fn resetting_adjustments_allows_an_unedited_thumbnail_to_replace_the_developed_o
     library.entries.push(entry);
     library.rebuild_entry_indices();
 
-    library.invalidate_adjustment_thumbnail_for_asset(&test_asset(path.clone()));
+    library.invalidate_adjustment_thumbnail_for_asset(&test_asset(path));
 
     let entry = &library.entries[0];
     assert!(entry.texture.is_none());
@@ -1060,7 +1060,7 @@ fn duplicate_uses_shared_materialize_import_flow() {
     fs::write(&raw, b"raw-bytes").unwrap();
     fs::write(crate::sidecar::sidecar_path_for_raw(&raw), b"sidecar-bytes").unwrap();
     install_test_developed_thumbnail(&raw);
-    let asset = LibraryAsset::from_desktop_path(raw.clone(), 9, 1, None);
+    let asset = LibraryAsset::from_desktop_path(raw, 9, 1, None);
 
     let completion = run_duplicate_assets(vec![asset]);
     assert!(completion.result.is_ok());

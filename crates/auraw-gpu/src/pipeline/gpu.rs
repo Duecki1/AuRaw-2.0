@@ -857,11 +857,11 @@ fn pack_adjustment_mask(mask: &LocalMask) -> MaskData {
 }
 
 fn pack_mask_params(masks: &MaskStack) -> Box<[MaskData]> {
-    let mut packed = [MaskData::zeroed(); MAX_LOCAL_MASKS];
+    let mut packed = vec![MaskData::zeroed(); MAX_LOCAL_MASKS].into_boxed_slice();
     for (destination, mask) in packed.iter_mut().zip(masks.masks.iter()) {
         *destination = pack_effect_mask(mask).unwrap_or_else(|| pack_adjustment_mask(mask));
     }
-    Box::new(packed)
+    packed
 }
 
 fn pack_camera_params(ctx: &GpuParamContext<'_>) -> CameraUniforms {
