@@ -6,68 +6,69 @@ use serde::{Deserialize, Serialize};
 
 const DESKTOP_CONTROL_HEIGHT: f32 = 32.0;
 const ANDROID_CONTROL_HEIGHT: f32 = 40.0;
-pub const CONTROL_HEIGHT: f32 = platform_control_height(cfg!(target_os = "android"));
-pub const TOOLBAR_HEIGHT: f32 = if cfg!(target_os = "android") {
+pub(crate) const CONTROL_HEIGHT: f32 = platform_control_height(cfg!(target_os = "android"));
+pub(crate) const TOOLBAR_HEIGHT: f32 = if cfg!(target_os = "android") {
     ANDROID_CONTROL_HEIGHT
 } else {
     DESKTOP_CONTROL_HEIGHT
 };
-pub const TOOLBAR_ICON_EDGE: f32 = CONTROL_HEIGHT;
+pub(crate) const TOOLBAR_ICON_EDGE: f32 = CONTROL_HEIGHT;
 #[cfg(not(target_os = "android"))]
-pub const TOOL_RAIL_ICON_EDGE: f32 = 40.0;
-pub const SPACE_XS: f32 = 4.0;
-pub const SPACE_SM: f32 = 8.0;
-pub const SPACE_MD: f32 = 12.0;
-pub const SPACE_LG: f32 = 16.0;
-pub const CARD_GAP: f32 = SPACE_MD;
-pub const CONTENT_MARGIN: i8 = 12;
+pub(crate) const TOOL_RAIL_ICON_EDGE: f32 = 40.0;
+pub(crate) const SPACE_XS: f32 = 4.0;
+pub(crate) const SPACE_SM: f32 = 8.0;
+pub(crate) const SPACE_MD: f32 = 12.0;
+pub(crate) const SPACE_LG: f32 = 16.0;
+pub(crate) const CARD_GAP: f32 = SPACE_MD;
+pub(crate) const CONTENT_MARGIN: i8 = 12;
 const COMPACT_PORTRAIT_CARD_GAP: f32 = SPACE_SM;
 const COMPACT_PORTRAIT_CONTENT_MARGIN: i8 = 8;
-pub const FORM_STACK_BREAKPOINT: f32 = 520.0;
-pub const HELP_BUTTON_EDGE: f32 = if cfg!(target_os = "android") {
+pub(crate) const FORM_STACK_BREAKPOINT: f32 = 520.0;
+pub(crate) const HELP_BUTTON_EDGE: f32 = if cfg!(target_os = "android") {
     CONTROL_HEIGHT
 } else {
     28.0
 };
-pub const PANEL_TITLE_HEIGHT: f32 = 42.0;
-pub const PANEL_TITLE_TEXT_SIZE: f32 = 18.0;
+pub(crate) const PANEL_TITLE_HEIGHT: f32 = 42.0;
+pub(crate) const PANEL_TITLE_TEXT_SIZE: f32 = 18.0;
 #[cfg(any(target_os = "android", test))]
-pub const FLOATING_ACTION_EDGE: f32 = platform_floating_action_edge(cfg!(target_os = "android"));
+pub(crate) const FLOATING_ACTION_EDGE: f32 =
+    platform_floating_action_edge(cfg!(target_os = "android"));
 #[cfg(any(target_os = "android", test))]
-pub const FLOATING_ACTION_MARGIN: f32 = 12.0;
+pub(crate) const FLOATING_ACTION_MARGIN: f32 = 12.0;
 
-pub const ACCENT: Color32 = Color32::from_rgb(255, 59, 154);
-pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(255, 125, 190);
-pub const HYPERLINK: Color32 = Color32::from_rgb(255, 111, 180);
-pub const BORDER: Color32 = Color32::from_rgb(62, 61, 72);
-pub const SURFACE_PANEL: Color32 = Color32::from_rgb(22, 21, 27);
-pub const SURFACE_WINDOW: Color32 = Color32::from_rgb(27, 26, 33);
-pub const SURFACE_FAINT: Color32 = Color32::from_rgb(31, 30, 38);
-pub const SURFACE_EXTREME: Color32 = Color32::from_rgb(14, 13, 18);
-pub const SURFACE_WIDGET_INACTIVE: Color32 = Color32::from_rgb(38, 36, 45);
-pub const WIDGET_INACTIVE_STROKE: Color32 = Color32::from_rgb(67, 64, 78);
-pub const SURFACE_WIDGET_HOVERED: Color32 = Color32::from_rgb(52, 48, 61);
-pub const WIDGET_HOVERED_STROKE: Color32 = Color32::from_rgb(101, 92, 113);
-pub const SURFACE_WIDGET_OPEN: Color32 = Color32::from_rgb(49, 45, 58);
-pub const WIDGET_OPEN_STROKE: Color32 = Color32::from_rgb(91, 83, 104);
-pub const CANVAS_BACKDROP: Color32 = Color32::from_rgb(15, 16, 18);
-pub const THUMBNAIL_BACKDROP: Color32 = Color32::from_rgb(17, 18, 20);
-pub const STATUS_WARNING: Color32 = Color32::from_rgb(244, 142, 48);
-pub const MASK_ADD: Color32 = Color32::from_rgb(78, 163, 255);
-pub const MASK_SUBTRACT: Color32 = Color32::from_rgb(255, 105, 105);
-pub const DROP_TARGET: Color32 = Color32::from_rgb(225, 62, 62);
-pub fn inpaint_stroke_highlight() -> Color32 {
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(255, 59, 154);
+pub(crate) const ACCENT_BRIGHT: Color32 = Color32::from_rgb(255, 125, 190);
+pub(crate) const HYPERLINK: Color32 = Color32::from_rgb(255, 111, 180);
+pub(crate) const BORDER: Color32 = Color32::from_rgb(62, 61, 72);
+pub(crate) const SURFACE_PANEL: Color32 = Color32::from_rgb(22, 21, 27);
+pub(crate) const SURFACE_WINDOW: Color32 = Color32::from_rgb(27, 26, 33);
+pub(crate) const SURFACE_FAINT: Color32 = Color32::from_rgb(31, 30, 38);
+pub(crate) const SURFACE_EXTREME: Color32 = Color32::from_rgb(14, 13, 18);
+pub(crate) const SURFACE_WIDGET_INACTIVE: Color32 = Color32::from_rgb(38, 36, 45);
+pub(crate) const WIDGET_INACTIVE_STROKE: Color32 = Color32::from_rgb(67, 64, 78);
+pub(crate) const SURFACE_WIDGET_HOVERED: Color32 = Color32::from_rgb(52, 48, 61);
+pub(crate) const WIDGET_HOVERED_STROKE: Color32 = Color32::from_rgb(101, 92, 113);
+pub(crate) const SURFACE_WIDGET_OPEN: Color32 = Color32::from_rgb(49, 45, 58);
+pub(crate) const WIDGET_OPEN_STROKE: Color32 = Color32::from_rgb(91, 83, 104);
+pub(crate) const CANVAS_BACKDROP: Color32 = Color32::from_rgb(15, 16, 18);
+pub(crate) const THUMBNAIL_BACKDROP: Color32 = Color32::from_rgb(17, 18, 20);
+pub(crate) const STATUS_WARNING: Color32 = Color32::from_rgb(244, 142, 48);
+pub(crate) const MASK_ADD: Color32 = Color32::from_rgb(78, 163, 255);
+pub(crate) const MASK_SUBTRACT: Color32 = Color32::from_rgb(255, 105, 105);
+pub(crate) const DROP_TARGET: Color32 = Color32::from_rgb(225, 62, 62);
+pub(crate) fn inpaint_stroke_highlight() -> Color32 {
     Color32::from_rgba_unmultiplied(255, 96, 78, 62)
 }
 
-pub fn inpaint_stroke_active() -> Color32 {
+pub(crate) fn inpaint_stroke_active() -> Color32 {
     Color32::from_rgba_unmultiplied(255, 120, 84, 84)
 }
-pub const CHANNEL_RED: Color32 = Color32::from_rgb(238, 84, 84);
-pub const CHANNEL_GREEN: Color32 = Color32::from_rgb(92, 210, 116);
-pub const CHANNEL_BLUE: Color32 = Color32::from_rgb(88, 150, 245);
+pub(crate) const CHANNEL_RED: Color32 = Color32::from_rgb(238, 84, 84);
+pub(crate) const CHANNEL_GREEN: Color32 = Color32::from_rgb(92, 210, 116);
+pub(crate) const CHANNEL_BLUE: Color32 = Color32::from_rgb(88, 150, 245);
 
-pub const MASK_COMPONENT_COLORS: [Color32; 8] = [
+pub(crate) const MASK_COMPONENT_COLORS: [Color32; 8] = [
     MASK_ADD,
     Color32::from_rgb(255, 116, 102),
     Color32::from_rgb(83, 211, 146),
@@ -78,7 +79,7 @@ pub const MASK_COMPONENT_COLORS: [Color32; 8] = [
     Color32::from_rgb(180, 205, 88),
 ];
 
-pub const HSL_CHANNELS: [(&str, Color32); 8] = [
+pub(crate) const HSL_CHANNELS: [(&str, Color32); 8] = [
     ("Red", Color32::from_rgb(232, 76, 82)),
     ("Orange", Color32::from_rgb(238, 137, 48)),
     ("Yellow", Color32::from_rgb(224, 193, 57)),
@@ -89,19 +90,19 @@ pub const HSL_CHANNELS: [(&str, Color32); 8] = [
     ("Magenta", Color32::from_rgb(219, 79, 163)),
 ];
 
-pub const BRIGHTNESS_SHADOW: Color32 = Color32::from_gray(18);
-pub const BRIGHTNESS_MID: Color32 = Color32::from_gray(118);
-pub const BRIGHTNESS_HIGHLIGHT: Color32 = Color32::from_gray(245);
-pub const TEMPERATURE_COOL: Color32 = Color32::from_rgb(72, 128, 235);
-pub const TEMPERATURE_NEUTRAL: Color32 = Color32::from_gray(208);
-pub const TEMPERATURE_WARM: Color32 = Color32::from_rgb(244, 157, 62);
-pub const TINT_GREEN: Color32 = Color32::from_rgb(76, 181, 112);
-pub const TINT_NEUTRAL: Color32 = Color32::from_gray(202);
-pub const TINT_MAGENTA: Color32 = Color32::from_rgb(222, 84, 174);
-pub const COLORFULNESS_SHADOW: Color32 = Color32::from_gray(92);
-pub const COLORFULNESS_MID: Color32 = Color32::from_gray(178);
-pub const LUMINANCE_BLACK: Color32 = Color32::from_rgb(10, 10, 10);
-pub const LUMINANCE_WHITE: Color32 = Color32::from_rgb(246, 246, 246);
+pub(crate) const BRIGHTNESS_SHADOW: Color32 = Color32::from_gray(18);
+pub(crate) const BRIGHTNESS_MID: Color32 = Color32::from_gray(118);
+pub(crate) const BRIGHTNESS_HIGHLIGHT: Color32 = Color32::from_gray(245);
+pub(crate) const TEMPERATURE_COOL: Color32 = Color32::from_rgb(72, 128, 235);
+pub(crate) const TEMPERATURE_NEUTRAL: Color32 = Color32::from_gray(208);
+pub(crate) const TEMPERATURE_WARM: Color32 = Color32::from_rgb(244, 157, 62);
+pub(crate) const TINT_GREEN: Color32 = Color32::from_rgb(76, 181, 112);
+pub(crate) const TINT_NEUTRAL: Color32 = Color32::from_gray(202);
+pub(crate) const TINT_MAGENTA: Color32 = Color32::from_rgb(222, 84, 174);
+pub(crate) const COLORFULNESS_SHADOW: Color32 = Color32::from_gray(92);
+pub(crate) const COLORFULNESS_MID: Color32 = Color32::from_gray(178);
+pub(crate) const LUMINANCE_BLACK: Color32 = Color32::from_rgb(10, 10, 10);
+pub(crate) const LUMINANCE_WHITE: Color32 = Color32::from_rgb(246, 246, 246);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -339,11 +340,11 @@ const fn platform_floating_action_edge(android: bool) -> f32 {
     }
 }
 
-pub fn toolbar_icon_size() -> Vec2 {
+pub(crate) fn toolbar_icon_size() -> Vec2 {
     Vec2::splat(TOOLBAR_ICON_EDGE)
 }
 
-pub fn is_compact_portrait(ui: &Ui) -> bool {
+pub(crate) fn is_compact_portrait(ui: &Ui) -> bool {
     compact_portrait_for_platform(ui.ctx().content_rect().size(), cfg!(target_os = "android"))
 }
 
@@ -360,17 +361,20 @@ fn content_margin(ui: &Ui) -> i8 {
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn tool_rail_icon_size() -> Vec2 {
+pub(crate) fn tool_rail_icon_size() -> Vec2 {
     Vec2::splat(TOOL_RAIL_ICON_EDGE)
 }
 
-pub fn prepare_toolbar(ui: &mut Ui) {
+pub(crate) fn prepare_toolbar(ui: &mut Ui) {
     ui.set_min_height(TOOLBAR_HEIGHT);
     ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
     ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
 }
 
-pub fn toolbar_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+pub(crate) fn toolbar_row<R>(
+    ui: &mut Ui,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<R> {
     let size = egui::vec2(ui.available_width().max(1.0), TOOLBAR_HEIGHT);
     ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
         prepare_toolbar(ui);
@@ -378,7 +382,7 @@ pub fn toolbar_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> I
     })
 }
 
-pub fn panel_title(ui: &mut Ui, title: impl Into<RichText>) -> InnerResponse<Response> {
+pub(crate) fn panel_title(ui: &mut Ui, title: impl Into<RichText>) -> InnerResponse<Response> {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let title = ui
@@ -393,7 +397,7 @@ pub fn panel_title(ui: &mut Ui, title: impl Into<RichText>) -> InnerResponse<Res
     })
 }
 
-pub fn toolbar_frame(ui: &Ui) -> Frame {
+pub(crate) fn toolbar_frame(ui: &Ui) -> Frame {
     let compact = is_compact_portrait(ui);
     Frame::new()
         .fill(ui.visuals().panel_fill)
@@ -407,7 +411,7 @@ pub fn toolbar_frame(ui: &Ui) -> Frame {
         ))
 }
 
-pub fn panel_frame(ui: &Ui) -> Frame {
+pub(crate) fn panel_frame(ui: &Ui) -> Frame {
     Frame::new()
         .fill(ui.visuals().panel_fill)
         .inner_margin(Margin::same(if is_compact_portrait(ui) {
@@ -417,7 +421,7 @@ pub fn panel_frame(ui: &Ui) -> Frame {
         }))
 }
 
-pub fn card_frame(ui: &Ui) -> Frame {
+pub(crate) fn card_frame(ui: &Ui) -> Frame {
     Frame::new()
         .fill(ui.visuals().faint_bg_color)
         .inner_margin(Margin::same(content_margin(ui)))
@@ -428,7 +432,10 @@ pub fn card_frame(ui: &Ui) -> Frame {
         ))
 }
 
-pub fn content_card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+pub(crate) fn content_card<R>(
+    ui: &mut Ui,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<R> {
     let frame_width = f32::from(content_margin(ui)) * 2.0 + 2.0;
     let inner_width = (ui.available_width() - frame_width).max(1.0);
     card_frame(ui).show(ui, |ui| {
@@ -438,7 +445,7 @@ pub fn content_card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> 
     })
 }
 
-pub fn section_card<R>(
+pub(crate) fn section_card<R>(
     ui: &mut Ui,
     title: impl Into<RichText>,
     add_contents: impl FnOnce(&mut Ui) -> R,
@@ -449,7 +456,7 @@ pub fn section_card<R>(
     })
 }
 
-pub fn section_card_with_help<R>(
+pub(crate) fn section_card_with_help<R>(
     ui: &mut Ui,
     title: impl Into<RichText>,
     help: &str,
@@ -465,7 +472,7 @@ pub fn section_card_with_help<R>(
 ///
 /// Hovering (or pressing and holding on a touch screen) shows an ordinary
 /// tooltip. Tapping the icon opens the same text in a persistent popup.
-pub fn help_button(ui: &mut Ui, help: &str) -> Response {
+pub(crate) fn help_button(ui: &mut Ui, help: &str) -> Response {
     let popup_width = (ui.ctx().content_rect().width() - 48.0).clamp(180.0, 300.0);
     let response = ui.add_sized(
         [HELP_BUTTON_EDGE, HELP_BUTTON_EDGE],
@@ -486,7 +493,7 @@ pub fn help_button(ui: &mut Ui, help: &str) -> Response {
     response.on_hover_text(help)
 }
 
-pub fn heading_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
+pub(crate) fn heading_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
     let width = ui.available_width().max(1.0);
     ui.allocate_ui_with_layout(
         egui::vec2(width, HELP_BUTTON_EDGE),
@@ -500,7 +507,7 @@ pub fn heading_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
     );
 }
 
-pub fn strong_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
+pub(crate) fn strong_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
     let width = ui.available_width().max(1.0);
     ui.allocate_ui_with_layout(
         egui::vec2(width, HELP_BUTTON_EDGE),
@@ -514,7 +521,7 @@ pub fn strong_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
     );
 }
 
-pub fn checkbox_with_help(
+pub(crate) fn checkbox_with_help(
     ui: &mut Ui,
     checked: &mut bool,
     label: impl Into<egui::WidgetText>,
@@ -536,11 +543,11 @@ pub fn checkbox_with_help(
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn tab_button(ui: &mut Ui, label: &str, selected: bool, width: f32) -> Response {
+pub(crate) fn tab_button(ui: &mut Ui, label: &str, selected: bool, width: f32) -> Response {
     segmented_button(ui, RichText::new(label).strong(), selected, width)
 }
 
-pub fn segmented_button(
+pub(crate) fn segmented_button(
     ui: &mut Ui,
     label: impl Into<egui::WidgetText>,
     selected: bool,
@@ -554,11 +561,15 @@ pub fn segmented_button(
     )
 }
 
-pub fn toolbar_button(ui: &mut Ui, label: impl Into<egui::WidgetText>, width: f32) -> Response {
+pub(crate) fn toolbar_button(
+    ui: &mut Ui,
+    label: impl Into<egui::WidgetText>,
+    width: f32,
+) -> Response {
     ui.add_sized([width, CONTROL_HEIGHT], egui::Button::new(label.into()))
 }
 
-pub fn navigation_row(
+pub(crate) fn navigation_row(
     ui: &mut Ui,
     label: impl Into<egui::WidgetText>,
     selected: bool,
@@ -573,7 +584,10 @@ pub fn navigation_row(
     )
 }
 
-pub fn action_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+pub(crate) fn action_row<R>(
+    ui: &mut Ui,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<R> {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
         ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
@@ -581,7 +595,7 @@ pub fn action_row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> In
     })
 }
 
-pub fn card_gap(ui: &mut Ui) {
+pub(crate) fn card_gap(ui: &mut Ui) {
     let gap = if is_compact_portrait(ui) {
         COMPACT_PORTRAIT_CARD_GAP
     } else {
@@ -591,7 +605,7 @@ pub fn card_gap(ui: &mut Ui) {
     ui.add_space(explicit_space);
 }
 
-pub fn singleline_text_edit<'a>(text: &'a mut dyn egui::TextBuffer) -> egui::TextEdit<'a> {
+pub(crate) fn singleline_text_edit<'a>(text: &'a mut dyn egui::TextBuffer) -> egui::TextEdit<'a> {
     egui::TextEdit::singleline(text)
         .vertical_align(Align::Center)
         .margin(Margin::symmetric(8, 4))
@@ -599,7 +613,7 @@ pub fn singleline_text_edit<'a>(text: &'a mut dyn egui::TextBuffer) -> egui::Tex
 }
 
 #[cfg(any(target_os = "android", test))]
-pub fn floating_action_rect(bounds: egui::Rect) -> egui::Rect {
+pub(crate) fn floating_action_rect(bounds: egui::Rect) -> egui::Rect {
     let size = Vec2::splat(FLOATING_ACTION_EDGE);
     let inset = Vec2::splat(FLOATING_ACTION_MARGIN);
     egui::Rect::from_min_size(bounds.right_bottom() - inset - size, size)
@@ -632,7 +646,7 @@ pub fn floating_action_button(
     .on_hover_text(tooltip)
 }
 
-pub fn form_combo(
+pub(crate) fn form_combo(
     ui: &mut Ui,
     label: impl Into<egui::WidgetText>,
     id_salt: impl egui::AsIdSalt,
@@ -665,7 +679,7 @@ pub fn form_combo(
     }
 }
 
-pub fn form_combo_with_help(
+pub(crate) fn form_combo_with_help(
     ui: &mut Ui,
     label: &str,
     id_salt: impl egui::AsIdSalt,
@@ -714,7 +728,7 @@ pub fn form_combo_with_help(
     }
 }
 
-pub fn install(ctx: &egui::Context) {
+pub(crate) fn install(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);
@@ -722,7 +736,7 @@ pub fn install(ctx: &egui::Context) {
     apply(ctx, UiDesign::default());
 }
 
-pub fn apply(ctx: &egui::Context, design: UiDesign) {
+pub(crate) fn apply(ctx: &egui::Context, design: UiDesign) {
     let palette = design.palette();
     let theme = if design.is_dark() {
         egui::Theme::Dark

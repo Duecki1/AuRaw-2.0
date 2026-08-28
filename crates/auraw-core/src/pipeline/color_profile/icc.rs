@@ -1,5 +1,3 @@
-#![cfg_attr(test, allow(dead_code))]
-
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -115,6 +113,7 @@ pub(super) struct MatrixShaperProfile {
 
 impl MatrixShaperProfile {
     #[cfg(any(target_os = "android", test))]
+    #[cfg_attr(test, allow(dead_code))]
     pub(super) fn parse(bytes: &[u8]) -> Result<Self> {
         Self::parse_impl(bytes, true)
     }

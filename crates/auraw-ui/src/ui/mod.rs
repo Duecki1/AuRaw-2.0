@@ -1,14 +1,14 @@
-pub mod components;
+pub(crate) mod components;
 #[cfg(not(target_os = "android"))]
-pub mod develop;
-pub mod icons;
-pub mod layout;
-pub mod library;
-pub mod preview;
-pub mod settings;
-pub mod sidebar;
-pub mod theme;
-pub mod top_bar;
+pub(crate) mod develop;
+pub(crate) mod icons;
+pub(crate) mod layout;
+pub(crate) mod library;
+pub(crate) mod preview;
+pub(crate) mod settings;
+pub(crate) mod sidebar;
+pub(crate) mod theme;
+pub(crate) mod top_bar;
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn choose_export_file_path(

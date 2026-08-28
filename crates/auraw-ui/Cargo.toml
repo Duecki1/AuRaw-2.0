@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 description = "AuRaw egui/eframe desktop and Android user interface"
+publish = false
 build = "build.rs"
 
 [lib]

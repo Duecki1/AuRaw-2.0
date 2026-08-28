@@ -218,7 +218,9 @@ file(WRITE "${AURAW_GLIB_CROSS_FILE}"
 
 # libiconv installs the iconv/charset archives consumed by GLib and Lensfun.
 ExternalProject_Add(auraw_iconv
-    URL https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.17.tar.gz
+    URL
+        https://ftpmirror.gnu.org/libiconv/libiconv-1.17.tar.gz
+        https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.17.tar.gz
     URL_HASH SHA256=8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313
     PREFIX "${AURAW_EXTERNAL_ROOT}/iconv-prefix"
     BINARY_DIR "${AURAW_EXTERNAL_ROOT}/iconv-build"

@@ -8,7 +8,7 @@ const POINT_RADIUS: f32 = 5.0;
 const PICK_RADIUS: f32 = 16.0;
 const MIN_POINT_X_GAP: f32 = 0.005;
 
-pub fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color32) -> bool {
+pub(crate) fn tone_curve_editor(ui: &mut Ui, curve: &mut PointCurve, curve_color: Color32) -> bool {
     curve.sanitize();
     let width = ui.available_width().max(1.0);
     let (rect, response) =
@@ -239,7 +239,7 @@ fn secant(a: [f32; 2], b: [f32; 2]) -> f32 {
     (b[1] - a[1]) / (b[0] - a[0]).max(1e-5)
 }
 
-pub struct ToneCurveChannels<'a> {
+pub(crate) struct ToneCurveChannels<'a> {
     pub rgb: &'a mut PointCurve,
     pub red: &'a mut PointCurve,
     pub green: &'a mut PointCurve,
@@ -253,7 +253,7 @@ const TONE_CURVE_TABS: [(ToneCurveTab, &str, Color32); 4] = [
     (ToneCurveTab::Blue, "B", CHANNEL_BLUE),
 ];
 
-pub fn tone_curve_channel_editor(
+pub(crate) fn tone_curve_channel_editor(
     ui: &mut Ui,
     curves: ToneCurveChannels<'_>,
     selected_tab: &mut ToneCurveTab,

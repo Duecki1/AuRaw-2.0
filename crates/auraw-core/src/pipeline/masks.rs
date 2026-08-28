@@ -275,7 +275,7 @@ mod base64_arc_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::sync::Arc;
 
-    pub fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -285,7 +285,7 @@ mod base64_arc_bytes {
         ))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -1139,6 +1139,7 @@ impl MaskStack {
             // A mask begins empty. A leading subtraction or intersection cannot
             // affect it, so avoid rasterizing an otherwise discarded component.
             if combined.is_none() && component.combine != MaskCombineMode::Add {
+                combined = Some(vec![0.0; len]);
                 continue;
             }
             let mut coverage = rasterize_component(

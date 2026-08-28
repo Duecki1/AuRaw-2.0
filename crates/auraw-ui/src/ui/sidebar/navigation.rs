@@ -24,7 +24,7 @@ fn mobile_tab_icon_geometry(height: f32, show_label: bool) -> (f32, f32) {
 }
 
 impl Sidebar {
-    pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
+    pub(crate) fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout, frame: &eframe::Frame) {
         ui.take_available_width();
         let vertical_spacing = if crate::ui::theme::is_compact_portrait(ui) {
             crate::ui::theme::SPACE_XS

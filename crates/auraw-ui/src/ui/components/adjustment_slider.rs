@@ -33,7 +33,7 @@ const COMPACT_LABEL_MAX_WIDTH: f32 = 104.0;
 const COMPACT_TRACK_MIN_WIDTH: f32 = 64.0;
 
 #[derive(Clone, Copy, Debug)]
-pub enum SliderGradient {
+pub(crate) enum SliderGradient {
     HueDegrees {
         start: f32,
         end: f32,
@@ -68,7 +68,7 @@ fn slider_scroll_lock_id() -> egui::Id {
     egui::Id::new("auraw-adjustment-slider-scroll-lock")
 }
 
-pub fn slider_scroll_locked(ctx: &egui::Context) -> bool {
+pub(crate) fn slider_scroll_locked(ctx: &egui::Context) -> bool {
     let pointer_down = ctx.input(|input| input.pointer.any_down());
     if !pointer_down {
         ctx.data_mut(|data| data.remove::<egui::Id>(slider_scroll_lock_id()));
@@ -87,7 +87,7 @@ fn lock_slider_scroll(ctx: &egui::Context, slider_id: egui::Id) {
     ctx.set_dragged_id(slider_id);
 }
 
-pub fn adjustment_slider<Num>(
+pub(crate) fn adjustment_slider<Num>(
     ui: &mut Ui,
     label: &str,
     value: &mut Num,
@@ -116,7 +116,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn gradient_adjustment_slider<Num>(
+pub(crate) fn gradient_adjustment_slider<Num>(
     ui: &mut Ui,
     label: &str,
     value: &mut Num,
@@ -146,7 +146,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn accented_gradient_adjustment_slider<Num>(
+pub(crate) fn accented_gradient_adjustment_slider<Num>(
     ui: &mut Ui,
     label: &str,
     value: &mut Num,
@@ -176,7 +176,11 @@ where
     )
 }
 
-pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&str>) -> bool {
+pub(crate) fn hue_adjustment_slider(
+    ui: &mut Ui,
+    value: &mut f32,
+    hover_text: Option<&str>,
+) -> bool {
     let spec = crate::pipeline::effect_params::adjustment::HUE;
     adjustment_slider_impl(
         ui,
@@ -198,7 +202,7 @@ pub fn hue_adjustment_slider(ui: &mut Ui, value: &mut f32, hover_text: Option<&s
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn adjustment_slider_with_reset<Num>(
+pub(crate) fn adjustment_slider_with_reset<Num>(
     ui: &mut Ui,
     label: &str,
     value: &mut Num,

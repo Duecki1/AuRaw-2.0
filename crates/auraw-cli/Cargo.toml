@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 description = "AuRaw headless export tool"
+publish = false
 
 [[bin]]
 name = "auraw-develop-export"

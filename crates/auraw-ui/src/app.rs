@@ -152,7 +152,7 @@ pub(crate) enum PreviewQuality {
 }
 
 impl PreviewQuality {
-    pub const fn pixel_scale(self) -> f32 {
+    pub(crate) const fn pixel_scale(self) -> f32 {
         match self {
             Self::Low => 0.75,
             Self::Medium => 1.00,
@@ -161,7 +161,7 @@ impl PreviewQuality {
         }
     }
 
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Low => "Low",
             Self::Medium => "Medium",
@@ -170,7 +170,7 @@ impl PreviewQuality {
         }
     }
 
-    pub const fn proxy_edge(self) -> u32 {
+    pub(crate) const fn proxy_edge(self) -> u32 {
         match self {
             Self::Low => 640,
             Self::Medium => 800,
@@ -187,11 +187,11 @@ impl PreviewQuality {
             .max(requested.min(f64::from(u32::MAX - CFA_PHASE_GUARD)) as u32 + CFA_PHASE_GUARD)
     }
 
-    pub fn proxy_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
+    pub(crate) fn proxy_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
         self.edge_for_scale(viewport_pixels, 1.0)
     }
 
-    pub fn proxy_edge_for_fitted_source(
+    pub(crate) fn proxy_edge_for_fitted_source(
         self,
         viewport_pixels: [u32; 2],
         source_width: u32,
@@ -213,11 +213,11 @@ impl PreviewQuality {
         self.proxy_edge().max(requested).min(source_edge)
     }
 
-    pub fn detail_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
+    pub(crate) fn detail_edge_for_viewport(self, viewport_pixels: [u32; 2]) -> u32 {
         self.edge_for_scale(viewport_pixels, 1.35)
     }
 
-    pub const fn detail_pixel_scale(self) -> f32 {
+    pub(crate) const fn detail_pixel_scale(self) -> f32 {
         self.pixel_scale()
     }
 }
@@ -283,7 +283,7 @@ pub(crate) struct PreviewDetail {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum AppTab {
+pub(crate) enum AppTab {
     #[default]
     Library,
     Develop,
@@ -291,7 +291,7 @@ pub enum AppTab {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SidebarTab {
+pub(crate) enum SidebarTab {
     #[default]
     Adjustments,
     Crop,
@@ -338,7 +338,7 @@ impl InpaintTool {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum AdjustmentSection {
+pub(crate) enum AdjustmentSection {
     #[default]
     Light,
     ToneCurve,
@@ -353,7 +353,7 @@ pub enum AdjustmentSection {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum MaskSection {
+pub(crate) enum MaskSection {
     #[default]
     Properties,
     Light,
@@ -365,7 +365,7 @@ pub enum MaskSection {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ToneCurveTab {
+pub(crate) enum ToneCurveTab {
     #[default]
     Rgb,
     Red,
@@ -374,7 +374,7 @@ pub enum ToneCurveTab {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ColorGradeTab {
+pub(crate) enum ColorGradeTab {
     Shadows,
     #[default]
     Midtones,
@@ -384,7 +384,7 @@ pub enum ColorGradeTab {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(usize)]
-pub enum HslMixerColor {
+pub(crate) enum HslMixerColor {
     #[default]
     Red,
     Orange,
@@ -397,7 +397,7 @@ pub enum HslMixerColor {
 }
 
 impl HslMixerColor {
-    pub const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Red,
         Self::Orange,
         Self::Yellow,
@@ -408,7 +408,7 @@ impl HslMixerColor {
         Self::Magenta,
     ];
 
-    pub const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         self as usize
     }
 }

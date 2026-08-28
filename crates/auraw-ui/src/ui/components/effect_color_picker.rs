@@ -16,7 +16,7 @@ struct PickerState {
     hue: f32,
 }
 
-pub fn effect_color_picker(
+pub(crate) fn effect_color_picker(
     ui: &mut Ui,
     id_salt: impl egui::AsIdSalt,
     color: &mut [f32; 3],

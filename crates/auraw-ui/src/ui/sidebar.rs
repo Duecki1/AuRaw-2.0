@@ -19,7 +19,7 @@ use crate::ui::components::tone_curve_editor::{tone_curve_channel_editor, ToneCu
 use crate::ui::layout::ScreenLayout;
 use eframe::egui::{self, Ui};
 
-pub struct Sidebar;
+pub(crate) struct Sidebar;
 
 mod mask_effects;
 

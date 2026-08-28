@@ -1004,6 +1004,10 @@ fn leading_non_add_components_leave_an_empty_layer_unchanged() {
         stack.masks[0].components[0].combine = combine;
         assert_eq!(stack.rasterize_layer(0, 2, 2, 2, 2), vec![0; 4]);
 
+        stack.masks[0].invert = true;
+        assert_eq!(stack.rasterize_layer(0, 2, 2, 2, 2), vec![255; 4]);
+        stack.masks[0].invert = false;
+
         stack.add_component(MaskKind::Fullscreen, MaskCombineMode::Add);
         assert_eq!(stack.rasterize_layer(0, 2, 2, 2, 2), vec![255; 4]);
     }

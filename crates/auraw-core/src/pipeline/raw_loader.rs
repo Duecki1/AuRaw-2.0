@@ -768,11 +768,13 @@ impl LoadedRaw {
             matches!(self.cfa_kind, CfaKind::Bayer) == image.bayer_cfa().is_some(),
             "AI-denoise payload type does not match the RAW CFA"
         );
-        let mut cached = self
-            .ai_denoised
-            .write()
-            .map_err(|_| anyhow::anyhow!("AI-denoise cache lock was poisoned"))?;
-        *cached = Some(image);
+        {
+            let mut cached = self
+                .ai_denoised
+                .write()
+                .map_err(|_| anyhow::anyhow!("AI-denoise cache lock was poisoned"))?;
+            *cached = Some(image);
+        }
         if let Ok(mut chroma) = self.opposed_chroma_cache.write() {
             chroma.retain(|key, _| !key.use_ai_cfa);
         }

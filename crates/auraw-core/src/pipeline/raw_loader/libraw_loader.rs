@@ -83,11 +83,11 @@ mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-pub fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
+pub(super) fn load_raw_file(path: &Path) -> Result<LoadedRaw> {
     load_raw_file_with_profile_config(path, CameraProfileMode::Automatic, None)
 }
 
-pub fn load_raw_file_with_profile_config(
+pub(super) fn load_raw_file_with_profile_config(
     path: &Path,
     mode: CameraProfileMode,
     profile_folder: Option<&Path>,
@@ -95,7 +95,7 @@ pub fn load_raw_file_with_profile_config(
     load_raw_file_with_profile_selection(path, mode, profile_folder, None)
 }
 
-pub fn load_raw_file_with_profile_selection(
+pub(super) fn load_raw_file_with_profile_selection(
     path: &Path,
     mode: CameraProfileMode,
     profile_folder: Option<&Path>,
@@ -242,7 +242,7 @@ pub fn load_raw_file_with_profile_selection(
     Ok(loaded)
 }
 
-pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<LoadedRaw> {
+pub(super) fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<LoadedRaw> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW input")?;
     validate_input_file(profile_path, MAX_DCP_FILE_BYTES, "DCP profile")?;
     let mut selected = DcpProfile::from_path(profile_path)
@@ -262,7 +262,7 @@ pub fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result<Loaded
     Ok(loaded)
 }
 
-pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
+pub(super) fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW dimension input")?;
     let ctx = open_libraw(path)?;
 
@@ -280,13 +280,13 @@ pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
     })
 }
 
-pub fn load_raw_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+pub(super) fn load_raw_embedded_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "embedded RAW thumbnail input")?;
     anyhow::ensure!(maximum_edge > 0, "thumbnail edge must be non-zero");
     load_embedded_thumbnail(path, maximum_edge)
 }
 
-pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+pub(super) fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW thumbnail input")?;
     anyhow::ensure!(maximum_edge > 0, "thumbnail edge must be non-zero");
 

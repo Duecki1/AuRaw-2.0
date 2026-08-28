@@ -722,14 +722,14 @@ mod arc_u8_base64 {
     use super::*;
     use base64::Engine as _;
 
-    pub fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -745,7 +745,7 @@ mod arc_u16_le_base64 {
     use super::*;
     use base64::Engine as _;
 
-    pub fn serialize<S>(values: &Arc<[u16]>, serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(values: &Arc<[u16]>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -756,7 +756,7 @@ mod arc_u16_le_base64 {
         serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u16]>, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u16]>, D::Error>
     where
         D: Deserializer<'de>,
     {

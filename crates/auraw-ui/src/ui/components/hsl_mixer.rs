@@ -12,7 +12,7 @@ use crate::ui::theme::HSL_CHANNELS as CHANNELS;
 const SELECTOR_GAP: f32 = 4.0;
 const SELECTOR_HEIGHT: f32 = 30.0;
 
-pub fn hsl_mixer(
+pub(crate) fn hsl_mixer(
     ui: &mut Ui,
     selected: &mut HslMixerColor,
     hue: &mut [f32; 8],

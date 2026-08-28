@@ -23,7 +23,7 @@ const REC709_TO_REC2020: [[f32; 3]; 3] = [
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TiffContainerKind {
+pub(super) enum TiffContainerKind {
     Sensor,
     Raster,
 }
@@ -57,7 +57,7 @@ impl ByteOrder {
     }
 }
 
-pub fn is_tiff_path(path: &Path) -> bool {
+pub(super) fn is_tiff_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
@@ -65,7 +65,7 @@ pub fn is_tiff_path(path: &Path) -> bool {
         })
 }
 
-pub fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
+pub(super) fn inspect_tiff_container(path: &Path) -> Result<TiffContainerKind> {
     let mut file = File::open(path).with_context(|| format!("open TIFF {}", path.display()))?;
     let file_len = file
         .metadata()
@@ -298,7 +298,7 @@ fn integer_values(file: &mut File, field: TiffFieldRef, limit: usize) -> Result<
     Ok(values)
 }
 
-pub fn load_raster_tiff(path: &Path) -> Result<LoadedRaw> {
+pub(super) fn load_raster_tiff(path: &Path) -> Result<LoadedRaw> {
     let (width, height, rgb) = decode_scene_linear_rec2020(path)?;
     LoadedRaw::from_scene_linear_rec2020(width, height, rgb)
 }
@@ -352,7 +352,7 @@ fn srgb_to_linear(value: f32) -> f32 {
     }
 }
 
-pub fn load_raster_tiff_dimensions(path: &Path) -> Result<[u32; 2]> {
+pub(super) fn load_raster_tiff_dimensions(path: &Path) -> Result<[u32; 2]> {
     let file = File::open(path).with_context(|| format!("open TIFF {}", path.display()))?;
     let mut reader = image::ImageReader::with_format(BufReader::new(file), ImageFormat::Tiff);
     configure_limits(&mut reader);
@@ -363,7 +363,7 @@ pub fn load_raster_tiff_dimensions(path: &Path) -> Result<[u32; 2]> {
     Ok([width, height])
 }
 
-pub fn load_raster_tiff_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
+pub(super) fn load_raster_tiff_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail> {
     anyhow::ensure!(maximum_edge > 0, "thumbnail edge must be non-zero");
     let (width, height, rgb) = decode_scene_linear_rec2020(path)?;
     let image = image::DynamicImage::ImageRgb32F(
