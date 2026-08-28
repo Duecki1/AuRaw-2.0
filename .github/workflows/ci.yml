@@ -34,7 +34,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libclang-dev libraw-dev liblensfun-dev liblensfun-data-v1 \
-            libasound2-dev libdbus-1-dev libegl1-mesa-dev libfontconfig1-dev \
+            libasound2-dev libdbus-1-dev libegl1-mesa-dev libfontconfig1-dev libglib2.0-dev \
             libgl1-mesa-dev libudev-dev libwayland-dev libx11-dev libxkbcommon-dev
 
       - name: Install Rust
