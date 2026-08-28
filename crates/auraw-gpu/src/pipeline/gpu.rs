@@ -7,8 +7,7 @@ use crate::pipeline::{
     working_rec2020_to_canonical_remove_scene, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, LocalMask,
     MaskEffect, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RemoveEditState, RemovePatch,
-    RenderingIntent, SigmoidParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT,
-    MAX_LOCAL_MASKS,
+    SigmoidParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -2361,16 +2360,6 @@ impl RawGpuPipeline {
             renderer.register_native_texture(device, &self._out_view, wgpu::FilterMode::Linear);
         self.egui_texture_id = Some(texture_id);
         texture_id
-    }
-
-    pub fn set_display_icc_profile(
-        &self,
-        queue: &wgpu::Queue,
-        profile_bytes: &[u8],
-        intent: RenderingIntent,
-    ) -> Result<()> {
-        let transform = IccOutputTransform::from_icc(profile_bytes, intent)?;
-        self.write_output_transform(queue, &transform)
     }
 
     pub fn reset_display_to_srgb(&self, queue: &wgpu::Queue) -> Result<()> {

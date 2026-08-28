@@ -76,18 +76,6 @@ impl MaskKind {
         }
     }
 
-    pub const fn short_label(self) -> &'static str {
-        match self {
-            Self::Fullscreen => "Full Image",
-            Self::Radial => "Radial",
-            Self::Linear => "Linear",
-            Self::LuminanceRange => "Luminance",
-            Self::ColorRange => "Color",
-            Self::DepthRange => "Depth",
-            _ => self.label(),
-        }
-    }
-
     pub const fn is_available(self) -> bool {
         matches!(
             self,

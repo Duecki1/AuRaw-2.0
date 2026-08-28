@@ -44,9 +44,11 @@ See [ANDROID.md](ANDROID.md) for platform-specific details.
 ## Development
 
 ```sh
+cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo deny check
 ```
 
 Architecture and development notes:

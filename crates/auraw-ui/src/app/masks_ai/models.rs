@@ -93,22 +93,16 @@ impl AurawApp {
                     .truncate(true)
                     .write(true)
                     .open(&temporary)
-                    .map_err(|error| {
-                        format!("could not open {}: {error}", temporary.display())
-                    })?;
-                file.write_all(payload.as_bytes()).map_err(|error| {
-                    format!("could not write {}: {error}", temporary.display())
-                })?;
-                file.sync_all().map_err(|error| {
-                    format!("could not flush {}: {error}", temporary.display())
-                })?;
+                    .map_err(|error| format!("could not open {}: {error}", temporary.display()))?;
+                file.write_all(payload.as_bytes())
+                    .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+                file.sync_all()
+                    .map_err(|error| format!("could not flush {}: {error}", temporary.display()))?;
                 drop(file);
-                crate::file_ops::replace_file(&temporary, &config).map_err(|error| {
-                    format!("could not publish {}: {error}", config.display())
-                })?;
-                crate::file_ops::sync_parent_directory(parent).map_err(|error| {
-                    format!("could not flush {}: {error}", parent.display())
-                })
+                crate::file_ops::replace_file(&temporary, &config)
+                    .map_err(|error| format!("could not publish {}: {error}", config.display()))?;
+                crate::file_ops::sync_parent_directory(parent)
+                    .map_err(|error| format!("could not flush {}: {error}", parent.display()))
             })();
             if result.is_err() {
                 let _ = std::fs::remove_file(&temporary);

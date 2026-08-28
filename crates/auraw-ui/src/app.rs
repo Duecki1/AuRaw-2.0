@@ -56,8 +56,8 @@ pub(crate) enum DesktopPickerEvent {
     DisplayProfile(Option<PathBuf>),
 }
 
+#[cfg(target_os = "android")]
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) struct AndroidOriginalHold {
     pub start: egui::Pos2,
     pub started_at: Instant,
@@ -961,6 +961,7 @@ pub(crate) struct PreviewState {
     pub(crate) original_exposure: ExposureParams,
     pub(crate) original_requested: bool,
     pub(crate) original_rendered_state: Option<(bool, u64)>,
+    #[cfg(target_os = "android")]
     pub(crate) original_hold: Option<AndroidOriginalHold>,
     pub(crate) pending_stage: Option<ProcessingStage>,
     #[cfg(target_os = "android")]
@@ -1219,7 +1220,7 @@ impl AurawApp {
         }
         if self.ui.active_tab == AppTab::Develop && tab != AppTab::Develop {
             self.set_original_preview_requested(false);
-            self.preview.original_hold = None;
+            self.clear_android_original_hold();
         }
         if self.ui.active_tab == AppTab::Library && tab != AppTab::Library {
             self.library.prepare_for_develop();
@@ -1235,6 +1236,14 @@ impl AurawApp {
         #[cfg(target_os = "android")]
         crate::android::set_back_navigation_active(tab != AppTab::Library);
     }
+
+    #[cfg(target_os = "android")]
+    fn clear_android_original_hold(&mut self) {
+        self.preview.original_hold = None;
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn clear_android_original_hold(&mut self) {}
 
     fn retire_egui_texture(&mut self, texture_id: egui::TextureId) {
         if !self.preview.retired_egui_textures.contains(&texture_id) {

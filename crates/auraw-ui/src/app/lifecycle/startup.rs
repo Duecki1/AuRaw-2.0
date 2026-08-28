@@ -82,6 +82,7 @@ impl AurawApp {
                 original_exposure: exposure,
                 original_requested: false,
                 original_rendered_state: None,
+                #[cfg(target_os = "android")]
                 original_hold: None,
                 pending_stage: None,
                 #[cfg(target_os = "android")]
@@ -364,6 +365,7 @@ impl AurawApp {
                 original_exposure: exposure,
                 original_requested: false,
                 original_rendered_state: None,
+                #[cfg(target_os = "android")]
                 original_hold: None,
                 pending_stage: None,
                 lens_original_cache: None,

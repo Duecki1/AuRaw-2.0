@@ -21,8 +21,6 @@ pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0007;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg";
-#[cfg(any(not(target_os = "android"), test))]
-pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str = crate::thumbnail_cache::DESKTOP_THUMBNAIL_CACHE_DIR;
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-thumb.fingerprint";
 pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {

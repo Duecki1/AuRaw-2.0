@@ -234,7 +234,7 @@ impl AurawApp {
         self.preview.original_exposure = initial_exposure;
         self.preview.original_requested = false;
         self.preview.original_rendered_state = None;
-        self.preview.original_hold = None;
+        self.clear_android_original_hold();
         self.develop.exposure = initial_exposure;
         self.develop.target_exposure = initial_exposure;
         self.masks.stack.clear();

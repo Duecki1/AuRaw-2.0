@@ -767,17 +767,6 @@ pub fn load_developed_thumbnail_cache(
     crate::thumbnail_cache::load_jpeg(&cache_path, maximum_edge)
 }
 
-pub fn developed_thumbnail_cache_file(
-    app: &AndroidApp,
-    raw_uri: &str,
-    display_name: &str,
-) -> Result<Option<PathBuf>, String> {
-    if load_developed_thumbnail_cache(app, raw_uri, display_name, 8192)?.is_none() {
-        return Ok(None);
-    }
-    developed_thumbnail_cache_path(app, raw_uri).map(Some)
-}
-
 pub fn save_developed_thumbnail_cache(
     app: &AndroidApp,
     raw_uri: &str,

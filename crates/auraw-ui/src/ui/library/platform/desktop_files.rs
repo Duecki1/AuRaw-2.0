@@ -141,17 +141,17 @@ pub(in crate::ui::library) fn rename_raw_bundle(
     if destination_raw.exists() || destination_sidecar.exists() {
         return Err(format!("{} already exists.", destination_raw.display()));
     }
-    let developed_thumbnail =
-        match crate::sidecar::load_developed_thumbnail_cache(source_raw, 8192) {
-            Ok(thumbnail) => thumbnail,
-            Err(error) => {
-                log::warn!(
-                    "could not read developed thumbnail cache before renaming {}: {error}",
-                    source_raw.display()
-                );
-                None
-            }
-        };
+    let developed_thumbnail = match crate::sidecar::load_developed_thumbnail_cache(source_raw, 8192)
+    {
+        Ok(thumbnail) => thumbnail,
+        Err(error) => {
+            log::warn!(
+                "could not read developed thumbnail cache before renaming {}: {error}",
+                source_raw.display()
+            );
+            None
+        }
+    };
     fs::rename(source_raw, &destination_raw).map_err(|error| {
         format!(
             "Could not rename {} to {}: {error}",
