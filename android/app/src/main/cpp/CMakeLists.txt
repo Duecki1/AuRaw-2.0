@@ -217,10 +217,20 @@ file(WRITE "${AURAW_GLIB_CROSS_FILE}"
 "endian = 'little'\n")
 
 # libiconv installs the iconv/charset archives consumed by GLib and Lensfun.
+# CI prefetches the pinned archive into android/native/downloads with the
+# retrying/checksum-verifying bootstrap helper. Prefer that local archive so
+# Ninja never depends on ftp.gnu.org being reachable. Local developer builds
+# still have a direct HTTPS fallback to the kernel.org GNU mirror.
+set(AURAW_LIBICONV_ARCHIVE
+    "${AURAW_NATIVE_STAGE_ROOT}/downloads/libiconv-1.17.tar.gz")
+if(EXISTS "${AURAW_LIBICONV_ARCHIVE}")
+    set(AURAW_LIBICONV_URL "${AURAW_LIBICONV_ARCHIVE}")
+else()
+    set(AURAW_LIBICONV_URL
+        "https://mirrors.edge.kernel.org/gnu/libiconv/libiconv-1.17.tar.gz")
+endif()
 ExternalProject_Add(auraw_iconv
-    URL
-        https://ftpmirror.gnu.org/libiconv/libiconv-1.17.tar.gz
-        https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.17.tar.gz
+    URL "${AURAW_LIBICONV_URL}"
     URL_HASH SHA256=8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313
     PREFIX "${AURAW_EXTERNAL_ROOT}/iconv-prefix"
     BINARY_DIR "${AURAW_EXTERNAL_ROOT}/iconv-build"

@@ -301,6 +301,23 @@ jobs:
             python3 scripts/bootstrap_download.py "$1" "$2" "$3"
           }
 
+          # CMake's ExternalProject download previously fell through to
+          # ftp.gnu.org, which is unreachable from this Gitea runner. Fetch
+          # the immutable libiconv archive here with retries and a hard hash,
+          # then let CMake use the cached local file. Prefer an immutable
+          # GitHub mirror (GitHub is already required by this build), with a
+          # direct kernel.org GNU mirror as a second source.
+          mkdir -p android/native/downloads
+          if ! bootstrap_download_verified \
+            https://github.com/neovim/deps/raw/b9bf36eb31f27e8136d907da38fa23518927737e/opt/libiconv-1.17.tar.gz \
+            android/native/downloads/libiconv-1.17.tar.gz \
+            8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313; then
+            bootstrap_download_verified \
+              https://mirrors.edge.kernel.org/gnu/libiconv/libiconv-1.17.tar.gz \
+              android/native/downloads/libiconv-1.17.tar.gz \
+              8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313
+          fi
+
           bootstrap_download_verified \
             https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
             /tmp/rustup-init \
