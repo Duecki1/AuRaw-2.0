@@ -6,6 +6,7 @@ impl AurawApp {
         let performance_settings_path = crate::performance_settings::desktop_path();
         let performance = crate::performance_settings::load(performance_settings_path.as_deref());
         auraw_ai::set_ai_acceleration_enabled(performance.ai_gpu_acceleration);
+        let discord_presence = DiscordPresence::new(performance.discord_rich_presence);
         let last_library_folder = performance.last_library_folder.clone();
         let last_library_selected_folder = performance.last_library_selected_folder.clone();
         let mut camera_profile_folder = performance.camera_profile_folder.clone();
@@ -201,6 +202,7 @@ impl AurawApp {
             preferences: PreferencesState {
                 image_relative_brush_size: performance.image_relative_brush_size,
                 show_develop_navigation_labels: performance.show_develop_navigation_labels,
+                discord_rich_presence: performance.discord_rich_presence,
                 ui_design: performance.ui_design,
                 preview_backdrop: performance.preview_backdrop,
                 adjustment_copy_settings: performance.adjustment_copy_settings,
@@ -246,6 +248,7 @@ impl AurawApp {
                 performance.library_folder_sidebar_open,
                 performance.render_edited_thumbnails_during_indexing,
             ),
+            discord_presence,
             egui_ctx: ctx.clone(),
             foreground_operation: None,
         };

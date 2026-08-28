@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 16;
+const SETTINGS_VERSION: u32 = 17;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,6 +34,9 @@ pub(crate) struct PerformanceSettings {
     #[cfg(not(target_os = "android"))]
     #[serde(default = "default_true")]
     pub ai_gpu_acceleration: bool,
+    #[cfg(not(target_os = "android"))]
+    #[serde(default)]
+    pub discord_rich_presence: bool,
     #[serde(default)]
     pub camera_profile_mode: CameraProfileMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,6 +126,8 @@ impl Default for PerformanceSettings {
             birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: true,
+            #[cfg(not(target_os = "android"))]
+            discord_rich_presence: false,
             camera_profile_mode: CameraProfileMode::default(),
             camera_profile_folder: None,
             camera_profile_folder_label: None,
@@ -321,6 +326,8 @@ mod tests {
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: false,
+            #[cfg(not(target_os = "android"))]
+            discord_rich_presence: true,
             camera_profile_mode: CameraProfileMode::DcpProfiles,
             camera_profile_folder: Some(PathBuf::from("profiles")),
             camera_profile_folder_label: Some("CameraProfiles".to_owned()),
@@ -376,7 +383,10 @@ mod tests {
             crate::ai_masks::BiRefNetQuality::High
         );
         #[cfg(not(target_os = "android"))]
-        assert!(!settings.ai_gpu_acceleration);
+        {
+            assert!(!settings.ai_gpu_acceleration);
+            assert!(settings.discord_rich_presence);
+        }
         assert_eq!(settings.camera_profile_mode, CameraProfileMode::DcpProfiles);
         assert_eq!(
             settings.camera_profile_folder,
@@ -458,6 +468,7 @@ mod tests {
         #[cfg(not(target_os = "android"))]
         {
             assert!(settings.ai_gpu_acceleration);
+            assert!(!settings.discord_rich_presence);
             assert!(settings.library_folder_sidebar_open);
             assert!(settings.develop_filmstrip_open);
         }
@@ -483,6 +494,7 @@ mod tests {
         #[cfg(not(target_os = "android"))]
         {
             settings.ai_gpu_acceleration = false;
+            settings.discord_rich_presence = true;
             settings.last_library_folder = Some(PathBuf::from("photos"));
             settings.last_library_selected_folder = Some(PathBuf::from("photos/2026/trip"));
             settings.library_folder_sidebar_open = false;
@@ -515,6 +527,7 @@ mod tests {
         #[cfg(not(target_os = "android"))]
         {
             assert!(!restored.ai_gpu_acceleration);
+            assert!(restored.discord_rich_presence);
             assert_eq!(restored.last_library_folder, Some(PathBuf::from("photos")));
             assert_eq!(
                 restored.last_library_selected_folder,

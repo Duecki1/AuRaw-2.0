@@ -53,6 +53,18 @@ cargo clippy --workspace --all-targets --all-features -- \
 cargo deny check
 ```
 
+Desktop builds support an opt-in Discord Rich Presence setting. Register the
+AuRaw application in Discord's Developer Portal, then provide its public
+Application ID while building or launching AuRaw:
+
+```sh
+AURAW_DISCORD_APPLICATION_ID=123456789012345678 cargo run -p auraw-ui --bin auraw --release
+```
+
+The integration is disabled by default and sends only whether the user is
+browsing the Library or editing, along with the edit start time. It never sends
+photo names or paths.
+
 Architecture and development notes:
 
 - [Development](docs/DEVELOPMENT.md)

@@ -40,6 +40,10 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 mod ai_denoise;
+#[cfg(not(target_os = "android"))]
+mod discord_presence;
+#[cfg(not(target_os = "android"))]
+use discord_presence::DiscordPresence;
 mod edit_history;
 use edit_history::EditHistory;
 mod worker;
@@ -997,6 +1001,8 @@ pub(crate) struct DevelopUiState {
 pub(crate) struct PreferencesState {
     pub(crate) image_relative_brush_size: bool,
     pub(crate) show_develop_navigation_labels: bool,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) discord_rich_presence: bool,
     pub(crate) ui_design: UiDesign,
     pub(crate) preview_backdrop: PreviewBackdrop,
     pub(crate) adjustment_copy_settings: AdjustmentCopySettings,
@@ -1158,6 +1164,8 @@ pub struct AurawApp {
     pub(crate) persistence: PersistenceState,
     pub(crate) preferences: PreferencesState,
     pub(crate) ui: UiState,
+    #[cfg(not(target_os = "android"))]
+    discord_presence: DiscordPresence,
     egui_ctx: egui::Context,
     foreground_operation: Option<ForegroundOperation>,
     #[cfg(target_os = "android")]

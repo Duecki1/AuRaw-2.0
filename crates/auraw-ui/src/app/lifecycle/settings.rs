@@ -83,6 +83,42 @@ impl AurawApp {
         self.egui_ctx.request_repaint();
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn set_discord_rich_presence(&mut self, enabled: bool) {
+        if self.preferences.discord_rich_presence == enabled {
+            return;
+        }
+        if let Err(error) = self.discord_presence.set_enabled(enabled) {
+            self.ui.notice = Some(error);
+            return;
+        }
+
+        self.preferences.discord_rich_presence = enabled;
+        self.sync_discord_presence();
+        self.persist_performance_settings();
+        self.ui.notice = Some(if enabled {
+            "Discord Rich Presence enabled. Discord will show Library browsing or the current edit timer when its desktop client is running."
+                .to_owned()
+        } else {
+            "Discord Rich Presence disabled and cleared.".to_owned()
+        });
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn discord_rich_presence_configured(&self) -> bool {
+        self.discord_presence.is_configured()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(in crate::app) fn sync_discord_presence(&mut self) {
+        let document_id = self
+            .develop
+            .loaded_raw
+            .as_ref()
+            .map(|_| self.persistence.sidecar_generation);
+        self.discord_presence.sync(self.ui.active_tab, document_id);
+    }
+
     pub(crate) fn thumbnail_cache_size_label(&mut self) -> String {
         let update = self
             .ui
@@ -254,6 +290,8 @@ impl AurawApp {
             birefnet_quality: self.ai.birefnet_quality,
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: self.ai.gpu_acceleration,
+            #[cfg(not(target_os = "android"))]
+            discord_rich_presence: self.preferences.discord_rich_presence,
             camera_profile_mode: self.preferences.camera_profile_mode,
             camera_profile_folder: self.preferences.camera_profile_folder.clone(),
             camera_profile_folder_label: self.preferences.camera_profile_folder_label.clone(),

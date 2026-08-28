@@ -319,6 +319,8 @@ impl eframe::App for AurawApp {
             }
         });
         self.sync_ai_model_runtime_context();
+        #[cfg(not(target_os = "android"))]
+        self.sync_discord_presence();
 
         #[cfg(not(target_os = "android"))]
         if self.ui.active_tab == AppTab::Develop {
@@ -381,6 +383,8 @@ impl eframe::App for AurawApp {
 
     fn on_exit(&mut self) {
         auraw_ai::set_active_ai_context(None);
+        #[cfg(not(target_os = "android"))]
+        self.discord_presence.shutdown();
         #[cfg(target_os = "android")]
         {
             if let Err(error) =

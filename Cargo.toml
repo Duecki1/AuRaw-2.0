@@ -48,6 +48,7 @@ auraw-cli = { version = "2.0.0", path = "crates/auraw-cli" }
 anyhow = "1.0"
 base64 = "0.22"
 bytemuck = { version = "1.16", features = ["derive"] }
+discord-rich-presence = "1.1.0"
 half = "2.7"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }

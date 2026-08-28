@@ -158,6 +158,28 @@ impl Settings {
                 app.persist_performance_settings();
             }
 
+            #[cfg(not(target_os = "android"))]
+            {
+                ui.separator();
+                let mut enabled = app.preferences.discord_rich_presence;
+                if crate::ui::theme::checkbox_with_help(
+                    ui,
+                    &mut enabled,
+                    "Discord Rich Presence",
+                    "Shares only whether you are browsing the Library or editing, plus the elapsed edit time. Photo names and paths are never sent. Discord's desktop client must be running.",
+                )
+                .changed()
+                {
+                    app.set_discord_rich_presence(enabled);
+                }
+                if !app.discord_rich_presence_configured() {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "Unavailable in this build: AURAW_DISCORD_APPLICATION_ID is not configured.",
+                    );
+                }
+            }
+
             ui.separator();
             let previous_quality = app.preview.quality;
             crate::ui::theme::form_combo_with_help(

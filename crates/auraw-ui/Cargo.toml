@@ -31,6 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
+discord-rich-presence.workspace = true
 eframe = { workspace = true, features = ["accesskit", "wgpu", "default_fonts", "wayland", "x11"] }
 env_logger.workspace = true
 pollster.workspace = true
