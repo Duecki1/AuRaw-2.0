@@ -6,8 +6,7 @@ use crate::pipeline::{
     BrushMode, DemosaicMode, DenoiseQuality, ExportBitDepth, ExportColorProfile, ExportResizeMode,
     ExposureParams, LoadedRaw, LocalMask, MaskCombineMode, MaskComponent, MaskEffect,
     MaskEffectCategory, MaskGeometry, MaskKind, RetouchAlignment, SigmoidColorProcessing,
-    MAX_EXPORT_EDGE, MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS, MAX_WHITE_BALANCE_TINT,
-    MIN_WHITE_BALANCE_TINT,
+    MAX_LOCAL_MASKS, MAX_MASK_COMPONENTS, MAX_WHITE_BALANCE_TINT, MIN_WHITE_BALANCE_TINT,
 };
 use crate::ui::components::adjustment_slider::{
     adjustment_slider, adjustment_slider_with_reset, gradient_adjustment_slider,

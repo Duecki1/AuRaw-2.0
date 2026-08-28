@@ -26,7 +26,7 @@ pub(super) fn show_library_export_settings_controls(
     });
     enforce_library_export_bit_depth(*format, settings);
     ui.add_space(6.0);
-    crate::ui::sidebar::export_settings_controls(ui, settings, None, false, picker_directory);
+    crate::ui::sidebar::export_settings_controls(ui, settings, picker_directory);
     enforce_library_export_bit_depth(*format, settings);
 }
 

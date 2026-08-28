@@ -1,90 +1,12 @@
 pub(crate) fn export_settings_controls(
     ui: &mut Ui,
     settings: &mut crate::pipeline::ExportSettings,
-    source_dimensions: Option<(u32, u32)>,
-    show_dimension_summary: bool,
     fallback_picker_directory: Option<&std::path::Path>,
 ) {
     #[cfg(target_os = "android")]
     let _ = fallback_picker_directory;
-    crate::ui::theme::section_card_with_help(
-        ui,
-        "Image sizing",
-        "Export the complete processed image or constrain one dimension or percentage. Batch sizing is calculated independently for every selected image.",
-        |ui| {
-        crate::ui::theme::form_combo_with_help(
-            ui,
-            "Resize to fit",
-            "export-resize-mode",
-            settings.resize_mode.label(),
-            150.0,
-            "Original preserves the processed dimensions. Other modes constrain the selected edge, dimension, or percentage while preserving aspect ratio.",
-            |ui| {
-                for mode in [
-                    ExportResizeMode::Original,
-                    ExportResizeMode::LongEdge,
-                    ExportResizeMode::ShortEdge,
-                    ExportResizeMode::Width,
-                    ExportResizeMode::Height,
-                    ExportResizeMode::Percentage,
-                ] {
-                    ui.selectable_value(&mut settings.resize_mode, mode, mode.label());
-                }
-            },
-        );
+    settings.resize_mode = ExportResizeMode::Original;
 
-        match settings.resize_mode {
-            ExportResizeMode::Original => {}
-            ExportResizeMode::Percentage => {
-                ui.horizontal(|ui| {
-                    ui.label("Scale");
-                    ui.add(
-                        egui::DragValue::new(&mut settings.percentage)
-                            .range(1.0..=400.0)
-                            .speed(1.0)
-                            .suffix("%"),
-                    );
-                });
-            }
-            mode => {
-                ui.horizontal(|ui| {
-                    ui.label(mode.label());
-                    ui.add(
-                        egui::DragValue::new(&mut settings.edge_or_dimension)
-                            .range(64..=MAX_EXPORT_EDGE)
-                            .speed(10.0)
-                            .suffix(" px"),
-                    );
-                });
-            }
-        }
-
-        if settings.resize_mode != ExportResizeMode::Original {
-            ui.checkbox(&mut settings.allow_upscale, "Allow upscaling")
-                .on_hover_text(
-                    "Disabled by default to avoid enlarging beyond the source dimensions.",
-                );
-        }
-
-        if show_dimension_summary {
-            if let Some((width, height)) = source_dimensions {
-                match settings.checked_output_dimensions(width, height) {
-                    Ok((output_width, output_height)) => {
-                        ui.label(format!(
-                            "Source: {width}×{height}  ·  Export: {output_width}×{output_height}"
-                        ));
-                    }
-                    Err(error) => {
-                        ui.colored_label(egui::Color32::RED, error.to_string());
-                    }
-                }
-            } else {
-                ui.label("Open a RAW file to calculate export dimensions.");
-            }
-        }
-    });
-
-    crate::ui::theme::card_gap(ui);
     crate::ui::theme::section_card_with_help(
         ui,
         "Precision",
@@ -212,9 +134,6 @@ impl Sidebar {
         let content_width = ui.available_width().max(1.0);
         let column_width = content_width;
 
-        let source_dimensions = app.develop.loaded_raw
-            .as_ref()
-            .map(|raw| app.develop.geometry.crop_pixel_dimensions(raw.width, raw.height));
         #[cfg(not(target_os = "android"))]
         let export_picker_directory = app.develop.current_path
             .as_deref()
@@ -232,8 +151,6 @@ impl Sidebar {
                 export_settings_controls(
                     ui,
                     &mut app.export.settings,
-                    source_dimensions,
-                    true,
                     export_picker_directory.as_deref(),
                 );
 
@@ -263,7 +180,11 @@ impl Sidebar {
                 }
 
                 ui.add_space(10.0);
-                let dimensions_valid = source_dimensions.is_some_and(|(width, height)| {
+                let dimensions_valid = app.develop.loaded_raw.as_ref().is_some_and(|raw| {
+                    let (width, height) = app
+                        .develop
+                        .geometry
+                        .crop_pixel_dimensions(raw.width, raw.height);
                     app.export.settings
                         .checked_output_dimensions(width, height)
                         .is_ok()
