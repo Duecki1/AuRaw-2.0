@@ -95,6 +95,8 @@ jobs:
           test -f /mingw64/bin/libclang.dll
 
       - name: Build release binaries
+        env:
+          AURAW_DISCORD_APPLICATION_ID: ${{ secrets.AURAW_DISCORD_APPLICATION_ID }}
         run: |
           export PKG_CONFIG_PATH="$(cygpath -w /mingw64/lib/pkgconfig);$(cygpath -w /mingw64/share/pkgconfig)"
           export LIBCLANG_PATH="$(cygpath -w /mingw64/bin)"

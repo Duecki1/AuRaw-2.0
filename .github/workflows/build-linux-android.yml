@@ -85,6 +85,8 @@ jobs:
             zlib1g-dev
 
       - name: Build release binary
+        env:
+          AURAW_DISCORD_APPLICATION_ID: ${{ secrets.AURAW_DISCORD_APPLICATION_ID }}
         shell: bash
         run: |
           set -euxo pipefail

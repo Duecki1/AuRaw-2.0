@@ -68,6 +68,8 @@ jobs:
           test -d "$(brew --prefix llvm)/lib"
 
       - name: Build release application
+        env:
+          AURAW_DISCORD_APPLICATION_ID: ${{ secrets.AURAW_DISCORD_APPLICATION_ID }}
         run: |
           set -euxo pipefail
 
