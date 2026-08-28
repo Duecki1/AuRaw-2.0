@@ -6,8 +6,6 @@
 #import auraw::tone_common as ToneCommon
 #import auraw::tonemap as Tonemap
 
-
-
 const MIXER_HUE_RED: f32 = 0.0812052;
 const MIXER_HUE_ORANGE: f32 = 0.1465993;
 const MIXER_HUE_YELLOW: f32 = 0.3049145;

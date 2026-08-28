@@ -148,7 +148,7 @@ impl Default for PerformanceSettings {
 }
 
 impl PerformanceSettings {
-    pub fn sanitized(mut self) -> Self {
+    pub(crate) fn sanitized(mut self) -> Self {
         let loaded_version = self.version;
         self.version = SETTINGS_VERSION;
         if loaded_version < 4 {
@@ -171,7 +171,7 @@ impl PerformanceSettings {
     }
 }
 
-pub fn load(path: Option<&Path>) -> PerformanceSettings {
+pub(crate) fn load(path: Option<&Path>) -> PerformanceSettings {
     let Some(path) = path else {
         return PerformanceSettings::default();
     };
@@ -205,7 +205,7 @@ pub fn load(path: Option<&Path>) -> PerformanceSettings {
     }
 }
 
-pub fn save(path: Option<&Path>, settings: PerformanceSettings) -> Result<(), String> {
+pub(crate) fn save(path: Option<&Path>, settings: PerformanceSettings) -> Result<(), String> {
     let Some(path) = path else {
         return Ok(());
     };
@@ -221,7 +221,7 @@ pub fn save(path: Option<&Path>, settings: PerformanceSettings) -> Result<(), St
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn desktop_path() -> Option<PathBuf> {
+pub(crate) fn desktop_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
 
@@ -246,14 +246,14 @@ pub fn desktop_path() -> Option<PathBuf> {
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn detected_adobe_camera_profile_folder() -> Option<PathBuf> {
+pub(crate) fn detected_adobe_camera_profile_folder() -> Option<PathBuf> {
     adobe_camera_profile_candidates()
         .into_iter()
         .find(|path| path.is_dir())
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn adobe_camera_profile_candidates() -> Vec<PathBuf> {
+pub(crate) fn adobe_camera_profile_candidates() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let mut candidates = Vec::new();

@@ -1585,7 +1585,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires the published RawNIND Bayer model, ONNX Runtime shared library, and runtime graph contract"]
     fn raw_nind_published_bayer_graph_contract() {
         let model_dir = std::path::PathBuf::from(
             std::env::var_os("AURAW_RAWNIND_MODEL_DIR")
@@ -1611,7 +1611,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires the published RawNIND linear model, ONNX Runtime shared library, and runtime graph contract"]
     fn raw_nind_published_linear_graph_contract() {
         let model_dir = std::path::PathBuf::from(
             std::env::var_os("AURAW_RAWNIND_MODEL_DIR")
@@ -1637,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires RawNIND model/runtime files, a Bayer RAW fixture, and a working wgpu device"]
     fn raw_nind_bayer_end_to_end_fixture() {
         let model_dir = std::path::PathBuf::from(
             std::env::var_os("AURAW_RAWNIND_MODEL_DIR")
@@ -1757,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires RawNIND model/runtime files, an X-Trans RAW fixture, and a working wgpu device"]
     fn raw_nind_xtrans_end_to_end_fixture() {
         let model_dir = std::path::PathBuf::from(
             std::env::var_os("AURAW_RAWNIND_MODEL_DIR")

@@ -82,6 +82,7 @@ impl AurawApp {
                 original_exposure: exposure,
                 original_requested: false,
                 original_rendered_state: None,
+                #[cfg(target_os = "android")]
                 original_hold: None,
                 pending_stage: None,
                 #[cfg(target_os = "android")]
@@ -239,7 +240,6 @@ impl AurawApp {
                 notice: None,
             },
             library: LibraryState::new_desktop_with_preferences(
-                ctx,
                 performance.thumbnail_workers,
                 performance.library_thumbnail_size,
                 performance.library_sort_order,
@@ -365,6 +365,7 @@ impl AurawApp {
                 original_exposure: exposure,
                 original_requested: false,
                 original_rendered_state: None,
+                #[cfg(target_os = "android")]
                 original_hold: None,
                 pending_stage: None,
                 lens_original_cache: None,

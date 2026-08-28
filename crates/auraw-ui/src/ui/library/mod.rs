@@ -53,7 +53,7 @@ pub(crate) use actions::library_image_context_menu;
 pub(crate) use actions::{apply_library_action, show_library_action_overlays};
 #[cfg(not(target_os = "android"))]
 pub(crate) use thumbnails::{load_desktop_cached_thumbnail, load_desktop_reference_preview};
-pub use view::Library;
+pub(crate) use view::Library;
 
 const THUMBNAIL_EDGE: u32 = 512;
 const MAX_LIBRARY_FILES: usize = 20_000;
@@ -79,7 +79,7 @@ pub(crate) const MAX_ANDROID_THUMBNAIL_WORKERS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LibrarySortOrder {
+pub(crate) enum LibrarySortOrder {
     #[default]
     NewestFirst,
     OldestFirst,

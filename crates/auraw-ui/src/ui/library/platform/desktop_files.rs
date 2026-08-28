@@ -80,10 +80,11 @@ pub(in crate::ui::library) fn copy_raw_bundle_to_folder(
         if let Err(error) =
             crate::sidecar::copy_developed_thumbnail_cache(source_raw, &destination_raw)
         {
-            let _ = fs::remove_file(&destination_raw);
-            let _ = fs::remove_file(&destination_sidecar);
+            log::warn!(
+                "could not copy developed thumbnail cache for {}: {error}",
+                source_raw.display()
+            );
             let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&destination_raw);
-            return Err(format!("Could not copy the developed thumbnail: {error}"));
         }
         if let Err(error) = crate::file_ops::sync_parent_directory(destination_folder) {
             log::warn!(
@@ -140,7 +141,17 @@ pub(in crate::ui::library) fn rename_raw_bundle(
     if destination_raw.exists() || destination_sidecar.exists() {
         return Err(format!("{} already exists.", destination_raw.display()));
     }
-    let developed_thumbnail = crate::sidecar::load_developed_thumbnail_cache(source_raw, 8192)?;
+    let developed_thumbnail = match crate::sidecar::load_developed_thumbnail_cache(source_raw, 8192)
+    {
+        Ok(thumbnail) => thumbnail,
+        Err(error) => {
+            log::warn!(
+                "could not read developed thumbnail cache before renaming {}: {error}",
+                source_raw.display()
+            );
+            None
+        }
+    };
     fs::rename(source_raw, &destination_raw).map_err(|error| {
         format!(
             "Could not rename {} to {}: {error}",
@@ -175,21 +186,11 @@ pub(in crate::ui::library) fn rename_raw_bundle(
                 .map(|_| ())
             });
         if let Err(error) = thumbnail_result {
-            let sidecar_rollback = if destination_sidecar.is_file() {
-                fs::rename(&destination_sidecar, &source_sidecar)
-            } else {
-                Ok(())
-            };
-            let raw_rollback = fs::rename(&destination_raw, source_raw);
+            log::warn!(
+                "could not preserve developed thumbnail cache while renaming {}: {error}",
+                source_raw.display()
+            );
             let _ = crate::sidecar::invalidate_developed_thumbnail_cache(&destination_raw);
-            return Err(if sidecar_rollback.is_ok() && raw_rollback.is_ok() {
-                format!("Could not preserve the developed thumbnail while renaming: {error}")
-            } else {
-                format!(
-                    "The RAW was renamed to {}, but its developed thumbnail and rename rollback failed: {error}",
-                    destination_raw.display()
-                )
-            });
         }
     }
     if let Err(error) = crate::sidecar::invalidate_developed_thumbnail_cache(source_raw) {

@@ -73,6 +73,7 @@ impl AurawApp {
                     self.ui.notice = Some(format!(
                         "Could not prepare the adjusted navigation preview: {error:#}"
                     ));
+                    self.preview.navigation_pending_stage = None;
                     return;
                 }
             };
@@ -86,12 +87,14 @@ impl AurawApp {
                 crate::diagnostics::record(format!(
                     "preview pipeline display-profile install failed: {error:#}"
                 ));
+                self.preview.navigation_pending_stage = None;
                 return;
             }
             if let Err(error) =
                 Self::upload_preview_masks(&pipeline, &render_state.queue, &self.masks.stack, &raw)
             {
                 self.ui.notice = Some(error);
+                self.preview.navigation_pending_stage = None;
                 return;
             }
             if let Err(error) = pipeline.recompute_with_remove(
@@ -109,6 +112,7 @@ impl AurawApp {
                 self.ui.notice = Some(format!(
                     "Could not apply Remove to navigation preview: {error:#}"
                 ));
+                self.preview.navigation_pending_stage = None;
                 return;
             }
             let mut renderer = render_state.renderer.write();
@@ -153,6 +157,7 @@ impl AurawApp {
                     self.ui.notice = Some(format!(
                         "Could not update the navigation local mask: {error:#}"
                     ));
+                    self.preview.navigation_pending_stage = None;
                     return;
                 }
                 self.masks.navigation_dirty_layers[layer] = false;
@@ -166,6 +171,7 @@ impl AurawApp {
                 self.ui.notice = Some(format!(
                     "Could not update the navigation Light Rays mask: {error:#}"
                 ));
+                self.preview.navigation_pending_stage = None;
                 return;
             }
         }

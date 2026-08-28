@@ -2,7 +2,7 @@ use eframe::egui::{self, Response, RichText, Ui, Vec2};
 use egui_phosphor::regular;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UiIcon {
+pub(crate) enum UiIcon {
     #[cfg(not(target_os = "android"))]
     Adjustments,
     #[cfg(not(target_os = "android"))]
@@ -44,7 +44,7 @@ impl UiIcon {
     }
 }
 
-pub fn icon_toggle_button(
+pub(crate) fn icon_toggle_button(
     ui: &mut Ui,
     icon: UiIcon,
     selected: bool,
@@ -60,7 +60,12 @@ pub fn icon_toggle_button(
     .on_hover_text(tooltip)
 }
 
-pub fn phosphor_icon_button(ui: &mut Ui, glyph: &str, size: Vec2, tooltip: &str) -> Response {
+pub(crate) fn phosphor_icon_button(
+    ui: &mut Ui,
+    glyph: &str,
+    size: Vec2,
+    tooltip: &str,
+) -> Response {
     ui.add_sized(
         size,
         egui::Button::new(RichText::new(glyph).size(size.y * 0.55)),
@@ -68,7 +73,7 @@ pub fn phosphor_icon_button(ui: &mut Ui, glyph: &str, size: Vec2, tooltip: &str)
     .on_hover_text(tooltip)
 }
 
-pub fn phosphor_icon_toggle_button(
+pub(crate) fn phosphor_icon_toggle_button(
     ui: &mut Ui,
     glyph: &str,
     selected: bool,
@@ -83,7 +88,7 @@ pub fn phosphor_icon_toggle_button(
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn phosphor_icon_toggle_button_enabled(
+pub(crate) fn phosphor_icon_toggle_button_enabled(
     ui: &mut Ui,
     enabled: bool,
     glyph: &str,
@@ -101,7 +106,7 @@ pub fn phosphor_icon_toggle_button_enabled(
     .on_hover_text(tooltip)
 }
 
-pub fn phosphor_icon_button_enabled(
+pub(crate) fn phosphor_icon_button_enabled(
     ui: &mut Ui,
     enabled: bool,
     glyph: &str,

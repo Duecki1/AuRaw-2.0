@@ -199,7 +199,7 @@ impl AurawApp {
             } else if updating_all {
                 self.ai.mask_update_subject_pending = false;
                 self.ai.mask_update_failed |= !succeeded;
-                if let Some(message) = error_message.clone() {
+                if let Some(message) = error_message {
                     self.ui.notice = Some(message);
                 }
                 self.continue_ai_mask_update();

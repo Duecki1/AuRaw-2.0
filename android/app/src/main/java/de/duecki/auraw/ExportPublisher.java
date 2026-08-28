@@ -198,8 +198,9 @@ final class ExportPublisher {
         }
         File destination = uniqueFile(directory, displayName);
         try (InputStream input = new FileInputStream(cachedFile);
-             OutputStream output = new FileOutputStream(destination)) {
+             FileOutputStream output = new FileOutputStream(destination)) {
             BoundedStreams.copy(input, output, Long.MAX_VALUE, "Export is too large");
+            output.getFD().sync();
         }
         MediaScannerConnection.scanFile(
                 activity,

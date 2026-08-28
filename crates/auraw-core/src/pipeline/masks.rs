@@ -76,18 +76,6 @@ impl MaskKind {
         }
     }
 
-    pub const fn short_label(self) -> &'static str {
-        match self {
-            Self::Fullscreen => "Full Image",
-            Self::Radial => "Radial",
-            Self::Linear => "Linear",
-            Self::LuminanceRange => "Luminance",
-            Self::ColorRange => "Color",
-            Self::DepthRange => "Depth",
-            _ => self.label(),
-        }
-    }
-
     pub const fn is_available(self) -> bool {
         matches!(
             self,
@@ -287,7 +275,7 @@ mod base64_arc_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::sync::Arc;
 
-    pub fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -297,7 +285,7 @@ mod base64_arc_bytes {
         ))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -1148,6 +1136,12 @@ impl MaskStack {
             if !component.enabled || !component.geometry.is_initialized() {
                 continue;
             }
+            // A mask begins empty. A leading subtraction or intersection cannot
+            // affect it, so avoid rasterizing an otherwise discarded component.
+            if combined.is_none() && component.combine != MaskCombineMode::Add {
+                combined = Some(vec![0.0; len]);
+                continue;
+            }
             let mut coverage = rasterize_component(
                 component,
                 atlas_width,
@@ -1464,11 +1458,12 @@ fn rasterize_mask_image(width: u32, height: u32, mask: &MaskImage) -> Vec<f32> {
                 let x0 = source_x.floor() as usize;
                 let x1 = (x0 + 1).min(mask.width as usize - 1);
                 let fx = source_x - x0 as f32;
-                let sample = |sx: usize, sy: usize| {
-                    mask.pixels[sy * mask.width as usize + sx] as f32 / 255.0
-                };
-                let top = sample(x0, y0) + (sample(x1, y0) - sample(x0, y0)) * fx;
-                let bottom = sample(x0, y1) + (sample(x1, y1) - sample(x0, y1)) * fx;
+                let top_left = mask.pixels[y0 * mask.width as usize + x0] as f32 / 255.0;
+                let top_right = mask.pixels[y0 * mask.width as usize + x1] as f32 / 255.0;
+                let bottom_left = mask.pixels[y1 * mask.width as usize + x0] as f32 / 255.0;
+                let bottom_right = mask.pixels[y1 * mask.width as usize + x1] as f32 / 255.0;
+                let top = top_left + (top_right - top_left) * fx;
+                let bottom = bottom_left + (bottom_right - bottom_left) * fx;
                 *value = top + (bottom - top) * fy;
             }
         });
@@ -1747,14 +1742,17 @@ fn sample_rgb_mask(
                 let x0 = source_x.floor() as usize;
                 let x1 = (x0 + 1).min(source.width as usize - 1);
                 let fx = source_x - x0 as f32;
-                let sample = |sx: usize, sy: usize, channel: usize| {
-                    source.rgba[(sy * source.width as usize + sx) * 4 + channel] as f32 / 255.0
-                };
+                let top_left_index = (y0 * source.width as usize + x0) * 4;
+                let top_right_index = (y0 * source.width as usize + x1) * 4;
+                let bottom_left_index = (y1 * source.width as usize + x0) * 4;
+                let bottom_right_index = (y1 * source.width as usize + x1) * 4;
                 let rgb = std::array::from_fn(|channel| {
-                    let top = sample(x0, y0, channel)
-                        + (sample(x1, y0, channel) - sample(x0, y0, channel)) * fx;
-                    let bottom = sample(x0, y1, channel)
-                        + (sample(x1, y1, channel) - sample(x0, y1, channel)) * fx;
+                    let top_left = source.rgba[top_left_index + channel] as f32 / 255.0;
+                    let top_right = source.rgba[top_right_index + channel] as f32 / 255.0;
+                    let bottom_left = source.rgba[bottom_left_index + channel] as f32 / 255.0;
+                    let bottom_right = source.rgba[bottom_right_index + channel] as f32 / 255.0;
+                    let top = top_left + (top_right - top_left) * fx;
+                    let bottom = bottom_left + (bottom_right - bottom_left) * fx;
                     top + (bottom - top) * fy
                 });
                 *value = coverage(rgb).clamp(0.0, 1.0);

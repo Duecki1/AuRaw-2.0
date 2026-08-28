@@ -1,6 +1,6 @@
 use super::*;
 
-pub struct Library;
+pub(crate) struct Library;
 
 impl Library {
     pub(crate) fn show_folder_sidebar(ui: &mut Ui, app: &mut AurawApp) {
@@ -63,7 +63,7 @@ impl Library {
         platform::show_sidebar_dialogs(ui, app);
     }
 
-    pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+    pub(crate) fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         app.library.resume_thumbnail_decoding();
         app.library.poll(ui.ctx());
 

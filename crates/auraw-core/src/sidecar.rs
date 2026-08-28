@@ -21,8 +21,6 @@ pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0007;
 pub const SIDECAR_SUFFIX: &str = ".auraw";
 #[cfg(not(target_os = "android"))]
 pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".auraw-thumb.jpg";
-#[cfg(any(not(target_os = "android"), test))]
-pub const DEVELOPED_THUMBNAIL_CACHE_DIR: &str = crate::thumbnail_cache::DESKTOP_THUMBNAIL_CACHE_DIR;
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".auraw-thumb.fingerprint";
 pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {
@@ -374,7 +372,7 @@ mod base64_arc_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::sync::Arc;
 
-    pub fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -384,7 +382,7 @@ mod base64_arc_bytes {
         ))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Arc<[u8]>, D::Error>
     where
         D: Deserializer<'de>,
     {

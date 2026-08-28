@@ -15,7 +15,7 @@ use crate::pipeline::{
     working_rec2020_to_canonical_remove_scene, DevelopedCropJob, ExposureParams, GeometryTransform,
     GpuProgramPrewarm, LoadedRaw, MaskStack, NativeRect, RemoveBrushStroke, RemoveEditState,
     RemoveMask, RemovePatch, RemoveStroke, ResizedRemoveSceneCrop, RetouchAlignment, RetouchStroke,
-    RetouchTool, ToneStatisticsSnapshot, BIG_LAMA_INPUT_EDGE,
+    RetouchTool, BIG_LAMA_INPUT_EDGE,
 };
 use crate::ModelDownloadProgress;
 use anyhow::{Context, Result};
@@ -75,7 +75,6 @@ pub struct RemoveRequest {
     pub allow_download: bool,
     pub runtime_path: Option<PathBuf>,
     pub runtime_sha256: Option<String>,
-    pub tone_statistics: Option<Arc<ToneStatisticsSnapshot>>,
     pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
     pub cancellation: Arc<AtomicBool>,
 }
@@ -91,7 +90,6 @@ pub struct RetouchRequest {
     pub existing: RemoveEditState,
     pub brush: RemoveBrushStroke,
     pub retouch: RetouchStroke,
-    pub tone_statistics: Option<Arc<ToneStatisticsSnapshot>>,
     pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
     pub cancellation: Arc<AtomicBool>,
 }
@@ -185,7 +183,6 @@ fn run_remove(request: RemoveRequest, events: &mpsc::Sender<RemoveEvent>) -> Res
             masks: request.masks.clone(),
             remove: request.existing,
             crop,
-            tone_statistics: request.tone_statistics.clone(),
             program_prewarm: request.program_prewarm.clone(),
         },
         BIG_LAMA_INPUT_EDGE,
@@ -242,7 +239,6 @@ fn run_retouch(request: RetouchRequest) -> Result<RemoveStroke> {
             masks: request.masks.clone(),
             remove,
             crop,
-            tone_statistics: request.tone_statistics.clone(),
             program_prewarm: request.program_prewarm.clone(),
         })
     };

@@ -85,18 +85,42 @@ impl AurawApp {
                 .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
             let temporary = config.with_extension(format!("tmp.{}", std::process::id()));
             let payload = format!("sha256={sha256}\npath={path_text}\n");
-            std::fs::write(&temporary, payload.as_bytes())
-                .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
-            #[cfg(windows)]
-            if config.exists() {
-                std::fs::remove_file(&config)
-                    .map_err(|error| format!("could not replace {}: {error}", config.display()))?;
+            let result = (|| {
+                use std::io::Write as _;
+
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&temporary)
+                    .map_err(|error| format!("could not open {}: {error}", temporary.display()))?;
+                file.write_all(payload.as_bytes())
+                    .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+                file.sync_all()
+                    .map_err(|error| format!("could not flush {}: {error}", temporary.display()))?;
+                drop(file);
+                crate::file_ops::replace_file(&temporary, &config)
+                    .map_err(|error| format!("could not publish {}: {error}", config.display()))?;
+                crate::file_ops::sync_parent_directory(parent)
+                    .map_err(|error| format!("could not flush {}: {error}", parent.display()))
+            })();
+            if result.is_err() {
+                let _ = std::fs::remove_file(&temporary);
             }
-            std::fs::rename(&temporary, &config)
-                .map_err(|error| format!("could not publish {}: {error}", config.display()))?;
-        } else if let Err(error) = std::fs::remove_file(&config) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!("could not remove {}: {error}", config.display()));
+            result?;
+        } else {
+            match std::fs::remove_file(&config) {
+                Ok(()) => {
+                    if let Some(parent) = config.parent() {
+                        crate::file_ops::sync_parent_directory(parent).map_err(|error| {
+                            format!("could not flush {}: {error}", parent.display())
+                        })?;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("could not remove {}: {error}", config.display()));
+                }
             }
         }
         Ok(())

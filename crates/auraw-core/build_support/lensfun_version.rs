@@ -1,17 +1,17 @@
 use std::fmt;
 
-pub const MIN_SUPPORTED: LensfunVersion = LensfunVersion::new(0, 3, 2);
-pub const MAX_SUPPORTED: LensfunVersion = LensfunVersion::new(0, 3, 4);
+pub(crate) const MIN_SUPPORTED: LensfunVersion = LensfunVersion::new(0, 3, 2);
+pub(crate) const MAX_SUPPORTED: LensfunVersion = LensfunVersion::new(0, 3, 4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct LensfunVersion {
+pub(crate) struct LensfunVersion {
     pub major: u32,
     pub minor: u32,
     pub micro: u32,
 }
 
 impl LensfunVersion {
-    pub const fn new(major: u32, minor: u32, micro: u32) -> Self {
+    pub(crate) const fn new(major: u32, minor: u32, micro: u32) -> Self {
         Self {
             major,
             minor,
@@ -26,7 +26,7 @@ impl fmt::Display for LensfunVersion {
     }
 }
 
-pub fn parse_lensfun_version(value: &str) -> Result<LensfunVersion, String> {
+pub(crate) fn parse_lensfun_version(value: &str) -> Result<LensfunVersion, String> {
     let numeric = value
         .split(['-', '+'])
         .next()
@@ -56,7 +56,7 @@ pub fn parse_lensfun_version(value: &str) -> Result<LensfunVersion, String> {
     Ok(version)
 }
 
-pub fn parse_lensfun_header_version(contents: &str) -> Result<LensfunVersion, String> {
+pub(crate) fn parse_lensfun_header_version(contents: &str) -> Result<LensfunVersion, String> {
     fn define(contents: &str, name: &str) -> Result<u32, String> {
         contents
             .lines()
@@ -86,7 +86,7 @@ pub fn parse_lensfun_header_version(contents: &str) -> Result<LensfunVersion, St
     ))
 }
 
-pub fn validate_supported_lensfun_version(value: &str) -> Result<LensfunVersion, String> {
+pub(crate) fn validate_supported_lensfun_version(value: &str) -> Result<LensfunVersion, String> {
     let version = parse_lensfun_version(value)?;
     if !(MIN_SUPPORTED..=MAX_SUPPORTED).contains(&version) {
         return Err(format!(

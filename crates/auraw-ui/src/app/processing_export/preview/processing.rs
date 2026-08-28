@@ -213,6 +213,7 @@ impl AurawApp {
             }
             if let Some(error) = upload_error {
                 self.ui.notice = Some(error);
+                self.preview.pending_stage = None;
                 return;
             }
             if let Err(error) = pipeline.update_light_rays_mask_layers(
@@ -222,6 +223,7 @@ impl AurawApp {
                 raw.height,
             ) {
                 self.ui.notice = Some(format!("Could not update Light Rays mask: {error:#}"));
+                self.preview.pending_stage = None;
                 return;
             }
         }

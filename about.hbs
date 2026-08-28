@@ -3,7 +3,7 @@
 This file is generated from `Cargo.lock` by cargo-about. It covers the resolved
 Rust dependencies used by AuRaw's supported release targets. Regenerate it with:
 
-`cargo about generate --locked --workspace --fail -o THIRD_PARTY_LICENSES.md about.hbs`
+`scripts/generate_licenses.sh THIRD_PARTY_LICENSES.md`
 
 {{#each licenses}}
 ## {{{name}}} (`{{id}}`)

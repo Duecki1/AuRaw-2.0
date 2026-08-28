@@ -5,8 +5,6 @@
 #import auraw::tonemap as Tonemap
 #import auraw::detail_capture as DetailCapture
 
-
-
 @group(0) @binding(11) var scene_tex: texture_2d<f32>;
 @group(0) @binding(12) var out_tex: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(21) var adjustment_base_out: texture_storage_2d<rgba16float /* AURAW_WORK_FORMAT */, write>;
@@ -148,7 +146,6 @@ fn source_scene_at(pos: vec2<i32>) -> vec3<f32> {
 fn scene_working_at(pos: vec2<i32>) -> vec3<f32> {
     let camera_rgb = source_scene_at(pos);
     var working = Color::cam_to_working(camera_rgb);
-
 
     if Common::camera_uniforms._pad_0_field > 0.5 {
         working = BasicAdjustments::apply_temperature_tint_values(

@@ -166,7 +166,6 @@ impl AurawApp {
             allow_download,
             runtime_path,
             runtime_sha256,
-            tone_statistics: None,
             program_prewarm: self.export.gpu_prewarm.clone(),
             cancellation: Arc::clone(&cancellation),
         };
@@ -228,7 +227,6 @@ impl AurawApp {
             existing: self.inpaint.edits.as_ref().clone(),
             brush: brush.clone(),
             retouch,
-            tone_statistics: None,
             program_prewarm: self.export.gpu_prewarm.clone(),
             cancellation: Arc::clone(&cancellation),
         };

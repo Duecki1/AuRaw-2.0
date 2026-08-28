@@ -520,7 +520,6 @@ dependencies = [
  "eframe",
  "egui-phosphor",
  "env_logger",
- "half",
  "image",
  "log",
  "pollster",

@@ -77,10 +77,10 @@ use transform::*;
 #[cfg(test)]
 mod tests;
 
-pub struct Preview;
+pub(crate) struct Preview;
 
 impl Preview {
-    pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+    pub(crate) fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         let available = ui.available_size();
         let backdrop = app.preview_backdrop_color();
         ui.painter()

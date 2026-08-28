@@ -1,4 +1,6 @@
-use super::{CompactPixelMap, LensGeometryMap, LoadedRaw};
+use super::LoadedRaw;
+#[cfg(lensfun_available)]
+use super::{CompactPixelMap, LensGeometryMap};
 use anyhow::{anyhow, Result};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

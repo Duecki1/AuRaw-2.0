@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
+use auraw_core::file_ops::{replace_file, sync_parent_directory};
 use ring::digest::{Context as Sha256Context, SHA256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const IO_BUFFER_BYTES: usize = 256 * 1024;
+static NEXT_PARTIAL_ARTIFACT_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ArtifactSize {
@@ -56,12 +59,10 @@ where
         Ok(()) => return Ok(()),
         Err(error) if path.exists() => {
             log::warn!(
-                "discarding invalid {} cache {}: {error:#}",
+                "replacing invalid {} cache {}: {error:#}",
                 artifact.name,
                 path.display()
             );
-            fs::remove_file(path)
-                .with_context(|| format!("remove invalid {} {}", artifact.name, path.display()))?;
         }
         Err(_) => {}
     }
@@ -152,7 +153,7 @@ pub(crate) fn verify_artifact(path: &Path, artifact: ModelArtifact) -> Result<()
 pub fn sha256_file_hex(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = Sha256Context::new(&SHA256);
-    let mut buffer = [0u8; IO_BUFFER_BYTES];
+    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
     loop {
         let read = file
             .read(&mut buffer)
@@ -253,7 +254,7 @@ where
                     attempt + 1
                 )));
                 if attempt + 1 < attempts {
-                    retry_backoff(attempt);
+                    retry_backoff(attempt, &mut cancellation)?;
                     continue;
                 }
                 break;
@@ -328,7 +329,7 @@ where
                     attempt + 1
                 )));
                 if attempt + 1 < attempts {
-                    retry_backoff(attempt);
+                    retry_backoff(attempt, &mut cancellation)?;
                     continue;
                 }
                 break;
@@ -344,7 +345,7 @@ where
                     artifact.name
                 ));
                 if attempt + 1 < attempts {
-                    retry_backoff(attempt);
+                    retry_backoff(attempt, &mut cancellation)?;
                     continue;
                 }
                 break;
@@ -367,7 +368,7 @@ where
                     })?;
                 }
                 if attempt + 1 < attempts {
-                    retry_backoff(attempt);
+                    retry_backoff(attempt, &mut cancellation)?;
                 }
             }
         }
@@ -406,7 +407,7 @@ where
     F: FnMut(u64, u64),
     C: FnMut() -> Result<()>,
 {
-    let mut buffer = [0u8; IO_BUFFER_BYTES];
+    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
     loop {
         cancellation().map_err(TransferError::Fatal)?;
         let read = reader
@@ -432,8 +433,18 @@ where
     }
 }
 
-fn retry_backoff(attempt: usize) {
-    std::thread::sleep(Duration::from_secs(1u64 << attempt.min(3)));
+fn retry_backoff<C>(attempt: usize, cancellation: &mut C) -> Result<()>
+where
+    C: FnMut() -> Result<()>,
+{
+    let mut remaining = Duration::from_secs(1u64 << attempt.min(3));
+    while !remaining.is_zero() {
+        cancellation()?;
+        let sleep_for = remaining.min(Duration::from_millis(100));
+        std::thread::sleep(sleep_for);
+        remaining = remaining.saturating_sub(sleep_for);
+    }
+    cancellation()
 }
 
 struct PartialArtifact(PathBuf);
@@ -448,10 +459,12 @@ impl PartialArtifact {
             .extension()
             .and_then(|extension| extension.to_str())
             .unwrap_or("model");
+        let temporary_id = NEXT_PARTIAL_ARTIFACT_ID.fetch_add(1, Ordering::Relaxed);
         Self(destination.with_extension(format!(
-            "{extension}.{}.{}.part",
+            "{extension}.{}.{}.{}.part",
             std::process::id(),
-            nonce
+            nonce,
+            temporary_id
         )))
     }
 
@@ -468,7 +481,12 @@ impl PartialArtifact {
     }
 
     fn publish(&self, destination: &Path) -> std::io::Result<()> {
-        fs::rename(&self.0, destination)
+        replace_file(&self.0, destination)?;
+        let parent = destination
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        sync_parent_directory(parent)
     }
 }
 
@@ -531,13 +549,27 @@ mod tests {
     }
 
     #[test]
-    fn successful_install_is_atomic_and_verified() {
+    fn successful_install_replaces_existing_file_atomically_and_is_verified() {
         let temp = tempfile::tempdir().unwrap();
         let destination = temp.path().join("model.onnx");
+        fs::write(&destination, b"old invalid model").unwrap();
         let mut source = std::io::Cursor::new(b"valid model bytes");
         install_artifact_from_reader(&destination, TEST_ARTIFACT, &mut source, || Ok(())).unwrap();
         verify_artifact(&destination, TEST_ARTIFACT).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"valid model bytes");
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn retry_backoff_observes_cancellation_before_sleeping() {
+        let mut checks = 0;
+        let error = retry_backoff(3, &mut || {
+            checks += 1;
+            anyhow::bail!("background task cancelled")
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("cancelled"));
+        assert_eq!(checks, 1);
     }
 
     #[test]

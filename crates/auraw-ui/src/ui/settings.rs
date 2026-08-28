@@ -12,7 +12,7 @@ const PROJECT_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const THIRD_PARTY_NOTICES: &str = include_str!("../../../../THIRD_PARTY_NOTICES.md");
 const RUST_DEPENDENCY_LICENSES: &str = include_str!("../../../../THIRD_PARTY_LICENSES.md");
 
-pub struct Settings;
+pub(crate) struct Settings;
 
 fn diagnostics_snapshot_with_ai_backends() -> String {
     let mut diagnostic_log = crate::diagnostics::snapshot();
@@ -39,7 +39,7 @@ fn diagnostics_snapshot_with_ai_backends() -> String {
 }
 
 impl Settings {
-    pub fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
+    pub(crate) fn show(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
         let available_width = ui.available_width().max(1.0);
         let content_width = match layout {
             ScreenLayout::Horizontal => available_width.min(760.0),

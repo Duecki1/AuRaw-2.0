@@ -2,9 +2,8 @@ use super::*;
 
 impl LibraryState {
     #[cfg(all(not(target_os = "android"), test))]
-    pub(crate) fn new(context: &egui::Context) -> Self {
+    pub(crate) fn new() -> Self {
         Self::new_desktop_with_preferences(
-            context,
             default_thumbnail_worker_count(),
             LibraryThumbnailSize::default(),
             LibrarySortOrder::default(),
@@ -15,14 +14,12 @@ impl LibraryState {
 
     #[cfg(not(target_os = "android"))]
     pub(crate) fn new_desktop_with_preferences(
-        context: &egui::Context,
         workers: usize,
         thumbnail_size: LibraryThumbnailSize,
         sort_order: LibrarySortOrder,
         folder_sidebar_open: bool,
         render_edited_thumbnails_during_indexing: bool,
     ) -> Self {
-        let _ = context;
         let thumbnail_workers = workers.clamp(1, maximum_thumbnail_worker_count());
         crate::thumbnail_cache::set_rendered_thumbnail_worker_limit(thumbnail_workers);
         Self {

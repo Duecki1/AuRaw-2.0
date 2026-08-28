@@ -5,16 +5,16 @@ use super::{
     GpuParams, GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack,
     NativeRect, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
     RawGpuProgramTemplate, RemoveEditState, RemoveSceneContext, TilePlan, TileSpec,
-    ToneStatisticsSnapshot, EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
+    EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
 };
-use crate::file_ops::replace_file;
+use crate::file_ops::{replace_file, sync_parent_directory};
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -387,6 +387,7 @@ const MAX_EXPORT_BAND_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_EXPORT_BAND_BYTES: u64 = 192 * 1024 * 1024;
 const STALE_EXPORT_PART_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+static NEXT_EXPORT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 impl ExportSettings {
     pub fn output_dimensions(&self, source_width: u32, source_height: u32) -> (u32, u32) {
@@ -520,7 +521,6 @@ pub struct DevelopedCropJob {
     pub masks: MaskStack,
     pub remove: RemoveEditState,
     pub crop: NativeRect,
-    pub tone_statistics: Option<Arc<ToneStatisticsSnapshot>>,
     pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
 }
 
@@ -626,9 +626,6 @@ pub fn render_developed_linear_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
     )?;
     pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
     pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Tone);
-    if let Some(tone_statistics) = job.tone_statistics.as_deref() {
-        pipeline.inherit_tone_statistics_snapshot(&job.queue, &job.device, tone_statistics);
-    }
     pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Output);
     let mut rgb = pipeline.read_display_linear_region_blocking(
         &job.device,
@@ -1197,20 +1194,20 @@ where
         .context("upload full-image Light Rays emission masks")?;
 
     let tone_analysis_started = Instant::now();
-    let mut tone_scratch = first_raw.clone();
+    let mut tile_scratch = first_raw;
     tile_pipeline.begin_export_tone_analysis(queue, device);
     for (index, tile) in plan.tiles.iter().copied().enumerate() {
         ensure_export_not_cancelled(cancellation)?;
         if index != 0 {
-            extract_padded_tile_into(raw, tile, &mut tone_scratch);
+            extract_padded_tile_into(raw, tile, &mut tile_scratch);
         }
         tile_pipeline
-            .upload_raw_tile(queue, &tone_scratch)
+            .upload_raw_tile(queue, &tile_scratch)
             .with_context(|| format!("upload tone-analysis tile {}", index + 1))?;
         let tone_params = GpuParams::new_for_tile(
             exposure,
             masks,
-            &tone_scratch,
+            &tile_scratch,
             tile.global_origin_x,
             tile.global_origin_y,
             raw.width,
@@ -1244,8 +1241,6 @@ where
         tone_analysis_started.elapsed().as_secs_f64(),
         plan.tile_count()
     ));
-
-    let mut tile_scratch = first_raw.clone();
 
     let total_tiles = plan.tile_count();
     let mut completed_tiles = 0usize;
@@ -2908,7 +2903,13 @@ fn temporary_export_path(destination: &Path) -> Result<PathBuf> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    Ok(parent.join(format!(".{name}.{}.{}.part", std::process::id(), nonce)))
+    let temporary_id = NEXT_EXPORT_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(
+        ".{name}.{}.{}.{}.part",
+        std::process::id(),
+        nonce,
+        temporary_id
+    )))
 }
 
 fn with_temporary_export_path<T, F>(destination: &Path, action: F) -> Result<T>
@@ -2952,13 +2953,27 @@ fn cleanup_stale_export_parts(parent: &Path, destination_name: &str) {
 }
 
 fn publish_completed_export(temporary: &Path, destination: &Path) -> Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .open(temporary)
+        .with_context(|| format!("open completed export {}", temporary.display()))?
+        .sync_all()
+        .with_context(|| format!("flush completed export {}", temporary.display()))?;
+
     replace_file(temporary, destination).with_context(|| {
         format!(
             "publish completed export {} to {}",
             temporary.display(),
             destination.display()
         )
-    })
+    })?;
+
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    sync_parent_directory(parent)
+        .with_context(|| format!("flush export directory {}", parent.display()))
 }
 
 fn tile_mask_source_region(

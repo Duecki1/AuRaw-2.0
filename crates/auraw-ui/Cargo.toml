@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 description = "AuRaw egui/eframe desktop and Android user interface"
+publish = false
 build = "build.rs"
 
 [lib]
@@ -24,7 +25,6 @@ auraw-core.workspace = true
 auraw-gpu.workspace = true
 anyhow.workspace = true
 egui-phosphor.workspace = true
-half.workspace = true
 image.workspace = true
 log.workspace = true
 serde.workspace = true

@@ -1,12 +1,12 @@
-pub mod adjustment_slider;
-pub mod color_grading;
-pub mod effect_color_picker;
-pub mod hsl_mixer;
-pub mod tone_curve_editor;
+pub(crate) mod adjustment_slider;
+pub(crate) mod color_grading;
+pub(crate) mod effect_color_picker;
+pub(crate) mod hsl_mixer;
+pub(crate) mod tone_curve_editor;
 
 use eframe::egui::{Align2, Color32, FontId, Painter, Pos2};
 
-pub fn pending_indicator(painter: &Painter, center: Pos2, radius: f32, font_size: f32) {
+pub(crate) fn pending_indicator(painter: &Painter, center: Pos2, radius: f32, font_size: f32) {
     painter.circle_filled(center, radius, Color32::from_black_alpha(190));
     painter.text(
         center,

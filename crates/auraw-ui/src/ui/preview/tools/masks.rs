@@ -980,7 +980,6 @@ impl Preview {
         }
 
         if let Some(texture) = &app.masks.overlay_texture {
-            let _ = preview_rect;
             paint_final_geometry_overlay_texture(
                 ui,
                 texture.id(),

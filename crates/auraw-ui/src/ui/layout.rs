@@ -1,18 +1,18 @@
 use eframe::egui::Vec2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScreenLayout {
+pub(crate) enum ScreenLayout {
     Horizontal,
     Vertical,
 }
 
 impl ScreenLayout {
-    pub const MIN_HORIZONTAL_SIDEBAR_WIDTH: f32 = 320.0;
+    pub(crate) const MIN_HORIZONTAL_SIDEBAR_WIDTH: f32 = 320.0;
     #[cfg(not(target_os = "android"))]
-    pub const MAX_HORIZONTAL_SIDEBAR_WIDTH: f32 = 520.0;
-    pub const MIN_VERTICAL_SIDEBAR_HEIGHT: f32 = 240.0;
+    pub(crate) const MAX_HORIZONTAL_SIDEBAR_WIDTH: f32 = 520.0;
+    pub(crate) const MIN_VERTICAL_SIDEBAR_HEIGHT: f32 = 240.0;
 
-    pub fn from_size(size: Vec2) -> Self {
+    pub(crate) fn from_size(size: Vec2) -> Self {
         if size.x >= size.y {
             Self::Horizontal
         } else {
@@ -20,7 +20,7 @@ impl ScreenLayout {
         }
     }
 
-    pub fn sidebar_default_size(self, viewport: Vec2) -> f32 {
+    pub(crate) fn sidebar_default_size(self, viewport: Vec2) -> f32 {
         self.sidebar_default_size_for_platform(viewport, cfg!(target_os = "android"))
     }
 

@@ -206,6 +206,14 @@ pub fn install_context(context: &egui::Context) {
     }
 }
 
+pub fn uninstall_context() {
+    if let Ok(mut installed) = EGUI_CONTEXT.lock() {
+        *installed = None;
+    }
+    BACK_NAVIGATION_ACTIVE.store(false, Ordering::Release);
+    BACK_REQUESTED.store(false, Ordering::Release);
+}
+
 pub fn set_back_navigation_active(active: bool) {
     BACK_NAVIGATION_ACTIVE.store(active, Ordering::Release);
 }
@@ -235,19 +243,6 @@ pub fn take_camera_profile_folder_result() -> Option<CameraProfileFolderResult> 
 
 pub fn take_export_publish_result() -> Option<ExportPublishResult> {
     export_results().lock().ok()?.pop_front()
-}
-
-pub fn network_available(app: &AndroidApp) -> Result<bool, String> {
-    with_activity(app, |env, activity| {
-        env.call_method(
-            activity,
-            jni::jni_str!("isNetworkAvailable"),
-            jni::jni_sig!(() -> boolean),
-            &[],
-        )?
-        .z()
-    })
-    .map_err(|error| format!("could not inspect Android network state: {error:#}"))
 }
 
 pub fn set_light_system_bars(app: &AndroidApp, light: bool) -> Result<(), String> {
@@ -770,17 +765,6 @@ pub fn load_developed_thumbnail_cache(
         return Ok(None);
     }
     crate::thumbnail_cache::load_jpeg(&cache_path, maximum_edge)
-}
-
-pub fn developed_thumbnail_cache_file(
-    app: &AndroidApp,
-    raw_uri: &str,
-    display_name: &str,
-) -> Result<Option<PathBuf>, String> {
-    if load_developed_thumbnail_cache(app, raw_uri, display_name, 8192)?.is_none() {
-        return Ok(None);
-    }
-    developed_thumbnail_cache_path(app, raw_uri).map(Some)
 }
 
 pub fn save_developed_thumbnail_cache(

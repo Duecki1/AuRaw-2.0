@@ -2,10 +2,10 @@ use crate::app::{AppTab, AurawApp};
 use crate::ui::theme;
 use eframe::egui::{self, Ui};
 
-pub struct TopBar;
+pub(crate) struct TopBar;
 
 impl TopBar {
-    pub fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
+    pub(crate) fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         #[cfg(target_os = "android")]
         Self::show_android(ui, app, frame);
         #[cfg(not(target_os = "android"))]

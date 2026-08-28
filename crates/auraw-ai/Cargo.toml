@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 description = "AuRaw ONNX Runtime bindings for BiRefNet, SAM 2.1, and RAW denoise"
+publish = false
 
 [dependencies]
 auraw-core.workspace = true

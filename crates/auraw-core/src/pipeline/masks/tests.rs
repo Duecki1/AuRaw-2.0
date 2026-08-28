@@ -995,6 +995,24 @@ fn subtract_component_removes_coverage() {
     let layer = stack.rasterize_layer(0, 64, 64, 100, 100);
     assert!(layer[32 * 64 + 32] < 32);
 }
+
+#[test]
+fn leading_non_add_components_leave_an_empty_layer_unchanged() {
+    for combine in [MaskCombineMode::Subtract, MaskCombineMode::Intersect] {
+        let mut stack = MaskStack::default();
+        stack.add_mask(MaskKind::Fullscreen);
+        stack.masks[0].components[0].combine = combine;
+        assert_eq!(stack.rasterize_layer(0, 2, 2, 2, 2), vec![0; 4]);
+
+        stack.masks[0].invert = true;
+        assert_eq!(stack.rasterize_layer(0, 2, 2, 2, 2), vec![255; 4]);
+        stack.masks[0].invert = false;
+
+        stack.add_component(MaskKind::Fullscreen, MaskCombineMode::Add);
+        assert_eq!(stack.rasterize_layer(0, 2, 2, 2, 2), vec![255; 4]);
+    }
+}
+
 #[test]
 fn object_prompt_overlay_uses_a_hard_edged_brush() {
     let point = [0.45, 0.6];

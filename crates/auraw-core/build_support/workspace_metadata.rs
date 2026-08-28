@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 #[derive(Debug)]
-pub struct WorkspaceMetadata {
+pub(crate) struct WorkspaceMetadata {
     pub manifest_path: PathBuf,
     pub android_ndk_version: String,
     pub android_build_tools_version: String,
@@ -17,7 +17,7 @@ pub struct WorkspaceMetadata {
 }
 
 impl WorkspaceMetadata {
-    pub fn load_from_manifest_dir() -> Result<Self, String> {
+    pub(crate) fn load_from_manifest_dir() -> Result<Self, String> {
         let manifest_dir = PathBuf::from(
             env::var_os("CARGO_MANIFEST_DIR")
                 .ok_or_else(|| "Cargo did not set CARGO_MANIFEST_DIR".to_owned())?,
@@ -52,7 +52,7 @@ impl WorkspaceMetadata {
         Ok(metadata)
     }
 
-    pub fn emit_cargo_contract(&self) {
+    pub(crate) fn emit_cargo_contract(&self) {
         println!("cargo:rerun-if-changed={}", self.manifest_path.display());
         for (name, value) in [
             (

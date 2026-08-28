@@ -930,7 +930,6 @@ pub(super) fn save_sidecar_request(
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod sidecar_persistence_tests {
     use super::*;
 

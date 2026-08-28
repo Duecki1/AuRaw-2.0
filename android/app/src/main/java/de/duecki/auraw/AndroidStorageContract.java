@@ -15,6 +15,8 @@ import java.util.Set;
 
 final class AndroidStorageContract {
     static final String RAW_LIBRARY_DIRECTORY_NAME = ".library";
+    static final int MAX_RAW_NAME_BYTES = 220;
+    static final int MAX_EXPORT_NAME_BYTES = 240;
 
     private static final Set<String> RAW_SUFFIXES = new HashSet<>(Arrays.asList(
             "3fr", "ari", "arw", "bay", "bmq", "cap", "cine", "cr2", "cr3", "crw",
@@ -98,6 +100,10 @@ final class AndroidStorageContract {
     }
 
     static String safeRawName(String requestedName) {
+        return truncateUtf8PreservingExtension(sanitizeRawName(requestedName), MAX_RAW_NAME_BYTES);
+    }
+
+    private static String sanitizeRawName(String requestedName) {
         String name = requestedName == null ? "imported.raw" : requestedName.trim();
         name = name.replace('/', '_').replace('\\', '_').replace('\0', '_');
         return name.isEmpty() ? "imported.raw" : name;
@@ -134,7 +140,7 @@ final class AndroidStorageContract {
     }
 
     static String sidecarDisplayName(String rawDisplayName) {
-        String name = safeRawName(rawDisplayName);
+        String name = sanitizeRawName(rawDisplayName);
         if (!name.equals(rawDisplayName)
                 || name.getBytes(StandardCharsets.UTF_8).length > 240) {
             throw new IllegalArgumentException("The RAW name cannot be used for a sidecar");
@@ -158,6 +164,16 @@ final class AndroidStorageContract {
 
     static String importPartialName(String destinationName) {
         return ".auraw-import-" + destinationName + ".part";
+    }
+
+    static boolean isLibraryTemporaryFileName(String name) {
+        if (name == null || !name.endsWith(".part")) {
+            return false;
+        }
+        return name.startsWith(".auraw-import-")
+                || name.startsWith(".auraw-sidecar-")
+                || name.startsWith(".auraw-migrate-")
+                || name.startsWith(".auraw-move-");
     }
 
     static String exportRelativePath(String picturesDirectory) {
@@ -189,7 +205,40 @@ final class AndroidStorageContract {
         } else if (!lower.endsWith(extension)) {
             name += extension;
         }
-        return name;
+        return truncateUtf8PreservingExtension(name, MAX_EXPORT_NAME_BYTES);
+    }
+
+    static String truncateUtf8PreservingExtension(String name, int maximumBytes) {
+        if (name.getBytes(StandardCharsets.UTF_8).length <= maximumBytes) {
+            return name;
+        }
+        int dot = name.lastIndexOf('.');
+        if (dot <= 0) {
+            return truncateUtf8(name, maximumBytes);
+        }
+        String extension = name.substring(dot);
+        int extensionBytes = extension.getBytes(StandardCharsets.UTF_8).length;
+        if (extensionBytes >= maximumBytes) {
+            return truncateUtf8(name, maximumBytes);
+        }
+        return truncateUtf8(name.substring(0, dot), maximumBytes - extensionBytes) + extension;
+    }
+
+    private static String truncateUtf8(String value, int maximumBytes) {
+        StringBuilder truncated = new StringBuilder(value.length());
+        int bytes = 0;
+        for (int offset = 0; offset < value.length(); ) {
+            int codePoint = value.codePointAt(offset);
+            String character = new String(Character.toChars(codePoint));
+            int characterBytes = character.getBytes(StandardCharsets.UTF_8).length;
+            if (bytes + characterBytes > maximumBytes) {
+                break;
+            }
+            truncated.append(character);
+            bytes += characterBytes;
+            offset += Character.charCount(codePoint);
+        }
+        return truncated.toString();
     }
 
     static void deleteSidecar(File directory, String rawDisplayName) {

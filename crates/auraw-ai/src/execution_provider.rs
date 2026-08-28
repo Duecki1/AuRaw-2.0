@@ -417,18 +417,6 @@ pub struct FallbackSession {
 }
 
 impl FallbackSession {
-    pub const fn active_execution_provider(&self) -> &'static str {
-        self.active_provider
-    }
-
-    pub const fn is_accelerated(&self) -> bool {
-        self.accelerated
-    }
-
-    pub const fn is_degraded(&self) -> bool {
-        self.degraded
-    }
-
     pub fn run_with_fallback<T, F>(&mut self, operation: &str, mut run: F) -> Result<T>
     where
         F: FnMut(&mut Session, bool) -> Result<T>,

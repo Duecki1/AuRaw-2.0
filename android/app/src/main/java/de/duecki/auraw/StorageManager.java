@@ -95,32 +95,63 @@ final class StorageManager {
     }
 
     void scavengeTemporaryRawFiles() {
+        long now = System.currentTimeMillis();
         File[] cachedFiles = storage.getCacheDir().listFiles((directory, name) ->
                 name.startsWith("auraw-library-")
                         || name.startsWith("auraw-import-")
                         || name.startsWith("auraw-sidecar-")
                         || name.startsWith("auraw-thumbnail-"));
-        deleteStaleFiles(cachedFiles);
+        deleteStaleFiles(cachedFiles, now);
 
-        File[] partialImports = rawLibraryDirectory().listFiles((directory, name) ->
-                (name.startsWith(".auraw-import-") || name.startsWith(".auraw-sidecar-"))
-                        && name.endsWith(".part"));
-        deleteStaleFiles(partialImports);
+        File library = rawLibraryDirectory();
+        try {
+            deleteStaleLibraryTemporaryFiles(library, library.getCanonicalFile(), now, 0);
+        } catch (Exception error) {
+            Log.w(LOG_TAG, "Could not scavenge stale RAW library temporary files", error);
+        }
     }
 
-    private static void deleteStaleFiles(File[] files) {
+    private static void deleteStaleFiles(File[] files, long now) {
         if (files == null) {
             return;
         }
-        long now = System.currentTimeMillis();
         for (File file : files) {
-            long modified = file.lastModified();
-            boolean isStale = modified > 0L
-                    && now >= modified
-                    && now - modified >= STALE_TEMP_FILE_AGE_MS;
-            if (file.isFile() && isStale && !file.delete() && file.exists()) {
-                file.deleteOnExit();
+            deleteStaleFile(file, now);
+        }
+    }
+
+    private static void deleteStaleLibraryTemporaryFiles(
+            File directory,
+            File canonicalLibrary,
+            long now,
+            int depth) throws Exception {
+        if (depth > MAX_RAW_LIBRARY_FOLDER_DEPTH || !directory.isDirectory()) {
+            return;
+        }
+        File canonicalDirectory = directory.getCanonicalFile();
+        if (!canonicalDirectory.toPath().startsWith(canonicalLibrary.toPath())) {
+            return;
+        }
+        File[] entries = directory.listFiles();
+        if (entries == null) {
+            return;
+        }
+        for (File entry : entries) {
+            if (entry.isDirectory()) {
+                deleteStaleLibraryTemporaryFiles(entry, canonicalLibrary, now, depth + 1);
+            } else if (AndroidStorageContract.isLibraryTemporaryFileName(entry.getName())) {
+                deleteStaleFile(entry, now);
             }
+        }
+    }
+
+    private static void deleteStaleFile(File file, long now) {
+        long modified = file.lastModified();
+        boolean isStale = modified > 0L
+                && now >= modified
+                && now - modified >= STALE_TEMP_FILE_AGE_MS;
+        if (file.isFile() && isStale && !file.delete() && file.exists()) {
+            file.deleteOnExit();
         }
     }
 
@@ -441,15 +472,8 @@ final class StorageManager {
         try {
             copyDevelopedThumbnailCache(rawUriText, destinationUri);
         } catch (Exception error) {
+            Log.w(LOG_TAG, "Renamed RAW but could not preserve its developed thumbnail cache", error);
             clearDevelopedThumbnailCache(destinationUri);
-            boolean sidecarRolledBack = !destinationSidecar.isFile()
-                    || destinationSidecar.renameTo(sourceSidecar);
-            boolean rawRolledBack = destinationRaw.renameTo(sourceRaw);
-            if (!sidecarRolledBack || !rawRolledBack) {
-                throw new IllegalStateException(
-                        "The RAW was renamed, but its thumbnail and rename rollback failed", error);
-            }
-            throw error;
         }
         clearDevelopedThumbnailCache(rawUriText);
         return destinationUri;
@@ -458,14 +482,24 @@ final class StorageManager {
     void deleteRawLibraryDocument(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
-        removeRawSidecar(rawUriText, displayName);
-        if (ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            File raw = new File(rawUri.getPath());
+        boolean fileBacked = ContentResolver.SCHEME_FILE.equals(rawUri.getScheme());
+        File raw = fileBacked ? new File(rawUri.getPath()) : null;
+        if (fileBacked) {
             if (raw.exists() && !raw.delete()) {
                 throw new IllegalStateException("Could not delete the RAW file");
             }
         } else if (storage.getContentResolver().delete(rawUri, null, null) <= 0) {
             throw new IllegalStateException("Android storage could not delete the RAW file");
+        }
+
+        try {
+            if (fileBacked) {
+                AndroidStorageContract.deleteSidecar(raw.getParentFile(), displayName);
+            } else {
+                removeRawSidecarLegacyMediaStore(displayName);
+            }
+        } catch (Exception error) {
+            Log.w(LOG_TAG, "Deleted RAW but could not clean up its sidecar", error);
         }
         clearDevelopedThumbnailCache(rawUriText);
     }
@@ -819,7 +853,7 @@ final class StorageManager {
         boolean completed = false;
         try {
             try (InputStream input = openLibraryInput(source);
-                 OutputStream output = new FileOutputStream(partial)) {
+                 FileOutputStream output = new FileOutputStream(partial)) {
                 if (input == null) {
                     throw new IllegalStateException("The document provider returned no input stream");
                 }
@@ -828,6 +862,7 @@ final class StorageManager {
                         output,
                         MAX_RAW_IMPORT_BYTES,
                         storageLimitMessage(MAX_RAW_IMPORT_BYTES));
+                output.getFD().sync();
             }
             if (!partial.renameTo(destination)) {
                 throw new IllegalStateException("Could not publish the imported RAW in " + directory);
@@ -1324,12 +1359,4 @@ final class StorageManager {
         return "selected RAW";
     }
 
-    private static String suffixFor(String displayName) {
-        int dot = displayName.lastIndexOf('.');
-        if (dot < 0 || dot >= displayName.length() - 1) {
-            return ".raw";
-        }
-        String suffix = displayName.substring(dot).toLowerCase(Locale.ROOT);
-        return suffix.matches("\\.[a-z0-9]{1,10}") ? suffix : ".raw";
-    }
 }

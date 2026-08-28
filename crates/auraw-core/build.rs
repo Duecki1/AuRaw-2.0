@@ -282,6 +282,7 @@ fn generate_lensfun_bindings(header: &Path, include_paths: &[PathBuf]) {
     bindings
         .write_to_file(&output)
         .unwrap_or_else(|error| panic!("could not write {}: {error}", output.display()));
+    normalize_generated_bindings(&output);
 }
 
 fn configure_desktop_libraw() {
@@ -373,10 +374,41 @@ fn generate_bindings(header: &Path, include_paths: &[PathBuf], android_min_sdk: 
         .expect("Unable to generate LibRaw bindings");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let output = out_dir.join("bindings.rs");
     bindings
-        .write_to_file(out_dir.join("bindings.rs"))
+        .write_to_file(&output)
         .expect("Couldn't write LibRaw bindings");
+    normalize_generated_bindings(&output);
     println!("cargo:rustc-cfg=libraw_available");
+}
+
+fn normalize_generated_bindings(path: &Path) {
+    let source = std::fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!(
+            "could not read generated bindings {}: {error}",
+            path.display()
+        )
+    });
+    let mut normalized = String::with_capacity(source.len());
+    for line in source.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let indentation = &line[..line.len() - line.trim_start().len()];
+        let content = line.trim_start();
+        normalized.push_str(indentation);
+        if let Some(content) = content.strip_prefix("pub ") {
+            normalized.push_str("pub(super) ");
+            normalized.push_str(content);
+        } else {
+            normalized.push_str(content);
+        }
+        normalized.push('\n');
+    }
+    std::fs::write(path, normalized).unwrap_or_else(|error| {
+        panic!(
+            "could not normalize generated bindings {}: {error}",
+            path.display()
+        )
+    });
 }
 
 fn android_abi(target: &str) -> Option<&'static str> {
