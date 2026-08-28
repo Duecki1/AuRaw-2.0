@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const APPLICATION_ID_ENV: &str = "AURAW_DISCORD_APPLICATION_ID";
+const GET_AURAW_URL: &str = env!("CARGO_PKG_REPOSITORY");
 const DISCONNECTED_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECTED_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -215,7 +216,9 @@ fn presence_worker(application_id: &str, receiver: mpsc::Receiver<PresenceComman
 }
 
 fn activity_payload(presence: PresenceActivity) -> activity::Activity<'static> {
-    let payload = activity::Activity::new().activity_type(activity::ActivityType::Playing);
+    let payload = activity::Activity::new()
+        .activity_type(activity::ActivityType::Playing)
+        .buttons(vec![activity::Button::new("Get AuRaw", GET_AURAW_URL)]);
     match presence {
         PresenceActivity::Browsing => payload.details("Browsing RAW Photos"),
         PresenceActivity::Editing { started_at } => payload
@@ -279,6 +282,10 @@ mod tests {
         assert!(browsing.contains("Browsing RAW Photos"));
         assert!(editing.contains("Editing a Picture"));
         assert!(editing.contains("\"start\":123"));
+        assert!(browsing.contains("Get AuRaw"));
+        assert!(editing.contains("Get AuRaw"));
+        assert!(browsing.contains(GET_AURAW_URL));
+        assert!(editing.contains(GET_AURAW_URL));
         assert!(!browsing.contains("document"));
         assert!(!editing.contains("document"));
     }
