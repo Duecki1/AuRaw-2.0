@@ -206,14 +206,25 @@ fn configure_android_lensfun(build_metadata: &workspace_metadata::WorkspaceMetad
 }
 
 fn configure_desktop_lensfun() {
-    for variable in ["LENSFUN_NO_PKG_CONFIG", "PKG_CONFIG_PATH"] {
+    for variable in [
+        "AURAW_REQUIRE_LENSFUN",
+        "LENSFUN_NO_PKG_CONFIG",
+        "PKG_CONFIG_PATH",
+    ] {
         println!("cargo:rerun-if-env-changed={variable}");
     }
     println!("cargo:rerun-if-changed=build_support/lensfun_version.rs");
 
     let lensfun = match pkg_config::Config::new().probe("lensfun") {
         Ok(lensfun) => lensfun,
-        Err(_) => {
+        Err(error) => {
+            if std::env::var("AURAW_REQUIRE_LENSFUN")
+                .is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
+            {
+                panic!(
+                    "Lensfun is required for this production build, but pkg-config could not find it: {error}"
+                );
+            }
             println!(
                 "cargo:warning=Lensfun was not found through pkg-config; lens correction will be disabled. Install a supported Lensfun 0.3.2 through 0.3.4 development package to enable it."
             );
