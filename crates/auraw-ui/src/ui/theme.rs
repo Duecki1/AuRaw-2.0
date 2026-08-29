@@ -594,6 +594,19 @@ pub(crate) fn toolbar_button(
     ui.add_sized([width, CONTROL_HEIGHT], egui::Button::new(label.into()))
 }
 
+pub(crate) fn toggle_button(
+    ui: &mut Ui,
+    label: impl Into<egui::WidgetText>,
+    selected: bool,
+) -> Response {
+    ui.add(
+        egui::Button::new(label.into())
+            .selected(selected)
+            .frame(true)
+            .corner_radius(6.0),
+    )
+}
+
 pub(crate) fn navigation_row(
     ui: &mut Ui,
     label: impl Into<egui::WidgetText>,

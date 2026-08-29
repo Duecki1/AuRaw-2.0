@@ -72,10 +72,9 @@ impl Sidebar {
         crate::ui::theme::card_gap(ui);
         crate::ui::theme::section_card(ui, "Rotation", |ui| {
             ui.horizontal(|ui| {
-                if crate::ui::icons::icon_toggle_button(
+                if crate::ui::icons::icon_button(
                     ui,
                     crate::ui::icons::UiIcon::RotateLeft,
-                    false,
                     crate::ui::theme::toolbar_icon_size(),
                     "Rotate 90° counter-clockwise",
                 )
@@ -83,10 +82,9 @@ impl Sidebar {
                 {
                     app.develop.geometry.rotate_quarter_turn(false);
                 }
-                if crate::ui::icons::icon_toggle_button(
+                if crate::ui::icons::icon_button(
                     ui,
                     crate::ui::icons::UiIcon::RotateRight,
-                    false,
                     crate::ui::theme::toolbar_icon_size(),
                     "Rotate 90° clockwise",
                 )
@@ -109,8 +107,11 @@ impl Sidebar {
             } else {
                 "Draw straighten line"
             };
-            if ui
-                .selectable_label(app.develop_ui.straighten_tool_active, straighten_label)
+            if crate::ui::theme::toggle_button(
+                ui,
+                straighten_label,
+                app.develop_ui.straighten_tool_active,
+            )
                 .on_hover_text("Drag along a horizon or vertical edge in the Crop preview. AuRaw rotates the image so that line becomes level.")
                 .clicked()
             {
@@ -123,8 +124,24 @@ impl Sidebar {
         crate::ui::theme::card_gap(ui);
         crate::ui::theme::section_card(ui, "Transform", |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut app.develop.geometry.flip_horizontal, "Flip horizontal");
-                ui.checkbox(&mut app.develop.geometry.flip_vertical, "Flip vertical");
+                if crate::ui::theme::toggle_button(
+                    ui,
+                    "Flip horizontal",
+                    app.develop.geometry.flip_horizontal,
+                )
+                .clicked()
+                {
+                    app.develop.geometry.flip_horizontal = !app.develop.geometry.flip_horizontal;
+                }
+                if crate::ui::theme::toggle_button(
+                    ui,
+                    "Flip vertical",
+                    app.develop.geometry.flip_vertical,
+                )
+                .clicked()
+                {
+                    app.develop.geometry.flip_vertical = !app.develop.geometry.flip_vertical;
+                }
             });
             adjustment_slider(
                 ui,

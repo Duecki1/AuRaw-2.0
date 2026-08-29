@@ -60,6 +60,14 @@ pub(crate) fn icon_toggle_button(
     .on_hover_text(tooltip)
 }
 
+pub(crate) fn icon_button(ui: &mut Ui, icon: UiIcon, size: Vec2, tooltip: &str) -> Response {
+    ui.add_sized(
+        size,
+        egui::Button::new(RichText::new(icon.glyph()).size(size.y * 0.52)).frame(true),
+    )
+    .on_hover_text(tooltip)
+}
+
 pub(crate) fn phosphor_icon_button(
     ui: &mut Ui,
     glyph: &str,
@@ -68,7 +76,7 @@ pub(crate) fn phosphor_icon_button(
 ) -> Response {
     ui.add_sized(
         size,
-        egui::Button::new(RichText::new(glyph).size(size.y * 0.55)).frame(false),
+        egui::Button::new(RichText::new(glyph).size(size.y * 0.55)).frame(true),
     )
     .on_hover_text(tooltip)
 }
@@ -116,7 +124,7 @@ pub(crate) fn phosphor_icon_button_enabled(
     ui.add_enabled_ui(enabled, |ui| {
         ui.add_sized(
             size,
-            egui::Button::new(RichText::new(glyph).size(size.y * 0.55)).frame(false),
+            egui::Button::new(RichText::new(glyph).size(size.y * 0.55)).frame(true),
         )
     })
     .inner
