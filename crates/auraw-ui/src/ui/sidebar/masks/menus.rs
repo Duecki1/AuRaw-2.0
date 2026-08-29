@@ -20,11 +20,11 @@ impl Sidebar {
             } else {
                 format!("{} · soon", kind.label())
             };
-            if ui
-                .add_enabled(kind.is_available(), egui::Button::new(label))
-                .on_disabled_hover_text(unavailable_message)
-                .clicked()
-            {
+            let response = ui
+                .add_enabled_ui(kind.is_available(), |ui| ui.selectable_label(false, label))
+                .inner
+                .on_disabled_hover_text(unavailable_message);
+            if response.clicked() {
                 selected = Some(kind);
                 ui.close();
             }

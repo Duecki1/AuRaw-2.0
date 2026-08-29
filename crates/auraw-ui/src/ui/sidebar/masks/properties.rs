@@ -5,42 +5,40 @@ impl Sidebar {
         let before = *effect;
         crate::ui::theme::section_card(ui, "Mask type", |ui| {
             ui.add_space(4.0);
-            let button = egui::Button::new(effect.label())
-                .right_text(egui_phosphor::regular::CARET_DOWN)
-                .min_size(egui::vec2(
-                    ui.available_width(),
-                    crate::ui::theme::CONTROL_HEIGHT,
-                ));
-            egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-                ui.set_min_width(190.0);
-                if ui
-                    .selectable_label(*effect == MaskEffect::Adjustment, "Adjustment")
-                    .on_hover_text("Use the mask with the existing local adjustment controls.")
-                    .clicked()
-                {
-                    *effect = MaskEffect::Adjustment;
-                    ui.close();
-                }
+            egui::ComboBox::from_id_salt("mask-effect-picker")
+                .selected_text(effect.label())
+                .width(ui.available_width())
+                .height(ui.ctx().content_rect().height())
+                .show_ui(ui, |ui| {
+                    ui.set_min_width(190.0);
+                    if ui
+                        .selectable_label(*effect == MaskEffect::Adjustment, "Adjustment")
+                        .on_hover_text("Use the mask with the existing local adjustment controls.")
+                        .clicked()
+                    {
+                        *effect = MaskEffect::Adjustment;
+                        ui.close();
+                    }
 
-                ui.separator();
-                for category in MaskEffectCategory::ALL {
-                    ui.menu_button(category.label(), |ui| {
-                        ui.set_min_width(180.0);
-                        for candidate in MaskEffect::ALL {
-                            if candidate.category() != Some(category) {
-                                continue;
+                    ui.separator();
+                    for category in MaskEffectCategory::ALL {
+                        ui.menu_button(category.label(), |ui| {
+                            ui.set_min_width(180.0);
+                            for candidate in MaskEffect::ALL {
+                                if candidate.category() != Some(category) {
+                                    continue;
+                                }
+                                if ui
+                                    .selectable_label(*effect == candidate, candidate.label())
+                                    .clicked()
+                                {
+                                    *effect = candidate;
+                                    ui.close();
+                                }
                             }
-                            if ui
-                                .selectable_label(*effect == candidate, candidate.label())
-                                .clicked()
-                            {
-                                *effect = candidate;
-                                ui.close();
-                            }
-                        }
-                    });
-                }
-            });
+                        });
+                    }
+                });
         });
         before != *effect
     }
