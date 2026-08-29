@@ -68,7 +68,7 @@ pub(crate) fn phosphor_icon_button(
 ) -> Response {
     ui.add_sized(
         size,
-        egui::Button::new(RichText::new(glyph).size(size.y * 0.55)),
+        egui::Button::new(RichText::new(glyph).size(size.y * 0.55)).frame(false),
     )
     .on_hover_text(tooltip)
 }
@@ -116,7 +116,7 @@ pub(crate) fn phosphor_icon_button_enabled(
     ui.add_enabled_ui(enabled, |ui| {
         ui.add_sized(
             size,
-            egui::Button::new(RichText::new(glyph).size(size.y * 0.55)),
+            egui::Button::new(RichText::new(glyph).size(size.y * 0.55)).frame(false),
         )
     })
     .inner

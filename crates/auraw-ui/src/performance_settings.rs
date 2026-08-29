@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
         assert!(!settings.image_relative_brush_size);
         assert!(!settings.show_develop_navigation_labels);
-        assert_eq!(settings.ui_design, crate::ui::theme::UiDesign::MidnightPink);
+        assert_eq!(settings.ui_design, crate::ui::theme::UiDesign::GraphiteMint);
         assert_eq!(
             settings.preview_backdrop,
             crate::ui::theme::PreviewBackdrop::DarkGrey

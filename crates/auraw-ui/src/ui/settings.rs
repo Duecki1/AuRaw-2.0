@@ -854,7 +854,7 @@ impl Settings {
     }
 
     fn group(ui: &mut Ui, total_width: f32, contents: impl FnOnce(&mut Ui)) {
-        let frame_width = f32::from(crate::ui::theme::CONTENT_MARGIN) * 2.0 + 2.0;
+        let frame_width = f32::from(crate::ui::theme::CONTENT_MARGIN) * 2.0 + 6.0;
         let inner_width = (total_width - frame_width).max(1.0);
         crate::ui::theme::card_frame(ui).show(ui, |ui| {
             ui.set_width(inner_width);

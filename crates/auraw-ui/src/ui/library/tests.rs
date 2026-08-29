@@ -210,6 +210,19 @@ fn catalog_status_only_reports_exceptional_conditions() {
 }
 
 #[test]
+fn uniform_thumbnail_grid_keeps_every_visible_tile_the_same_size() {
+    let (tiles, total_height) = uniform_thumbnail_layout(7, 960.0, 200.0, 12.0);
+
+    assert_eq!(tiles.len(), 7);
+    assert!(total_height > tiles[0].height());
+    for tile in &tiles {
+        assert_eq!(tile.size(), tiles[0].size());
+    }
+    assert_eq!(tiles[0].top(), tiles[3].top());
+    assert!(tiles[4].top() > tiles[0].top());
+}
+
+#[test]
 fn thumbnail_background_progress_is_generation_scoped_and_deduplicated() {
     let first = test_asset("one.CR3").id;
     let second = test_asset("two.NEF").id;

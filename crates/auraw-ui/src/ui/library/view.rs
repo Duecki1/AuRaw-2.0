@@ -9,53 +9,47 @@ impl Library {
         let can_create_folder = platform::can_create_local_folder(app);
         let mut requested_toolbar_action = None;
 
-        crate::ui::theme::content_card(ui, |ui| {
-            crate::ui::theme::toolbar_row(ui, |ui| {
-                ui.strong("Folders");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if crate::ui::icons::phosphor_icon_button(
-                        ui,
-                        egui_phosphor::regular::X,
-                        crate::ui::theme::toolbar_icon_size(),
-                        "Close folder sidebar",
-                    )
-                    .clicked()
-                    {
-                        app.set_library_folder_sidebar_open(false);
-                    }
-                    if crate::ui::icons::phosphor_icon_button_enabled(
-                        ui,
-                        folders_available && !action_in_progress,
-                        egui_phosphor::regular::ARROW_CLOCKWISE,
-                        crate::ui::theme::toolbar_icon_size(),
-                        "Refresh folders",
-                    )
-                    .clicked()
-                    {
-                        requested_toolbar_action =
-                            Some(platform::LocalFolderToolbarAction::Refresh);
-                    }
-                    if crate::ui::icons::phosphor_icon_button_enabled(
-                        ui,
-                        can_create_folder && !action_in_progress,
-                        egui_phosphor::regular::FOLDER_PLUS,
-                        crate::ui::theme::toolbar_icon_size(),
-                        "Create folder here",
-                    )
-                    .clicked()
-                    {
-                        requested_toolbar_action = Some(platform::LocalFolderToolbarAction::New);
-                    }
-                });
+        crate::ui::theme::toolbar_row(ui, |ui| {
+            ui.strong("Folders");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if crate::ui::icons::phosphor_icon_button(
+                    ui,
+                    egui_phosphor::regular::X,
+                    crate::ui::theme::toolbar_icon_size(),
+                    "Close folder sidebar",
+                )
+                .clicked()
+                {
+                    app.set_library_folder_sidebar_open(false);
+                }
+                if crate::ui::icons::phosphor_icon_button_enabled(
+                    ui,
+                    folders_available && !action_in_progress,
+                    egui_phosphor::regular::ARROW_CLOCKWISE,
+                    crate::ui::theme::toolbar_icon_size(),
+                    "Refresh folders",
+                )
+                .clicked()
+                {
+                    requested_toolbar_action = Some(platform::LocalFolderToolbarAction::Refresh);
+                }
+                if crate::ui::icons::phosphor_icon_button_enabled(
+                    ui,
+                    can_create_folder && !action_in_progress,
+                    egui_phosphor::regular::FOLDER_PLUS,
+                    crate::ui::theme::toolbar_icon_size(),
+                    "Create folder here",
+                )
+                .clicked()
+                {
+                    requested_toolbar_action = Some(platform::LocalFolderToolbarAction::New);
+                }
             });
         });
-
-        crate::ui::theme::card_gap(ui);
-        crate::ui::theme::card_frame(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let tree_height = ui.available_height().max(32.0);
-            platform::show_local_folder_tree(ui, app, tree_height, action_in_progress);
-        });
+        ui.separator();
+        ui.add_space(crate::ui::theme::SPACE_XS);
+        let tree_height = ui.available_height().max(32.0);
+        platform::show_local_folder_tree(ui, app, tree_height, action_in_progress);
 
         if let Some(action) = requested_toolbar_action {
             platform::apply_local_toolbar_action(app, action, ui.ctx());
@@ -104,7 +98,14 @@ impl Library {
                     if total_count == 1 { "file" } else { "files" }
                 )
             };
-            ui.strong(count_label);
+            if !compact_header {
+                ui.label(egui::RichText::new("Library").strong().size(16.0));
+            }
+            ui.label(
+                egui::RichText::new(count_label)
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
             let mut selected_sort = app.library.sort_order();
             let mut selected_size = app.library.thumbnail_size();
 
@@ -199,7 +200,11 @@ impl Library {
 
         if let Some(_location) = app.library.location.as_deref() {
             #[cfg(not(target_os = "android"))]
-            let location_label = _location.to_owned();
+            let location_label = std::path::Path::new(_location)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(_location)
+                .to_owned();
             #[cfg(target_os = "android")]
             let location_label = if app.library.platform.folder.is_empty() {
                 "Local / Library".to_owned()
@@ -208,12 +213,13 @@ impl Library {
             };
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(location_label)
+                    egui::RichText::new(format!("Folder · {location_label}"))
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 )
                 .truncate(),
-            );
+            )
+            .on_hover_text(_location);
         }
         show_local_image_paste_bar(ui, app);
         if !app.library.status.is_empty() {
@@ -273,36 +279,26 @@ impl Library {
             let current_path = app.develop.current_path.clone();
             let available = ui.available_width().max(1.0);
             let available_height = ui.available_height().max(1.0);
-            let gap = 6.0;
-            let target_thumbnail_height = responsive_thumbnail_target_height(
-                available,
+            let grid_padding = crate::ui::theme::SPACE_XS;
+            let gap = crate::ui::theme::SPACE_MD;
+            let grid_width = (available - grid_padding * 2.0).max(1.0);
+            let preferred_tile_width = library_grid_tile_width(
+                app.library.thumbnail_size(),
                 available_height,
-                ui.ctx().pixels_per_point(),
                 cfg!(target_os = "android"),
-            ) * app.library.thumbnail_size().scale();
-            let (placements, grid_height) = if let Some(indices) = &visible_indices {
-                justified_thumbnail_layout_for_indices(
-                    &app.library.entries,
-                    indices,
-                    available,
-                    target_thumbnail_height,
-                    gap,
-                )
-            } else {
-                justified_thumbnail_layout(
-                    &app.library.entries,
-                    available,
-                    target_thumbnail_height,
-                    gap,
-                )
-            };
+            );
+            let item_count = visible_indices
+                .as_ref()
+                .map_or(app.library.entries.len(), Vec::len);
+            let (placements, grid_height) =
+                uniform_thumbnail_layout(item_count, grid_width, preferred_tile_width, gap);
 
             let mut protected_thumbnail_indices = HashSet::new();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show_viewport(ui, |ui, viewport| {
                     let (content_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(available, grid_height.max(1.0)),
+                        egui::vec2(available, (grid_height + grid_padding * 2.0).max(1.0)),
                         Sense::hover(),
                     );
                     let preload_viewport = viewport.expand(600.0);
@@ -319,7 +315,9 @@ impl Library {
                         if !relative_rect.intersects(viewport) {
                             continue;
                         }
-                        let item_rect = relative_rect.translate(content_rect.min.to_vec2());
+                        let item_rect = relative_rect.translate(
+                            content_rect.min.to_vec2() + egui::vec2(grid_padding, grid_padding),
+                        );
                         let entry = &app.library.entries[index];
                         let asset = entry.asset.clone();
                         let selected = if app.library.selection_mode() {
@@ -457,6 +455,20 @@ impl Library {
             }
         }
     }
+}
+
+fn library_grid_tile_width(
+    size: LibraryThumbnailSize,
+    available_height: f32,
+    android: bool,
+) -> f32 {
+    let base = if android { 132.0 } else { 176.0 };
+    let height_scale = if !android && available_height < 540.0 {
+        0.9
+    } else {
+        1.0
+    };
+    (base * size.scale() * height_scale).round()
 }
 
 fn show_local_image_paste_bar(ui: &mut Ui, app: &mut AurawApp) {

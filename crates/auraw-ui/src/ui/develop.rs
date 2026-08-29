@@ -9,10 +9,10 @@ use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui}
 use std::collections::HashSet;
 use std::sync::{mpsc, Mutex, OnceLock};
 
-pub(crate) const FILMSTRIP_HEIGHT: f32 = 112.0;
-const FILMSTRIP_CARD_WIDTH: f32 = 118.0;
-const FILMSTRIP_CARD_HEIGHT: f32 = 88.0;
-const FILMSTRIP_GAP: f32 = 6.0;
+pub(crate) const FILMSTRIP_HEIGHT: f32 = 128.0;
+const FILMSTRIP_CARD_WIDTH: f32 = 132.0;
+const FILMSTRIP_CARD_HEIGHT: f32 = 96.0;
+const FILMSTRIP_GAP: f32 = 8.0;
 const FILMSTRIP_PRELOAD_POINTS: f32 = 360.0;
 const SPLIT_GAP: f32 = 8.0;
 const SPLIT_MIN_PANE_WIDTH: f32 = 160.0;
@@ -69,11 +69,18 @@ impl Develop {
     pub(crate) fn show_filmstrip(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         app.library.poll(ui.ctx());
         sync_reference_texture(app, ui.ctx());
+        let shelf_rect = ui.max_rect();
+        ui.painter().hline(
+            shelf_rect.x_range(),
+            shelf_rect.top(),
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
 
         egui::Frame::new()
             .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
-                ui.set_min_height(FILMSTRIP_HEIGHT - 4.0);
+                ui.set_min_height(FILMSTRIP_CARD_HEIGHT);
                 show_filmstrip_contents(ui, app, frame);
             });
     }
@@ -529,12 +536,12 @@ fn filmstrip_thumbnail(
         Sense::click(),
     );
     let painter = ui.painter();
-    painter.rect_filled(rect, 3.0, crate::ui::theme::THUMBNAIL_BACKDROP);
+    painter.rect_filled(rect, 6.0, crate::ui::theme::THUMBNAIL_BACKDROP);
 
     if let Some(texture) = item.texture.as_ref() {
         let image_rect = egui::Rect::from_min_max(
-            rect.min + egui::vec2(2.0, 2.0),
-            egui::pos2(rect.right() - 2.0, rect.bottom() - 22.0),
+            rect.min + egui::vec2(3.0, 3.0),
+            egui::pos2(rect.right() - 3.0, rect.bottom() - 25.0),
         );
         painter.image(
             texture.id(),
@@ -558,32 +565,31 @@ fn filmstrip_thumbnail(
     }
 
     let label_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + 2.0, rect.bottom() - 22.0),
-        rect.max - egui::vec2(2.0, 2.0),
+        egui::pos2(rect.left() + 6.0, rect.bottom() - 21.0),
+        egui::pos2(rect.right() - 6.0, rect.bottom() - 4.0),
     );
-    painter.rect_filled(label_rect, 2.0, Color32::from_black_alpha(180));
     painter.text(
         label_rect.center(),
         Align2::CENTER_CENTER,
-        elide_name(&item.asset.display_name, 17),
-        FontId::proportional(10.5),
-        Color32::WHITE,
+        elide_name(&item.asset.display_name, 18),
+        FontId::proportional(10.0),
+        ui.visuals().weak_text_color(),
     );
 
     if response.hovered() {
-        painter.rect_filled(rect, 3.0, Color32::from_white_alpha(13));
+        painter.rect_filled(rect, 6.0, Color32::from_white_alpha(10));
     }
     if active {
         painter.rect_stroke(
             rect,
-            3.0,
-            Stroke::new(3.0, ui.visuals().selection.bg_fill),
+            6.0,
+            Stroke::new(2.0, ui.visuals().selection.bg_fill),
             StrokeKind::Inside,
         );
     } else {
         painter.rect_stroke(
             rect,
-            3.0,
+            6.0,
             Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
             StrokeKind::Inside,
         );

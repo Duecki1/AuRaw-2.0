@@ -4,6 +4,7 @@ use super::*;
 /// aspect-ratio combinations can still reach both edges of the viewport. Rows
 /// requiring more growth than this are genuinely sparse and retain their
 /// natural width instead of turning a handful of thumbnails into huge tiles.
+#[cfg(test)]
 pub(super) const MAX_JUSTIFIED_ROW_HEIGHT_SCALE: f32 = 4.0 / 3.0;
 
 pub(super) fn send_scan_failure(
@@ -30,6 +31,7 @@ pub(super) fn catalog_status(warning_count: usize, truncated: bool) -> String {
     notices.join(" · ")
 }
 
+#[cfg(test)]
 pub(super) fn responsive_thumbnail_target_height(
     available_width: f32,
     available_height: f32,
@@ -67,6 +69,50 @@ pub(super) fn responsive_thumbnail_target_height(
     (BASE_HEIGHT * viewport_scale * density_scale).clamp(126.0, 270.0)
 }
 
+/// A predictable library grid is easier to scan than a collage of justified
+/// rows. Every tile reserves the same image and metadata space; source aspect
+/// ratios are handled by cover cropping inside that stable frame.
+pub(super) fn uniform_thumbnail_layout(
+    item_count: usize,
+    available_width: f32,
+    preferred_tile_width: f32,
+    gap: f32,
+) -> (Vec<egui::Rect>, f32) {
+    if item_count == 0 {
+        return (Vec::new(), 0.0);
+    }
+
+    const CARD_HEIGHT_RATIO: f32 = 0.72;
+    let available_width = available_width.max(1.0);
+    let preferred_tile_width = preferred_tile_width.max(1.0);
+    let gap = gap.max(0.0);
+    let columns = ((available_width + gap) / (preferred_tile_width + gap))
+        .floor()
+        .max(1.0) as usize;
+    let columns = columns.min(item_count).max(1);
+    let tile_width =
+        ((available_width - gap * columns.saturating_sub(1) as f32) / columns as f32).max(1.0);
+    let tile_height = (tile_width * CARD_HEIGHT_RATIO).round().max(1.0);
+    let rows = item_count.div_ceil(columns);
+    let mut placements = Vec::with_capacity(item_count);
+
+    for index in 0..item_count {
+        let column = index % columns;
+        let row = index / columns;
+        placements.push(egui::Rect::from_min_size(
+            egui::pos2(
+                column as f32 * (tile_width + gap),
+                row as f32 * (tile_height + gap),
+            ),
+            egui::vec2(tile_width, tile_height),
+        ));
+    }
+
+    let total_height = rows as f32 * tile_height + rows.saturating_sub(1) as f32 * gap;
+    (placements, total_height)
+}
+
+#[cfg(test)]
 pub(super) fn balanced_justified_row_ranges(
     aspects: &[f32],
     available_width: f32,
@@ -121,6 +167,7 @@ pub(super) fn balanced_justified_row_ranges(
     ranges
 }
 
+#[cfg(test)]
 pub(super) fn justified_thumbnail_layout(
     entries: &[LibraryEntry],
     available_width: f32,
@@ -135,24 +182,7 @@ pub(super) fn justified_thumbnail_layout(
     )
 }
 
-pub(super) fn justified_thumbnail_layout_for_indices(
-    entries: &[LibraryEntry],
-    indices: &[usize],
-    available_width: f32,
-    target_height: f32,
-    gap: f32,
-) -> (Vec<egui::Rect>, f32) {
-    justified_thumbnail_layout_from_aspects(
-        indices
-            .iter()
-            .map(|index| library_entry_aspect(&entries[*index]))
-            .collect(),
-        available_width,
-        target_height,
-        gap,
-    )
-}
-
+#[cfg(test)]
 fn library_entry_aspect(entry: &LibraryEntry) -> f32 {
     entry
         .layout_size
@@ -164,6 +194,7 @@ fn library_entry_aspect(entry: &LibraryEntry) -> f32 {
         .unwrap_or(1.5)
 }
 
+#[cfg(test)]
 fn justified_thumbnail_layout_from_aspects(
     aspects: Vec<f32>,
     available_width: f32,
@@ -261,14 +292,20 @@ pub(super) fn thumbnail_tile(
     );
     let visuals = ui.visuals();
 
+    let tile_rect = rect;
+    let image_rect = egui::Rect::from_min_max(
+        tile_rect.min + egui::vec2(3.0, 3.0),
+        egui::pos2(tile_rect.right() - 3.0, tile_rect.bottom() - 26.0),
+    );
     ui.painter()
-        .rect_filled(rect, 0.0, crate::ui::theme::THUMBNAIL_BACKDROP);
+        .rect_filled(tile_rect, 6.0, crate::ui::theme::THUMBNAIL_BACKDROP);
     if let Some(texture) = &entry.texture {
-        let uv = thumbnail_cover_uv(entry.thumbnail_size, rect.size());
-        ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
+        let uv = thumbnail_cover_uv(entry.thumbnail_size, image_rect.size());
+        ui.painter()
+            .image(texture.id(), image_rect, uv, Color32::WHITE);
     } else {
         ui.painter().text(
-            rect.center(),
+            image_rect.center(),
             Align2::CENTER_CENTER,
             if entry.thumbnail_error.is_some() {
                 "Retrying preview…"
@@ -298,31 +335,35 @@ pub(super) fn thumbnail_tile(
 
     if response.hovered() {
         ui.painter()
-            .rect_filled(rect, 0.0, Color32::from_white_alpha(14));
+            .rect_filled(tile_rect, 6.0, Color32::from_white_alpha(10));
     }
     if selected {
         ui.painter().rect_stroke(
-            rect,
-            0.0,
+            tile_rect,
+            6.0,
             Stroke::new(2.0, visuals.selection.bg_fill),
+            StrokeKind::Inside,
+        );
+    } else {
+        ui.painter().rect_stroke(
+            tile_rect,
+            6.0,
+            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
             StrokeKind::Inside,
         );
     }
 
-    let overlay_height = 32.0_f32.min(rect.height());
-    let overlay = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), rect.bottom() - overlay_height),
-        rect.right_bottom(),
+    let label_rect = egui::Rect::from_min_max(
+        egui::pos2(tile_rect.left() + 8.0, tile_rect.bottom() - 20.0),
+        egui::pos2(tile_rect.right() - 8.0, tile_rect.bottom() - 4.0),
     );
-    ui.painter()
-        .rect_filled(overlay, 0.0, Color32::from_black_alpha(116));
-    let max_chars = ((rect.width() - 16.0) / 7.0).floor().max(8.0) as usize;
+    let max_chars = ((label_rect.width() - 2.0) / 6.5).floor().max(8.0) as usize;
     ui.painter().text(
-        egui::pos2(rect.left() + 8.0, rect.bottom() - 7.0),
-        Align2::LEFT_BOTTOM,
+        label_rect.left_center(),
+        Align2::LEFT_CENTER,
         elide_middle(&entry.asset.display_name, max_chars),
-        FontId::proportional(12.5),
-        Color32::WHITE,
+        FontId::proportional(11.0),
+        visuals.weak_text_color(),
     );
 
     let mut tooltip = entry.asset.display_path.clone();

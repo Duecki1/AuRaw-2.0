@@ -14,12 +14,12 @@ pub(crate) const TOOLBAR_HEIGHT: f32 = if cfg!(target_os = "android") {
 };
 pub(crate) const TOOLBAR_ICON_EDGE: f32 = CONTROL_HEIGHT;
 #[cfg(not(target_os = "android"))]
-pub(crate) const TOOL_RAIL_ICON_EDGE: f32 = 40.0;
+pub(crate) const TOOL_RAIL_ICON_EDGE: f32 = 36.0;
 pub(crate) const SPACE_XS: f32 = 4.0;
 pub(crate) const SPACE_SM: f32 = 8.0;
 pub(crate) const SPACE_MD: f32 = 12.0;
 pub(crate) const SPACE_LG: f32 = 16.0;
-pub(crate) const CARD_GAP: f32 = SPACE_MD;
+pub(crate) const CARD_GAP: f32 = SPACE_SM;
 pub(crate) const CONTENT_MARGIN: i8 = 12;
 const COMPACT_PORTRAIT_CARD_GAP: f32 = SPACE_SM;
 const COMPACT_PORTRAIT_CONTENT_MARGIN: i8 = 8;
@@ -29,30 +29,30 @@ pub(crate) const HELP_BUTTON_EDGE: f32 = if cfg!(target_os = "android") {
 } else {
     28.0
 };
-pub(crate) const PANEL_TITLE_HEIGHT: f32 = 42.0;
-pub(crate) const PANEL_TITLE_TEXT_SIZE: f32 = 18.0;
+pub(crate) const PANEL_TITLE_HEIGHT: f32 = 40.0;
+pub(crate) const PANEL_TITLE_TEXT_SIZE: f32 = 16.0;
 #[cfg(any(target_os = "android", test))]
 pub(crate) const FLOATING_ACTION_EDGE: f32 =
     platform_floating_action_edge(cfg!(target_os = "android"));
 #[cfg(any(target_os = "android", test))]
 pub(crate) const FLOATING_ACTION_MARGIN: f32 = 12.0;
 
-pub(crate) const ACCENT: Color32 = Color32::from_rgb(255, 59, 154);
-pub(crate) const ACCENT_BRIGHT: Color32 = Color32::from_rgb(255, 125, 190);
-pub(crate) const HYPERLINK: Color32 = Color32::from_rgb(255, 111, 180);
-pub(crate) const BORDER: Color32 = Color32::from_rgb(62, 61, 72);
-pub(crate) const SURFACE_PANEL: Color32 = Color32::from_rgb(22, 21, 27);
-pub(crate) const SURFACE_WINDOW: Color32 = Color32::from_rgb(27, 26, 33);
-pub(crate) const SURFACE_FAINT: Color32 = Color32::from_rgb(31, 30, 38);
-pub(crate) const SURFACE_EXTREME: Color32 = Color32::from_rgb(14, 13, 18);
-pub(crate) const SURFACE_WIDGET_INACTIVE: Color32 = Color32::from_rgb(38, 36, 45);
-pub(crate) const WIDGET_INACTIVE_STROKE: Color32 = Color32::from_rgb(67, 64, 78);
-pub(crate) const SURFACE_WIDGET_HOVERED: Color32 = Color32::from_rgb(52, 48, 61);
-pub(crate) const WIDGET_HOVERED_STROKE: Color32 = Color32::from_rgb(101, 92, 113);
-pub(crate) const SURFACE_WIDGET_OPEN: Color32 = Color32::from_rgb(49, 45, 58);
-pub(crate) const WIDGET_OPEN_STROKE: Color32 = Color32::from_rgb(91, 83, 104);
-pub(crate) const CANVAS_BACKDROP: Color32 = Color32::from_rgb(15, 16, 18);
-pub(crate) const THUMBNAIL_BACKDROP: Color32 = Color32::from_rgb(17, 18, 20);
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(79, 132, 185);
+pub(crate) const ACCENT_BRIGHT: Color32 = Color32::from_rgb(126, 170, 213);
+pub(crate) const HYPERLINK: Color32 = Color32::from_rgb(111, 162, 210);
+pub(crate) const BORDER: Color32 = Color32::from_rgb(48, 52, 60);
+pub(crate) const SURFACE_PANEL: Color32 = Color32::from_rgb(24, 26, 31);
+pub(crate) const SURFACE_WINDOW: Color32 = Color32::from_rgb(18, 20, 24);
+pub(crate) const SURFACE_FAINT: Color32 = Color32::from_rgb(31, 34, 40);
+pub(crate) const SURFACE_EXTREME: Color32 = Color32::from_rgb(12, 14, 17);
+pub(crate) const SURFACE_WIDGET_INACTIVE: Color32 = Color32::from_rgb(34, 37, 43);
+pub(crate) const WIDGET_INACTIVE_STROKE: Color32 = Color32::from_rgb(58, 63, 72);
+pub(crate) const SURFACE_WIDGET_HOVERED: Color32 = Color32::from_rgb(43, 47, 55);
+pub(crate) const WIDGET_HOVERED_STROKE: Color32 = Color32::from_rgb(79, 86, 98);
+pub(crate) const SURFACE_WIDGET_OPEN: Color32 = Color32::from_rgb(39, 43, 50);
+pub(crate) const WIDGET_OPEN_STROKE: Color32 = Color32::from_rgb(69, 76, 88);
+pub(crate) const CANVAS_BACKDROP: Color32 = Color32::from_rgb(13, 15, 18);
+pub(crate) const THUMBNAIL_BACKDROP: Color32 = Color32::from_rgb(16, 18, 22);
 pub(crate) const STATUS_WARNING: Color32 = Color32::from_rgb(244, 142, 48);
 pub(crate) const MASK_ADD: Color32 = Color32::from_rgb(78, 163, 255);
 pub(crate) const MASK_SUBTRACT: Color32 = Color32::from_rgb(255, 105, 105);
@@ -107,8 +107,8 @@ pub(crate) const LUMINANCE_WHITE: Color32 = Color32::from_rgb(246, 246, 246);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UiDesign {
-    #[default]
     MidnightPink,
+    #[default]
     GraphiteMint,
     Porcelain,
     DaylightBlue,
@@ -124,19 +124,19 @@ impl UiDesign {
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::MidnightPink => "Midnight Pink · Dark",
-            Self::GraphiteMint => "Graphite Mint · Dark",
-            Self::Porcelain => "Porcelain Rose · Light",
-            Self::DaylightBlue => "Daylight Blue · Light",
+            Self::MidnightPink => "Obsidian Blue · Dark",
+            Self::GraphiteMint => "Graphite Blue · Dark",
+            Self::Porcelain => "Porcelain · Light",
+            Self::DaylightBlue => "Daylight · Light",
         }
     }
 
     pub(crate) const fn description(self) -> &'static str {
         match self {
-            Self::MidnightPink => "Deep neutral surfaces with a bright pink accent.",
-            Self::GraphiteMint => "Cool graphite surfaces with a crisp mint accent.",
-            Self::Porcelain => "Warm paper-like surfaces with a restrained rose accent.",
-            Self::DaylightBlue => "Clean cool surfaces with a vivid blue accent.",
+            Self::MidnightPink => "Deep neutral surfaces with a restrained blue accent.",
+            Self::GraphiteMint => "Cool graphite surfaces with a focused blue accent.",
+            Self::Porcelain => "Warm paper-like surfaces with a restrained coral accent.",
+            Self::DaylightBlue => "Clean cool surfaces with a focused blue accent.",
         }
     }
 
@@ -163,20 +163,20 @@ impl UiDesign {
                 open_stroke: WIDGET_OPEN_STROKE,
             },
             Self::GraphiteMint => ThemePalette {
-                accent: Color32::from_rgb(64, 210, 177),
-                accent_bright: Color32::from_rgb(124, 235, 207),
-                hyperlink: Color32::from_rgb(91, 219, 190),
-                border: Color32::from_rgb(54, 67, 70),
-                panel: Color32::from_rgb(18, 24, 25),
-                window: Color32::from_rgb(23, 29, 31),
-                faint: Color32::from_rgb(27, 34, 35),
-                extreme: Color32::from_rgb(11, 16, 17),
-                inactive: Color32::from_rgb(33, 42, 43),
-                inactive_stroke: Color32::from_rgb(58, 75, 76),
-                hovered: Color32::from_rgb(43, 55, 56),
-                hovered_stroke: Color32::from_rgb(79, 104, 103),
-                open: Color32::from_rgb(40, 51, 52),
-                open_stroke: Color32::from_rgb(74, 96, 96),
+                accent: Color32::from_rgb(79, 132, 185),
+                accent_bright: Color32::from_rgb(126, 170, 213),
+                hyperlink: Color32::from_rgb(111, 162, 210),
+                border: Color32::from_rgb(47, 55, 66),
+                panel: Color32::from_rgb(19, 24, 30),
+                window: Color32::from_rgb(14, 18, 23),
+                faint: Color32::from_rgb(27, 32, 39),
+                extreme: Color32::from_rgb(9, 12, 16),
+                inactive: Color32::from_rgb(30, 37, 45),
+                inactive_stroke: Color32::from_rgb(52, 63, 76),
+                hovered: Color32::from_rgb(39, 47, 57),
+                hovered_stroke: Color32::from_rgb(75, 88, 104),
+                open: Color32::from_rgb(35, 42, 51),
+                open_stroke: Color32::from_rgb(66, 78, 94),
             },
             Self::Porcelain => ThemePalette {
                 accent: Color32::from_rgb(232, 132, 169),
@@ -382,6 +382,7 @@ pub(crate) fn toolbar_row<R>(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn panel_title(ui: &mut Ui, title: impl Into<RichText>) -> InnerResponse<Response> {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -405,26 +406,21 @@ pub(crate) fn toolbar_frame(ui: &Ui) -> Frame {
             if compact { 10 } else { CONTENT_MARGIN },
             if compact { 4 } else { 6 },
         ))
-        .stroke(Stroke::new(
-            1.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        ))
+        .stroke(Stroke::NONE)
+        .corner_radius(0.0)
 }
 
 pub(crate) fn panel_frame(ui: &Ui) -> Frame {
     Frame::new()
         .fill(ui.visuals().panel_fill)
-        .inner_margin(Margin::same(if is_compact_portrait(ui) {
-            6
-        } else {
-            SPACE_SM as i8
-        }))
+        .inner_margin(Margin::same(if is_compact_portrait(ui) { 6 } else { 10 }))
+        .stroke(Stroke::NONE)
 }
 
 pub(crate) fn card_frame(ui: &Ui) -> Frame {
     Frame::new()
         .fill(ui.visuals().faint_bg_color)
-        .inner_margin(Margin::same(content_margin(ui)))
+        .inner_margin(Margin::same(content_margin(ui) + 2))
         .corner_radius(6.0)
         .stroke(Stroke::new(
             1.0,
@@ -436,7 +432,7 @@ pub(crate) fn content_card<R>(
     ui: &mut Ui,
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> InnerResponse<R> {
-    let frame_width = f32::from(content_margin(ui)) * 2.0 + 2.0;
+    let frame_width = f32::from(content_margin(ui)) * 2.0 + 6.0;
     let inner_width = (ui.available_width() - frame_width).max(1.0);
     card_frame(ui).show(ui, |ui| {
         ui.set_width(inner_width);
@@ -557,7 +553,9 @@ pub(crate) fn segmented_button(
         [width, CONTROL_HEIGHT],
         egui::Button::new(label.into())
             .selected(selected)
-            .truncate(),
+            .frame(selected)
+            .truncate()
+            .corner_radius(6.0),
     )
 }
 
@@ -765,7 +763,7 @@ pub(crate) fn apply(ctx: &egui::Context, design: UiDesign) {
     visuals.hyperlink_color = palette.hyperlink;
     visuals.window_stroke = Stroke::new(1.0, palette.border);
     visuals.window_corner_radius = 8.0.into();
-    visuals.menu_corner_radius = 7.0.into();
+    visuals.menu_corner_radius = 6.0.into();
 
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);
     visuals.widgets.noninteractive.corner_radius = 6.0.into();
@@ -794,13 +792,13 @@ pub(crate) fn apply(ctx: &egui::Context, design: UiDesign) {
         .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
     style
         .text_styles
-        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
     style
         .text_styles
-        .insert(egui::TextStyle::Button, egui::FontId::proportional(13.5));
+        .insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
     style
         .text_styles
-        .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
+        .insert(egui::TextStyle::Small, egui::FontId::proportional(11.0));
     style.spacing.slider_width = 220.0;
     style.spacing.item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
