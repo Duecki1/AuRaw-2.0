@@ -1,33 +1,39 @@
 use crate::pipeline::{CropAspectRatio, GeometryTransform};
 
 impl Sidebar {
-    fn show_crop(ui: &mut Ui, app: &mut AurawApp) {
+    fn reset_crop(app: &mut AurawApp) {
+        app.develop.geometry = GeometryTransform::default();
+        app.develop_ui.crop_constraint_reference = Some(app.develop.geometry.crop);
+        app.develop_ui.crop_drag = None;
+        app.develop_ui.straighten_tool_active = false;
+        app.develop_ui.straighten_drag = None;
+        app.note_geometry_changed();
+    }
+
+    fn show_crop(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
         let source_dimensions = app.develop.loaded_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((1, 1));
 
-        crate::ui::theme::toolbar_row(ui, |ui| {
-            ui.strong("Crop geometry");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::ui::icons::phosphor_icon_button(
-                    ui,
-                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                    crate::ui::theme::toolbar_icon_size(),
-                    "Reset crop and geometry",
-                )
-                .clicked()
-                {
-                    app.develop.geometry = GeometryTransform::default();
-                    app.develop_ui.crop_constraint_reference = Some(app.develop.geometry.crop);
-                    app.develop_ui.crop_drag = None;
-                    app.develop_ui.straighten_tool_active = false;
-                    app.develop_ui.straighten_drag = None;
-                    app.note_geometry_changed();
-                }
+        if layout == ScreenLayout::Vertical {
+            crate::ui::theme::toolbar_row(ui, |ui| {
+                ui.strong("Crop geometry");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::ui::icons::phosphor_icon_button(
+                        ui,
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                        crate::ui::theme::toolbar_icon_size(),
+                        "Reset crop and geometry",
+                    )
+                    .clicked()
+                    {
+                        Self::reset_crop(app);
+                    }
+                });
             });
-        });
-        ui.add_space(4.0);
+            ui.add_space(4.0);
+        }
 
         let before = app.develop.geometry;
         if app.develop_ui.crop_constraint_reference.is_none() {

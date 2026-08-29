@@ -31,7 +31,7 @@ impl Sidebar {
     pub(crate) fn show_inpainting(
         ui: &mut Ui,
         app: &mut AurawApp,
-        _layout: ScreenLayout,
+        layout: ScreenLayout,
         _frame: &eframe::Frame,
     ) {
         let active_tool = app.inpaint.tool;
@@ -44,22 +44,24 @@ impl Sidebar {
                 active_tool.matches_stroke_tool(stroke.retouch.map(|retouch| retouch.tool))
             })
             .count();
-        crate::ui::theme::toolbar_row(ui, |ui| {
-            ui.strong("Inpainting");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let clear = crate::ui::icons::phosphor_icon_button_enabled(
-                    ui,
-                    active_stroke_count != 0 && !app.inpaint.processing(),
-                    egui_phosphor::regular::TRASH,
-                    crate::ui::theme::toolbar_icon_size(),
-                    &format!("Clear all {} strokes", active_tool.label()),
-                );
-                if clear.clicked() {
-                    app.clear_inpainting_tool();
-                }
+        if layout == ScreenLayout::Vertical {
+            crate::ui::theme::toolbar_row(ui, |ui| {
+                ui.strong("Inpainting");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let clear = crate::ui::icons::phosphor_icon_button_enabled(
+                        ui,
+                        active_stroke_count != 0 && !app.inpaint.processing(),
+                        egui_phosphor::regular::TRASH,
+                        crate::ui::theme::toolbar_icon_size(),
+                        &format!("Clear all {} strokes", active_tool.label()),
+                    );
+                    if clear.clicked() {
+                        app.clear_inpainting_tool();
+                    }
+                });
             });
-        });
-        ui.add_space(4.0);
+            ui.add_space(4.0);
+        }
 
         let tool_help = inpaint_tool_help(app.inpaint.tool);
         crate::ui::theme::section_card_with_help(ui, "Tool", tool_help, |ui| {

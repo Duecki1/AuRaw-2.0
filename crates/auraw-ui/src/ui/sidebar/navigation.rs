@@ -60,20 +60,71 @@ impl Sidebar {
                         .strong()
                         .size(crate::ui::theme::PANEL_TITLE_TEXT_SIZE),
                 );
-                if app.ui.sidebar_tab == SidebarTab::Adjustments {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::ui::icons::phosphor_icon_button(
-                            ui,
-                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                            crate::ui::theme::toolbar_icon_size(),
-                            "Reset all develop adjustments",
-                        )
-                        .clicked()
-                        {
-                            app.reset_develop_adjustments();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    match app.ui.sidebar_tab {
+                        SidebarTab::Adjustments => {
+                            if crate::ui::icons::phosphor_icon_button(
+                                ui,
+                                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                crate::ui::theme::toolbar_icon_size(),
+                                "Reset all develop adjustments",
+                            )
+                            .clicked()
+                            {
+                                app.reset_develop_adjustments();
+                            }
                         }
-                    });
-                }
+                        SidebarTab::Crop => {
+                            if crate::ui::icons::phosphor_icon_button(
+                                ui,
+                                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                crate::ui::theme::toolbar_icon_size(),
+                                "Reset crop and geometry",
+                            )
+                            .clicked()
+                            {
+                                Self::reset_crop(app);
+                            }
+                        }
+                        SidebarTab::Inpainting => {
+                            let active_tool = app.inpaint.tool;
+                            let active_stroke_count = app
+                                .inpaint
+                                .edits
+                                .strokes
+                                .iter()
+                                .filter(|stroke| {
+                                    active_tool
+                                        .matches_stroke_tool(stroke.retouch.map(|retouch| retouch.tool))
+                                })
+                                .count();
+                            if crate::ui::icons::phosphor_icon_button_enabled(
+                                ui,
+                                active_stroke_count != 0 && !app.inpaint.processing(),
+                                egui_phosphor::regular::TRASH,
+                                crate::ui::theme::toolbar_icon_size(),
+                                &format!("Clear all {} strokes", active_tool.label()),
+                            )
+                            .clicked()
+                            {
+                                app.clear_inpainting_tool();
+                            }
+                        }
+                        SidebarTab::Masks => {
+                            if crate::ui::icons::phosphor_icon_button(
+                                ui,
+                                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                crate::ui::theme::toolbar_icon_size(),
+                                "Reset all masks and clear the subject mask cache",
+                            )
+                            .clicked()
+                            {
+                                app.reset_masks();
+                            }
+                        }
+                        SidebarTab::Export => {}
+                    }
+                });
             },
         );
         ui.separator();
@@ -418,7 +469,7 @@ impl Sidebar {
                                 SidebarTab::Adjustments => {
                                     Self::show_adjustments(ui, app, layout, frame)
                                 }
-                                SidebarTab::Crop => Self::show_crop(ui, app),
+                                SidebarTab::Crop => Self::show_crop(ui, app, layout),
                                 SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
                                 SidebarTab::Inpainting => {
                                     Self::show_inpainting(ui, app, layout, frame)

@@ -87,6 +87,46 @@ impl MaskState {
 }
 
 impl AurawApp {
+    pub(crate) fn reset_masks(&mut self) {
+        let masks_changed =
+            !self.masks.stack.masks.is_empty() || !self.masks.stack.subject_refinement.is_empty();
+
+        self.finish_mask_geometry_interaction();
+        self.masks.stack.clear();
+        self.masks.active_tool = None;
+        self.masks.brush_mode = BrushMode::Paint;
+        self.masks.subject_refinement_active = false;
+        self.masks.drag = None;
+        self.masks.last_brush_point = None;
+        self.masks.touch_gesture_backup = None;
+        self.masks.interaction_dirty_layer = None;
+        self.masks.interaction_last_upload = None;
+        self.masks.interaction_has_uncommitted_change = false;
+        self.masks.overlay_revision = self.masks.overlay_revision.wrapping_add(1);
+        self.masks.overlay_texture = None;
+        self.masks.overlay_texture_key = None;
+        self.masks.overlay_blink = None;
+        self.masks.thumbnail_group_textures.clear();
+        self.masks.thumbnail_component_mask = None;
+        self.masks.thumbnail_component_textures.clear();
+        self.masks.thumbnail_revision = self.masks.overlay_revision;
+        self.masks.dirty_layers.fill(false);
+        self.masks.detail_dirty_layers.fill(false);
+        self.masks.navigation_dirty_layers.fill(false);
+        self.develop_ui.mask_section = MaskSection::Properties;
+
+        self.invalidate_generated_mask_sources();
+        self.ai.masks_need_update = false;
+        self.ai.subject_consent_open = false;
+        self.ai.object_consent_open = false;
+        self.ai.object_error_dialog = None;
+
+        if masks_changed {
+            self.mark_all_mask_layers_dirty();
+        }
+        self.egui_ctx.request_repaint();
+    }
+
     pub(crate) fn mark_mask_adjustments_dirty(&mut self) {
         self.note_mask_edit_changed();
         if self.preview.gpu_pipeline.is_none() {

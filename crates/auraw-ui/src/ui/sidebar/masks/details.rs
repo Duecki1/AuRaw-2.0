@@ -178,13 +178,6 @@ impl Sidebar {
             return;
         };
 
-        ui.label(
-            egui::RichText::new(app.masks.stack.masks[mask_index].name.clone())
-                .strong()
-                .color(ui.visuals().weak_text_color()),
-        );
-        ui.add_space(5.0);
-
         let vertical_section = (orientation == MaskStripOrientation::Vertical).then(|| {
             if !app.masks.stack.masks[mask_index].effect.uses_adjustments() {
                 app.develop_ui.mask_section = MaskSection::Properties;
