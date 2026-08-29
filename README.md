@@ -1,73 +1,51 @@
 # AuRaw
+AuRaw is a fast, GPU-accelerated RAW photo editor. <br>
+It was made not to focus on design, but to be performant and non-destructive to the export.
 
-GPU-based, non-destructive RAW editor for Linux, Windows, macOS, and Android,
-built with Rust, egui, and wgpu.
+I developed this project because I could not find a suitable alternative to Lightroom® that is both performant and easy to use. <br>
+AuRaw is available for Linux, Android, Windows, and macOS, with Linux and Android being the primary focus.
 
-## Features
+Download the latest release [here](https://github.com/Duecki1/AuRaw-2.0/releases).
 
-- Folder and Android document-picker libraries with `.auraw` edit sidecars
-- Scene-linear RAW processing, DCP profiles, Lensfun corrections, local masks,
-  inpainting, AI selections, denoise, color tools, and creative effects
-- PNG, JPEG, and ICC-managed TIFF export
+## Showcase
+<img width="100%" alt="image" src="https://github.com/user-attachments/assets/69d52204-05e4-4c40-8a74-f9200ec01e5b" />
 
-Linux and Android are the primary targets. CI also produces Windows builds and
-native Apple Silicon and Intel macOS bundles.
+<p>
+  <img width="49.5%" alt="image" src="https://github.com/user-attachments/assets/aa0e8a4d-5772-47ee-8938-c782b1597a0d" />
+  <img width="49.5%" alt="image" src="https://github.com/user-attachments/assets/789540d1-f6b6-4466-8db4-48340c3f2ed7" />
+</p>
 
-## Linux
+## Key Features
 
-Install Rust with [rustup](https://rustup.rs/) and the build dependencies:
+- **GPU-accelerated:** Built with Rust, wgpu, and custom WGSL compute shaders for real-time performance.
+- **Non-destructive:** All edits and adjustments are non-destructive and saved to lightweight `.auraw` sidecar files.
+- **Advanced demosaicing:** Features Bayer RCD, Fujifilm X-Trans (Markesteijn), and noise-resilient Dual Demosaicing.
+- **Masking:** Supports brush and shape masks with independent tone curves and adjustments.
+- **Creative effects:** Unique mask effects like light rays, lens blur, motion blur, fog, Glow, and more.
+- **Optional AI:** Local Subject & Object masks, [AI Denoise](https://github.com/darktable-org/darktable-ai), and AI object removal.
+- **Multi-platform:** Native builds for Linux, Android, Windows, and macOS.
+- **Flexible export:** High-quality export to PNG, JPEG, and color-managed TIFF.
 
-```sh
-sudo apt update
-sudo apt install build-essential pkg-config libclang-dev libraw-dev \
-  liblensfun-dev liblensfun-data-v1 libasound2-dev libdbus-1-dev \
-  libegl1-mesa-dev libfontconfig1-dev libgl1-mesa-dev libudev-dev \
-  libwayland-dev libx11-dev libxkbcommon-dev
-cargo run -p auraw-ui --bin auraw --release
-```
+## Contributing
+Feel free to open a Pull Request or create an issue :D.
 
-## Android
+### Roadmap / To-Do
+- [ ] Currently waiting for feedback
 
-Install JDK 17, the Android SDK/NDK versions declared in `Cargo.toml`, CMake
-3.22.1, `libclang`, and `cargo-ndk` 4.1.2. Then run:
+## Special Thanks
 
-```sh
-rustup target add aarch64-linux-android
-cargo install cargo-ndk --version 4.1.2 --locked
-export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-./gradlew assembleDebug
-adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-```
+- **[darktable](https://www.darktable.org/)** – for their exceptional contributions to open-source color science and raw processing algorithms.
+- **[RapidRAW](https://github.com/CyberSys/RapidRAW)** – for workflow and interface inspiration that sparked the creation of this project.
+- **[GIMP](https://www.gimp.org/) & [Ansel](https://ansel.photos/)** – for image editing algorithms and foundations.
+- **[LibRaw](https://github.com/LibRaw/LibRaw), [Lensfun](https://github.com/lensfun/lensfun) & [Little CMS](https://github.com/mm2/little-cms)** – for the underlying decoding, correction, and color management backends.
 
-See [ANDROID.md](ANDROID.md) for platform-specific details.
+*Check [Third-Party Notices](THIRD_PARTY_LICENSES.md) for a more detailed list.*
 
-## Development
+## AI Notice
 
-```sh
-cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets --all-features -- \
-  -D warnings -W clippy::perf -W clippy::large_stack_arrays \
-  -W clippy::redundant_clone
-cargo deny check
-```
+This project was developed with the assistance of LLMs.
 
-Desktop builds support an opt-in Discord Rich Presence setting. Register the
-AuRaw application in Discord's Developer Portal, then provide its public
-Application ID while building or launching AuRaw:
-
-```sh
-AURAW_DISCORD_APPLICATION_ID=123456789012345678 cargo run -p auraw-ui --bin auraw --release
-```
-
-The integration is disabled by default and sends only whether the user is
-browsing the Library or editing, along with the edit start time. It never sends
-photo names or paths.
-
-Architecture and development notes:
-
-- [Development](docs/DEVELOPMENT.md)
+AuRaw also supports optional, locally run AI models for smart masking, denoising, and object removal.
 
 ## License
 
