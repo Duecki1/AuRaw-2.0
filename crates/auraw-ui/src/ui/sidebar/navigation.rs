@@ -449,7 +449,8 @@ impl Sidebar {
             scroll_style.bar_inner_margin = 7.0;
             ui.spacing_mut().scroll = scroll_style;
 
-            egui::ScrollArea::vertical()
+            let mut mask_edit_header_rect = None;
+            let scroll_output = egui::ScrollArea::vertical()
                 .id_salt("develop-sidebar-content")
                 .scroll_source(sidebar_scroll_source)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
@@ -467,7 +468,9 @@ impl Sidebar {
                                     Self::show_adjustments(ui, app, layout, frame)
                                 }
                                 SidebarTab::Crop => Self::show_crop(ui, app, layout),
-                                SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
+                                SidebarTab::Masks => {
+                                    mask_edit_header_rect = Self::show_masks(ui, app, layout, frame)
+                                }
                                 SidebarTab::Inpainting => {
                                     Self::show_inpainting(ui, app, layout, frame)
                                 }
@@ -477,6 +480,17 @@ impl Sidebar {
                         },
                     );
                 });
+
+            if layout == ScreenLayout::Horizontal && app.ui.sidebar_tab == SidebarTab::Masks {
+                if let Some(header_rect) = mask_edit_header_rect {
+                    Self::show_sticky_mask_edit_header(
+                        ui.ctx(),
+                        app,
+                        header_rect,
+                        scroll_output.inner_rect,
+                    );
+                }
+            }
         });
     }
 

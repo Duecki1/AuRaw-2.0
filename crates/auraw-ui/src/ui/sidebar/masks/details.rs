@@ -156,8 +156,8 @@ impl Sidebar {
         ui: &mut Ui,
         app: &mut AurawApp,
         frame: &eframe::Frame,
-    ) {
-        Self::show_mask_details(ui, app, frame, MaskStripOrientation::Horizontal);
+    ) -> Option<egui::Rect> {
+        Self::show_mask_details(ui, app, frame, MaskStripOrientation::Horizontal)
     }
 
     pub(super) fn show_masks_vertical_details(
@@ -168,14 +168,64 @@ impl Sidebar {
         Self::show_mask_details(ui, app, frame, MaskStripOrientation::Vertical);
     }
 
+    fn render_mask_edit_header(ui: &mut Ui, on_reset: impl FnOnce()) -> egui::InnerResponse<()> {
+        crate::ui::theme::card_header(ui, |ui| {
+            let width = ui.available_width().max(1.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, crate::ui::theme::TOOLBAR_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    crate::ui::theme::toolbar_title(ui, "Edit");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::ui::icons::phosphor_icon_button(
+                            ui,
+                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                            crate::ui::theme::toolbar_icon_size(),
+                            "Reset local adjustments",
+                        )
+                        .clicked()
+                        {
+                            on_reset();
+                        }
+                    });
+                },
+            );
+        })
+    }
+
+    pub(crate) fn show_sticky_mask_edit_header(
+        ctx: &egui::Context,
+        app: &mut AurawApp,
+        header_rect: egui::Rect,
+        viewport_rect: egui::Rect,
+    ) {
+        if header_rect.top() >= viewport_rect.top() {
+            return;
+        }
+
+        egui::Area::new(egui::Id::new("sticky-mask-edit-header"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(viewport_rect.min)
+            .show(ctx, |ui| {
+                ui.set_width(viewport_rect.width());
+                ui.set_max_width(viewport_rect.width());
+                Self::render_mask_edit_header(ui, || {
+                    if let Some(mask) = app.masks.stack.selected_mask_mut() {
+                        mask.adjustments.reset();
+                    }
+                    app.mark_mask_adjustments_dirty();
+                });
+            });
+    }
+
     fn show_mask_details(
         ui: &mut Ui,
         app: &mut AurawApp,
         frame: &eframe::Frame,
         orientation: MaskStripOrientation,
-    ) {
+    ) -> Option<egui::Rect> {
         let Some((mask_index, component_index)) = app.masks.stack.ensure_selection() else {
-            return;
+            return None;
         };
 
         let vertical_section = (orientation == MaskStripOrientation::Vertical).then(|| {
@@ -188,6 +238,7 @@ impl Sidebar {
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
         let mut effect_changed = false;
+        let mut edit_header_rect = None;
         let mut request_subject = false;
         let mut request_object = false;
         let mut brush_mode = app.masks.brush_mode;
@@ -240,26 +291,15 @@ impl Sidebar {
                     });
 
                     if mask.effect.uses_adjustments() {
-                        crate::ui::theme::toolbar_row(ui, |ui| {
-                            crate::ui::theme::toolbar_title(ui, "Edit");
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if crate::ui::icons::phosphor_icon_button(
-                                        ui,
-                                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                                        crate::ui::theme::toolbar_icon_size(),
-                                        "Reset local adjustments",
-                                    )
-                                    .clicked()
-                                    {
-                                        mask.adjustments.reset();
-                                        adjustments_changed = true;
-                                    }
-                                },
-                            );
-                        });
-                        ui.add_space(4.0);
+                        edit_header_rect = Some(
+                            Self::render_mask_edit_header(ui, || {
+                                mask.adjustments.reset();
+                                adjustments_changed = true;
+                            })
+                            .response
+                            .rect,
+                        );
+                        crate::ui::theme::card_gap(ui);
 
                         for (section, label, default_open) in [
                             (MaskSection::Light, "Light", true),
@@ -425,6 +465,7 @@ impl Sidebar {
         if adjustments_changed || effect_changed {
             app.mark_mask_adjustments_dirty();
         }
+        edit_header_rect
     }
 }
 
