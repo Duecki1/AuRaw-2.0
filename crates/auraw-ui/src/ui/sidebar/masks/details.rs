@@ -207,14 +207,20 @@ impl Sidebar {
             .order(egui::Order::Foreground)
             .fixed_pos(viewport_rect.min)
             .show(ctx, |ui| {
-                ui.set_width(viewport_rect.width());
-                ui.set_max_width(viewport_rect.width());
-                Self::render_mask_edit_header(ui, || {
-                    if let Some(mask) = app.masks.stack.selected_mask_mut() {
-                        mask.adjustments.reset();
-                    }
-                    app.mark_mask_adjustments_dirty();
-                });
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::ZERO)
+                    .show(ui, |ui| {
+                        ui.set_width(viewport_rect.width());
+                        ui.set_max_width(viewport_rect.width());
+                        Self::render_mask_edit_header(ui, || {
+                            if let Some(mask) = app.masks.stack.selected_mask_mut() {
+                                mask.adjustments.reset();
+                            }
+                            app.mark_mask_adjustments_dirty();
+                        });
+                        crate::ui::theme::card_gap(ui);
+                    });
             });
     }
 

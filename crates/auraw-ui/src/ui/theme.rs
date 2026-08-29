@@ -580,7 +580,7 @@ pub(crate) fn segmented_button(
         [width, CONTROL_HEIGHT],
         egui::Button::new(label.into())
             .selected(selected)
-            .frame(selected)
+            .frame(true)
             .truncate()
             .corner_radius(6.0),
     )

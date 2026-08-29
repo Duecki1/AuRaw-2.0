@@ -253,20 +253,26 @@ impl Sidebar {
                         0.55,
                     );
                     ui.horizontal(|ui| {
-                        geometry_changed |= ui
-                            .checkbox(opacity_enabled, "Opacity")
+                        if crate::ui::theme::toggle_button(ui, "Opacity", *opacity_enabled)
                             .on_hover_text(
                                 "Use the opacity setting for newly drawn brush and eraser strokes. \
                                  Disabled strokes always use 100% opacity.",
                             )
-                            .changed();
-                        geometry_changed |= ui
-                            .checkbox(overlap_enabled, "Overlapping")
+                            .clicked()
+                        {
+                            *opacity_enabled = !*opacity_enabled;
+                            geometry_changed = true;
+                        }
+                        if crate::ui::theme::toggle_button(ui, "Overlapping", *overlap_enabled)
                             .on_hover_text(
                                 "Allow separate brush strokes to build opacity where they overlap. \
                                  For example, 10% over 10% produces about 19% coverage.",
                             )
-                            .changed();
+                            .clicked()
+                        {
+                            *overlap_enabled = !*overlap_enabled;
+                            geometry_changed = true;
+                        }
                     });
                     ui.add_enabled_ui(*opacity_enabled, |ui| {
                         geometry_changed |= adjustment_slider(
@@ -294,7 +300,6 @@ impl Sidebar {
                         stroke_starts.clear();
                         geometry_changed = true;
                     }
-                    ui.small(format!("{} brush dabs", dabs.len()));
                 }
                 MaskGeometry::Radial { feather, .. } => {
                     geometry_changed |= Self::mask_feather_slider(
