@@ -68,7 +68,7 @@ impl MaskCardSize {
 
 impl Sidebar {
     #[cfg(not(target_os = "android"))]
-    pub(crate) const DESKTOP_TOOL_RAIL_WIDTH: f32 = 76.0;
+    pub(crate) const DESKTOP_TOOL_RAIL_WIDTH: f32 = 60.0;
     #[cfg(target_os = "android")]
     pub(crate) const ANDROID_LANDSCAPE_TOOL_RAIL_WIDTH: f32 = 72.0;
     const MASK_THUMBNAIL_EDGE: u32 = 64;

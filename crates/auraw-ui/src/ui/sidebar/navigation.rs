@@ -437,10 +437,10 @@ impl Sidebar {
         use crate::ui::icons::{icon_toggle_button, UiIcon};
 
         ui.set_min_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = crate::ui::theme::SPACE_SM;
+        ui.spacing_mut().item_spacing.y = crate::ui::theme::SPACE_XS;
         let previous = app.ui.sidebar_tab;
         ui.vertical_centered(|ui| {
-            ui.add_space(crate::ui::theme::SPACE_SM);
+            ui.add_space(5.0);
             for (tab, icon, tooltip) in [
                 (SidebarTab::Adjustments, UiIcon::Adjustments, "Edit"),
                 (SidebarTab::Crop, UiIcon::Crop, "Crop and straighten"),
@@ -468,7 +468,7 @@ impl Sidebar {
         });
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            ui.add_space(crate::ui::theme::SPACE_SM);
+            ui.add_space(5.0);
 
             let filmstrip_tooltip = if app.develop_ui.filmstrip_open {
                 "Hide filmstrip"

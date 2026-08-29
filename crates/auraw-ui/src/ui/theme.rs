@@ -14,7 +14,7 @@ pub(crate) const TOOLBAR_HEIGHT: f32 = if cfg!(target_os = "android") {
 };
 pub(crate) const TOOLBAR_ICON_EDGE: f32 = CONTROL_HEIGHT;
 #[cfg(not(target_os = "android"))]
-pub(crate) const TOOL_RAIL_ICON_EDGE: f32 = 36.0;
+pub(crate) const TOOL_RAIL_ICON_EDGE: f32 = 40.0;
 pub(crate) const SPACE_XS: f32 = 4.0;
 pub(crate) const SPACE_SM: f32 = 8.0;
 pub(crate) const SPACE_MD: f32 = 12.0;
@@ -380,6 +380,10 @@ pub(crate) fn toolbar_row<R>(
         prepare_toolbar(ui);
         add_contents(ui)
     })
+}
+
+pub(crate) fn toolbar_title(ui: &mut Ui, title: impl Into<RichText>) -> Response {
+    ui.label(title.into().strong().size(PANEL_TITLE_TEXT_SIZE))
 }
 
 #[cfg(test)]

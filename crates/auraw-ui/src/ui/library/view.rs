@@ -10,7 +10,7 @@ impl Library {
         let mut requested_toolbar_action = None;
 
         crate::ui::theme::toolbar_row(ui, |ui| {
-            ui.strong("Folders");
+            crate::ui::theme::toolbar_title(ui, "Folders");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::ui::icons::phosphor_icon_button(
                     ui,
@@ -99,7 +99,7 @@ impl Library {
                 )
             };
             if !compact_header {
-                ui.label(egui::RichText::new("Library").strong().size(16.0));
+                crate::ui::theme::toolbar_title(ui, "Library");
             }
             ui.label(
                 egui::RichText::new(count_label)
