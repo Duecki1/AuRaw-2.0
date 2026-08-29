@@ -8,17 +8,6 @@ fn mask_effect_picker_visible(
         || vertical_section == Some(MaskSection::Properties)
 }
 
-fn mask_kind_popup_height(ui: &Ui) -> f32 {
-    const MASK_KIND_COUNT: f32 = 10.0;
-    let popup_style = ui.ctx().global_style();
-    let spacing = &popup_style.spacing;
-    MASK_KIND_COUNT * spacing.interact_size.y
-        + (MASK_KIND_COUNT - 1.0) * spacing.item_spacing.y
-        + spacing.menu_margin.sum().y
-        + 2.0 * ui.visuals().window_stroke.width
-        + 4.0
-}
-
 impl Sidebar {
     pub(super) fn create_mask_group_card(
         ui: &mut Ui,
@@ -31,38 +20,23 @@ impl Sidebar {
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
                 ui.spacing_mut().interact_size = size;
-                let popup_height = mask_kind_popup_height(ui);
-                let content_height = ui.ctx().content_rect().height();
-                let popup_fits_viewport = content_height >= popup_height;
-                let context = ui.ctx().clone();
-                let theme = context.theme();
-                let original_style = context.style_of(theme);
-                if original_style.spacing.default_area_size.y < popup_height {
-                    context.style_mut_of(theme, |style| {
-                        style.spacing.default_area_size.y = popup_height;
-                    });
-                }
-
-                let response =
-                    egui::ComboBox::from_id_salt(("mask-group-creation", popup_fits_viewport))
-                        .selected_text(
-                            egui::RichText::new(mask_creation_icon())
-                                .size(20.0)
-                                .strong(),
-                        )
-                        .width(size.x)
-                        .height(ui.ctx().content_rect().height())
-                        .show_ui(ui, |ui| {
-                            *new_mask = Self::mask_kind_menu(
-                                ui,
-                                "This mask type is planned but not implemented yet.",
-                            );
-                        })
-                        .response
-                        .on_hover_text("Create a new mask group");
-
-                context.set_style_of(theme, original_style);
-                drop(response);
+                crate::ui::theme::responsive_combo_box(
+                    ui,
+                    "mask-group-creation",
+                    egui::RichText::new(mask_creation_icon())
+                        .size(20.0)
+                        .strong(),
+                    size.x,
+                    10,
+                    |ui| {
+                        *new_mask = Self::mask_kind_menu(
+                            ui,
+                            "This mask type is planned but not implemented yet.",
+                        );
+                    },
+                )
+                .response
+                .on_hover_text("Create a new mask group");
             },
         );
     }

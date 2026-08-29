@@ -168,10 +168,13 @@ impl Library {
                     .response
                     .on_hover_text("Library view options");
                 } else {
-                    egui::ComboBox::from_id_salt("library-sort-order")
-                        .selected_text(format!("Sort: {}", selected_sort.label()))
-                        .width(154.0)
-                        .show_ui(ui, |ui| {
+                    crate::ui::theme::responsive_combo_box(
+                        ui,
+                        "library-sort-order",
+                        format!("Sort: {}", selected_sort.label()),
+                        154.0,
+                        LibrarySortOrder::ALL.len(),
+                        |ui| {
                             for sort_order in LibrarySortOrder::ALL {
                                 ui.selectable_value(
                                     &mut selected_sort,
@@ -179,11 +182,15 @@ impl Library {
                                     sort_order.label(),
                                 );
                             }
-                        });
-                    egui::ComboBox::from_id_salt("library-thumbnail-size")
-                        .selected_text(format!("Size: {}", selected_size.label()))
-                        .width(118.0)
-                        .show_ui(ui, |ui| {
+                        },
+                    );
+                    crate::ui::theme::responsive_combo_box(
+                        ui,
+                        "library-thumbnail-size",
+                        format!("Size: {}", selected_size.label()),
+                        118.0,
+                        LibraryThumbnailSize::ALL.len(),
+                        |ui| {
                             for thumbnail_size in LibraryThumbnailSize::ALL {
                                 ui.selectable_value(
                                     &mut selected_size,
@@ -191,7 +198,8 @@ impl Library {
                                     thumbnail_size.label(),
                                 );
                             }
-                        });
+                        },
+                    );
                 }
             });
             app.set_library_sort_order(selected_sort);

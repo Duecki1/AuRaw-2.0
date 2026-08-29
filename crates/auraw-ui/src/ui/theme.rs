@@ -717,6 +717,45 @@ pub(crate) fn form_combo(
     }
 }
 
+pub(crate) fn responsive_combo_box<R>(
+    ui: &mut Ui,
+    id_salt: impl egui::AsIdSalt,
+    selected_text: impl Into<egui::WidgetText>,
+    width: f32,
+    item_count: usize,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<Option<R>> {
+    let popup_style = ui.ctx().global_style();
+    let spacing = &popup_style.spacing;
+    let item_count_f32 = item_count as f32;
+    let item_spacing_count = item_count.saturating_sub(1) as f32;
+    let popup_height = item_count_f32 * spacing.interact_size.y
+        + item_spacing_count * spacing.item_spacing.y
+        + spacing.menu_margin.sum().y
+        + 2.0 * ui.visuals().window_stroke.width
+        + 4.0;
+    let content_height = ui.ctx().content_rect().height();
+    let popup_fits_viewport = content_height >= popup_height;
+
+    let context = ui.ctx().clone();
+    let theme = context.theme();
+    let original_style = context.style_of(theme);
+    if original_style.spacing.default_area_size.y < popup_height {
+        context.style_mut_of(theme, |style| {
+            style.spacing.default_area_size.y = popup_height;
+        });
+    }
+
+    let response = egui::ComboBox::from_id_salt((id_salt, popup_fits_viewport))
+        .selected_text(selected_text)
+        .width(width)
+        .height(content_height)
+        .show_ui(ui, add_contents);
+
+    context.set_style_of(theme, original_style);
+    response
+}
+
 pub(crate) fn form_combo_with_help(
     ui: &mut Ui,
     label: &str,
