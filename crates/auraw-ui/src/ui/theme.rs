@@ -29,6 +29,7 @@ pub(crate) const HELP_BUTTON_EDGE: f32 = if cfg!(target_os = "android") {
 } else {
     28.0
 };
+#[cfg(test)]
 pub(crate) const PANEL_TITLE_HEIGHT: f32 = 40.0;
 pub(crate) const PANEL_TITLE_TEXT_SIZE: f32 = 16.0;
 #[cfg(any(target_os = "android", test))]
@@ -443,6 +444,28 @@ pub(crate) fn content_card<R>(
         ui.set_max_width(inner_width);
         add_contents(ui)
     })
+}
+
+pub(crate) fn card_header<R>(
+    ui: &mut Ui,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<R> {
+    let horizontal_margin = content_margin(ui) + 2;
+    let frame_width = f32::from(content_margin(ui)) * 2.0 + 6.0;
+    let inner_width = (ui.available_width() - frame_width).max(1.0);
+    Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .inner_margin(Margin::symmetric(horizontal_margin, 10))
+        .corner_radius(6.0)
+        .stroke(Stroke::new(
+            1.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
+        .show(ui, |ui| {
+            ui.set_width(inner_width);
+            ui.set_max_width(inner_width);
+            add_contents(ui)
+        })
 }
 
 pub(crate) fn section_card<R>(

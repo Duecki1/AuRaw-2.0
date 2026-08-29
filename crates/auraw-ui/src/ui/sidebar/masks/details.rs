@@ -241,7 +241,7 @@ impl Sidebar {
 
                     if mask.effect.uses_adjustments() {
                         crate::ui::theme::toolbar_row(ui, |ui| {
-                            ui.strong("Local Adjustments");
+                            crate::ui::theme::toolbar_title(ui, "Edit");
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
