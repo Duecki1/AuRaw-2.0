@@ -1,11 +1,9 @@
 use super::*;
 
-/// Normal justified galleries allow modest row-height variation so discrete
-/// aspect-ratio combinations can still reach both edges of the viewport. Rows
-/// requiring more growth than this are genuinely sparse and retain their
-/// natural width instead of turning a handful of thumbnails into huge tiles.
-#[cfg(test)]
-pub(super) const MAX_JUSTIFIED_ROW_HEIGHT_SCALE: f32 = 4.0 / 3.0;
+/// Rows with enough images shrink to fit the viewport. Sparse rows retain the
+/// selected thumbnail height rather than enlarging their images to fill space.
+const THUMBNAIL_IMAGE_HORIZONTAL_INSET: f32 = 6.0;
+const THUMBNAIL_IMAGE_VERTICAL_CHROME: f32 = 29.0;
 
 pub(super) fn send_scan_failure(
     sender: &mpsc::SyncSender<ScanEvent>,
@@ -31,7 +29,6 @@ pub(super) fn catalog_status(warning_count: usize, truncated: bool) -> String {
     notices.join(" · ")
 }
 
-#[cfg(test)]
 pub(super) fn responsive_thumbnail_target_height(
     available_width: f32,
     available_height: f32,
@@ -69,105 +66,47 @@ pub(super) fn responsive_thumbnail_target_height(
     (BASE_HEIGHT * viewport_scale * density_scale).clamp(126.0, 270.0)
 }
 
-/// A predictable library grid is easier to scan than a collage of justified
-/// rows. Every tile reserves the same image and metadata space; source aspect
-/// ratios are handled by cover cropping inside that stable frame.
-pub(super) fn uniform_thumbnail_layout(
-    item_count: usize,
-    available_width: f32,
-    preferred_tile_width: f32,
-    gap: f32,
-) -> (Vec<egui::Rect>, f32) {
-    if item_count == 0 {
-        return (Vec::new(), 0.0);
-    }
-
-    const CARD_HEIGHT_RATIO: f32 = 0.72;
-    let available_width = available_width.max(1.0);
-    let preferred_tile_width = preferred_tile_width.max(1.0);
-    let gap = gap.max(0.0);
-    let columns = ((available_width + gap) / (preferred_tile_width + gap))
-        .floor()
-        .max(1.0) as usize;
-    let columns = columns.min(item_count).max(1);
-    let tile_width =
-        ((available_width - gap * columns.saturating_sub(1) as f32) / columns as f32).max(1.0);
-    let tile_height = (tile_width * CARD_HEIGHT_RATIO).round().max(1.0);
-    let rows = item_count.div_ceil(columns);
-    let mut placements = Vec::with_capacity(item_count);
-
-    for index in 0..item_count {
-        let column = index % columns;
-        let row = index / columns;
-        placements.push(egui::Rect::from_min_size(
-            egui::pos2(
-                column as f32 * (tile_width + gap),
-                row as f32 * (tile_height + gap),
-            ),
-            egui::vec2(tile_width, tile_height),
-        ));
-    }
-
-    let total_height = rows as f32 * tile_height + rows.saturating_sub(1) as f32 * gap;
-    (placements, total_height)
-}
-
-#[cfg(test)]
-pub(super) fn balanced_justified_row_ranges(
+/// Groups images in their display order. A row becomes complete only once its
+/// natural width at the selected thumbnail height reaches the viewport width.
+/// This leaves a short final row unscaled instead of spreading it across the
+/// viewport.
+pub(super) fn justified_thumbnail_row_ranges(
     aspects: &[f32],
     available_width: f32,
-    target_height: f32,
+    target_image_height: f32,
     gap: f32,
 ) -> Vec<(usize, usize)> {
     if aspects.is_empty() {
         return Vec::new();
     }
 
-    let gap_weight = gap / target_height.max(1.0);
-    let weights = aspects
-        .iter()
-        .map(|aspect| aspect.max(f32::EPSILON) + gap_weight)
-        .collect::<Vec<_>>();
-    let total_weight = weights.iter().sum::<f32>();
-    let target_row_weight = (available_width + gap) / target_height.max(1.0);
-    let row_count = (total_weight / target_row_weight.max(f32::EPSILON))
-        .round()
-        .clamp(1.0, aspects.len() as f32) as usize;
-
-    let mut ranges = Vec::with_capacity(row_count);
+    let available_width = available_width.max(1.0);
+    let target_image_height = target_image_height.max(1.0);
+    let gap = gap.max(0.0);
+    let mut ranges = Vec::new();
     let mut start = 0usize;
-    let mut remaining_weight = total_weight;
+    let mut row_width = 0.0;
 
-    for row_index in 0..row_count {
-        let rows_left = row_count - row_index;
-        if rows_left == 1 {
-            ranges.push((start, aspects.len()));
-            break;
+    for (index, aspect) in aspects.iter().copied().enumerate() {
+        if index > start {
+            row_width += gap;
         }
-
-        let max_end = aspects.len() - (rows_left - 1);
-        let desired_weight = remaining_weight / rows_left as f32;
-        let mut end = start + 1;
-        let mut row_weight = weights[start];
-
-        while end < max_end {
-            let with_next = row_weight + weights[end];
-            if (row_weight - desired_weight).abs() <= (with_next - desired_weight).abs() {
-                break;
-            }
-            row_weight = with_next;
-            end += 1;
+        row_width +=
+            aspect.max(f32::EPSILON) * target_image_height + THUMBNAIL_IMAGE_HORIZONTAL_INSET;
+        if row_width >= available_width {
+            ranges.push((start, index + 1));
+            start = index + 1;
+            row_width = 0.0;
         }
+    }
 
-        ranges.push((start, end));
-        remaining_weight = (remaining_weight - row_weight).max(0.0);
-        start = end;
+    if start < aspects.len() {
+        ranges.push((start, aspects.len()));
     }
 
     ranges
 }
 
-#[cfg(test)]
 pub(super) fn justified_thumbnail_layout(
     entries: &[LibraryEntry],
     available_width: f32,
@@ -182,7 +121,24 @@ pub(super) fn justified_thumbnail_layout(
     )
 }
 
-#[cfg(test)]
+pub(super) fn justified_thumbnail_layout_for_indices(
+    entries: &[LibraryEntry],
+    indices: &[usize],
+    available_width: f32,
+    target_height: f32,
+    gap: f32,
+) -> (Vec<egui::Rect>, f32) {
+    justified_thumbnail_layout_from_aspects(
+        indices
+            .iter()
+            .map(|index| library_entry_aspect(&entries[*index]))
+            .collect(),
+        available_width,
+        target_height,
+        gap,
+    )
+}
+
 fn library_entry_aspect(entry: &LibraryEntry) -> f32 {
     entry
         .layout_size
@@ -194,7 +150,6 @@ fn library_entry_aspect(entry: &LibraryEntry) -> f32 {
         .unwrap_or(1.5)
 }
 
-#[cfg(test)]
 fn justified_thumbnail_layout_from_aspects(
     aspects: Vec<f32>,
     available_width: f32,
@@ -205,7 +160,9 @@ fn justified_thumbnail_layout_from_aspects(
     let target_height = target_height.max(1.0);
     let gap = gap.max(0.0);
 
-    let row_ranges = balanced_justified_row_ranges(&aspects, available_width, target_height, gap);
+    let target_image_height = (target_height - THUMBNAIL_IMAGE_VERTICAL_CHROME).max(1.0);
+    let row_ranges =
+        justified_thumbnail_row_ranges(&aspects, available_width, target_image_height, gap);
     let mut placements = Vec::with_capacity(aspects.len());
     let mut y = 0.0;
 
@@ -213,22 +170,25 @@ fn justified_thumbnail_layout_from_aspects(
         let row_aspects = &aspects[row_start..row_end];
         let item_count = row_aspects.len();
         let aspect_sum = row_aspects.iter().sum::<f32>();
-        let gaps_width = gap * (item_count.saturating_sub(1) as f32);
-        let justified_height =
-            ((available_width - gaps_width).max(1.0) / aspect_sum.max(f32::EPSILON)).max(1.0);
-        let row_is_justified = justified_height <= target_height * MAX_JUSTIFIED_ROW_HEIGHT_SCALE;
-        let row_height = if row_is_justified {
-            justified_height
+        let gaps_width = gap * item_count.saturating_sub(1) as f32;
+        let image_chrome_width = THUMBNAIL_IMAGE_HORIZONTAL_INSET * item_count as f32;
+        let justified_image_height = ((available_width - gaps_width - image_chrome_width).max(1.0)
+            / aspect_sum.max(f32::EPSILON))
+        .max(1.0);
+        let row_is_justified = justified_image_height <= target_image_height;
+        let image_height = if row_is_justified {
+            justified_image_height
         } else {
-            target_height
+            target_image_height
         };
+        let row_height = image_height + THUMBNAIL_IMAGE_VERTICAL_CHROME;
         let mut x = 0.0;
 
         for (row_offset, aspect) in row_aspects.iter().copied().enumerate() {
             let width = if row_is_justified && row_offset + 1 == item_count {
                 (available_width - x).max(1.0)
             } else {
-                row_height * aspect
+                image_height * aspect + THUMBNAIL_IMAGE_HORIZONTAL_INSET
             };
             placements.push(egui::Rect::from_min_size(
                 egui::pos2(x, y),
@@ -294,8 +254,15 @@ pub(super) fn thumbnail_tile(
 
     let tile_rect = rect;
     let image_rect = egui::Rect::from_min_max(
-        tile_rect.min + egui::vec2(3.0, 3.0),
-        egui::pos2(tile_rect.right() - 3.0, tile_rect.bottom() - 26.0),
+        tile_rect.min
+            + egui::vec2(
+                THUMBNAIL_IMAGE_HORIZONTAL_INSET * 0.5,
+                THUMBNAIL_IMAGE_VERTICAL_CHROME - 26.0,
+            ),
+        egui::pos2(
+            tile_rect.right() - THUMBNAIL_IMAGE_HORIZONTAL_INSET * 0.5,
+            tile_rect.bottom() - 26.0,
+        ),
     );
     ui.painter()
         .rect_filled(tile_rect, 6.0, crate::ui::theme::THUMBNAIL_BACKDROP);

@@ -210,16 +210,22 @@ fn catalog_status_only_reports_exceptional_conditions() {
 }
 
 #[test]
-fn uniform_thumbnail_grid_keeps_every_visible_tile_the_same_size() {
-    let (tiles, total_height) = uniform_thumbnail_layout(7, 960.0, 200.0, 12.0);
+fn justified_thumbnail_grid_preserves_image_aspect_ratios_per_row() {
+    let mut entries = [test_asset("portrait.CR3"), test_asset("landscape.CR3")]
+        .into_iter()
+        .map(new_library_entry)
+        .collect::<Vec<_>>();
+    entries[0].layout_size = Some([2, 3]);
+    entries[1].layout_size = Some([3, 2]);
 
-    assert_eq!(tiles.len(), 7);
-    assert!(total_height > tiles[0].height());
-    for tile in &tiles {
-        assert_eq!(tile.size(), tiles[0].size());
-    }
-    assert_eq!(tiles[0].top(), tiles[3].top());
-    assert!(tiles[4].top() > tiles[0].top());
+    let (tiles, total_height) = justified_thumbnail_layout(&entries, 368.0, 150.0, 6.0);
+
+    assert_eq!(tiles.len(), 2);
+    assert_eq!(tiles[0].top(), tiles[1].top());
+    assert_eq!(tiles[0].height(), tiles[1].height());
+    assert!(tiles[1].width() > tiles[0].width());
+    assert!(tiles.last().unwrap().right() < 368.0);
+    assert_eq!(total_height, tiles[0].height());
 }
 
 #[test]
@@ -286,13 +292,11 @@ fn import_fab_is_square_bottom_right_and_uses_plus_icon() {
 }
 
 #[test]
-fn justified_rows_rebalance_to_avoid_sparse_tail() {
+fn complete_rows_fill_the_viewport_and_the_final_row_is_left_sparse() {
     let aspects = vec![1.5; 7];
-    let rows = balanced_justified_row_ranges(&aspects, 640.0, 140.0, 6.0);
-    assert_eq!(rows.first().map(|range| range.0), Some(0));
-    assert_eq!(rows.last().map(|range| range.1), Some(aspects.len()));
-    assert!(rows.windows(2).all(|pair| pair[0].1 == pair[1].0));
-    assert!(rows.iter().all(|(start, end)| end > start));
+    let rows = justified_thumbnail_row_ranges(&aspects, 640.0, 140.0, 6.0);
+
+    assert_eq!(rows, vec![(0, 3), (3, 6), (6, 7)]);
 }
 
 #[test]
@@ -312,7 +316,7 @@ fn sparse_gallery_does_not_stretch_above_target_height() {
 }
 
 #[test]
-fn normal_justified_row_grows_slightly_to_fill_the_viewport() {
+fn sparse_row_keeps_the_selected_thumbnail_height() {
     let assets = [test_asset("portrait.CR3"), test_asset("landscape.CR3")];
     let mut entries = assets
         .into_iter()
@@ -322,13 +326,16 @@ fn normal_justified_row_grows_slightly_to_fill_the_viewport() {
     entries[1].layout_size = Some([3, 2]);
 
     let available_width = 368.0;
-    let target_height = 150.0;
-    let (rects, height) = justified_thumbnail_layout(&entries, available_width, target_height, 6.0);
+    let (small_rects, small_height) =
+        justified_thumbnail_layout(&entries, available_width, 120.0, 6.0);
+    let (large_rects, large_height) =
+        justified_thumbnail_layout(&entries, available_width, 180.0, 6.0);
 
-    assert_eq!(rects.len(), 2);
-    assert!(height > target_height);
-    assert!(height <= target_height * MAX_JUSTIFIED_ROW_HEIGHT_SCALE);
-    assert!((rects.last().unwrap().right() - available_width).abs() < 0.01);
+    assert_eq!(small_rects.len(), 2);
+    assert_eq!(small_height, 120.0);
+    assert_eq!(large_height, 180.0);
+    assert!(small_rects.last().unwrap().right() < available_width);
+    assert!(large_rects[0].width() > small_rects[0].width());
 }
 
 #[test]

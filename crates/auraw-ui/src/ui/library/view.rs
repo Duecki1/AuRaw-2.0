@@ -287,26 +287,36 @@ impl Library {
             let current_path = app.develop.current_path.clone();
             let available = ui.available_width().max(1.0);
             let available_height = ui.available_height().max(1.0);
-            let grid_padding = crate::ui::theme::SPACE_XS;
             let gap = crate::ui::theme::SPACE_MD;
-            let grid_width = (available - grid_padding * 2.0).max(1.0);
-            let preferred_tile_width = library_grid_tile_width(
-                app.library.thumbnail_size(),
+            let target_thumbnail_height = responsive_thumbnail_target_height(
+                available,
                 available_height,
+                ui.ctx().pixels_per_point(),
                 cfg!(target_os = "android"),
-            );
-            let item_count = visible_indices
-                .as_ref()
-                .map_or(app.library.entries.len(), Vec::len);
-            let (placements, grid_height) =
-                uniform_thumbnail_layout(item_count, grid_width, preferred_tile_width, gap);
+            ) * app.library.thumbnail_size().scale();
+            let (placements, grid_height) = if let Some(indices) = &visible_indices {
+                justified_thumbnail_layout_for_indices(
+                    &app.library.entries,
+                    indices,
+                    available,
+                    target_thumbnail_height,
+                    gap,
+                )
+            } else {
+                justified_thumbnail_layout(
+                    &app.library.entries,
+                    available,
+                    target_thumbnail_height,
+                    gap,
+                )
+            };
 
             let mut protected_thumbnail_indices = HashSet::new();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show_viewport(ui, |ui, viewport| {
                     let (content_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(available, (grid_height + grid_padding * 2.0).max(1.0)),
+                        egui::vec2(available, grid_height.max(1.0)),
                         Sense::hover(),
                     );
                     let preload_viewport = viewport.expand(600.0);
@@ -323,9 +333,7 @@ impl Library {
                         if !relative_rect.intersects(viewport) {
                             continue;
                         }
-                        let item_rect = relative_rect.translate(
-                            content_rect.min.to_vec2() + egui::vec2(grid_padding, grid_padding),
-                        );
+                        let item_rect = relative_rect.translate(content_rect.min.to_vec2());
                         let entry = &app.library.entries[index];
                         let asset = entry.asset.clone();
                         let selected = if app.library.selection_mode() {
@@ -463,20 +471,6 @@ impl Library {
             }
         }
     }
-}
-
-fn library_grid_tile_width(
-    size: LibraryThumbnailSize,
-    available_height: f32,
-    android: bool,
-) -> f32 {
-    let base = if android { 132.0 } else { 176.0 };
-    let height_scale = if !android && available_height < 540.0 {
-        0.9
-    } else {
-        1.0
-    };
-    (base * size.scale() * height_scale).round()
 }
 
 fn show_local_image_paste_bar(ui: &mut Ui, app: &mut AurawApp) {
