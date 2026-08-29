@@ -1,5 +1,63 @@
 use super::*;
 
+/// Returns the width selected with the sidebar resize handle.
+///
+/// `egui::Panel` normally records the size of its contents. That is useful for
+/// small utility panels, but not for the Develop sidebar: revealing controls
+/// such as brush or subject-refinement settings must not widen a sidebar the
+/// user has already sized. Keep a separate persisted value that is updated
+/// only while the panel resize handle is being dragged.
+fn develop_sidebar_user_width(
+    ctx: &egui::Context,
+    panel_id: egui::Id,
+    default_width: f32,
+    min_width: f32,
+    max_width: f32,
+) -> f32 {
+    ctx.data_mut(|data| {
+        data.get_persisted::<f32>(panel_id.with("user-width"))
+            .or_else(|| {
+                data.get_persisted::<egui::PanelState>(panel_id)
+                    .map(|state| state.size().x)
+            })
+            .unwrap_or(default_width)
+            .clamp(min_width, max_width)
+    })
+}
+
+fn set_develop_sidebar_panel_width(ctx: &egui::Context, panel_id: egui::Id, width: f32) {
+    ctx.data_mut(|data| {
+        data.insert_persisted(panel_id.with("user-width"), width);
+
+        // A Panel reads its own persisted state before it draws. Restore that
+        // state to the user-selected width before the next frame so content
+        // expansion can never become the new sidebar width.
+        let mut outer_rect = data
+            .get_persisted::<egui::PanelState>(panel_id)
+            .map(|state| state.outer_rect)
+            .unwrap_or_else(|| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1.0)));
+        // The Develop sidebar is attached to the right edge, so retain that
+        // fixed edge when changing its stored width.
+        outer_rect.min.x = outer_rect.max.x - width;
+        data.insert_persisted(panel_id, egui::PanelState { outer_rect });
+    });
+}
+
+fn dragged_develop_sidebar_width(
+    ctx: &egui::Context,
+    panel_id: egui::Id,
+    min_width: f32,
+    max_width: f32,
+) -> Option<f32> {
+    ctx.read_response(panel_id.with("__resize"))
+        .filter(|response| response.dragged() || response.drag_stopped())
+        .and_then(|response| response.interact_pointer_pos())
+        .and_then(|pointer| {
+            egui::PanelState::load(ctx, panel_id)
+                .map(|state| (state.outer_rect.right() - pointer.x).clamp(min_width, max_width))
+        })
+}
+
 impl AurawApp {
     fn release_optional_gpu_memory(&mut self) {
         let retired = [
@@ -189,15 +247,35 @@ impl eframe::App for AurawApp {
                             .show(ui, |ui| Sidebar::show_desktop_tool_rail(ui, self));
 
                         if self.develop_ui.sidebar_open {
+                            let panel_id = egui::Id::new("develop_sidebar_right");
                             let panel_max = (viewport_size.x * 0.48).clamp(
                                 ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH,
                                 ScreenLayout::MAX_HORIZONTAL_SIDEBAR_WIDTH,
                             );
-                            egui::Panel::right("develop_sidebar_right")
+                            let panel_width = develop_sidebar_user_width(
+                                ui.ctx(),
+                                panel_id,
+                                sidebar_size.min(panel_max),
+                                ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH,
+                                panel_max,
+                            );
+                            let panel_width = dragged_develop_sidebar_width(
+                                ui.ctx(),
+                                panel_id,
+                                ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH,
+                                panel_max,
+                            )
+                            .unwrap_or(panel_width);
+                            set_develop_sidebar_panel_width(ui.ctx(), panel_id, panel_width);
+                            egui::Panel::right(panel_id)
                                 .resizable(true)
                                 .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
-                                .max_size(panel_max)
-                                .default_size(sidebar_size.min(panel_max))
+                                // Keep the sidebar at the user's chosen width
+                                // even while it is being resized. This prevents
+                                // newly shown mask controls from widening the
+                                // panel through their layout.
+                                .max_size(panel_width)
+                                .default_size(panel_width)
                                 .frame(crate::ui::theme::panel_frame(ui))
                                 .show(ui, |ui| Sidebar::show(ui, self, layout, frame));
                         }
