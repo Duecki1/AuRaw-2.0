@@ -295,19 +295,12 @@ pub(crate) fn tone_curve_channel_editor(
         });
     });
 
-    let (curve, color, description) = match *selected_tab {
-        ToneCurveTab::Rgb => (curves.rgb, Color32::WHITE, "Composite luminance curve"),
-        ToneCurveTab::Red => (curves.red, CHANNEL_RED, "Red channel curve"),
-        ToneCurveTab::Green => (curves.green, CHANNEL_GREEN, "Green channel curve"),
-        ToneCurveTab::Blue => (curves.blue, CHANNEL_BLUE, "Blue channel curve"),
+    let (curve, color) = match *selected_tab {
+        ToneCurveTab::Rgb => (curves.rgb, Color32::WHITE),
+        ToneCurveTab::Red => (curves.red, CHANNEL_RED),
+        ToneCurveTab::Green => (curves.green, CHANNEL_GREEN),
+        ToneCurveTab::Blue => (curves.blue, CHANNEL_BLUE),
     };
-    if !crate::ui::theme::is_compact_portrait(ui) {
-        ui.label(
-            egui::RichText::new(description)
-                .size(11.5)
-                .color(ui.visuals().weak_text_color()),
-        );
-    }
     changed |= tone_curve_editor(ui, curve, color);
     changed
 }

@@ -131,15 +131,6 @@ impl Sidebar {
 
     fn show_vertical_mobile_shell(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         let compact = crate::ui::theme::is_compact_portrait(ui);
-        if !app.ui.expert_mode
-            && matches!(
-                app.develop_ui.adjustment_section,
-                AdjustmentSection::AdvancedRendering | AdjustmentSection::Raw
-            )
-        {
-            app.develop_ui.adjustment_section = AdjustmentSection::Light;
-        }
-
         egui::Panel::bottom("develop_portrait_primary_tabs")
             .resizable(false)
             .show_separator_line(false)
@@ -306,32 +297,6 @@ impl Sidebar {
                     {
                         app.develop_ui.adjustment_section = section;
                         if section != AdjustmentSection::Color {
-                            app.develop_ui.white_balance_picker_active = false;
-                            app.develop_ui.white_balance_picker_drag = None;
-                        }
-                    }
-                }
-                if app.ui.expert_mode {
-                    for (section, icon, label) in [
-                        (
-                            AdjustmentSection::AdvancedRendering,
-                            regular::SLIDERS,
-                            "Advanced",
-                        ),
-                        (AdjustmentSection::Raw, regular::IMAGE, "Raw"),
-                    ] {
-                        if Self::mobile_icon_tab(
-                            ui,
-                            icon,
-                            label,
-                            show_labels,
-                            app.develop_ui.adjustment_section == section,
-                            egui::vec2(Self::CONTEXT_TAB_WIDTH, tab_height),
-                            label,
-                        )
-                        .clicked()
-                        {
-                            app.develop_ui.adjustment_section = section;
                             app.develop_ui.white_balance_picker_active = false;
                             app.develop_ui.white_balance_picker_drag = None;
                         }
@@ -650,8 +615,6 @@ impl Sidebar {
                     AdjustmentSection::Effects => "Effects",
                     AdjustmentSection::ColorMixer => "Color Mixer",
                     AdjustmentSection::Optics => "Optics",
-                    AdjustmentSection::AdvancedRendering => "Advanced Rendering",
-                    AdjustmentSection::Raw => "Raw",
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::ui::icons::phosphor_icon_button(
@@ -711,7 +674,7 @@ impl Sidebar {
                     ai_denoise_request = request;
                 }
                 AdjustmentSection::Effects => {
-                    changed |= Self::show_presence(ui, &mut app.develop.exposure, app.ui.expert_mode, false);
+                    changed |= Self::show_presence(ui, &mut app.develop.exposure, false);
                 }
                 AdjustmentSection::ColorMixer => {
                     changed |=
@@ -720,13 +683,6 @@ impl Sidebar {
                 AdjustmentSection::Optics => {
                     lens_changed |= Self::show_optics(ui, app, false);
                 }
-                AdjustmentSection::AdvancedRendering if app.ui.expert_mode => {
-                    changed |= Self::show_rendering(ui, &mut app.develop.exposure, false);
-                }
-                AdjustmentSection::Raw if app.ui.expert_mode => {
-                    changed |= Self::show_raw(ui, &mut app.develop.exposure, false);
-                }
-                _ => {}
             }
         } else {
             changed |= Self::show_basic(ui, &mut app.develop.exposure, true);
@@ -747,13 +703,9 @@ impl Sidebar {
             let (detail_changed, request) = Self::show_detail(ui, &mut app.develop.exposure, true);
             changed |= detail_changed;
             ai_denoise_request = request;
-            changed |= Self::show_presence(ui, &mut app.develop.exposure, app.ui.expert_mode, true);
+            changed |= Self::show_presence(ui, &mut app.develop.exposure, true);
             changed |= Self::show_hsl(ui, &mut app.develop.exposure, &mut app.develop_ui.hsl_mixer_color, true);
             lens_changed |= Self::show_optics(ui, app, true);
-            if app.ui.expert_mode {
-                changed |= Self::show_rendering(ui, &mut app.develop.exposure, true);
-                changed |= Self::show_raw(ui, &mut app.develop.exposure, true);
-            }
         }
 
         if layout == ScreenLayout::Vertical && crate::ui::theme::is_compact_portrait(ui) {

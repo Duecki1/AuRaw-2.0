@@ -491,57 +491,12 @@ pub(crate) fn section_card_with_help<R>(
     })
 }
 
-/// A discoverable explanation affordance that works with a mouse and touch.
-///
-/// Hovering (or pressing and holding on a touch screen) shows an ordinary
-/// tooltip. Tapping the icon opens the same text in a persistent popup.
-pub(crate) fn help_button(ui: &mut Ui, help: &str) -> Response {
-    let popup_width = (ui.ctx().content_rect().width() - 48.0).clamp(180.0, 300.0);
-    let response = ui.add_sized(
-        [HELP_BUTTON_EDGE, HELP_BUTTON_EDGE],
-        egui::Button::new(
-            RichText::new(egui_phosphor::regular::INFO)
-                .size(16.0)
-                .color(ui.visuals().weak_text_color()),
-        )
-        .frame(false),
-    );
-    egui::Popup::menu(&response)
-        .width(popup_width)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
-            ui.set_max_width(popup_width);
-            ui.add(egui::Label::new(help).wrap());
-        });
-    response.on_hover_text(help)
-}
-
 pub(crate) fn heading_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
-    let width = ui.available_width().max(1.0);
-    ui.allocate_ui_with_layout(
-        egui::vec2(width, HELP_BUTTON_EDGE),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.heading(title).on_hover_text(help);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                help_button(ui, help);
-            });
-        },
-    );
+    ui.heading(title).on_hover_text(help);
 }
 
 pub(crate) fn strong_with_help(ui: &mut Ui, title: impl Into<RichText>, help: &str) {
-    let width = ui.available_width().max(1.0);
-    ui.allocate_ui_with_layout(
-        egui::vec2(width, HELP_BUTTON_EDGE),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.label(title.into().strong()).on_hover_text(help);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                help_button(ui, help);
-            });
-        },
-    );
+    ui.label(title.into().strong()).on_hover_text(help);
 }
 
 pub(crate) fn checkbox_with_help(
@@ -554,13 +509,7 @@ pub(crate) fn checkbox_with_help(
     ui.allocate_ui_with_layout(
         egui::vec2(width, CONTROL_HEIGHT),
         Layout::left_to_right(Align::Center),
-        |ui| {
-            let response = ui.checkbox(checked, label).on_hover_text(help);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                help_button(ui, help);
-            });
-            response
-        },
+        |ui| ui.checkbox(checked, label).on_hover_text(help),
     )
     .inner
 }
@@ -773,9 +722,6 @@ pub(crate) fn form_combo_with_help(
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     ui.label(label).on_hover_text(help);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        help_button(ui, help);
-                    });
                 },
             );
             let width = ui.available_width().max(1.0);
@@ -790,7 +736,6 @@ pub(crate) fn form_combo_with_help(
     } else {
         ui.horizontal(|ui| {
             ui.label(label).on_hover_text(help);
-            help_button(ui, help);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let width = preferred_width.min(ui.available_width().max(1.0));
                 egui::ComboBox::from_id_salt(id_salt)

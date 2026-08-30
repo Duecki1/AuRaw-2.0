@@ -49,9 +49,6 @@ fn effect_toolbar<T: Default>(ui: &mut Ui, effect: MaskEffect, settings: &mut T)
                 &format!("Reset {} settings", effect.label()),
             )
             .clicked();
-            if let Some(help) = help {
-                crate::ui::theme::help_button(ui, help);
-            }
         });
     });
     ui.add_space(4.0);

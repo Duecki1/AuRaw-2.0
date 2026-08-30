@@ -352,8 +352,6 @@ pub(crate) enum AdjustmentSection {
     Effects,
     ColorMixer,
     Optics,
-    AdvancedRendering,
-    Raw,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1034,7 +1032,6 @@ pub(crate) struct UiState {
     pub(crate) active_tab: AppTab,
     pub(crate) sidebar_tab: SidebarTab,
     pub(crate) status: String,
-    pub(crate) expert_mode: bool,
     pub(crate) adaptive_preview_backdrop: egui::Color32,
     pub(crate) notice: Option<String>,
     pub(crate) thumbnail_cache_size: Option<Result<u64, String>>,

@@ -170,12 +170,10 @@ impl Sidebar {
         ui.scope(|ui| {
             let is_fullscreen = matches!(&component.geometry, MaskGeometry::Fullscreen);
             ui.horizontal_wrapped(|ui| {
-                ui.strong(component.name.as_str());
+                let component_name = ui.strong(component.name.as_str());
                 if is_fullscreen {
-                    crate::ui::theme::help_button(
-                        ui,
-                        "Covers the complete image with uniform mask strength.",
-                    );
+                    component_name
+                        .on_hover_text("Covers the complete image with uniform mask strength.");
                 }
                 if crate::ui::theme::toggle_button(ui, "Invert", component.invert).clicked() {
                     component.common.toggle_invert();

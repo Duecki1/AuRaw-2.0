@@ -237,7 +237,6 @@ impl AurawApp {
                 #[cfg(not(target_os = "android"))]
                 desktop_picker_receiver: None,
                 status: "Open a RAW or TIFF file to get started.".to_owned(),
-                expert_mode: false,
                 adaptive_preview_backdrop: crate::ui::theme::CANVAS_BACKDROP,
                 notice: None,
             },
@@ -511,7 +510,6 @@ impl AurawApp {
                 active_tab: AppTab::default(),
                 sidebar_tab: SidebarTab::default(),
                 status: "Open a RAW or TIFF file to get started.".to_owned(),
-                expert_mode: false,
                 adaptive_preview_backdrop: crate::ui::theme::CANVAS_BACKDROP,
                 notice: None,
             },

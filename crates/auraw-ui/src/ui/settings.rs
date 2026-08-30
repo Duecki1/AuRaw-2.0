@@ -1,5 +1,5 @@
 use crate::app::{maximum_raw_cache_limit, AurawApp, PreviewQuality};
-use crate::pipeline::{CameraProfileMode, HighlightReconstructionMethod};
+use crate::pipeline::CameraProfileMode;
 use crate::ui::components::adjustment_slider::adjustment_slider;
 use crate::ui::layout::ScreenLayout;
 use crate::ui::library::maximum_thumbnail_worker_count;
@@ -137,13 +137,7 @@ impl Settings {
             crate::ui::theme::heading_with_help(
                 ui,
                 "Interface",
-                "Configure editing complexity, preview resolution, brush behavior, and library resource use.",
-            );
-            crate::ui::theme::checkbox_with_help(
-                ui,
-                &mut app.ui.expert_mode,
-                "Expert mode",
-                "Shows detailed creative-effect tuning, darktable-style rendering internals, and RAW reconstruction controls. The standard Develop view keeps only photographic controls visible.",
+                "Configure preview resolution, brush behavior, and library resource use.",
             );
 
             ui.separator();
@@ -763,94 +757,6 @@ impl Settings {
                     );
                 });
         });
-
-        if !app.ui.expert_mode {
-            return;
-        }
-
-        crate::ui::theme::card_gap(ui);
-        let mut changed = false;
-
-        Self::group(ui, content_width, |ui| {
-            crate::ui::theme::heading_with_help(
-                ui,
-                "Highlight reconstruction",
-                "Reconstructs clipped sensor channels before demosaicing to avoid pink or grey highlights.",
-            );
-
-            crate::ui::theme::form_combo_with_help(
-                ui,
-                "Method",
-                "settings-highlight-reconstruction-method",
-                match app.develop.exposure.highlight_method {
-                    HighlightReconstructionMethod::Off => "Off",
-                    HighlightReconstructionMethod::Lch => "LCh (fast)",
-                    HighlightReconstructionMethod::InpaintOpposed => "Inpaint opposed",
-                },
-                180.0,
-                "Choose the sensor-channel reconstruction algorithm. LCh is faster; Inpaint opposed can recover more difficult clipped regions.",
-                |ui| {
-                    changed |= ui
-                        .selectable_value(
-                            &mut app.develop.exposure.highlight_method,
-                            HighlightReconstructionMethod::Off,
-                            "Off",
-                        )
-                        .changed();
-                    changed |= ui
-                        .selectable_value(
-                            &mut app.develop.exposure.highlight_method,
-                            HighlightReconstructionMethod::Lch,
-                            "LCh (fast)",
-                        )
-                        .changed();
-                    changed |= ui
-                        .selectable_value(
-                            &mut app.develop.exposure.highlight_method,
-                            HighlightReconstructionMethod::InpaintOpposed,
-                            "Inpaint opposed",
-                        )
-                        .changed();
-                },
-            );
-
-            let enabled =
-                app.develop.exposure.highlight_method != HighlightReconstructionMethod::Off;
-            ui.add_enabled_ui(enabled, |ui| {
-                changed |= adjustment_slider(
-                    ui,
-                    "Clip threshold",
-                    &mut app.develop.exposure.highlight_clip,
-                    0.5..=2.0,
-                    2,
-                    0.01,
-                    Some("Sensor-relative level at which a channel is treated as clipped."),
-                );
-                if app.develop.exposure.highlight_method == HighlightReconstructionMethod::Lch {
-                    changed |= adjustment_slider(
-                        ui,
-                        "Reconstruction strength",
-                        &mut app.develop.exposure.highlight_reconstruction,
-                        0.0..=1.0,
-                        2,
-                        0.01,
-                        Some("Blend between the original and LCh-reconstructed highlight."),
-                    );
-                }
-            });
-
-            if ui
-                .button("Restore reconstruction defaults")
-                .on_hover_text("Reset the method, threshold, and strength to their defaults.")
-                .clicked()
-            {
-                app.reset_highlight_reconstruction_settings();
-            }
-        });
-
-        if changed {
-            app.mark_pipeline_dirty();
-        }
     }
 
     fn group(ui: &mut Ui, total_width: f32, contents: impl FnOnce(&mut Ui)) {
