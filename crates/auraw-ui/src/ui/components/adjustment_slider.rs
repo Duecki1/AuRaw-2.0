@@ -75,11 +75,22 @@ pub(crate) fn slider_scroll_locked(ctx: &egui::Context) -> bool {
         return false;
     }
 
-    ctx.data(|data| data.get_temp::<egui::Id>(slider_scroll_lock_id()).is_some())
+    slider_scroll_lock_owner(ctx).is_some()
 }
 
 fn slider_scroll_lock_owner(ctx: &egui::Context) -> Option<egui::Id> {
-    ctx.data(|data| data.get_temp::<egui::Id>(slider_scroll_lock_id()))
+    let owner = ctx.data(|data| data.get_temp::<egui::Id>(slider_scroll_lock_id()));
+    if owner.is_some_and(|owner| ctx.is_being_dragged(owner)) {
+        return owner;
+    }
+
+    // Some screens do not contain a scroll area and therefore never call
+    // `slider_scroll_locked` while the pointer is up. Do not let their stale
+    // owner token turn a later pointer press elsewhere into another slider drag.
+    if owner.is_some() {
+        ctx.data_mut(|data| data.remove::<egui::Id>(slider_scroll_lock_id()));
+    }
+    None
 }
 
 fn lock_slider_scroll(ctx: &egui::Context, slider_id: egui::Id) {
@@ -865,9 +876,31 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_slider_widths, gradient_color_at, SliderGradient, COMPACT_ROW_GAP, HEADER_HEIGHT,
-        VALUE_FIELD_WIDTH,
+        adjustment_slider, compact_slider_widths, gradient_color_at, SliderGradient,
+        COMPACT_ROW_GAP, HEADER_HEIGHT, VALUE_FIELD_WIDTH,
     };
+
+    fn pointer_input(events: Vec<eframe::egui::Event>) -> eframe::egui::RawInput {
+        eframe::egui::RawInput {
+            screen_rect: Some(eframe::egui::Rect::from_min_size(
+                eframe::egui::Pos2::ZERO,
+                eframe::egui::vec2(400.0, 240.0),
+            )),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn show_test_slider(
+        ctx: &eframe::egui::Context,
+        input: eframe::egui::RawInput,
+        value: &mut u8,
+    ) {
+        let _ = ctx.run_ui(input, |ui| {
+            ui.set_width(400.0);
+            adjustment_slider(ui, "Quality", value, 1..=100, 0, 1.0, None);
+        });
+    }
 
     #[test]
     fn slider_header_reserves_the_full_themed_control_height() {
@@ -880,6 +913,62 @@ mod tests {
         let (label, track) = compact_slider_widths(width);
         assert!((label + track + VALUE_FIELD_WIDTH + COMPACT_ROW_GAP * 2.0 - width).abs() < 0.001);
         assert!(track >= 64.0);
+    }
+
+    #[test]
+    fn completed_slider_drag_does_not_capture_a_later_drag_elsewhere() {
+        use eframe::egui::{pos2, Event, Modifiers, PointerButton};
+
+        let ctx = eframe::egui::Context::default();
+        let mut value = 50;
+        show_test_slider(&ctx, pointer_input(Vec::new()), &mut value);
+
+        let slider_y = HEADER_HEIGHT + 4.0 + 14.0;
+        show_test_slider(
+            &ctx,
+            pointer_input(vec![
+                Event::PointerMoved(pos2(100.0, slider_y)),
+                Event::PointerButton {
+                    pos: pos2(100.0, slider_y),
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                Event::PointerMoved(pos2(300.0, slider_y)),
+            ]),
+            &mut value,
+        );
+        let dragged_value = value;
+        assert_ne!(dragged_value, 50);
+
+        show_test_slider(
+            &ctx,
+            pointer_input(vec![Event::PointerButton {
+                pos: pos2(300.0, slider_y),
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }]),
+            &mut value,
+        );
+
+        let outside_y = 160.0;
+        show_test_slider(
+            &ctx,
+            pointer_input(vec![
+                Event::PointerMoved(pos2(100.0, outside_y)),
+                Event::PointerButton {
+                    pos: pos2(100.0, outside_y),
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                Event::PointerMoved(pos2(300.0, outside_y)),
+            ]),
+            &mut value,
+        );
+
+        assert_eq!(value, dragged_value);
     }
 
     #[test]
