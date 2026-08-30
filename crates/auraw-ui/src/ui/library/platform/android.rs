@@ -24,7 +24,7 @@ pub(super) fn show_android_library_folder_node(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let has_children = !children.is_empty();
-    let expanded = expanded_folders.contains(path);
+    let expanded = has_children && expanded_folders.contains(path);
     let selected = selected_folder == path;
 
     ui.push_id(("android-library-folder", path), |ui| {

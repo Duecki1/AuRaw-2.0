@@ -70,6 +70,9 @@ impl Library {
         let visible_indices = search_active.then(|| app.library.filtered_entry_indices());
 
         let compact_header = ui.available_width() < 520.0;
+        let compact_android_controls = cfg!(target_os = "android") && compact_header;
+        let mut selected_sort = app.library.sort_order();
+        let mut selected_size = app.library.thumbnail_size();
         crate::ui::theme::toolbar_row(ui, |ui| {
             if compact_header {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -106,9 +109,6 @@ impl Library {
                     .small()
                     .color(ui.visuals().weak_text_color()),
             );
-            let mut selected_sort = app.library.sort_order();
-            let mut selected_size = app.library.thumbnail_size();
-
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 #[cfg(target_os = "android")]
                 app.show_export_task_indicator(ui);
@@ -141,7 +141,7 @@ impl Library {
                     refresh = true;
                 }
 
-                if compact_header {
+                if compact_header && !compact_android_controls {
                     ui.menu_button(
                         egui::RichText::new(egui_phosphor::regular::SLIDERS_HORIZONTAL).size(17.0),
                         |ui| {
@@ -167,44 +167,21 @@ impl Library {
                     )
                     .response
                     .on_hover_text("Library view options");
-                } else {
-                    crate::ui::theme::responsive_combo_box(
-                        ui,
-                        "library-sort-order",
-                        format!("Sort: {}", selected_sort.label()),
-                        154.0,
-                        LibrarySortOrder::ALL.len(),
-                        |ui| {
-                            for sort_order in LibrarySortOrder::ALL {
-                                ui.selectable_value(
-                                    &mut selected_sort,
-                                    sort_order,
-                                    sort_order.label(),
-                                );
-                            }
-                        },
-                    );
-                    crate::ui::theme::responsive_combo_box(
-                        ui,
-                        "library-thumbnail-size",
-                        format!("Size: {}", selected_size.label()),
-                        118.0,
-                        LibraryThumbnailSize::ALL.len(),
-                        |ui| {
-                            for thumbnail_size in LibraryThumbnailSize::ALL {
-                                ui.selectable_value(
-                                    &mut selected_size,
-                                    thumbnail_size,
-                                    thumbnail_size.label(),
-                                );
-                            }
-                        },
-                    );
+                } else if !compact_header {
+                    show_library_view_combos(ui, &mut selected_sort, &mut selected_size);
                 }
             });
-            app.set_library_sort_order(selected_sort);
-            app.set_library_thumbnail_size(selected_size);
         });
+
+        if compact_android_controls {
+            crate::ui::theme::toolbar_row(ui, |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    show_library_view_combos(ui, &mut selected_sort, &mut selected_size);
+                });
+            });
+        }
+        app.set_library_sort_order(selected_sort);
+        app.set_library_thumbnail_size(selected_size);
 
         if let Some(_location) = app.library.location.as_deref() {
             #[cfg(not(target_os = "android"))]
@@ -471,6 +448,48 @@ impl Library {
             }
         }
     }
+}
+
+fn show_library_view_combos(
+    ui: &mut Ui,
+    selected_sort: &mut LibrarySortOrder,
+    selected_size: &mut LibraryThumbnailSize,
+) {
+    const SORT_WIDTH: f32 = 154.0;
+    const SIZE_WIDTH: f32 = 118.0;
+    let available_width = ui.available_width().max(1.0);
+    let minimum_width = SORT_WIDTH + crate::ui::theme::SPACE_SM + SIZE_WIDTH;
+    let (sort_width, size_width) = if available_width < minimum_width {
+        let width = ((available_width - crate::ui::theme::SPACE_SM).max(2.0)) * 0.5;
+        (width, width)
+    } else {
+        (SORT_WIDTH, SIZE_WIDTH)
+    };
+
+    crate::ui::theme::responsive_combo_box(
+        ui,
+        "library-sort-order",
+        format!("Sort: {}", selected_sort.label()),
+        sort_width,
+        LibrarySortOrder::ALL.len(),
+        |ui| {
+            for sort_order in LibrarySortOrder::ALL {
+                ui.selectable_value(selected_sort, sort_order, sort_order.label());
+            }
+        },
+    );
+    crate::ui::theme::responsive_combo_box(
+        ui,
+        "library-thumbnail-size",
+        format!("Size: {}", selected_size.label()),
+        size_width,
+        LibraryThumbnailSize::ALL.len(),
+        |ui| {
+            for thumbnail_size in LibraryThumbnailSize::ALL {
+                ui.selectable_value(selected_size, thumbnail_size, thumbnail_size.label());
+            }
+        },
+    );
 }
 
 fn show_local_image_paste_bar(ui: &mut Ui, app: &mut AurawApp) {
