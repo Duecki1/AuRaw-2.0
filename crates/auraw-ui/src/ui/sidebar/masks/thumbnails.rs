@@ -167,26 +167,32 @@ impl Sidebar {
         let (rect, response) = ui.allocate_exact_size(size, thumbnail_sense);
         let visuals = ui.visuals();
         let fill = if selected {
-            visuals.selection.bg_fill.gamma_multiply(0.24)
+            visuals.selection.bg_fill.gamma_multiply(0.18)
         } else if response.hovered() {
             visuals.widgets.hovered.bg_fill
         } else {
-            visuals.widgets.inactive.bg_fill
+            visuals.faint_bg_color
         };
         let stroke = if selected {
-            Stroke::new(2.0, visuals.selection.bg_fill)
+            Stroke::new(1.5, visuals.selection.bg_fill)
         } else {
             Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color)
         };
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 5.0, fill);
-        painter.rect_stroke(rect, 5.0, stroke, StrokeKind::Inside);
+        painter.rect_filled(rect, 6.0, fill);
+        painter.rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
 
         let image_rect = egui::Rect::from_min_size(
             egui::pos2(rect.center().x - image_edge * 0.5, rect.min.y + 5.0),
             egui::vec2(image_edge, image_edge),
         );
-        painter.rect_filled(image_rect, 3.0, Color32::BLACK);
+        painter.rect_filled(image_rect, 4.0, visuals.extreme_bg_color);
+        painter.rect_stroke(
+            image_rect,
+            4.0,
+            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+            StrokeKind::Inside,
+        );
         if let Some(texture) = texture {
             let tint = if enabled {
                 Color32::WHITE
@@ -213,13 +219,17 @@ impl Sidebar {
             );
             let badge_rect =
                 egui::Rect::from_min_size(image_rect.right_bottom() - badge_size, badge_size);
-            painter.rect_filled(badge_rect, 3.0, Color32::from_black_alpha(210));
+            painter.rect_filled(
+                badge_rect,
+                4.0,
+                visuals.widgets.active.bg_fill.gamma_multiply(0.92),
+            );
             painter.text(
                 badge_rect.center(),
                 Align2::CENTER_CENTER,
                 badge,
                 FontId::proportional(font_size),
-                Color32::WHITE,
+                visuals.widgets.active.fg_stroke.color,
             );
         }
 
@@ -240,6 +250,6 @@ impl Sidebar {
                 visuals.weak_text_color()
             },
         );
-        response
+        response.on_hover_text(label)
     }
 }

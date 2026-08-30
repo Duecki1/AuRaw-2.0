@@ -8,6 +8,32 @@ fn mask_effect_picker_visible(
         || vertical_section == Some(MaskSection::Properties)
 }
 
+fn mask_creation_menu_button<R>(
+    ui: &mut Ui,
+    id_salt: impl egui::AsIdSalt,
+    size: egui::Vec2,
+    icon_size: f32,
+    tooltip: &str,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::Response {
+    let response = ui
+        .push_id(id_salt, |ui| {
+            ui.add_sized(
+                size,
+                egui::Button::new(
+                    egui::RichText::new(mask_creation_icon())
+                        .size(icon_size)
+                        .strong(),
+                )
+                .corner_radius(6.0),
+            )
+        })
+        .inner
+        .on_hover_text(tooltip);
+    egui::Popup::menu(&response).show(add_contents);
+    response
+}
+
 impl Sidebar {
     pub(super) fn create_mask_group_card(
         ui: &mut Ui,
@@ -20,23 +46,19 @@ impl Sidebar {
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
                 ui.spacing_mut().interact_size = size;
-                crate::ui::theme::responsive_combo_box(
+                mask_creation_menu_button(
                     ui,
                     "mask-group-creation",
-                    egui::RichText::new(mask_creation_icon())
-                        .size(20.0)
-                        .strong(),
-                    size.x,
-                    10,
+                    size,
+                    20.0,
+                    "Create a new mask group",
                     |ui| {
                         *new_mask = Self::mask_kind_menu(
                             ui,
                             "This mask type is planned but not implemented yet.",
                         );
                     },
-                )
-                .response
-                .on_hover_text("Create a new mask group");
+                );
             },
         );
     }
@@ -52,22 +74,19 @@ impl Sidebar {
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
                 ui.spacing_mut().interact_size = size;
-                egui::ComboBox::from_id_salt("mask-submask-creation")
-                    .selected_text(
-                        egui::RichText::new(mask_creation_icon())
-                            .size(18.0)
-                            .strong(),
-                    )
-                    .width(size.x)
-                    .height(ui.ctx().content_rect().height())
-                    .show_ui(ui, |ui| {
+                mask_creation_menu_button(
+                    ui,
+                    "mask-submask-creation",
+                    size,
+                    18.0,
+                    "Add a sub-mask to the selected group",
+                    |ui| {
                         *add_component = Self::submask_creation_menu(
                             ui,
                             "This sub-mask type is planned but not implemented yet.",
                         );
-                    })
-                    .response
-                    .on_hover_text("Add a sub-mask to the selected group");
+                    },
+                );
             },
         );
     }
