@@ -579,12 +579,12 @@ impl Settings {
                 crate::ui::theme::strong_with_help(
                     ui,
                     "Subject masks",
-                    "Quality applies to newly generated and rerun Subject and Not Subject masks.",
+                    "Quality applies to newly generated Subject and Not Subject masks.",
                 );
                 let previous_quality = app.ai.birefnet_quality;
                 let mut quality = previous_quality;
                 let quality_help = format!(
-                    "{} This quality applies to newly generated and rerun Subject and Not Subject masks.",
+                    "{} This quality applies to newly generated Subject and Not Subject masks.",
                     quality.model().explanation
                 );
                 ui.add_enabled_ui(app.birefnet_quality_change_enabled(), |ui| {

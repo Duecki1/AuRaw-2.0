@@ -26,7 +26,27 @@ impl AurawApp {
         let reference_exposure = ExposureParams::scene_referred_default();
         let reference_masks = MaskStack::default();
         let reference_params = GpuParams::new(&reference_exposure, &reference_masks, raw);
-        pipeline.recompute(&render_state.queue, &render_state.device, &reference_params);
+        let source_raw = self
+            .develop
+            .loaded_raw
+            .as_deref()
+            .ok_or_else(|| "The original RAW is not available.".to_owned())?;
+        pipeline
+            .recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &reference_params,
+                RemoveSceneContext::new(
+                    &self.inpaint.edits,
+                    source_raw,
+                    &reference_exposure,
+                    [0.0, 0.0],
+                    [source_raw.width as f32, source_raw.height as f32],
+                ),
+            )
+            .map_err(|error| {
+                format!("Could not apply Remove edits to the mask source: {error:#}")
+            })?;
 
         let readback = pipeline.read_output_region_blocking(
             &render_state.device,
@@ -51,10 +71,28 @@ impl AurawApp {
                 &self.preferences.display_output_transform,
             )
             .map_err(|error| format!("Could not restore the preview color output: {error:#}"));
-        pipeline.recompute(&render_state.queue, &render_state.device, &restore_params);
+        let preview_restore = if self.preview.original_requested {
+            pipeline.recompute(&render_state.queue, &render_state.device, &restore_params);
+            Ok(())
+        } else {
+            pipeline.recompute_with_remove(
+                &render_state.queue,
+                &render_state.device,
+                &restore_params,
+                RemoveSceneContext::new(
+                    &self.inpaint.edits,
+                    source_raw,
+                    &self.develop.target_exposure,
+                    [0.0, 0.0],
+                    [source_raw.width as f32, source_raw.height as f32],
+                ),
+            )
+        }
+        .map_err(|error| format!("Could not restore Remove edits to the preview: {error:#}"));
 
         #[cfg(not(target_os = "android"))]
         display_restore?;
+        preview_restore?;
         let rgba = readback
             .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;
         MaskRgbImage::new(pipeline.width, pipeline.height, rgba)
@@ -131,7 +169,22 @@ impl AurawApp {
                     ));
                 }
             };
-            reference_pipeline.recompute(&render_state.queue, &render_state.device, &params);
+            reference_pipeline
+                .recompute_with_remove(
+                    &render_state.queue,
+                    &render_state.device,
+                    &params,
+                    RemoveSceneContext::new(
+                        &self.inpaint.edits,
+                        full_raw,
+                        &reference_exposure,
+                        [0.0, 0.0],
+                        [full_raw.width as f32, full_raw.height as f32],
+                    ),
+                )
+                .map_err(|error| {
+                    format!("Could not apply Remove edits to the mask source: {error:#}")
+                })?;
             let rgba = reference_pipeline
                 .read_output_region_blocking(
                     &render_state.device,

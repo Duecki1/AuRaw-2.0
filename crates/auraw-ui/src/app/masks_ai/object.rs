@@ -286,7 +286,6 @@ impl AurawApp {
             _ => (None, false),
         };
         let updating_all = self.ai.mask_update_active && target.is_some();
-        let library_refresh = self.ai.library_mask_refresh.is_some();
         let cancelled = operation.is_cancelled();
         let stale = operation.document_id != self.persistence.sidecar_generation;
 
@@ -351,13 +350,16 @@ impl AurawApp {
             }
         }
 
-        if library_refresh {
-            if cancelled {
+        if updating_all {
+            if cancelled || stale {
+                let pending_target = self.ai.object_pending_target.take();
                 self.cancel_ai_mask_update();
-            } else if let Some((mask_index, component_index)) = self.ai.object_pending_target.take()
-            {
-                self.request_object_mask(mask_index, component_index);
-            } else if updating_all {
+                if !stale {
+                    if let Some((mask_index, component_index)) = pending_target {
+                        self.request_object_mask(mask_index, component_index);
+                    }
+                }
+            } else {
                 self.ai.mask_update_failed |= !succeeded;
                 if !succeeded {
                     self.ai.mask_update_object_queue.clear();

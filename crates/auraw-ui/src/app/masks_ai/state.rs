@@ -416,11 +416,15 @@ impl AurawApp {
         self.ai.mask_update_failed = false;
     }
 
-    pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
+    pub(crate) fn note_mask_source_changed(&mut self) {
         let (has_subject, object_targets) = self.generated_ai_mask_targets();
         let has_ranges = self.has_range_mask_targets();
         self.invalidate_generated_mask_sources();
         self.ai.masks_need_update = has_subject || !object_targets.is_empty() || has_ranges;
+    }
+
+    pub(crate) fn note_lens_correction_changed_for_masks(&mut self) {
+        self.note_mask_source_changed();
     }
 
     #[cfg(not(target_os = "android"))]

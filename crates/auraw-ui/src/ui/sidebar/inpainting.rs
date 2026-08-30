@@ -67,10 +67,21 @@ impl Sidebar {
         let tool_help = inpaint_tool_help(app.inpaint.tool);
         crate::ui::theme::section_card_with_help(ui, "Tool", tool_help, |ui| {
             let previous_tool = app.inpaint.tool;
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
+                let spacing = ui.spacing().item_spacing.x;
+                let tool_width = ((ui.available_width() - spacing * 2.0) / 3.0).max(1.0);
                 for tool in InpaintTool::ALL {
-                    ui.selectable_value(&mut app.inpaint.tool, tool, tool.label())
-                        .on_hover_text(inpaint_tool_help(tool));
+                    if crate::ui::theme::segmented_button(
+                        ui,
+                        tool.label(),
+                        app.inpaint.tool == tool,
+                        tool_width,
+                    )
+                    .on_hover_text(inpaint_tool_help(tool))
+                    .clicked()
+                    {
+                        app.inpaint.tool = tool;
+                    }
                 }
             });
             if app.inpaint.tool != previous_tool {

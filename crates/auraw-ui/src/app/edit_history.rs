@@ -361,6 +361,7 @@ impl AurawApp {
             &self.develop.lens_correction,
             &self.inpaint.edits,
         );
+        self.note_mask_source_changed();
         self.queue_preview_processing(ProcessingStage::Raw);
     }
 
@@ -506,6 +507,9 @@ impl AurawApp {
         }
         snapshot.lens.apply_to(&mut self.develop.lens_correction);
         self.rehydrate_restored_mask_state();
+        if remove_changed {
+            self.note_mask_source_changed();
+        }
         if ai_denoise_changed && self.develop.exposure.ai_denoise_enabled {
             self.ai.denoise_resume_pending = true;
         }

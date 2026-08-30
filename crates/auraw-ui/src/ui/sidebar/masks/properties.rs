@@ -322,20 +322,18 @@ impl Sidebar {
                     grow,
                     feather,
                 } => {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(
-                                *refinement_active,
-                                if *refinement_active { "Done" } else { "Refine" },
-                            )
-                            .on_hover_text(
-                                "Fine-tune the shared Subject / Not Subject boundary with a brush.",
-                            )
-                            .clicked()
-                        {
-                            *refinement_active = !*refinement_active;
-                        }
-                    });
+                    if crate::ui::theme::toggle_button(
+                        ui,
+                        if *refinement_active { "Done" } else { "Refine" },
+                        *refinement_active,
+                    )
+                    .on_hover_text(
+                        "Fine-tune the shared Subject / Not Subject boundary with a brush.",
+                    )
+                    .clicked()
+                    {
+                        *refinement_active = !*refinement_active;
+                    }
                     if *refinement_active {
                         crate::ui::theme::section_card(ui, "Subject refinement", |ui| {
                             ui.horizontal(|ui| {
@@ -405,30 +403,26 @@ impl Sidebar {
                             }
                         });
                     }
-                    let has_generated_mask = generated_mask.is_some();
-                    let action = if has_generated_mask {
-                        "Rerun"
-                    } else {
-                        "Generate"
-                    };
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(format!(
-                            "{action} in {} quality",
-                            birefnet_quality.label()
-                        ));
-                        if ui
-                            .add_enabled(
-                                birefnet_quality_change_enabled,
-                                egui::Button::new(format!("{action} subject mask")),
-                            )
-                            .clicked()
-                        {
-                            *request_subject = true;
-                        }
-                        if !birefnet_quality_change_enabled {
-                            ui.spinner();
-                        }
-                    });
+                    if generated_mask.is_none() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(format!(
+                                "Generate in {} quality",
+                                birefnet_quality.label()
+                            ));
+                            if ui
+                                .add_enabled(
+                                    birefnet_quality_change_enabled,
+                                    egui::Button::new("Generate subject mask"),
+                                )
+                                .clicked()
+                            {
+                                *request_subject = true;
+                            }
+                            if !birefnet_quality_change_enabled {
+                                ui.spinner();
+                            }
+                        });
+                    }
                     geometry_changed |= Self::mask_grow_slider(ui, grow);
                     geometry_changed |= Self::mask_feather_slider(
                         ui,

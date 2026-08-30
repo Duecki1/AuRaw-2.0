@@ -11,18 +11,13 @@ impl Sidebar {
         layout: ScreenLayout,
         frame: &eframe::Frame,
     ) -> Option<egui::Rect> {
-        if app.ai.masks_need_update {
+        if app.ai.masks_need_update && !app.ai_mask_update_busy() {
             crate::ui::theme::section_card(ui, "Masks need updating", |ui| {
                 ui.label(
                     "The image used by existing masks changed. Refresh masks to rebuild content-aware masks and mask sources without deleting your edits.",
                 );
                 ui.add_space(4.0);
-                if app.ai_mask_update_busy() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Refreshing masks…");
-                    });
-                } else if ui.button("Update masks").clicked() {
+                if ui.button("Update masks").clicked() {
                     app.request_update_all_ai_masks(frame);
                 }
             });
