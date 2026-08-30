@@ -70,7 +70,6 @@ impl Library {
         let visible_indices = search_active.then(|| app.library.filtered_entry_indices());
 
         let compact_header = ui.available_width() < 520.0;
-        let compact_android_controls = cfg!(target_os = "android") && compact_header;
         let mut selected_sort = app.library.sort_order();
         let mut selected_size = app.library.thumbnail_size();
         crate::ui::theme::toolbar_row(ui, |ui| {
@@ -89,26 +88,9 @@ impl Library {
                 app.set_library_folder_sidebar_open(true);
             }
 
-            let total_count = app.library.entries.len();
-            let visible_count = visible_indices
-                .as_ref()
-                .map_or(total_count, |indices| indices.len());
-            let count_label = if search_active {
-                format!("{visible_count} of {total_count} RAW files")
-            } else {
-                format!(
-                    "{total_count} RAW {}",
-                    if total_count == 1 { "file" } else { "files" }
-                )
-            };
             if !compact_header {
                 crate::ui::theme::toolbar_title(ui, "Library");
             }
-            ui.label(
-                egui::RichText::new(count_label)
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
-            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 #[cfg(target_os = "android")]
                 app.show_export_task_indicator(ui);
@@ -141,7 +123,7 @@ impl Library {
                     refresh = true;
                 }
 
-                if compact_header && !compact_android_controls {
+                if compact_header && !cfg!(target_os = "android") {
                     ui.menu_button(
                         egui::RichText::new(egui_phosphor::regular::SLIDERS_HORIZONTAL).size(17.0),
                         |ui| {
@@ -167,45 +149,14 @@ impl Library {
                     )
                     .response
                     .on_hover_text("Library view options");
-                } else if !compact_header {
+                } else {
                     show_library_view_combos(ui, &mut selected_sort, &mut selected_size);
                 }
             });
         });
-
-        if compact_android_controls {
-            crate::ui::theme::toolbar_row(ui, |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    show_library_view_combos(ui, &mut selected_sort, &mut selected_size);
-                });
-            });
-        }
         app.set_library_sort_order(selected_sort);
         app.set_library_thumbnail_size(selected_size);
 
-        if let Some(_location) = app.library.location.as_deref() {
-            #[cfg(not(target_os = "android"))]
-            let location_label = std::path::Path::new(_location)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(_location)
-                .to_owned();
-            #[cfg(target_os = "android")]
-            let location_label = if app.library.platform.folder.is_empty() {
-                "Local / Library".to_owned()
-            } else {
-                format!("Local / {}", app.library.platform.folder)
-            };
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!("Folder · {location_label}"))
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                )
-                .truncate(),
-            )
-            .on_hover_text(_location);
-        }
         show_local_image_paste_bar(ui, app);
         if !app.library.status.is_empty() {
             ui.add(

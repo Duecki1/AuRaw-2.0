@@ -699,6 +699,7 @@ pub(crate) fn responsive_combo_box<R>(
         .selected_text(selected_text)
         .width(width)
         .height(content_height)
+        .truncate()
         .show_ui(ui, add_contents);
 
     context.set_style_of(theme, original_style);
