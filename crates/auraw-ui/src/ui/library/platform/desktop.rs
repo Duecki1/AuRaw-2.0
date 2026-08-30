@@ -25,7 +25,7 @@ pub(super) fn show_library_folder_node(
     requested_action: &mut Option<LibraryFolderUiAction>,
 ) {
     let has_children = !node.children.is_empty();
-    let expanded = expanded_folders.contains(&node.path);
+    let expanded = has_children && expanded_folders.contains(&node.path);
     let selected = selected_folder == Some(node.path.as_path());
 
     ui.push_id(&node.path, |ui| {

@@ -120,7 +120,7 @@ fn run() -> Result<()> {
     if let Some(directory) = &args.suite_output {
         std::fs::create_dir_all(directory)
             .with_context(|| format!("create suite directory {}", directory.display()))?;
-        for (label, adjustment) in LIGHTROOM_COMPARISON_SUITE {
+        for (label, adjustment) in REFERENCE_CONTRAST_SUITE {
             if !args.suite_only.is_empty() && !args.suite_only.iter().any(|value| value == label) {
                 continue;
             }
@@ -215,7 +215,7 @@ fn default_exposure_for_raw(raw: &auraw_cli::pipeline::LoadedRaw) -> ExposurePar
     exposure
 }
 
-const LIGHTROOM_COMPARISON_SUITE: &[(&str, Option<(&str, f32)>)] = &[
+const REFERENCE_CONTRAST_SUITE: &[(&str, Option<(&str, f32)>)] = &[
     ("baseline", None),
     ("exposure_plus1_25", Some(("exposure", 1.25))),
     ("exposure_minus1_25", Some(("exposure", -1.25))),
@@ -341,7 +341,7 @@ fn parse_args() -> Result<Args> {
         bail!("--skip-existing requires --suite-output");
     }
     for label in &suite_only {
-        if !LIGHTROOM_COMPARISON_SUITE
+        if !REFERENCE_CONTRAST_SUITE
             .iter()
             .any(|(candidate, _)| candidate == label)
         {
@@ -407,6 +407,6 @@ fn print_help() {
         "luminance_denoise, color_denoise, denoise_detail, denoise_quality (0/1/2),\n",
         "sharpen_amount, sharpen_radius, sharpen_detail, and sharpen_masking. The suite\n",
         "exports isolated endpoints matching the standard\n",
-        "Lightroom comparison set. Lens correction is not applied by this tool."
+        "Reference comparison set. Lens correction is not applied by this tool."
     ));
 }

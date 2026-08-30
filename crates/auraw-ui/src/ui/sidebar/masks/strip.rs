@@ -10,7 +10,7 @@ impl Sidebar {
         app: &mut AurawApp,
         layout: ScreenLayout,
         frame: &eframe::Frame,
-    ) {
+    ) -> Option<egui::Rect> {
         if app.ai.masks_need_update {
             crate::ui::theme::section_card(ui, "Masks need updating", |ui| {
                 ui.label(
@@ -31,11 +31,14 @@ impl Sidebar {
 
         if app.masks.stack.masks.is_empty() {
             crate::ui::theme::section_card(ui, "No masks yet", |_| {});
-            return;
+            return None;
         }
 
         match layout {
-            ScreenLayout::Vertical => Self::show_masks_vertical_details(ui, app, frame),
+            ScreenLayout::Vertical => {
+                Self::show_masks_vertical_details(ui, app, frame);
+                None
+            }
             ScreenLayout::Horizontal => Self::show_masks_horizontal_details(ui, app, frame),
         }
     }

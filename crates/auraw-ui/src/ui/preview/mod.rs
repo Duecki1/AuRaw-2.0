@@ -82,6 +82,13 @@ pub(crate) struct Preview;
 impl Preview {
     pub(crate) fn show(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         let available = ui.available_size();
+        let canvas_inset = if cfg!(target_os = "android") {
+            0.0
+        } else {
+            10.0
+        };
+        let preview_size =
+            (available - egui::Vec2::splat(canvas_inset * 2.0)).max(egui::Vec2::ZERO);
         let backdrop = app.preview_backdrop_color();
         ui.painter()
             .rect_filled(ui.available_rect_before_wrap(), 0.0, backdrop);
@@ -93,11 +100,11 @@ impl Preview {
                 .egui_texture_id
                 .map(|texture_id| (texture_id, pipeline.width, pipeline.height))
         });
-        if base_pipeline.is_none() && available.x > 0.0 && available.y > 0.0 {
+        if base_pipeline.is_none() && preview_size.x > 0.0 && preview_size.y > 0.0 {
             let pixels_per_point = physical_pixels_per_point(ui.ctx());
             app.set_preview_viewport_pixels([
-                (available.x * pixels_per_point).round().max(1.0) as u32,
-                (available.y * pixels_per_point).round().max(1.0) as u32,
+                (preview_size.x * pixels_per_point).round().max(1.0) as u32,
+                (preview_size.y * pixels_per_point).round().max(1.0) as u32,
             ]);
         }
 
@@ -127,11 +134,12 @@ impl Preview {
             return;
         };
 
-        if available.x <= 0.0 || available.y <= 0.0 || pipeline_height == 0 {
+        if preview_size.x <= 0.0 || preview_size.y <= 0.0 || pipeline_height == 0 {
             return;
         }
 
-        let (outer_rect, _) = ui.allocate_exact_size(available, Sense::hover());
+        let (workspace_rect, _) = ui.allocate_exact_size(available, Sense::hover());
+        let outer_rect = workspace_rect.shrink(canvas_inset);
         let source_dimensions = app
             .develop
             .loaded_raw
@@ -463,24 +471,6 @@ impl Preview {
                 source_dimensions.1,
             );
         }
-
-        #[cfg(not(target_os = "android"))]
-        painter.text(
-            outer_rect.left_top() + egui::vec2(10.0, 10.0),
-            egui::Align2::LEFT_TOP,
-            format!(
-                "{:.1}% · pinch/scroll zoom · drag pan · double-tap/click fit",
-                ((image_rect.width() * physical_pixels_per_point(ui.ctx())
-                    / geometry_width.max(1) as f32)
-                    .min(
-                        image_rect.height() * physical_pixels_per_point(ui.ctx())
-                            / geometry_height.max(1) as f32,
-                    )
-                    * 100.0)
-            ),
-            egui::FontId::proportional(11.0),
-            Color32::from_white_alpha(180),
-        );
 
         if app.preview.original_visible() {
             painter.text(

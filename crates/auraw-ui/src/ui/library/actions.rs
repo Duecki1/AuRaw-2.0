@@ -682,7 +682,6 @@ pub(crate) fn show_library_action_overlays(ui: &mut Ui, app: &mut AurawApp, fram
                     if ui.button(label).on_hover_text(help).clicked() {
                         confirm_export = true;
                     }
-                    crate::ui::theme::help_button(ui, help);
                 });
             });
     }

@@ -287,6 +287,7 @@ impl AurawApp {
             show_develop_navigation_labels: self.preferences.show_develop_navigation_labels,
             ui_design: self.preferences.ui_design,
             preview_backdrop: self.preferences.preview_backdrop,
+            onboarding_completed: self.preferences.onboarding_completed,
             birefnet_quality: self.ai.birefnet_quality,
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: self.ai.gpu_acceleration,

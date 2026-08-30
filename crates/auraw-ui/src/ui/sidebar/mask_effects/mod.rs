@@ -36,25 +36,36 @@ fn effect_description(effect: MaskEffect) -> Option<&'static str> {
 fn effect_toolbar<T: Default>(ui: &mut Ui, effect: MaskEffect, settings: &mut T) -> bool {
     let mut reset = false;
     let help = effect_description(effect);
-    crate::ui::theme::toolbar_row(ui, |ui| {
-        let title = ui.strong(format!("{} Effect", effect.label()));
-        if let Some(help) = help {
-            title.on_hover_text(help);
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            reset = crate::ui::icons::phosphor_icon_button(
-                ui,
-                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                crate::ui::theme::toolbar_icon_size(),
-                &format!("Reset {} settings", effect.label()),
-            )
-            .clicked();
+    if !crate::ui::theme::is_compact_portrait(ui) {
+        crate::ui::theme::toolbar_row(ui, |ui| {
+            let title = ui.strong(format!("{} Effect", effect.label()));
             if let Some(help) = help {
-                crate::ui::theme::help_button(ui, help);
+                title.on_hover_text(help);
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                reset = crate::ui::icons::phosphor_icon_button(
+                    ui,
+                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                    crate::ui::theme::toolbar_icon_size(),
+                    &format!("Reset {} settings", effect.label()),
+                )
+                .clicked();
+            });
         });
-    });
-    ui.add_space(4.0);
+        ui.add_space(4.0);
+    } else {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            reset = ui
+                .button(format!(
+                    "{}  Reset {} settings",
+                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                    effect.label()
+                ))
+                .on_hover_text(format!("Reset {} settings", effect.label()))
+                .clicked();
+        });
+        ui.add_space(crate::ui::theme::SPACE_XS);
+    }
     if reset {
         *settings = T::default();
     }

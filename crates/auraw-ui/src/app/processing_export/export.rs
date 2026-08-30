@@ -812,27 +812,9 @@ impl AurawApp {
     }
 
     pub(crate) fn reset_develop_adjustments(&mut self) {
-        let previous = self.develop.exposure;
         self.develop.exposure = ExposureParams::scene_referred_default();
         self.develop_ui.white_balance_picker_active = false;
         self.develop_ui.white_balance_picker_drag = None;
-
-        self.develop.exposure.highlight_method = previous.highlight_method;
-        self.develop.exposure.highlight_clip = previous.highlight_clip;
-        self.develop.exposure.highlight_reconstruction = previous.highlight_reconstruction;
-
-        self.develop.exposure.demosaic_mode = previous.demosaic_mode;
-        self.develop.exposure.dual_threshold = previous.dual_threshold;
-        self.develop.exposure.frequency_chroma = previous.frequency_chroma;
-
-        self.mark_pipeline_dirty();
-    }
-
-    pub(crate) fn reset_highlight_reconstruction_settings(&mut self) {
-        let defaults = ExposureParams::default();
-        self.develop.exposure.highlight_method = defaults.highlight_method;
-        self.develop.exposure.highlight_clip = defaults.highlight_clip;
-        self.develop.exposure.highlight_reconstruction = defaults.highlight_reconstruction;
         self.mark_pipeline_dirty();
     }
 }

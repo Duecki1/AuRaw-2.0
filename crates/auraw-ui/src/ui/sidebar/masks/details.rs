@@ -20,10 +20,14 @@ impl Sidebar {
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
                 ui.spacing_mut().interact_size = size;
-                ui.menu_button(
+                crate::ui::theme::responsive_combo_box(
+                    ui,
+                    "mask-group-creation",
                     egui::RichText::new(mask_creation_icon())
                         .size(20.0)
                         .strong(),
+                    size.x,
+                    10,
                     |ui| {
                         *new_mask = Self::mask_kind_menu(
                             ui,
@@ -48,19 +52,22 @@ impl Sidebar {
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
                 ui.spacing_mut().interact_size = size;
-                ui.menu_button(
-                    egui::RichText::new(mask_creation_icon())
-                        .size(18.0)
-                        .strong(),
-                    |ui| {
+                egui::ComboBox::from_id_salt("mask-submask-creation")
+                    .selected_text(
+                        egui::RichText::new(mask_creation_icon())
+                            .size(18.0)
+                            .strong(),
+                    )
+                    .width(size.x)
+                    .height(ui.ctx().content_rect().height())
+                    .show_ui(ui, |ui| {
                         *add_component = Self::submask_creation_menu(
                             ui,
                             "This sub-mask type is planned but not implemented yet.",
                         );
-                    },
-                )
-                .response
-                .on_hover_text("Add a sub-mask to the selected group");
+                    })
+                    .response
+                    .on_hover_text("Add a sub-mask to the selected group");
             },
         );
     }
@@ -156,8 +163,8 @@ impl Sidebar {
         ui: &mut Ui,
         app: &mut AurawApp,
         frame: &eframe::Frame,
-    ) {
-        Self::show_mask_details(ui, app, frame, MaskStripOrientation::Horizontal);
+    ) -> Option<egui::Rect> {
+        Self::show_mask_details(ui, app, frame, MaskStripOrientation::Horizontal)
     }
 
     pub(super) fn show_masks_vertical_details(
@@ -168,22 +175,71 @@ impl Sidebar {
         Self::show_mask_details(ui, app, frame, MaskStripOrientation::Vertical);
     }
 
+    fn render_mask_edit_header(ui: &mut Ui, on_reset: impl FnOnce()) -> egui::InnerResponse<()> {
+        crate::ui::theme::card_header(ui, |ui| {
+            let width = ui.available_width().max(1.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, crate::ui::theme::TOOLBAR_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    crate::ui::theme::toolbar_title(ui, "Edit");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::ui::icons::phosphor_icon_button(
+                            ui,
+                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                            crate::ui::theme::toolbar_icon_size(),
+                            "Reset local adjustments",
+                        )
+                        .clicked()
+                        {
+                            on_reset();
+                        }
+                    });
+                },
+            );
+        })
+    }
+
+    pub(crate) fn show_sticky_mask_edit_header(
+        ctx: &egui::Context,
+        app: &mut AurawApp,
+        header_rect: egui::Rect,
+        viewport_rect: egui::Rect,
+    ) {
+        if header_rect.top() >= viewport_rect.top() {
+            return;
+        }
+
+        egui::Area::new(egui::Id::new("sticky-mask-edit-header"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(viewport_rect.min)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::ZERO)
+                    .show(ui, |ui| {
+                        ui.set_width(viewport_rect.width());
+                        ui.set_max_width(viewport_rect.width());
+                        Self::render_mask_edit_header(ui, || {
+                            if let Some(mask) = app.masks.stack.selected_mask_mut() {
+                                mask.adjustments.reset();
+                            }
+                            app.mark_mask_adjustments_dirty();
+                        });
+                        crate::ui::theme::card_gap(ui);
+                    });
+            });
+    }
+
     fn show_mask_details(
         ui: &mut Ui,
         app: &mut AurawApp,
         frame: &eframe::Frame,
         orientation: MaskStripOrientation,
-    ) {
+    ) -> Option<egui::Rect> {
         let Some((mask_index, component_index)) = app.masks.stack.ensure_selection() else {
-            return;
+            return None;
         };
-
-        ui.label(
-            egui::RichText::new(app.masks.stack.masks[mask_index].name.clone())
-                .strong()
-                .color(ui.visuals().weak_text_color()),
-        );
-        ui.add_space(5.0);
 
         let vertical_section = (orientation == MaskStripOrientation::Vertical).then(|| {
             if !app.masks.stack.masks[mask_index].effect.uses_adjustments() {
@@ -195,6 +251,8 @@ impl Sidebar {
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
         let mut effect_changed = false;
+        let mut reset_all_masks_requested = false;
+        let mut edit_header_rect = None;
         let mut request_subject = false;
         let mut request_object = false;
         let mut brush_mode = app.masks.brush_mode;
@@ -217,6 +275,7 @@ impl Sidebar {
 
         {
             let mask = &mut app.masks.stack.masks[mask_index];
+            let compact_android = crate::ui::theme::is_compact_portrait(ui);
             if mask_effect_picker_visible(orientation, vertical_section) {
                 effect_changed |= Self::show_mask_effect_picker(ui, &mut mask.effect);
                 crate::ui::theme::card_gap(ui);
@@ -247,26 +306,15 @@ impl Sidebar {
                     });
 
                     if mask.effect.uses_adjustments() {
-                        crate::ui::theme::toolbar_row(ui, |ui| {
-                            ui.strong("Local Adjustments");
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if crate::ui::icons::phosphor_icon_button(
-                                        ui,
-                                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                                        crate::ui::theme::toolbar_icon_size(),
-                                        "Reset local adjustments",
-                                    )
-                                    .clicked()
-                                    {
-                                        mask.adjustments.reset();
-                                        adjustments_changed = true;
-                                    }
-                                },
-                            );
-                        });
-                        ui.add_space(4.0);
+                        edit_header_rect = Some(
+                            Self::render_mask_edit_header(ui, || {
+                                mask.adjustments.reset();
+                                adjustments_changed = true;
+                            })
+                            .response
+                            .rect,
+                        );
+                        crate::ui::theme::card_gap(ui);
 
                         for (section, label, default_open) in [
                             (MaskSection::Light, "Light", true),
@@ -304,28 +352,30 @@ impl Sidebar {
                         MaskSection::ColorMixer => "Color Mixer",
                     };
                     if mask.effect.uses_adjustments() {
-                        crate::ui::theme::toolbar_row(ui, |ui| {
-                            ui.strong(section_title);
-                            if mask_section != MaskSection::Properties {
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if crate::ui::icons::phosphor_icon_button(
-                                            ui,
-                                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                                            crate::ui::theme::toolbar_icon_size(),
-                                            "Reset local adjustments",
-                                        )
-                                        .clicked()
-                                        {
-                                            mask.adjustments.reset();
-                                            adjustments_changed = true;
-                                        }
-                                    },
-                                );
-                            }
-                        });
-                        ui.add_space(4.0);
+                        if !compact_android {
+                            crate::ui::theme::toolbar_row(ui, |ui| {
+                                ui.strong(section_title);
+                                if mask_section != MaskSection::Properties {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if crate::ui::icons::phosphor_icon_button(
+                                                ui,
+                                                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                                crate::ui::theme::toolbar_icon_size(),
+                                                "Reset local adjustments",
+                                            )
+                                            .clicked()
+                                            {
+                                                mask.adjustments.reset();
+                                                adjustments_changed = true;
+                                            }
+                                        },
+                                    );
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
 
                         match mask_section {
                             MaskSection::Properties => {
@@ -400,6 +450,44 @@ impl Sidebar {
             }
         }
 
+        if crate::ui::theme::is_compact_portrait(ui)
+            && vertical_section.is_some_and(|section| section != MaskSection::Properties)
+            && app.masks.stack.masks[mask_index].effect.uses_adjustments()
+        {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!(
+                        "{}  Reset local adjustments",
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                    ))
+                    .on_hover_text("Reset local adjustments")
+                    .clicked()
+                {
+                    app.masks.stack.masks[mask_index].adjustments.reset();
+                    adjustments_changed = true;
+                }
+            });
+            ui.add_space(crate::ui::theme::SPACE_XS);
+        }
+
+        if crate::ui::theme::is_compact_portrait(ui)
+            && vertical_section == Some(MaskSection::Properties)
+        {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!(
+                        "{}  Reset all masks",
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                    ))
+                    .on_hover_text("Reset all masks and clear the subject mask cache")
+                    .clicked()
+                {
+                    reset_all_masks_requested = true;
+                }
+            });
+            ui.add_space(crate::ui::theme::SPACE_XS);
+        }
+
         app.develop_ui.tone_curve_tab = local_curve_tab;
         app.develop_ui.color_grade_tab = local_color_grade_tab;
         app.develop_ui.hsl_mixer_color = local_hsl_mixer_color;
@@ -432,6 +520,10 @@ impl Sidebar {
         if adjustments_changed || effect_changed {
             app.mark_mask_adjustments_dirty();
         }
+        if reset_all_masks_requested {
+            app.reset_masks();
+        }
+        edit_header_rect
     }
 }
 

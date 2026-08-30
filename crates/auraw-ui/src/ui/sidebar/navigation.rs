@@ -41,31 +41,96 @@ impl Sidebar {
             return;
         }
 
-        crate::ui::theme::panel_title(
-            ui,
-            match app.ui.sidebar_tab {
-                SidebarTab::Adjustments => "Edit",
-                SidebarTab::Crop => "Crop & Straighten",
-                SidebarTab::Masks => "Masking",
-                SidebarTab::Inpainting => "Inpaint",
-                SidebarTab::Export => "Export",
-            },
-        );
+        let title = match app.ui.sidebar_tab {
+            SidebarTab::Adjustments => "Edit",
+            SidebarTab::Crop => "Crop & Straighten",
+            SidebarTab::Masks => "Masking",
+            SidebarTab::Inpainting => "Inpaint",
+            SidebarTab::Export => "Export",
+        };
+        crate::ui::theme::card_header(ui, |ui| {
+            let width = ui.available_width().max(1.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, crate::ui::theme::TOOLBAR_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    crate::ui::theme::toolbar_title(ui, title);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        match app.ui.sidebar_tab {
+                            SidebarTab::Adjustments => {
+                                if crate::ui::icons::phosphor_icon_button(
+                                    ui,
+                                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                    crate::ui::theme::toolbar_icon_size(),
+                                    "Reset all develop adjustments",
+                                )
+                                .clicked()
+                                {
+                                    app.reset_develop_adjustments();
+                                }
+                            }
+                            SidebarTab::Crop => {
+                                if crate::ui::icons::phosphor_icon_button(
+                                    ui,
+                                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                    crate::ui::theme::toolbar_icon_size(),
+                                    "Reset crop and geometry",
+                                )
+                                .clicked()
+                                {
+                                    Self::reset_crop(app);
+                                }
+                            }
+                            SidebarTab::Inpainting => {
+                                let active_tool = app.inpaint.tool;
+                                let active_stroke_count = app
+                                    .inpaint
+                                    .edits
+                                    .strokes
+                                    .iter()
+                                    .filter(|stroke| {
+                                        active_tool.matches_stroke_tool(
+                                            stroke.retouch.map(|retouch| retouch.tool),
+                                        )
+                                    })
+                                    .count();
+                                if crate::ui::icons::phosphor_icon_button_enabled(
+                                    ui,
+                                    active_stroke_count != 0 && !app.inpaint.processing(),
+                                    egui_phosphor::regular::TRASH,
+                                    crate::ui::theme::toolbar_icon_size(),
+                                    &format!("Clear all {} strokes", active_tool.label()),
+                                )
+                                .clicked()
+                                {
+                                    app.clear_inpainting_tool();
+                                }
+                            }
+                            SidebarTab::Masks => {
+                                if crate::ui::icons::phosphor_icon_button(
+                                    ui,
+                                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                    crate::ui::theme::toolbar_icon_size(),
+                                    "Reset all masks and clear the subject mask cache",
+                                )
+                                .clicked()
+                                {
+                                    app.reset_masks();
+                                }
+                            }
+                            SidebarTab::Export => {}
+                        }
+                    });
+                },
+            );
+        });
+        crate::ui::theme::card_gap(ui);
 
         Self::show_sidebar_content(ui, app, layout, frame);
     }
 
     fn show_vertical_mobile_shell(ui: &mut Ui, app: &mut AurawApp, frame: &eframe::Frame) {
         let compact = crate::ui::theme::is_compact_portrait(ui);
-        if !app.ui.expert_mode
-            && matches!(
-                app.develop_ui.adjustment_section,
-                AdjustmentSection::AdvancedRendering | AdjustmentSection::Raw
-            )
-        {
-            app.develop_ui.adjustment_section = AdjustmentSection::Light;
-        }
-
         egui::Panel::bottom("develop_portrait_primary_tabs")
             .resizable(false)
             .show_separator_line(false)
@@ -237,32 +302,6 @@ impl Sidebar {
                         }
                     }
                 }
-                if app.ui.expert_mode {
-                    for (section, icon, label) in [
-                        (
-                            AdjustmentSection::AdvancedRendering,
-                            regular::SLIDERS,
-                            "Advanced",
-                        ),
-                        (AdjustmentSection::Raw, regular::IMAGE, "Raw"),
-                    ] {
-                        if Self::mobile_icon_tab(
-                            ui,
-                            icon,
-                            label,
-                            show_labels,
-                            app.develop_ui.adjustment_section == section,
-                            egui::vec2(Self::CONTEXT_TAB_WIDTH, tab_height),
-                            label,
-                        )
-                        .clicked()
-                        {
-                            app.develop_ui.adjustment_section = section;
-                            app.develop_ui.white_balance_picker_active = false;
-                            app.develop_ui.white_balance_picker_drag = None;
-                        }
-                    }
-                }
             }
             SidebarTab::Masks => {
                 let adjustment_mask = app
@@ -375,7 +414,8 @@ impl Sidebar {
             scroll_style.bar_inner_margin = 7.0;
             ui.spacing_mut().scroll = scroll_style;
 
-            egui::ScrollArea::vertical()
+            let mut mask_edit_header_rect = None;
+            let scroll_output = egui::ScrollArea::vertical()
                 .id_salt("develop-sidebar-content")
                 .scroll_source(sidebar_scroll_source)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
@@ -392,8 +432,10 @@ impl Sidebar {
                                 SidebarTab::Adjustments => {
                                     Self::show_adjustments(ui, app, layout, frame)
                                 }
-                                SidebarTab::Crop => Self::show_crop(ui, app),
-                                SidebarTab::Masks => Self::show_masks(ui, app, layout, frame),
+                                SidebarTab::Crop => Self::show_crop(ui, app, layout),
+                                SidebarTab::Masks => {
+                                    mask_edit_header_rect = Self::show_masks(ui, app, layout, frame)
+                                }
                                 SidebarTab::Inpainting => {
                                     Self::show_inpainting(ui, app, layout, frame)
                                 }
@@ -403,6 +445,17 @@ impl Sidebar {
                         },
                     );
                 });
+
+            if layout == ScreenLayout::Horizontal && app.ui.sidebar_tab == SidebarTab::Masks {
+                if let Some(header_rect) = mask_edit_header_rect {
+                    Self::show_sticky_mask_edit_header(
+                        ui.ctx(),
+                        app,
+                        header_rect,
+                        scroll_output.inner_rect,
+                    );
+                }
+            }
         });
     }
 
@@ -410,8 +463,8 @@ impl Sidebar {
     pub(crate) fn show_desktop_tool_rail(ui: &mut Ui, app: &mut AurawApp) {
         use crate::ui::icons::{icon_toggle_button, UiIcon};
 
-        ui.set_width(Self::DESKTOP_TOOL_RAIL_WIDTH);
-        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.set_min_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = crate::ui::theme::SPACE_XS;
         let previous = app.ui.sidebar_tab;
         ui.vertical_centered(|ui| {
             ui.add_space(5.0);
@@ -551,24 +604,18 @@ impl Sidebar {
         layout: ScreenLayout,
         frame: &eframe::Frame,
     ) {
-        if !crate::ui::theme::is_compact_portrait(ui) {
+        if layout == ScreenLayout::Vertical && !crate::ui::theme::is_compact_portrait(ui) {
             crate::ui::theme::toolbar_row(ui, |ui| {
-                if layout == ScreenLayout::Vertical {
-                    ui.strong(match app.develop_ui.adjustment_section {
-                        AdjustmentSection::Light => "Light",
-                        AdjustmentSection::ToneCurve => "Tone Curve",
-                        AdjustmentSection::Color => "Color",
-                        AdjustmentSection::ColorGrading => "Color Grading",
-                        AdjustmentSection::Detail => "Detail",
-                        AdjustmentSection::Effects => "Effects",
-                        AdjustmentSection::ColorMixer => "Color Mixer",
-                        AdjustmentSection::Optics => "Optics",
-                        AdjustmentSection::AdvancedRendering => "Advanced Rendering",
-                        AdjustmentSection::Raw => "Raw",
-                    });
-                } else {
-                    ui.strong("Global adjustments");
-                }
+                ui.strong(match app.develop_ui.adjustment_section {
+                    AdjustmentSection::Light => "Light",
+                    AdjustmentSection::ToneCurve => "Tone Curve",
+                    AdjustmentSection::Color => "Color",
+                    AdjustmentSection::ColorGrading => "Color Grading",
+                    AdjustmentSection::Detail => "Detail",
+                    AdjustmentSection::Effects => "Effects",
+                    AdjustmentSection::ColorMixer => "Color Mixer",
+                    AdjustmentSection::Optics => "Optics",
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::ui::icons::phosphor_icon_button(
                         ui,
@@ -627,7 +674,7 @@ impl Sidebar {
                     ai_denoise_request = request;
                 }
                 AdjustmentSection::Effects => {
-                    changed |= Self::show_presence(ui, &mut app.develop.exposure, app.ui.expert_mode, false);
+                    changed |= Self::show_presence(ui, &mut app.develop.exposure, false);
                 }
                 AdjustmentSection::ColorMixer => {
                     changed |=
@@ -636,13 +683,6 @@ impl Sidebar {
                 AdjustmentSection::Optics => {
                     lens_changed |= Self::show_optics(ui, app, false);
                 }
-                AdjustmentSection::AdvancedRendering if app.ui.expert_mode => {
-                    changed |= Self::show_rendering(ui, &mut app.develop.exposure, false);
-                }
-                AdjustmentSection::Raw if app.ui.expert_mode => {
-                    changed |= Self::show_raw(ui, &mut app.develop.exposure, false);
-                }
-                _ => {}
             }
         } else {
             changed |= Self::show_basic(ui, &mut app.develop.exposure, true);
@@ -663,13 +703,9 @@ impl Sidebar {
             let (detail_changed, request) = Self::show_detail(ui, &mut app.develop.exposure, true);
             changed |= detail_changed;
             ai_denoise_request = request;
-            changed |= Self::show_presence(ui, &mut app.develop.exposure, app.ui.expert_mode, true);
+            changed |= Self::show_presence(ui, &mut app.develop.exposure, true);
             changed |= Self::show_hsl(ui, &mut app.develop.exposure, &mut app.develop_ui.hsl_mixer_color, true);
             lens_changed |= Self::show_optics(ui, app, true);
-            if app.ui.expert_mode {
-                changed |= Self::show_rendering(ui, &mut app.develop.exposure, true);
-                changed |= Self::show_raw(ui, &mut app.develop.exposure, true);
-            }
         }
 
         if layout == ScreenLayout::Vertical && crate::ui::theme::is_compact_portrait(ui) {

@@ -5,42 +5,40 @@ impl Sidebar {
         let before = *effect;
         crate::ui::theme::section_card(ui, "Mask type", |ui| {
             ui.add_space(4.0);
-            let button = egui::Button::new(effect.label())
-                .right_text(egui_phosphor::regular::CARET_DOWN)
-                .min_size(egui::vec2(
-                    ui.available_width(),
-                    crate::ui::theme::CONTROL_HEIGHT,
-                ));
-            egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-                ui.set_min_width(190.0);
-                if ui
-                    .selectable_label(*effect == MaskEffect::Adjustment, "Adjustment")
-                    .on_hover_text("Use the mask with the existing local adjustment controls.")
-                    .clicked()
-                {
-                    *effect = MaskEffect::Adjustment;
-                    ui.close();
-                }
+            egui::ComboBox::from_id_salt("mask-effect-picker")
+                .selected_text(effect.label())
+                .width(ui.available_width())
+                .height(ui.ctx().content_rect().height())
+                .show_ui(ui, |ui| {
+                    ui.set_min_width(190.0);
+                    if ui
+                        .selectable_label(*effect == MaskEffect::Adjustment, "Adjustment")
+                        .on_hover_text("Use the mask with the existing local adjustment controls.")
+                        .clicked()
+                    {
+                        *effect = MaskEffect::Adjustment;
+                        ui.close();
+                    }
 
-                ui.separator();
-                for category in MaskEffectCategory::ALL {
-                    ui.menu_button(category.label(), |ui| {
-                        ui.set_min_width(180.0);
-                        for candidate in MaskEffect::ALL {
-                            if candidate.category() != Some(category) {
-                                continue;
+                    ui.separator();
+                    for category in MaskEffectCategory::ALL {
+                        ui.menu_button(category.label(), |ui| {
+                            ui.set_min_width(180.0);
+                            for candidate in MaskEffect::ALL {
+                                if candidate.category() != Some(category) {
+                                    continue;
+                                }
+                                if ui
+                                    .selectable_label(*effect == candidate, candidate.label())
+                                    .clicked()
+                                {
+                                    *effect = candidate;
+                                    ui.close();
+                                }
                             }
-                            if ui
-                                .selectable_label(*effect == candidate, candidate.label())
-                                .clicked()
-                            {
-                                *effect = candidate;
-                                ui.close();
-                            }
-                        }
-                    });
-                }
-            });
+                        });
+                    }
+                });
         });
         before != *effect
     }
@@ -172,16 +170,12 @@ impl Sidebar {
         ui.scope(|ui| {
             let is_fullscreen = matches!(&component.geometry, MaskGeometry::Fullscreen);
             ui.horizontal_wrapped(|ui| {
-                ui.strong(component.name.as_str());
-                ui.weak(component.kind.label());
+                let component_name = ui.strong(component.name.as_str());
                 if is_fullscreen {
-                    crate::ui::theme::help_button(
-                        ui,
-                        "Covers the complete image with uniform mask strength.",
-                    );
+                    component_name
+                        .on_hover_text("Covers the complete image with uniform mask strength.");
                 }
-                let mut inverted = component.invert;
-                if ui.checkbox(&mut inverted, "Invert").changed() {
+                if crate::ui::theme::toggle_button(ui, "Invert", component.invert).clicked() {
                     component.common.toggle_invert();
                     geometry_changed = true;
                 }
@@ -255,20 +249,26 @@ impl Sidebar {
                         0.55,
                     );
                     ui.horizontal(|ui| {
-                        geometry_changed |= ui
-                            .checkbox(opacity_enabled, "Opacity")
+                        if crate::ui::theme::toggle_button(ui, "Opacity", *opacity_enabled)
                             .on_hover_text(
                                 "Use the opacity setting for newly drawn brush and eraser strokes. \
                                  Disabled strokes always use 100% opacity.",
                             )
-                            .changed();
-                        geometry_changed |= ui
-                            .checkbox(overlap_enabled, "Overlapping")
+                            .clicked()
+                        {
+                            *opacity_enabled = !*opacity_enabled;
+                            geometry_changed = true;
+                        }
+                        if crate::ui::theme::toggle_button(ui, "Overlapping", *overlap_enabled)
                             .on_hover_text(
                                 "Allow separate brush strokes to build opacity where they overlap. \
                                  For example, 10% over 10% produces about 19% coverage.",
                             )
-                            .changed();
+                            .clicked()
+                        {
+                            *overlap_enabled = !*overlap_enabled;
+                            geometry_changed = true;
+                        }
                     });
                     ui.add_enabled_ui(*opacity_enabled, |ui| {
                         geometry_changed |= adjustment_slider(
@@ -296,7 +296,6 @@ impl Sidebar {
                         stroke_starts.clear();
                         geometry_changed = true;
                     }
-                    ui.small(format!("{} brush dabs", dabs.len()));
                 }
                 MaskGeometry::Radial { feather, .. } => {
                     geometry_changed |= Self::mask_feather_slider(

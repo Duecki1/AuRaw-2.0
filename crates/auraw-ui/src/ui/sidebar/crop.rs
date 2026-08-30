@@ -1,33 +1,40 @@
 use crate::pipeline::{CropAspectRatio, GeometryTransform};
 
 impl Sidebar {
-    fn show_crop(ui: &mut Ui, app: &mut AurawApp) {
+    fn reset_crop(app: &mut AurawApp) {
+        app.develop.geometry = GeometryTransform::default();
+        app.develop_ui.crop_constraint_reference = Some(app.develop.geometry.crop);
+        app.develop_ui.crop_drag = None;
+        app.develop_ui.straighten_tool_active = false;
+        app.develop_ui.straighten_drag = None;
+        app.note_geometry_changed();
+    }
+
+    fn show_crop(ui: &mut Ui, app: &mut AurawApp, layout: ScreenLayout) {
         let source_dimensions = app.develop.loaded_raw
             .as_ref()
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((1, 1));
 
-        crate::ui::theme::toolbar_row(ui, |ui| {
-            ui.strong("Crop geometry");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if crate::ui::icons::phosphor_icon_button(
-                    ui,
-                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                    crate::ui::theme::toolbar_icon_size(),
-                    "Reset crop and geometry",
-                )
-                .clicked()
-                {
-                    app.develop.geometry = GeometryTransform::default();
-                    app.develop_ui.crop_constraint_reference = Some(app.develop.geometry.crop);
-                    app.develop_ui.crop_drag = None;
-                    app.develop_ui.straighten_tool_active = false;
-                    app.develop_ui.straighten_drag = None;
-                    app.note_geometry_changed();
-                }
+        let compact_android = crate::ui::theme::is_compact_portrait(ui);
+        if layout == ScreenLayout::Vertical && !compact_android {
+            crate::ui::theme::toolbar_row(ui, |ui| {
+                ui.strong("Crop geometry");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::ui::icons::phosphor_icon_button(
+                        ui,
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                        crate::ui::theme::toolbar_icon_size(),
+                        "Reset crop and geometry",
+                    )
+                    .clicked()
+                    {
+                        Self::reset_crop(app);
+                    }
+                });
             });
-        });
-        ui.add_space(4.0);
+            ui.add_space(4.0);
+        }
 
         let before = app.develop.geometry;
         if app.develop_ui.crop_constraint_reference.is_none() {
@@ -66,10 +73,9 @@ impl Sidebar {
         crate::ui::theme::card_gap(ui);
         crate::ui::theme::section_card(ui, "Rotation", |ui| {
             ui.horizontal(|ui| {
-                if crate::ui::icons::icon_toggle_button(
+                if crate::ui::icons::icon_button(
                     ui,
                     crate::ui::icons::UiIcon::RotateLeft,
-                    false,
                     crate::ui::theme::toolbar_icon_size(),
                     "Rotate 90° counter-clockwise",
                 )
@@ -77,10 +83,9 @@ impl Sidebar {
                 {
                     app.develop.geometry.rotate_quarter_turn(false);
                 }
-                if crate::ui::icons::icon_toggle_button(
+                if crate::ui::icons::icon_button(
                     ui,
                     crate::ui::icons::UiIcon::RotateRight,
-                    false,
                     crate::ui::theme::toolbar_icon_size(),
                     "Rotate 90° clockwise",
                 )
@@ -103,8 +108,11 @@ impl Sidebar {
             } else {
                 "Draw straighten line"
             };
-            if ui
-                .selectable_label(app.develop_ui.straighten_tool_active, straighten_label)
+            if crate::ui::theme::toggle_button(
+                ui,
+                straighten_label,
+                app.develop_ui.straighten_tool_active,
+            )
                 .on_hover_text("Drag along a horizon or vertical edge in the Crop preview. AuRaw rotates the image so that line becomes level.")
                 .clicked()
             {
@@ -117,8 +125,24 @@ impl Sidebar {
         crate::ui::theme::card_gap(ui);
         crate::ui::theme::section_card(ui, "Transform", |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut app.develop.geometry.flip_horizontal, "Flip horizontal");
-                ui.checkbox(&mut app.develop.geometry.flip_vertical, "Flip vertical");
+                if crate::ui::theme::toggle_button(
+                    ui,
+                    "Flip horizontal",
+                    app.develop.geometry.flip_horizontal,
+                )
+                .clicked()
+                {
+                    app.develop.geometry.flip_horizontal = !app.develop.geometry.flip_horizontal;
+                }
+                if crate::ui::theme::toggle_button(
+                    ui,
+                    "Flip vertical",
+                    app.develop.geometry.flip_vertical,
+                )
+                .clicked()
+                {
+                    app.develop.geometry.flip_vertical = !app.develop.geometry.flip_vertical;
+                }
             });
             adjustment_slider(
                 ui,
@@ -156,6 +180,21 @@ impl Sidebar {
             app.note_geometry_changed();
         }
 
+        if compact_android {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!(
+                        "{}  Reset crop and geometry",
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                    ))
+                    .on_hover_text("Reset crop and geometry")
+                    .clicked()
+                {
+                    Self::reset_crop(app);
+                }
+            });
+            ui.add_space(crate::ui::theme::SPACE_XS);
+        }
     }
 
     fn apply_crop_aspect(app: &mut AurawApp, source_width: u32, source_height: u32) {

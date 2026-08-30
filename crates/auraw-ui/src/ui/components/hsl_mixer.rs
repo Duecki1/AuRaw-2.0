@@ -3,9 +3,7 @@ use crate::pipeline::HSL_HUE_LIMIT;
 use crate::ui::components::adjustment_slider::{
     accented_gradient_adjustment_slider, SliderGradient,
 };
-use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Layout, RichText, Sense, Stroke, StrokeKind, Ui,
-};
+use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, StrokeKind, Ui};
 
 use crate::ui::theme::HSL_CHANNELS as CHANNELS;
 
@@ -20,12 +18,6 @@ pub(crate) fn hsl_mixer(
     luminance: &mut [f32; 8],
 ) -> bool {
     let mut changed = false;
-
-    ui.label(
-        RichText::new("Color range")
-            .size(11.5)
-            .color(ui.visuals().weak_text_color()),
-    );
 
     let (selector_width, selector_gap) = selector_geometry(ui.available_width());
     ui.horizontal(|ui| {
@@ -156,21 +148,6 @@ fn color_selector_button(
         radius,
         Stroke::new(1.0, Color32::from_white_alpha(100)),
     );
-    let initial = name.chars().next().unwrap_or('?');
-    let luminance = u16::from(accent.r()) * 3 + u16::from(accent.g()) * 6 + u16::from(accent.b());
-    let text_color = if luminance > 1_650 {
-        Color32::from_gray(35)
-    } else {
-        Color32::WHITE
-    };
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        initial,
-        FontId::proportional(11.0),
-        text_color,
-    );
-
     response.on_hover_text(format!("Select the {name} color range"))
 }
 
