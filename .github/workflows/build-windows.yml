@@ -174,21 +174,33 @@ jobs:
           cp -a "$lensfun_db"/. "$package_dir/lensfun/"
           test -n "$(find "$package_dir/lensfun" -name '*.xml' -print -quit)"
 
-          # DLLs
-          changed=1
-          while [ "$changed" -eq 1 ]; do
-            changed=0
-            for binary in "$package_dir"/*.exe "$package_dir"/*.dll; do
-              [ -f "$binary" ] || continue
-              while IFS= read -r dll; do
-                [ -n "$dll" ] || continue
-                dll_name="$(basename "$dll")"
-                if [ ! -f "$package_dir/$dll_name" ]; then
-                  cp "$dll" "$package_dir/$dll_name"
-                  changed=1
-                fi
-              done < <(ldd "$binary" | awk -v prefix="${{ matrix.msys_prefix }}/bin/" '$3 ~ ("^" prefix) { print $3 }')
-            done
+          # Resolve the PE import table without executing target binaries. In
+          # particular, MSYS2's ldd can hang while inspecting ARM64 binaries.
+          declare -A inspected_dlls=()
+          dependency_queue=("$package_dir/auraw.exe")
+          while [ "${#dependency_queue[@]}" -gt 0 ]; do
+            binary="${dependency_queue[0]}"
+            dependency_queue=("${dependency_queue[@]:1}")
+            echo "Inspecting imports for $(basename "$binary")"
+
+            while IFS= read -r dll_name; do
+              [ -n "$dll_name" ] || continue
+              dll_key="${dll_name,,}"
+              if [ -n "${inspected_dlls[$dll_key]+present}" ]; then
+                continue
+              fi
+              inspected_dlls[$dll_key]=1
+
+              dll_path="$(find ${{ matrix.msys_prefix }}/bin -maxdepth 1 -type f -iname "$dll_name" -print -quit)"
+              if [ -z "$dll_path" ]; then
+                continue
+              fi
+
+              destination="$package_dir/$(basename "$dll_path")"
+              echo "Bundling $(basename "$dll_path")"
+              cp "$dll_path" "$destination"
+              dependency_queue+=("$destination")
+            done < <(objdump -p "$binary" | awk '/DLL Name:/ { print $3 }')
           done
 
           libraw_version="$(pkg-config --modversion libraw 2>/dev/null || pkg-config --modversion libraw_r)"
