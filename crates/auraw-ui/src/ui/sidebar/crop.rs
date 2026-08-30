@@ -16,7 +16,8 @@ impl Sidebar {
             .map(|raw| (raw.width, raw.height))
             .unwrap_or((1, 1));
 
-        if layout == ScreenLayout::Vertical {
+        let compact_android = crate::ui::theme::is_compact_portrait(ui);
+        if layout == ScreenLayout::Vertical && !compact_android {
             crate::ui::theme::toolbar_row(ui, |ui| {
                 ui.strong("Crop geometry");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -179,6 +180,21 @@ impl Sidebar {
             app.note_geometry_changed();
         }
 
+        if compact_android {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!(
+                        "{}  Reset crop and geometry",
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                    ))
+                    .on_hover_text("Reset crop and geometry")
+                    .clicked()
+                {
+                    Self::reset_crop(app);
+                }
+            });
+            ui.add_space(crate::ui::theme::SPACE_XS);
+        }
     }
 
     fn apply_crop_aspect(app: &mut AurawApp, source_width: u32, source_height: u32) {

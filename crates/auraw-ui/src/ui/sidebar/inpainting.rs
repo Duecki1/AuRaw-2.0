@@ -44,7 +44,8 @@ impl Sidebar {
                 active_tool.matches_stroke_tool(stroke.retouch.map(|retouch| retouch.tool))
             })
             .count();
-        if layout == ScreenLayout::Vertical {
+        let compact_android = crate::ui::theme::is_compact_portrait(ui);
+        if layout == ScreenLayout::Vertical && !compact_android {
             crate::ui::theme::toolbar_row(ui, |ui| {
                 ui.strong("Inpainting");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -326,5 +327,24 @@ impl Sidebar {
                 );
             }
         });
+
+        if compact_android {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let clear = ui
+                    .add_enabled(
+                        active_stroke_count != 0 && !app.inpaint.processing(),
+                        egui::Button::new(format!(
+                            "{}  Clear all {} strokes",
+                            egui_phosphor::regular::TRASH,
+                            active_tool.label()
+                        )),
+                    )
+                    .on_hover_text(format!("Clear all {} strokes", active_tool.label()));
+                if clear.clicked() {
+                    app.clear_inpainting_tool();
+                }
+            });
+            ui.add_space(crate::ui::theme::SPACE_XS);
+        }
     }
 }

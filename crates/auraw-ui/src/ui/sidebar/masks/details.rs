@@ -251,6 +251,7 @@ impl Sidebar {
         let mut geometry_changed = false;
         let mut adjustments_changed = false;
         let mut effect_changed = false;
+        let mut reset_all_masks_requested = false;
         let mut edit_header_rect = None;
         let mut request_subject = false;
         let mut request_object = false;
@@ -274,6 +275,7 @@ impl Sidebar {
 
         {
             let mask = &mut app.masks.stack.masks[mask_index];
+            let compact_android = crate::ui::theme::is_compact_portrait(ui);
             if mask_effect_picker_visible(orientation, vertical_section) {
                 effect_changed |= Self::show_mask_effect_picker(ui, &mut mask.effect);
                 crate::ui::theme::card_gap(ui);
@@ -350,28 +352,30 @@ impl Sidebar {
                         MaskSection::ColorMixer => "Color Mixer",
                     };
                     if mask.effect.uses_adjustments() {
-                        crate::ui::theme::toolbar_row(ui, |ui| {
-                            ui.strong(section_title);
-                            if mask_section != MaskSection::Properties {
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if crate::ui::icons::phosphor_icon_button(
-                                            ui,
-                                            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                                            crate::ui::theme::toolbar_icon_size(),
-                                            "Reset local adjustments",
-                                        )
-                                        .clicked()
-                                        {
-                                            mask.adjustments.reset();
-                                            adjustments_changed = true;
-                                        }
-                                    },
-                                );
-                            }
-                        });
-                        ui.add_space(4.0);
+                        if !compact_android {
+                            crate::ui::theme::toolbar_row(ui, |ui| {
+                                ui.strong(section_title);
+                                if mask_section != MaskSection::Properties {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if crate::ui::icons::phosphor_icon_button(
+                                                ui,
+                                                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                                                crate::ui::theme::toolbar_icon_size(),
+                                                "Reset local adjustments",
+                                            )
+                                            .clicked()
+                                            {
+                                                mask.adjustments.reset();
+                                                adjustments_changed = true;
+                                            }
+                                        },
+                                    );
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
 
                         match mask_section {
                             MaskSection::Properties => {
@@ -446,6 +450,44 @@ impl Sidebar {
             }
         }
 
+        if crate::ui::theme::is_compact_portrait(ui)
+            && vertical_section.is_some_and(|section| section != MaskSection::Properties)
+            && app.masks.stack.masks[mask_index].effect.uses_adjustments()
+        {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!(
+                        "{}  Reset local adjustments",
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                    ))
+                    .on_hover_text("Reset local adjustments")
+                    .clicked()
+                {
+                    app.masks.stack.masks[mask_index].adjustments.reset();
+                    adjustments_changed = true;
+                }
+            });
+            ui.add_space(crate::ui::theme::SPACE_XS);
+        }
+
+        if crate::ui::theme::is_compact_portrait(ui)
+            && vertical_section == Some(MaskSection::Properties)
+        {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!(
+                        "{}  Reset all masks",
+                        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                    ))
+                    .on_hover_text("Reset all masks and clear the subject mask cache")
+                    .clicked()
+                {
+                    reset_all_masks_requested = true;
+                }
+            });
+            ui.add_space(crate::ui::theme::SPACE_XS);
+        }
+
         app.develop_ui.tone_curve_tab = local_curve_tab;
         app.develop_ui.color_grade_tab = local_color_grade_tab;
         app.develop_ui.hsl_mixer_color = local_hsl_mixer_color;
@@ -477,6 +519,9 @@ impl Sidebar {
         }
         if adjustments_changed || effect_changed {
             app.mark_mask_adjustments_dirty();
+        }
+        if reset_all_masks_requested {
+            app.reset_masks();
         }
         edit_header_rect
     }

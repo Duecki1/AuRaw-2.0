@@ -30,6 +30,7 @@ Download the latest release [here](https://github.com/Duecki1/AuRaw-2.0/releases
 Feel free to open a Pull Request or create an issue :D.
 
 ### Roadmap / To-Do
+- [ ] Bundle ONNX Runtime
 - [ ] Currently waiting for feedback
 
 ## Special Thanks
