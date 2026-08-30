@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 17;
+const SETTINGS_VERSION: u32 = 18;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29,6 +29,8 @@ pub(crate) struct PerformanceSettings {
     pub ui_design: crate::ui::theme::UiDesign,
     #[serde(default)]
     pub preview_backdrop: crate::ui::theme::PreviewBackdrop,
+    #[serde(default)]
+    pub onboarding_completed: bool,
     #[serde(default)]
     pub birefnet_quality: crate::ai_masks::BiRefNetQuality,
     #[cfg(not(target_os = "android"))]
@@ -123,6 +125,7 @@ impl Default for PerformanceSettings {
             show_develop_navigation_labels: false,
             ui_design: crate::ui::theme::UiDesign::default(),
             preview_backdrop: crate::ui::theme::PreviewBackdrop::default(),
+            onboarding_completed: false,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: true,
@@ -163,6 +166,11 @@ impl PerformanceSettings {
             self.adjustment_copy_settings.geometry = false;
             self.adjustment_copy_settings.camera_profile = true;
             self.adjustment_copy_settings.ai_masks = self.adjustment_copy_settings.masks;
+        }
+        if loaded_version < 18 {
+            // Existing installations already have these preferences configured. Only a genuinely
+            // new settings file should open the first-run setup assistant.
+            self.onboarding_completed = true;
         }
         self.raw_cache_files = self
             .raw_cache_files
@@ -323,6 +331,7 @@ mod tests {
             show_develop_navigation_labels: true,
             ui_design: crate::ui::theme::UiDesign::DaylightBlue,
             preview_backdrop: crate::ui::theme::PreviewBackdrop::White,
+            onboarding_completed: true,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: false,
@@ -378,6 +387,7 @@ mod tests {
             settings.preview_backdrop,
             crate::ui::theme::PreviewBackdrop::White
         );
+        assert!(settings.onboarding_completed);
         assert_eq!(
             settings.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::High
@@ -476,6 +486,18 @@ mod tests {
             settings.adjustment_copy_settings,
             crate::sidecar::AdjustmentCopySettings::default()
         );
+        assert!(!settings.onboarding_completed);
+    }
+
+    #[test]
+    fn legacy_settings_do_not_reopen_first_run_onboarding() {
+        let settings = serde_json::from_str::<PerformanceSettings>(
+            r#"{"version":17,"raw_cache_files":1,"thumbnail_workers":1}"#,
+        )
+        .expect("version 17 settings should remain readable")
+        .sanitized();
+
+        assert!(settings.onboarding_completed);
     }
 
     #[test]

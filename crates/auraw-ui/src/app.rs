@@ -1003,6 +1003,7 @@ pub(crate) struct PreferencesState {
     pub(crate) discord_rich_presence: bool,
     pub(crate) ui_design: UiDesign,
     pub(crate) preview_backdrop: PreviewBackdrop,
+    pub(crate) onboarding_completed: bool,
     pub(crate) adjustment_copy_settings: AdjustmentCopySettings,
     pub(crate) performance_settings_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
@@ -1028,12 +1029,22 @@ pub(crate) struct PreferencesState {
     pub(crate) last_camera_profile: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum OnboardingStep {
+    Appearance,
+    Preview,
+    CopyPaste,
+    #[cfg(not(target_os = "android"))]
+    Ai,
+}
+
 pub(crate) struct UiState {
     pub(crate) active_tab: AppTab,
     pub(crate) sidebar_tab: SidebarTab,
     pub(crate) status: String,
     pub(crate) adaptive_preview_backdrop: egui::Color32,
     pub(crate) notice: Option<String>,
+    pub(crate) onboarding_step: Option<OnboardingStep>,
     pub(crate) thumbnail_cache_size: Option<Result<u64, String>>,
     pub(crate) thumbnail_cache_size_receiver: Option<mpsc::Receiver<Result<u64, String>>>,
     #[cfg(not(target_os = "android"))]

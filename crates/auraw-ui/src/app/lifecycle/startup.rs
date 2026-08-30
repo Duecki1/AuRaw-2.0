@@ -205,6 +205,7 @@ impl AurawApp {
                 discord_rich_presence: performance.discord_rich_presence,
                 ui_design: performance.ui_design,
                 preview_backdrop: performance.preview_backdrop,
+                onboarding_completed: performance.onboarding_completed,
                 adjustment_copy_settings: performance.adjustment_copy_settings,
                 performance_settings_path,
                 #[cfg(not(target_os = "android"))]
@@ -239,6 +240,8 @@ impl AurawApp {
                 status: "Open a RAW or TIFF file to get started.".to_owned(),
                 adaptive_preview_backdrop: crate::ui::theme::CANVAS_BACKDROP,
                 notice: None,
+                onboarding_step: (!performance.onboarding_completed)
+                    .then_some(OnboardingStep::Appearance),
             },
             library: LibraryState::new_desktop_with_preferences(
                 performance.thumbnail_workers,
@@ -480,6 +483,7 @@ impl AurawApp {
                 show_develop_navigation_labels: performance.show_develop_navigation_labels,
                 ui_design: performance.ui_design,
                 preview_backdrop: performance.preview_backdrop,
+                onboarding_completed: performance.onboarding_completed,
                 adjustment_copy_settings: performance.adjustment_copy_settings,
                 performance_settings_path,
                 #[cfg(not(target_os = "android"))]
@@ -512,6 +516,8 @@ impl AurawApp {
                 status: "Open a RAW or TIFF file to get started.".to_owned(),
                 adaptive_preview_backdrop: crate::ui::theme::CANVAS_BACKDROP,
                 notice: None,
+                onboarding_step: (!performance.onboarding_completed)
+                    .then_some(OnboardingStep::Appearance),
             },
             library: LibraryState::new_android_with_workers(
                 android_app.clone(),
