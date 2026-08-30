@@ -237,9 +237,7 @@ impl Sidebar {
         frame: &eframe::Frame,
         orientation: MaskStripOrientation,
     ) -> Option<egui::Rect> {
-        let Some((mask_index, component_index)) = app.masks.stack.ensure_selection() else {
-            return None;
-        };
+        let (mask_index, component_index) = app.masks.stack.ensure_selection()?;
 
         let vertical_section = (orientation == MaskStripOrientation::Vertical).then(|| {
             if !app.masks.stack.masks[mask_index].effect.uses_adjustments() {
