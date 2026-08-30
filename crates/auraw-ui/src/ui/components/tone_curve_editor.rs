@@ -1,7 +1,9 @@
 use crate::app::ToneCurveTab;
 use crate::pipeline::{PointCurve, MAX_POINT_CURVE_POINTS};
 use crate::ui::theme::{CHANNEL_BLUE, CHANNEL_GREEN, CHANNEL_RED};
-use eframe::egui::{self, Align, Color32, Pos2, Sense, Stroke, StrokeKind, Ui};
+#[cfg(not(target_os = "android"))]
+use eframe::egui::Align;
+use eframe::egui::{self, Color32, Pos2, Sense, Stroke, StrokeKind, Ui};
 
 const CURVE_HEIGHT: f32 = 210.0;
 const POINT_RADIUS: f32 = 5.0;
@@ -255,11 +257,15 @@ const TONE_CURVE_TABS: [(ToneCurveTab, &str, Color32); 4] = [
 
 pub(crate) fn tone_curve_channel_editor(
     ui: &mut Ui,
-    curves: ToneCurveChannels<'_>,
+    mut curves: ToneCurveChannels<'_>,
     selected_tab: &mut ToneCurveTab,
     min_segment_width: f32,
 ) -> bool {
     let mut changed = false;
+    #[cfg(target_os = "android")]
+    let _ = min_segment_width;
+
+    #[cfg(not(target_os = "android"))]
     ui.horizontal(|ui| {
         let spacing = ui.spacing().item_spacing.x;
         let segment_width =
@@ -284,25 +290,79 @@ pub(crate) fn tone_curve_channel_editor(
             )
             .clicked()
             {
-                match *selected_tab {
-                    ToneCurveTab::Rgb => curves.rgb.reset(),
-                    ToneCurveTab::Red => curves.red.reset(),
-                    ToneCurveTab::Green => curves.green.reset(),
-                    ToneCurveTab::Blue => curves.blue.reset(),
-                }
+                reset_selected_tone_curve(&mut curves, *selected_tab);
                 changed = true;
             }
         });
     });
 
-    let (curve, color) = match *selected_tab {
+    #[cfg(not(target_os = "android"))]
+    {
+        let (curve, color) = selected_tone_curve(curves, *selected_tab);
+        changed |= tone_curve_editor(ui, curve, color);
+    }
+
+    #[cfg(target_os = "android")]
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            let control_height = crate::ui::theme::CONTROL_HEIGHT;
+            ui.spacing_mut().item_spacing.y =
+                ((CURVE_HEIGHT - control_height * 5.0) / 4.0).max(0.0);
+
+            for (tab, label, color) in TONE_CURVE_TABS {
+                let text = egui::RichText::new(label).color(color);
+                if crate::ui::theme::segmented_button(
+                    ui,
+                    text,
+                    *selected_tab == tab,
+                    crate::ui::theme::TOOLBAR_ICON_EDGE,
+                )
+                .on_hover_text(tone_curve_description(tab))
+                .clicked()
+                {
+                    *selected_tab = tab;
+                }
+            }
+
+            if crate::ui::icons::phosphor_icon_button(
+                ui,
+                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+                crate::ui::theme::toolbar_icon_size(),
+                "Reset the selected tone curve",
+            )
+            .clicked()
+            {
+                reset_selected_tone_curve(&mut curves, *selected_tab);
+                changed = true;
+            }
+        });
+
+        let (curve, color) = selected_tone_curve(curves, *selected_tab);
+        changed |= tone_curve_editor(ui, curve, color);
+    });
+
+    changed
+}
+
+fn selected_tone_curve(
+    curves: ToneCurveChannels<'_>,
+    selected_tab: ToneCurveTab,
+) -> (&mut PointCurve, Color32) {
+    match selected_tab {
         ToneCurveTab::Rgb => (curves.rgb, Color32::WHITE),
         ToneCurveTab::Red => (curves.red, CHANNEL_RED),
         ToneCurveTab::Green => (curves.green, CHANNEL_GREEN),
         ToneCurveTab::Blue => (curves.blue, CHANNEL_BLUE),
-    };
-    changed |= tone_curve_editor(ui, curve, color);
-    changed
+    }
+}
+
+fn reset_selected_tone_curve(curves: &mut ToneCurveChannels<'_>, selected_tab: ToneCurveTab) {
+    match selected_tab {
+        ToneCurveTab::Rgb => curves.rgb.reset(),
+        ToneCurveTab::Red => curves.red.reset(),
+        ToneCurveTab::Green => curves.green.reset(),
+        ToneCurveTab::Blue => curves.blue.reset(),
+    }
 }
 
 fn tone_curve_description(tab: ToneCurveTab) -> &'static str {

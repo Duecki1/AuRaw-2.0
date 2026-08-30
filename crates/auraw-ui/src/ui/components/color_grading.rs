@@ -8,6 +8,27 @@ use eframe::egui::{self, Color32, Mesh, Pos2, Sense, Shape, Stroke, Ui};
 const WHEEL_MAX_SIZE: f32 = 190.0;
 const ANGULAR_SEGMENTS: usize = 96;
 const RADIAL_SEGMENTS: usize = 12;
+#[cfg(target_os = "android")]
+const ANDROID_TAB_RAIL_WIDTH: f32 = 72.0;
+
+const COLOR_GRADE_TABS: [(ColorGradeTab, &str, &str); 4] = [
+    (
+        ColorGradeTab::Shadows,
+        "Shadows",
+        "Grade the darker tonal range",
+    ),
+    (
+        ColorGradeTab::Midtones,
+        "Mid",
+        "Grade the middle tonal range",
+    ),
+    (
+        ColorGradeTab::Highlights,
+        "High",
+        "Grade the brighter tonal range",
+    ),
+    (ColorGradeTab::Global, "Global", "Grade all tones uniformly"),
+];
 
 pub(crate) fn color_grading_editor(
     ui: &mut Ui,
@@ -30,6 +51,7 @@ fn color_grading_editor_contents(
     ui.set_width(editor_width);
     ui.set_max_width(editor_width);
 
+    #[cfg(not(target_os = "android"))]
     crate::ui::theme::toolbar_row(ui, |ui| {
         ui.strong("Four-way color grading");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -47,45 +69,37 @@ fn color_grading_editor_contents(
         });
     });
 
-    ui.horizontal(|ui| {
-        let segment_width =
-            ((ui.available_width() - ui.spacing().item_spacing.x * 3.0).max(4.0)) / 4.0;
-        for (tab, label, tooltip) in [
-            (
-                ColorGradeTab::Shadows,
-                "Shadows",
-                "Grade the darker tonal range",
-            ),
-            (
-                ColorGradeTab::Midtones,
-                "Mid",
-                "Grade the middle tonal range",
-            ),
-            (
-                ColorGradeTab::Highlights,
-                "High",
-                "Grade the brighter tonal range",
-            ),
-            (ColorGradeTab::Global, "Global", "Grade all tones uniformly"),
-        ] {
-            if crate::ui::theme::segmented_button(ui, label, *selected == tab, segment_width)
-                .on_hover_text(tooltip)
-                .clicked()
-            {
-                *selected = tab;
-            }
-        }
-    });
-    ui.add_space(4.0);
-
+    #[cfg(not(target_os = "android"))]
     {
-        let (wheel_id, wheel) = match selected {
-            ColorGradeTab::Shadows => ("shadows", &mut grading.shadows),
-            ColorGradeTab::Midtones => ("midtones", &mut grading.midtones),
-            ColorGradeTab::Highlights => ("highlights", &mut grading.highlights),
-            ColorGradeTab::Global => ("global", &mut grading.global),
-        };
+        color_grade_tab_row(ui, selected);
+        ui.add_space(4.0);
+
+        let (wheel_id, wheel) = selected_color_wheel(grading, *selected);
         changed |= ui.push_id(wheel_id, |ui| color_wheel(ui, wheel)).inner;
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        ui.horizontal(|ui| {
+            color_grade_tab_rail(ui, selected);
+            let (wheel_id, wheel) = selected_color_wheel(grading, *selected);
+            let wheel_edge = ui.available_width().clamp(1.0, WHEEL_MAX_SIZE);
+            changed |= ui
+                .allocate_ui_with_layout(
+                    egui::vec2(wheel_edge, wheel_edge),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.push_id((wheel_id, "picker"), |ui| color_wheel_picker(ui, wheel))
+                            .inner
+                    },
+                )
+                .inner;
+        });
+
+        let (wheel_id, wheel) = selected_color_wheel(grading, *selected);
+        changed |= ui
+            .push_id((wheel_id, "sliders"), |ui| color_wheel_sliders(ui, wheel))
+            .inner;
     }
 
     ui.separator();
@@ -111,10 +125,67 @@ fn color_grading_editor_contents(
     changed
 }
 
+#[cfg(not(target_os = "android"))]
+fn color_grade_tab_row(ui: &mut Ui, selected: &mut ColorGradeTab) {
+    ui.horizontal(|ui| {
+        let segment_width =
+            ((ui.available_width() - ui.spacing().item_spacing.x * 3.0).max(4.0)) / 4.0;
+        for (tab, label, tooltip) in COLOR_GRADE_TABS {
+            if crate::ui::theme::segmented_button(ui, label, *selected == tab, segment_width)
+                .on_hover_text(tooltip)
+                .clicked()
+            {
+                *selected = tab;
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "android")]
+fn color_grade_tab_rail(ui: &mut Ui, selected: &mut ColorGradeTab) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y =
+            ((WHEEL_MAX_SIZE - crate::ui::theme::CONTROL_HEIGHT * 4.0) / 3.0).max(0.0);
+        for (tab, label, tooltip) in COLOR_GRADE_TABS {
+            if crate::ui::theme::segmented_button(
+                ui,
+                label,
+                *selected == tab,
+                ANDROID_TAB_RAIL_WIDTH,
+            )
+            .on_hover_text(tooltip)
+            .clicked()
+            {
+                *selected = tab;
+            }
+        }
+    });
+}
+
+fn selected_color_wheel(
+    grading: &mut ColorGrading,
+    selected: ColorGradeTab,
+) -> (&'static str, &mut ColorGradeWheel) {
+    match selected {
+        ColorGradeTab::Shadows => ("shadows", &mut grading.shadows),
+        ColorGradeTab::Midtones => ("midtones", &mut grading.midtones),
+        ColorGradeTab::Highlights => ("highlights", &mut grading.highlights),
+        ColorGradeTab::Global => ("global", &mut grading.global),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
     let mut changed = false;
-    let size = ui.available_width().clamp(1.0, WHEEL_MAX_SIZE);
+    changed |= color_wheel_toolbar(ui, wheel);
+    changed |= color_wheel_picker(ui, wheel);
+    changed |= color_wheel_sliders(ui, wheel);
+    changed
+}
 
+#[cfg(not(target_os = "android"))]
+fn color_wheel_toolbar(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
+    let mut changed = false;
     crate::ui::theme::toolbar_row(ui, |ui| {
         ui.strong("Hue / Saturation");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -131,6 +202,12 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
             }
         });
     });
+    changed
+}
+
+fn color_wheel_picker(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
+    let mut changed = false;
+    let size = ui.available_width().clamp(1.0, WHEEL_MAX_SIZE);
 
     ui.vertical_centered(|ui| {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::click_and_drag());
@@ -200,6 +277,12 @@ fn color_wheel(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
             "Drag from the center to choose hue and saturation. Double-click the wheel to reset it.",
         )
     });
+
+    changed
+}
+
+fn color_wheel_sliders(ui: &mut Ui, wheel: &mut ColorGradeWheel) -> bool {
+    let mut changed = false;
 
     changed |= gradient_adjustment_slider(
         ui,
