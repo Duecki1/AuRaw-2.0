@@ -14,9 +14,36 @@ concurrency:
 
 jobs:
   build-windows:
-    name: Windows x86_64 (GNU + LibRaw)
-    runs-on: windows-latest
+    name: Windows ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64 (GNU + LibRaw)
+            runner: windows-latest
+            target: x86_64-pc-windows-gnu
+            msystem: MINGW64
+            msys_prefix: /mingw64
+            toolchain_package: mingw-w64-x86_64-toolchain
+            clang_package: mingw-w64-x86_64-clang
+            libraw_package: mingw-w64-x86_64-libraw
+            lensfun_package: mingw-w64-x86_64-lensfun
+            compiler: x86_64-w64-mingw32-gcc
+            artifact_arch: x86_64
+          - name: ARM64 (GNU LLVM + LibRaw)
+            runner: windows-11-arm
+            target: aarch64-pc-windows-gnullvm
+            msystem: CLANGARM64
+            msys_prefix: /clangarm64
+            toolchain_package: mingw-w64-clang-aarch64-toolchain
+            clang_package: mingw-w64-clang-aarch64-clang
+            libraw_package: mingw-w64-clang-aarch64-libraw
+            lensfun_package: mingw-w64-clang-aarch64-lensfun
+            compiler: clang
+            artifact_arch: arm64
 
     defaults:
       run:
@@ -28,6 +55,13 @@ jobs:
       RUST_BACKTRACE: "1"
       PKG_CONFIG_ALLOW_CROSS: "1"
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+      CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER: clang
+      CC_aarch64_pc_windows_gnullvm: clang
+      CXX_aarch64_pc_windows_gnullvm: clang++
+      AR_aarch64_pc_windows_gnullvm: llvm-ar
+      # Clang calls this ABI "gnu"; its triple parser does not accept Rust's
+      # equivalent "gnullvm" suffix when bindgen parses native headers.
+      BINDGEN_EXTRA_CLANG_ARGS_aarch64_pc_windows_gnullvm: --target=aarch64-pc-windows-gnu
 
     steps:
       # Line endings
@@ -59,47 +93,47 @@ jobs:
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-14
         with:
           toolchain: 1.92.0
-          targets: x86_64-pc-windows-gnu
+          targets: ${{ matrix.target }}
           components: clippy, rustfmt
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: windows-gnu
+          shared-key: windows-${{ matrix.target }}
 
       - name: Install MSYS2 build dependencies
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
         with:
-          msystem: MINGW64
+          msystem: ${{ matrix.msystem }}
           update: true
           path-type: inherit
           install: >-
             git
             zip
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-clang
-            mingw-w64-x86_64-libraw
-            mingw-w64-x86_64-lensfun
+            ${{ matrix.toolchain_package }}
+            ${{ matrix.clang_package }}
+            ${{ matrix.libraw_package }}
+            ${{ matrix.lensfun_package }}
 
       - name: Verify native dependencies
         run: |
-          export PKG_CONFIG_PATH="$(cygpath -w /mingw64/lib/pkgconfig);$(cygpath -w /mingw64/share/pkgconfig)"
-          export LIBCLANG_PATH="$(cygpath -w /mingw64/bin)"
+          export PKG_CONFIG_PATH="$(cygpath -w ${{ matrix.msys_prefix }}/lib/pkgconfig);$(cygpath -w ${{ matrix.msys_prefix }}/share/pkgconfig)"
+          export LIBCLANG_PATH="$(cygpath -w ${{ matrix.msys_prefix }}/bin)"
 
-          x86_64-w64-mingw32-gcc --version
+          ${{ matrix.compiler }} --version
           objdump --version
           cargo --version
           rustc --version
           pkg-config --modversion libraw || pkg-config --modversion libraw_r
           pkg-config --modversion lensfun
-          test -f /mingw64/bin/libclang.dll
+          test -f ${{ matrix.msys_prefix }}/bin/libclang.dll
 
       - name: Build release binaries
         env:
           AURAW_DISCORD_APPLICATION_ID: ${{ secrets.AURAW_DISCORD_APPLICATION_ID }}
         run: |
-          export PKG_CONFIG_PATH="$(cygpath -w /mingw64/lib/pkgconfig);$(cygpath -w /mingw64/share/pkgconfig)"
-          export LIBCLANG_PATH="$(cygpath -w /mingw64/bin)"
+          export PKG_CONFIG_PATH="$(cygpath -w ${{ matrix.msys_prefix }}/lib/pkgconfig);$(cygpath -w ${{ matrix.msys_prefix }}/share/pkgconfig)"
+          export LIBCLANG_PATH="$(cygpath -w ${{ matrix.msys_prefix }}/bin)"
 
           revision="$(git rev-parse --verify HEAD)"
           export AURAW_REQUIRE_COMMITTED_SOURCE=1
@@ -110,10 +144,10 @@ jobs:
             --locked \
             --release \
             --package auraw-ui \
-            --target x86_64-pc-windows-gnu \
+            --target "${{ matrix.target }}" \
             --bin auraw
 
-          release_dir="target/x86_64-pc-windows-gnu/release"
+          release_dir="target/${{ matrix.target }}/release"
           test -f "$release_dir/auraw.exe"
           objdump -h "$release_dir/auraw.exe" | grep -q '\.rsrc'
           # GUI subsystem
@@ -123,10 +157,10 @@ jobs:
 
       - name: Package Windows artifact
         run: |
-          export PKG_CONFIG_PATH="$(cygpath -w /mingw64/lib/pkgconfig);$(cygpath -w /mingw64/share/pkgconfig)"
+          export PKG_CONFIG_PATH="$(cygpath -w ${{ matrix.msys_prefix }}/lib/pkgconfig);$(cygpath -w ${{ matrix.msys_prefix }}/share/pkgconfig)"
 
-          release_dir="target/x86_64-pc-windows-gnu/release"
-          package_name="AuRaw-windows-x86_64"
+          release_dir="target/${{ matrix.target }}/release"
+          package_name="AuRaw-windows-${{ matrix.artifact_arch }}"
           package_dir="dist/$package_name"
 
           rm -rf dist
@@ -134,7 +168,7 @@ jobs:
           cp "$release_dir/auraw.exe" "$package_dir/"
           cp COPYING NOTICE.md THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md README.md "$package_dir/"
 
-          lensfun_db="$(find /mingw64/share/lensfun -type f -name '*.xml' -printf '%h\n' | head -n 1)"
+          lensfun_db="$(find ${{ matrix.msys_prefix }}/share/lensfun -type f -name '*.xml' -printf '%h\n' | head -n 1)"
           test -n "$lensfun_db"
           mkdir -p "$package_dir/lensfun"
           cp -a "$lensfun_db"/. "$package_dir/lensfun/"
@@ -153,17 +187,17 @@ jobs:
                   cp "$dll" "$package_dir/$dll_name"
                   changed=1
                 fi
-              done < <(ldd "$binary" | awk '$3 ~ /^\/mingw64\/bin\// { print $3 }')
+              done < <(ldd "$binary" | awk -v prefix="${{ matrix.msys_prefix }}/bin/" '$3 ~ ("^" prefix) { print $3 }')
             done
           done
 
           libraw_version="$(pkg-config --modversion libraw 2>/dev/null || pkg-config --modversion libraw_r)"
           lensfun_version="$(pkg-config --modversion lensfun)"
           {
-            echo "AuRaw Windows x86_64 build"
+            echo "AuRaw Windows ${{ matrix.artifact_arch }} build"
             echo "Source revision: $(git rev-parse --verify HEAD)"
             echo "Rust compiler: $(rustc --version)"
-            echo "Target: x86_64-pc-windows-gnu"
+            echo "Target: ${{ matrix.target }}"
             echo "LibRaw: $libraw_version"
             echo "Lensfun: $lensfun_version"
           } > "$package_dir/BUILD-INFO.txt"
@@ -177,6 +211,6 @@ jobs:
       - name: Upload Windows artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: AuRaw-windows-x86_64
-          path: dist/AuRaw-windows-x86_64/
+          name: AuRaw-windows-${{ matrix.artifact_arch }}
+          path: dist/AuRaw-windows-${{ matrix.artifact_arch }}/
           if-no-files-found: error
