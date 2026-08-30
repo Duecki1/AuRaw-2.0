@@ -510,12 +510,14 @@ where
     });
     let mut slider_drag_active = pointer.2
         && slider_scroll_lock_owner(ui.ctx()).is_some_and(|owner| owner == slider_drag_id);
+    let slider_owns_pointer =
+        track_response.contains_pointer() || handle_response.contains_pointer();
     if !reset_requested {
         if let (Some(origin), Some(position), true) = pointer {
             if slider_drag_active {
                 lock_slider_scroll(ui.ctx(), slider_drag_id);
                 changed |= set_from_pointer(value, start, end, decimals, track_rect, position.x);
-            } else if rect.contains(origin) {
+            } else if rect.contains(origin) && slider_owns_pointer {
                 let delta = position - origin;
                 let began_on_handle = handle_hit_rect.contains(origin);
                 let threshold = if began_on_handle {
@@ -877,7 +879,7 @@ where
 mod tests {
     use super::{
         adjustment_slider, compact_slider_widths, gradient_color_at, SliderGradient,
-        COMPACT_ROW_GAP, HEADER_HEIGHT, VALUE_FIELD_WIDTH,
+        COMPACT_ROW_GAP, HEADER_HEIGHT, SLIDER_HEIGHT, VALUE_FIELD_WIDTH,
     };
 
     fn pointer_input(events: Vec<eframe::egui::Event>) -> eframe::egui::RawInput {
@@ -896,9 +898,29 @@ mod tests {
         input: eframe::egui::RawInput,
         value: &mut u8,
     ) {
+        show_test_slider_with_bar(ctx, input, value, false);
+    }
+
+    fn show_test_slider_with_bar(
+        ctx: &eframe::egui::Context,
+        input: eframe::egui::RawInput,
+        value: &mut u8,
+        cover_slider: bool,
+    ) {
         let _ = ctx.run_ui(input, |ui| {
             ui.set_width(400.0);
             adjustment_slider(ui, "Quality", value, 1..=100, 0, 1.0, None);
+            if cover_slider {
+                eframe::egui::Area::new(eframe::egui::Id::new("test-bottom-bar"))
+                    .order(eframe::egui::Order::Foreground)
+                    .fixed_pos(eframe::egui::pos2(0.0, HEADER_HEIGHT + 4.0))
+                    .show(ui.ctx(), |ui| {
+                        ui.allocate_exact_size(
+                            eframe::egui::vec2(400.0, SLIDER_HEIGHT),
+                            eframe::egui::Sense::click_and_drag(),
+                        );
+                    });
+            }
         });
     }
 
@@ -969,6 +991,34 @@ mod tests {
         );
 
         assert_eq!(value, dragged_value);
+    }
+
+    #[test]
+    fn foreground_bar_blocks_slider_drag_beneath_it() {
+        use eframe::egui::{pos2, Event, Modifiers, PointerButton};
+
+        let ctx = eframe::egui::Context::default();
+        let mut value = 50;
+        show_test_slider_with_bar(&ctx, pointer_input(Vec::new()), &mut value, true);
+
+        let slider_y = HEADER_HEIGHT + 4.0 + SLIDER_HEIGHT * 0.5;
+        show_test_slider_with_bar(
+            &ctx,
+            pointer_input(vec![
+                Event::PointerMoved(pos2(100.0, slider_y)),
+                Event::PointerButton {
+                    pos: pos2(100.0, slider_y),
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                Event::PointerMoved(pos2(300.0, slider_y)),
+            ]),
+            &mut value,
+            true,
+        );
+
+        assert_eq!(value, 50);
     }
 
     #[test]
