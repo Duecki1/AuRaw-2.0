@@ -348,13 +348,19 @@ impl eframe::App for AurawApp {
 
         if self.ui.active_tab == AppTab::Library && self.library.folder_sidebar_open() {
             #[cfg(not(target_os = "android"))]
-            egui::Panel::left("library_folder_sidebar")
-                .resizable(true)
-                .min_size(220.0)
-                .max_size((viewport_size.x * 0.45).max(220.0))
-                .default_size(260.0)
-                .frame(crate::ui::theme::panel_frame(ui))
-                .show(ui, |ui| Library::show_folder_sidebar(ui, self));
+            {
+                let panel_max = (viewport_size.x * 0.48).clamp(
+                    ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH,
+                    ScreenLayout::MAX_HORIZONTAL_SIDEBAR_WIDTH,
+                );
+                egui::Panel::left("library_folder_sidebar")
+                    .resizable(true)
+                    .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
+                    .max_size(panel_max)
+                    .default_size(sidebar_size.min(panel_max))
+                    .frame(crate::ui::theme::panel_frame(ui))
+                    .show(ui, |ui| Library::show_folder_sidebar(ui, self));
+            }
             #[cfg(target_os = "android")]
             egui::Panel::left("library_folder_sidebar")
                 .resizable(false)

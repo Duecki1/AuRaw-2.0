@@ -397,7 +397,6 @@ pub(in crate::ui::library) fn apply_local_toolbar_action(
 pub(in crate::ui::library) fn show_local_folder_tree(
     ui: &mut Ui,
     app: &mut AurawApp,
-    tree_height: f32,
     action_in_progress: bool,
 ) {
     let tree = app.library.folder_tree.as_ref();
@@ -409,32 +408,26 @@ pub(in crate::ui::library) fn show_local_folder_tree(
     let mut requested_folder = None;
     let mut requested_action = None;
 
-    egui::ScrollArea::both()
-        .max_height(tree_height)
-        .min_scrolled_height(tree_height)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if let (Some(tree), Some(root_folder)) = (tree, root_folder) {
-                show_library_folder_node(
-                    ui,
-                    tree,
-                    root_folder,
-                    selected_folder,
-                    clipboard,
-                    image_clipboard,
-                    action_in_progress,
-                    expanded_folders,
-                    &mut requested_folder,
-                    &mut requested_action,
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new("Open a top-level folder to browse its hierarchy.")
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                );
-            }
-        });
+    if let (Some(tree), Some(root_folder)) = (tree, root_folder) {
+        show_library_folder_node(
+            ui,
+            tree,
+            root_folder,
+            selected_folder,
+            clipboard,
+            image_clipboard,
+            action_in_progress,
+            expanded_folders,
+            &mut requested_folder,
+            &mut requested_action,
+        );
+    } else {
+        ui.label(
+            egui::RichText::new("Open a top-level folder to browse its hierarchy.")
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+    }
 
     if let Some(folder) = requested_folder {
         app.select_library_folder(folder);

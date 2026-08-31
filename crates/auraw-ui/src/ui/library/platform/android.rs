@@ -181,7 +181,6 @@ pub(in crate::ui::library) fn apply_local_toolbar_action(
 pub(in crate::ui::library) fn show_local_folder_tree(
     ui: &mut Ui,
     app: &mut AurawApp,
-    tree_height: f32,
     action_in_progress: bool,
 ) {
     let PlatformLibraryState {
@@ -199,22 +198,16 @@ pub(in crate::ui::library) fn show_local_folder_tree(
     }
     let mut requested_action = None;
 
-    egui::ScrollArea::both()
-        .max_height(tree_height)
-        .min_scrolled_height(tree_height)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            show_android_library_folder_node(
-                ui,
-                "",
-                "Library",
-                &children_by_parent,
-                selected_folder.as_str(),
-                action_in_progress,
-                expanded_folders,
-                &mut requested_action,
-            );
-        });
+    show_android_library_folder_node(
+        ui,
+        "",
+        "Library",
+        &children_by_parent,
+        selected_folder.as_str(),
+        action_in_progress,
+        expanded_folders,
+        &mut requested_action,
+    );
 
     if let Some(action) = requested_action {
         apply_android_library_folder_ui_action(app, action, ui.ctx());

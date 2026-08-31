@@ -50,9 +50,31 @@ impl Library {
             });
         });
         crate::ui::theme::card_gap(ui);
-        crate::ui::theme::card_frame(ui).show(ui, |ui| {
-            let tree_height = ui.available_height().max(32.0);
-            platform::show_local_folder_tree(ui, app, tree_height, action_in_progress);
+        ui.scope(|ui| {
+            let mut scroll_style = egui::style::ScrollStyle::solid();
+            scroll_style.bar_width = 7.0;
+            scroll_style.bar_inner_margin = 7.0;
+            ui.spacing_mut().scroll = scroll_style;
+
+            egui::ScrollArea::vertical()
+                .id_salt("library-folder-sidebar-content")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let content_width = ui.available_width().max(1.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(content_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(content_width);
+                            ui.set_max_width(content_width);
+                            crate::ui::theme::card_frame(ui).show(ui, |ui| {
+                                platform::show_local_folder_tree(ui, app, action_in_progress);
+                            });
+                            ui.add_space(10.0);
+                        },
+                    );
+                });
         });
 
         if let Some(action) = requested_toolbar_action {
