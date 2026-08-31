@@ -99,9 +99,6 @@ impl AurawApp {
             crate::app::DesktopPickerEvent::OnnxRuntime(Err(error)) => {
                 self.ui.notice = Some(error);
             }
-            crate::app::DesktopPickerEvent::DisplayProfile(Some(path)) => {
-                self.apply_display_profile_override(path);
-            }
             _ => {}
         }
     }

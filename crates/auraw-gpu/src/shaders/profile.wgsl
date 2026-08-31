@@ -258,7 +258,7 @@ fn map_output_lut_input_rec2020(rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn apply_output_lut(rgb: vec3<f32>) -> vec3<f32> {
-    // ICC LUT output is destination-encoded; never apply an sRGB transfer afterward.
+    // The output LUT is sRGB-encoded; never apply an sRGB transfer afterward.
     let lut_info = Common::camera_uniforms.output_lut;
     if lut_info.x < 2u || lut_info.y < 2u || lut_info.z < 2u {
         let output_linear = Common::REC2020_TO_SRGB * rgb;

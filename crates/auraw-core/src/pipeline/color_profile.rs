@@ -8,8 +8,6 @@ mod icc;
 
 use crate::color_math::{rec2020_from_oklab, rec2020_to_oklab};
 use dcp::{profile_from_tags, profile_identity_from_tags, TiffReader};
-#[cfg(target_os = "android")]
-use icc::MatrixShaperProfile;
 
 #[cfg(test)]
 mod tests;
@@ -19,42 +17,8 @@ const PROFILE_TONE_LUT_SIZE: usize = 4096;
 const MAX_DCP_TAG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DCP_MAP_ENTRIES: usize = 1_000_000;
 const MAX_DCP_TONE_POINTS: usize = 65_536;
-#[cfg(any(target_os = "android", test))]
-const D50_XYZ: [f32; 3] = [0.964_22, 1.0, 0.825_21];
-
 pub(super) fn convert_embedded_icc_rgb_to_rec2020(bytes: &[u8], rgb: &mut [f32]) -> Result<()> {
     icc::convert_input_rgb_to_rec2020(bytes, rgb)
-}
-
-#[cfg(not(target_os = "android"))]
-#[derive(Clone, Debug)]
-pub struct DisplayIccProfile {
-    pub bytes: Vec<u8>,
-    pub label: String,
-    pub source: String,
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn read_display_icc_profile(path: &Path) -> Result<DisplayIccProfile> {
-    let profile = icc::read_display_profile_file(path)?;
-    Ok(DisplayIccProfile {
-        bytes: profile.bytes,
-        label: profile.label,
-        source: profile.source,
-    })
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn discover_display_icc_profile(
-    screen_point: Option<[i32; 2]>,
-) -> Result<Option<DisplayIccProfile>> {
-    Ok(
-        icc::discover_display_profile(screen_point)?.map(|profile| DisplayIccProfile {
-            bytes: profile.bytes,
-            label: profile.label,
-            source: profile.source,
-        }),
-    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -322,27 +286,19 @@ impl CameraProfile {
         ProfileGpuLayout::new(self)
     }
 
-    pub fn gpu_data(&self, output: &IccOutputTransform) -> ProfileGpuData {
+    pub fn gpu_data(&self, output: &SrgbOutputLut) -> ProfileGpuData {
         ProfileGpuData::new(self, output)
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RenderingIntent {
-    Perceptual,
-    RelativeColorimetric,
-    Saturation,
-    AbsoluteColorimetric,
-}
-
 #[derive(Clone, Debug)]
-pub struct IccOutputTransform {
+pub struct SrgbOutputLut {
     size: u32,
     entries: Vec<[f32; 4]>,
 }
 
-impl IccOutputTransform {
-    pub fn srgb() -> Self {
+impl SrgbOutputLut {
+    pub fn new() -> Self {
         let size = OUTPUT_LUT_EDGE;
         let mut entries = Vec::with_capacity((size * size * size) as usize);
         for b in 0..size {
@@ -359,35 +315,6 @@ impl IccOutputTransform {
             }
         }
         Self { size, entries }
-    }
-
-    pub fn from_icc(bytes: &[u8], intent: RenderingIntent) -> Result<Self> {
-        let size = OUTPUT_LUT_EDGE;
-        #[cfg(not(target_os = "android"))]
-        {
-            let entries = icc::build_lcms_output_lut(bytes, intent, size)?;
-            Ok(Self { size, entries })
-        }
-
-        #[cfg(target_os = "android")]
-        {
-            let profile = MatrixShaperProfile::parse(bytes)?;
-            let mut entries = Vec::with_capacity((size * size * size) as usize);
-            for b in 0..size {
-                for g in 0..size {
-                    for r in 0..size {
-                        let rgb = [
-                            output_lut_linear_node(r, size),
-                            output_lut_linear_node(g, size),
-                            output_lut_linear_node(b, size),
-                        ];
-                        let encoded = profile.transform(rgb, intent);
-                        entries.push([encoded[0], encoded[1], encoded[2], 0.0]);
-                    }
-                }
-            }
-            Ok(Self { size, entries })
-        }
     }
 
     pub fn size(&self) -> u32 {
@@ -531,7 +458,7 @@ pub struct ProfileGpuData {
 }
 
 impl ProfileGpuData {
-    fn new(profile: &CameraProfile, output: &IccOutputTransform) -> Self {
+    fn new(profile: &CameraProfile, output: &SrgbOutputLut) -> Self {
         let layout = profile.gpu_layout();
         debug_assert_eq!(output.size(), OUTPUT_LUT_EDGE);
         let total = layout.output[3] as usize + output.entries().len();
@@ -736,34 +663,6 @@ fn mul3(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {
     matrix.map(|row| row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2])
 }
 
-#[cfg(any(target_os = "android", test))]
-fn invert3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
-    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-    if !det.is_finite() || det.abs() < 1e-12 {
-        return None;
-    }
-    let inv = 1.0 / det;
-    Some([
-        [
-            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv,
-            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv,
-            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv,
-        ],
-        [
-            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv,
-            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv,
-            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv,
-        ],
-        [
-            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv,
-            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv,
-            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv,
-        ],
-    ])
-}
-
 pub(super) fn display_linear_rec2020_to_srgb(rgb: [f32; 3]) -> [f32; 3] {
     let linear = mul3(
         [
@@ -793,18 +692,6 @@ fn perceptual_gamut_compress(rgb: [f32; 3]) -> [f32; 3] {
         }
     }
     rgb.map(|value| (luma + (value - luma) * scale.clamp(0.0, 1.0)).clamp(0.0, 1.0))
-}
-
-#[cfg(any(target_os = "android", test))]
-fn saturation_gamut_compress(rgb: [f32; 3]) -> [f32; 3] {
-    let min = rgb[0].min(rgb[1]).min(rgb[2]);
-    let shifted = rgb.map(|v| v - min.min(0.0));
-    let max = shifted[0].max(shifted[1]).max(shifted[2]);
-    if max > 1.0 {
-        shifted.map(|v| (v / max).clamp(0.0, 1.0))
-    } else {
-        shifted.map(|v| v.clamp(0.0, 1.0))
-    }
 }
 
 fn srgb_encode(value: f32) -> f32 {

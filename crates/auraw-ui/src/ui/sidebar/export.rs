@@ -1,10 +1,8 @@
 pub(crate) fn export_settings_controls(
     ui: &mut Ui,
     settings: &mut crate::pipeline::ExportSettings,
-    fallback_picker_directory: Option<&std::path::Path>,
+    _fallback_picker_directory: Option<&std::path::Path>,
 ) {
-    #[cfg(target_os = "android")]
-    let _ = fallback_picker_directory;
     settings.resize_mode = ExportResizeMode::Original;
 
     crate::ui::theme::section_card_with_help(
@@ -34,75 +32,14 @@ pub(crate) fn export_settings_controls(
     crate::ui::theme::card_gap(ui);
     crate::ui::theme::section_card_with_help(
         ui,
-        "Color profile",
-        "Embeds the output color space used to interpret exported pixels. Float masters always use linear Rec.2020.",
+        "Color space",
+        "Integer exports use sRGB. Float TIFF masters use linear Rec.2020.",
         |ui| {
-        crate::ui::theme::form_combo_with_help(
-            ui,
-            "Output profile",
-            "export-output-profile",
-            if settings.bit_depth.is_float() {
-                "Linear Rec.2020"
-            } else {
-                settings.color_profile.label()
-            },
-            150.0,
-            "sRGB is the broadly compatible default. Desktop builds can embed a selected custom ICC profile. Float masters always embed linear Rec.2020.",
-            |ui| {
-                ui.add_enabled_ui(!settings.bit_depth.is_float(), |ui| {
-                    ui.selectable_value(
-                        &mut settings.color_profile,
-                        ExportColorProfile::Srgb,
-                        "sRGB",
-                    );
-                    #[cfg(not(target_os = "android"))]
-                    ui.selectable_value(
-                        &mut settings.color_profile,
-                        ExportColorProfile::CustomIcc,
-                        "Custom ICC",
-                    );
-                });
-            },
-        );
-
-        if !settings.bit_depth.is_float()
-            && settings.color_profile == ExportColorProfile::CustomIcc
-        {
-            #[cfg(not(target_os = "android"))]
-            {
-                if ui.button("Choose ICC profile…").clicked() {
-                    let mut dialog =
-                        rfd::FileDialog::new().add_filter("ICC profiles", &["icc", "icm"]);
-                    let selected_directory = settings
-                        .custom_icc_path
-                        .as_deref()
-                        .and_then(|path| path.parent())
-                        .filter(|parent| !parent.as_os_str().is_empty())
-                        .or(fallback_picker_directory);
-                    if let Some(directory) = selected_directory {
-                        dialog = dialog.set_directory(directory);
-                    }
-                    if let Some(path) = dialog.pick_file() {
-                        settings.custom_icc_path = Some(path);
-                    }
-                }
-            }
-            if let Some(path) = settings.custom_icc_path.as_deref() {
-                ui.label(
-                    egui::RichText::new(
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("Selected ICC profile"),
-                    )
-                    .small(),
-                );
-            } else {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    "Choose an ICC profile before export.",
-                );
-            }
-        }
+        ui.label(if settings.bit_depth.is_float() {
+            "Linear Rec.2020"
+        } else {
+            "sRGB"
+        });
     });
 
     crate::ui::theme::card_gap(ui);
@@ -190,12 +127,7 @@ impl Sidebar {
                         .is_ok()
                 });
                 let export_enabled = app.can_export() && dimensions_valid;
-                let profile_ready = app.export.settings.color_profile
-                    != ExportColorProfile::CustomIcc
-                    || app.export.settings.custom_icc_path.is_some()
-                    || app.export.settings.bit_depth.is_float();
                 let png_enabled = export_enabled
-                    && profile_ready
                     && app.export.settings.bit_depth != ExportBitDepth::Float32Linear;
                 let action_width = ui.available_width();
                 let png_response = ui
@@ -211,7 +143,7 @@ impl Sidebar {
                 }
                 ui.add_space(4.0);
                 let tiff_response = ui
-                    .add_enabled_ui(export_enabled && profile_ready, |ui| {
+                    .add_enabled_ui(export_enabled, |ui| {
                         ui.add_sized(
                             [action_width, crate::ui::theme::CONTROL_HEIGHT],
                             egui::Button::new("Export TIFF…"),
@@ -223,7 +155,6 @@ impl Sidebar {
                 }
                 ui.add_space(4.0);
                 let jpeg_enabled = export_enabled
-                    && profile_ready
                     && app.export.settings.bit_depth != ExportBitDepth::Float32Linear;
                 let jpeg_response = ui
                     .add_enabled_ui(jpeg_enabled, |ui| {

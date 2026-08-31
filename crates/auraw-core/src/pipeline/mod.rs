@@ -18,13 +18,8 @@ pub use basicadj::{
     HSL_HUE_LIMIT, HUE_ROTATION_LIMIT_DEGREES, MAX_POINT_CURVE_POINTS, MAX_TEMPERATURE_KELVIN,
     MAX_WHITE_BALANCE_TINT, MIN_TEMPERATURE_KELVIN, MIN_WHITE_BALANCE_TINT,
 };
-#[cfg(not(target_os = "android"))]
 pub use color_profile::{
-    discover_display_icc_profile, read_display_icc_profile, DisplayIccProfile,
-};
-pub use color_profile::{
-    CameraProfile, DcpMatrixSet, DcpProfile, HsvMap, IccOutputTransform, ProfileEncoding,
-    RenderingIntent, ToneCurve,
+    CameraProfile, DcpMatrixSet, DcpProfile, HsvMap, ProfileEncoding, SrgbOutputLut, ToneCurve,
 };
 pub use geometry::{
     transform_thumbnail_geometry, transform_thumbnail_geometry_with_lens, CropAspectRatio,

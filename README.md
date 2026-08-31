@@ -38,7 +38,7 @@ Feel free to open a Pull Request or create an issue :D.
 - **[darktable](https://www.darktable.org/)** – for their exceptional contributions to open-source color science and raw processing algorithms.
 - **[RapidRAW](https://github.com/CyberSys/RapidRAW)** – for workflow and interface inspiration that sparked the creation of this project.
 - **[GIMP](https://www.gimp.org/) & [Ansel](https://ansel.photos/)** – for image editing algorithms and foundations.
-- **[LibRaw](https://github.com/LibRaw/LibRaw), [Lensfun](https://github.com/lensfun/lensfun) & [Little CMS](https://github.com/mm2/little-cms)** – for the underlying decoding, correction, and color management backends.
+- **[LibRaw](https://github.com/LibRaw/LibRaw) & [Lensfun](https://github.com/lensfun/lensfun)** – for the underlying decoding and lens-correction backends.
 
 *Check [Third-Party Notices](THIRD_PARTY_LICENSES.md) for a more detailed list.*
 

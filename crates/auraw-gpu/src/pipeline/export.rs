@@ -2,10 +2,10 @@ use super::geometry::GeometryInverseMap;
 use super::{
     build_region_proxy, export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into,
     mask_atlas_edge, required_export_tile_halo, CfaKind, ExposureParams, GeometryTransform,
-    GpuParams, GpuProgramPrewarm, IccOutputTransform, LensGeometryMap, LoadedRaw, MaskStack,
-    NativeRect, ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline,
-    RawGpuProgramTemplate, RemoveEditState, RemoveSceneContext, TilePlan, TileSpec,
-    EXPORT_TILE_HALO, MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
+    GpuParams, GpuProgramPrewarm, LensGeometryMap, LoadedRaw, MaskStack, NativeRect,
+    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate,
+    RemoveEditState, RemoveSceneContext, SrgbOutputLut, TilePlan, TileSpec, EXPORT_TILE_HALO,
+    MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
 };
 use crate::file_ops::{replace_file, sync_parent_directory};
 use anyhow::{Context, Result};
@@ -309,22 +309,6 @@ impl ExportBitDepth {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ExportColorProfile {
-    #[default]
-    Srgb,
-    CustomIcc,
-}
-
-impl ExportColorProfile {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Srgb => "sRGB",
-            Self::CustomIcc => "Custom ICC",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExportResizeMode {
     #[default]
     Original,
@@ -357,8 +341,6 @@ pub struct ExportSettings {
     pub keep_metadata: bool,
     pub jpeg_quality: u8,
     pub bit_depth: ExportBitDepth,
-    pub color_profile: ExportColorProfile,
-    pub custom_icc_path: Option<PathBuf>,
 }
 
 impl Default for ExportSettings {
@@ -371,8 +353,6 @@ impl Default for ExportSettings {
             keep_metadata: true,
             jpeg_quality: 90,
             bit_depth: ExportBitDepth::Sixteen,
-            color_profile: ExportColorProfile::Srgb,
-            custom_icc_path: None,
         }
     }
 }
@@ -2219,7 +2199,7 @@ impl FinalSizeOutputSharpen {
     fn push_row<W: Write>(
         &mut self,
         row: Vec<f32>,
-        output_transform: Option<&IccOutputTransform>,
+        output_transform: Option<&SrgbOutputLut>,
         row_format: ExportRowFormat,
         output: &mut W,
     ) -> Result<()> {
@@ -2244,7 +2224,7 @@ impl FinalSizeOutputSharpen {
 
     fn finish<W: Write>(
         &mut self,
-        output_transform: Option<&IccOutputTransform>,
+        output_transform: Option<&SrgbOutputLut>,
         row_format: ExportRowFormat,
         output: &mut W,
     ) -> Result<()> {
@@ -2263,7 +2243,7 @@ impl FinalSizeOutputSharpen {
     fn write_encoded_row<W: Write>(
         &mut self,
         row: &[f32],
-        output_transform: Option<&IccOutputTransform>,
+        output_transform: Option<&SrgbOutputLut>,
         row_format: ExportRowFormat,
         output: &mut W,
     ) -> Result<()> {
@@ -2421,7 +2401,7 @@ impl LinearLightResizer {
         &mut self,
         source_y: u32,
         source: &[f32],
-        output_transform: Option<&IccOutputTransform>,
+        output_transform: Option<&SrgbOutputLut>,
         output: &mut W,
     ) -> Result<()> {
         anyhow::ensure!(
@@ -2475,7 +2455,7 @@ impl LinearLightResizer {
 
     fn finish<W: Write>(
         &mut self,
-        output_transform: Option<&IccOutputTransform>,
+        output_transform: Option<&SrgbOutputLut>,
         output: &mut W,
     ) -> Result<()> {
         anyhow::ensure!(
@@ -2515,7 +2495,7 @@ impl LinearLightResizer {
         &mut self,
         source_y: u32,
         completed_through_output: u32,
-        output_transform: Option<&IccOutputTransform>,
+        output_transform: Option<&SrgbOutputLut>,
         output: &mut W,
     ) -> Result<()> {
         while self.next_output_row < self.output_height
@@ -2680,14 +2660,14 @@ fn resize_horizontal_row(source: &[f32], weights: &[Vec<SampleWeight>]) -> Resul
 }
 
 #[cfg(test)]
-fn encode_srgb_row(row: &[f32], transform: &IccOutputTransform) -> Result<Vec<u8>> {
+fn encode_srgb_row(row: &[f32], transform: &SrgbOutputLut) -> Result<Vec<u8>> {
     encode_output_row(row, Some(transform), ExportRowFormat::Rgba8)
 }
 
 #[cfg(test)]
 fn encode_srgb_row_with_format(
     row: &[f32],
-    transform: &IccOutputTransform,
+    transform: &SrgbOutputLut,
     row_format: ExportRowFormat,
 ) -> Result<Vec<u8>> {
     encode_output_row(row, Some(transform), row_format)
@@ -2695,7 +2675,7 @@ fn encode_srgb_row_with_format(
 
 fn encode_output_row(
     row: &[f32],
-    transform: Option<&IccOutputTransform>,
+    transform: Option<&SrgbOutputLut>,
     row_format: ExportRowFormat,
 ) -> Result<Vec<u8>> {
     anyhow::ensure!(

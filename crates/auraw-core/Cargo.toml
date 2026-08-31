@@ -26,9 +26,6 @@ rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-[target.'cfg(not(target_os = "android"))'.dependencies]
-lcms2.workspace = true
-
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 

@@ -324,13 +324,6 @@ impl AurawApp {
                     return;
                 }
             };
-            if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline)
-            {
-                self.ui.notice = Some(format!(
-                    "Could not prepare the preview color profile: {error:#}"
-                ));
-                return;
-            }
             if let Err(error) = Self::upload_preview_masks(
                 &pipeline,
                 &render_state.queue,

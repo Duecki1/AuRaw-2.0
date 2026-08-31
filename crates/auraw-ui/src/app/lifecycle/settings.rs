@@ -298,10 +298,6 @@ impl AurawApp {
             camera_profile_folder_label: self.preferences.camera_profile_folder_label.clone(),
             camera_profile_auto_detect: self.preferences.camera_profile_auto_detect,
             last_camera_profile: self.preferences.last_camera_profile.clone(),
-            #[cfg(not(target_os = "android"))]
-            display_color_management: self.preferences.display_color_management,
-            #[cfg(not(target_os = "android"))]
-            display_profile_override: self.preferences.display_profile_override.clone(),
             adjustment_copy_settings: self.preferences.adjustment_copy_settings,
             #[cfg(target_os = "android")]
             last_android_library_folder: self.library.android_folder().to_owned(),

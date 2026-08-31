@@ -270,7 +270,6 @@ pub(super) fn create_pipeline_surfaces(
 
 pub(super) struct PipelineBuffers {
     pub(super) profile_buffer: wgpu::Buffer,
-    pub(super) output_lut_offset_bytes: u64,
     pub(super) camera_uniforms_buffer: wgpu::Buffer,
     pub(super) scene_tone_uniforms_buffer: wgpu::Buffer,
     pub(super) effects_uniforms_buffer: wgpu::Buffer,
@@ -283,13 +282,10 @@ pub(super) fn create_pipeline_buffers(
     device: &wgpu::Device,
     params: &GpuParams,
     profile_words: &[[f32; 4]],
-    output_lut_word_offset: u32,
 ) -> PipelineBuffers {
-    let output_lut_offset_bytes =
-        u64::from(output_lut_word_offset) * std::mem::size_of::<[f32; 4]>() as u64;
     let profile_buffer = create_initialized_buffer(
         device,
-        "auraw DCP and ICC profile LUTs",
+        "auraw DCP and sRGB output LUTs",
         bytemuck::cast_slice(profile_words),
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     );
@@ -334,7 +330,6 @@ pub(super) fn create_pipeline_buffers(
 
     PipelineBuffers {
         profile_buffer,
-        output_lut_offset_bytes,
         camera_uniforms_buffer,
         scene_tone_uniforms_buffer,
         effects_uniforms_buffer,

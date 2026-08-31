@@ -272,14 +272,6 @@ impl AurawApp {
             "DPI preview GPU graph prepared on the UI thread in {:.3}s",
             pipeline_started.elapsed().as_secs_f64()
         ));
-        #[cfg(not(target_os = "android"))]
-        if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
-            self.ui.notice = Some(format!(
-                "Could not prepare the preview color profile: {error:#}"
-            ));
-            self.preview.quality_dirty = false;
-            return;
-        }
         if let Err(error) = Self::upload_preview_masks(
             &pipeline,
             &render_state.queue,

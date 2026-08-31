@@ -19,10 +19,6 @@ impl AurawApp {
             .as_ref()
             .ok_or_else(|| "Open an image before creating this mask.".to_owned())?;
 
-        #[cfg(not(target_os = "android"))]
-        pipeline
-            .reset_display_to_srgb(&render_state.queue)
-            .map_err(|error| format!("Could not prepare mask-source color output: {error:#}"))?;
         let reference_exposure = ExposureParams::scene_referred_default();
         let reference_masks = MaskStack::default();
         let reference_params = GpuParams::new(&reference_exposure, &reference_masks, raw);
@@ -64,13 +60,6 @@ impl AurawApp {
             GpuParams::new(&self.develop.target_exposure, &self.masks.stack, raw)
                 .with_vignette_geometry(self.develop.geometry)
         };
-        #[cfg(not(target_os = "android"))]
-        let display_restore = pipeline
-            .write_output_transform(
-                &render_state.queue,
-                &self.preferences.display_output_transform,
-            )
-            .map_err(|error| format!("Could not restore the preview color output: {error:#}"));
         let preview_restore = if self.preview.original_requested {
             pipeline.recompute(&render_state.queue, &render_state.device, &restore_params);
             Ok(())
@@ -90,8 +79,6 @@ impl AurawApp {
         }
         .map_err(|error| format!("Could not restore Remove edits to the preview: {error:#}"));
 
-        #[cfg(not(target_os = "android"))]
-        display_restore?;
         preview_restore?;
         let rgba = readback
             .map_err(|error| format!("Could not read the original RAW for masking: {error:#}"))?;

@@ -103,8 +103,6 @@ native components:
   LGPL-2.1 and CDDL-1.0; AuRaw uses the LGPL-2.1 option.
 - [Lensfun 0.3.4](https://github.com/lensfun/lensfun/tree/v0.3.4). The library
   is LGPL-3.0 and its separately packaged profile database is CC BY-SA 3.0.
-- [Little CMS](https://github.com/mm2/Little-CMS), used through `lcms2` and
-  `lcms2-sys`, under the MIT license.
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime), under the MIT
   license. Desktop users provide the runtime separately; Android builds obtain
   the pinned runtime selected by `ort-sys` and package its shared library.

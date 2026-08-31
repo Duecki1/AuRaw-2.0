@@ -208,22 +208,6 @@ impl AurawApp {
                 onboarding_completed: performance.onboarding_completed,
                 adjustment_copy_settings: performance.adjustment_copy_settings,
                 performance_settings_path,
-                #[cfg(not(target_os = "android"))]
-                display_color_management: performance.display_color_management,
-                #[cfg(not(target_os = "android"))]
-                display_profile_override: performance.display_profile_override.clone(),
-                #[cfg(not(target_os = "android"))]
-                display_profile_label: "sRGB fallback".to_owned(),
-                #[cfg(not(target_os = "android"))]
-                display_profile_source: None,
-                #[cfg(not(target_os = "android"))]
-                display_profile_fingerprint: None,
-                #[cfg(not(target_os = "android"))]
-                display_profile_last_probe: None,
-                #[cfg(not(target_os = "android"))]
-                display_profile_last_screen_point: None,
-                #[cfg(not(target_os = "android"))]
-                display_output_transform: crate::pipeline::IccOutputTransform::srgb(),
                 camera_profile_mode: performance.camera_profile_mode,
                 camera_profile_folder,
                 camera_profile_folder_label,
@@ -486,22 +470,6 @@ impl AurawApp {
                 onboarding_completed: performance.onboarding_completed,
                 adjustment_copy_settings: performance.adjustment_copy_settings,
                 performance_settings_path,
-                #[cfg(not(target_os = "android"))]
-                display_color_management: performance.display_color_management,
-                #[cfg(not(target_os = "android"))]
-                display_profile_override: performance.display_profile_override.clone(),
-                #[cfg(not(target_os = "android"))]
-                display_profile_label: "sRGB fallback".to_owned(),
-                #[cfg(not(target_os = "android"))]
-                display_profile_source: None,
-                #[cfg(not(target_os = "android"))]
-                display_profile_fingerprint: None,
-                #[cfg(not(target_os = "android"))]
-                display_profile_last_probe: None,
-                #[cfg(not(target_os = "android"))]
-                display_profile_last_screen_point: None,
-                #[cfg(not(target_os = "android"))]
-                display_output_transform: crate::pipeline::IccOutputTransform::srgb(),
                 camera_profile_mode: performance.camera_profile_mode,
                 camera_profile_folder: performance.camera_profile_folder.clone(),
                 camera_profile_folder_label: performance.camera_profile_folder_label.clone(),

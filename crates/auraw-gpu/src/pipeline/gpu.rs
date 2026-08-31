@@ -5,9 +5,9 @@ use crate::pipeline::{
     canonical_remove_scene_to_pipeline_scene, effect_params, export_mask_atlas_edge_limit,
     mask_atlas_edge, model_srgb_to_display_linear_rec2020, pipeline_scene_to_working_rec2020,
     working_rec2020_to_canonical_remove_scene, AiDenoisedImage, CfaKind, ExposureParams,
-    GeometryTransform, HighlightReconstructionMethod, IccOutputTransform, LoadedRaw, LocalMask,
-    MaskEffect, MaskStack, PointCurve, ProcessingStage, RawThumbnail, RemoveEditState, RemovePatch,
-    SigmoidParams, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
+    GeometryTransform, HighlightReconstructionMethod, LoadedRaw, LocalMask, MaskEffect, MaskStack,
+    PointCurve, ProcessingStage, RawThumbnail, RemoveEditState, RemovePatch, SigmoidParams,
+    SrgbOutputLut, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
 };
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -1484,9 +1484,6 @@ pub struct RawGpuPipeline {
     light_rays_mask_texture: wgpu::Texture,
     mask_layer_capacity: usize,
     mask_atlas_edge: u32,
-    profile_buffer: wgpu::Buffer,
-    profile_buffer_size_bytes: u64,
-    output_lut_offset_bytes: u64,
     out_texture: wgpu::Texture,
     _out_view: wgpu::TextureView,
     pipeline_cache: Option<Arc<PersistentGpuPipelineCache>>,
@@ -1981,8 +1978,8 @@ impl RawGpuPipeline {
 
         let geometry = compute_derived_geometry(raw, params, quality, config);
 
-        let default_output_transform = IccOutputTransform::srgb();
-        let profile_gpu_data = raw.camera_profile.gpu_data(&default_output_transform);
+        let srgb_output_lut = SrgbOutputLut::new();
+        let profile_gpu_data = raw.camera_profile.gpu_data(&srgb_output_lut);
         profile_gpu_data.validate()?;
         let profile_buffer_size_bytes = u64::try_from(
             profile_gpu_data
@@ -2020,12 +2017,7 @@ impl RawGpuPipeline {
             create_pipeline_surfaces(device, queue, raw, ai_cfa, &geometry)?;
         let has_raster_scene = raw.is_pre_demosaiced_raster();
 
-        let buffers = create_pipeline_buffers(
-            device,
-            params,
-            &profile_gpu_data.words,
-            profile_gpu_data.layout.output[3],
-        );
+        let buffers = create_pipeline_buffers(device, params, &profile_gpu_data.words);
 
         let layouts = create_bind_group_layouts(
             device,
@@ -2143,9 +2135,6 @@ impl RawGpuPipeline {
             light_rays_mask_texture: surfaces.light_rays_mask_texture,
             mask_layer_capacity: geometry.mask_layer_capacity,
             mask_atlas_edge: geometry.mask_atlas_edge,
-            profile_buffer: buffers.profile_buffer,
-            profile_buffer_size_bytes,
-            output_lut_offset_bytes: buffers.output_lut_offset_bytes,
             out_texture: surfaces.out_texture,
             _out_view: surfaces.out_view,
             pipeline_cache,
@@ -2360,34 +2349,6 @@ impl RawGpuPipeline {
             renderer.register_native_texture(device, &self._out_view, wgpu::FilterMode::Linear);
         self.egui_texture_id = Some(texture_id);
         texture_id
-    }
-
-    pub fn reset_display_to_srgb(&self, queue: &wgpu::Queue) -> Result<()> {
-        self.write_output_transform(queue, &IccOutputTransform::srgb())
-    }
-
-    pub fn write_output_transform(
-        &self,
-        queue: &wgpu::Queue,
-        transform: &IccOutputTransform,
-    ) -> Result<()> {
-        if transform.size() != crate::pipeline::color_profile::OUTPUT_LUT_EDGE {
-            return Err(anyhow!(
-                "output ICC LUT edge does not match the GPU profile layout"
-            ));
-        }
-        let bytes = bytemuck::cast_slice(transform.entries());
-        let end = self
-            .output_lut_offset_bytes
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| anyhow!("output ICC LUT buffer range overflows"))?;
-        if end > self.profile_buffer_size_bytes {
-            return Err(anyhow!(
-                "output ICC LUT would write past the validated GPU profile buffer"
-            ));
-        }
-        queue.write_buffer(&self.profile_buffer, self.output_lut_offset_bytes, bytes);
-        Ok(())
     }
 
     pub fn recompute(&self, queue: &wgpu::Queue, device: &wgpu::Device, params: &GpuParams) {

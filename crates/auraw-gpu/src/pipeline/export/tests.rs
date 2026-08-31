@@ -8,7 +8,7 @@ use super::{
     MAX_EXPORT_EDGE, TIFF_TARGET_STRIP_BYTES,
 };
 use crate::pipeline::{
-    ExportTile, ExposureParams, GeometryTransform, IccOutputTransform, MaskStack, TileSpec,
+    ExportTile, ExposureParams, GeometryTransform, MaskStack, SrgbOutputLut, TileSpec,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -133,7 +133,7 @@ fn exif_payload_contains_source_camera_lens_and_exposure_metadata() {
 
 #[test]
 fn jpeg_rows_omit_png_alpha_bytes() {
-    let transform = crate::pipeline::IccOutputTransform::srgb();
+    let transform = crate::pipeline::SrgbOutputLut::new();
     let rgba = encode_srgb_row(&[0.18, 0.18, 0.18], &transform).unwrap();
     let rgb = encode_srgb_row_with_format(&[0.18, 0.18, 0.18], &transform, ExportRowFormat::Rgb8)
         .unwrap();
@@ -144,7 +144,7 @@ fn jpeg_rows_omit_png_alpha_bytes() {
 
 #[test]
 fn sixteen_bit_and_float_row_layouts_stay_format_specific() {
-    let transform = IccOutputTransform::srgb();
+    let transform = SrgbOutputLut::new();
     let row = [0.0, 0.18, 1.0];
     let png16 = encode_srgb_row_with_format(&row, &transform, ExportRowFormat::Rgba16Be).unwrap();
     let tiff16 = encode_srgb_row_with_format(&row, &transform, ExportRowFormat::Rgb16Le).unwrap();
@@ -321,8 +321,7 @@ fn geometry_downsample_accumulates_linear_values_before_encoding() {
         assert!((*value - 0.5).abs() < 1e-5);
     }
     let encoded =
-        encode_srgb_row_with_format(&row, &IccOutputTransform::srgb(), ExportRowFormat::Rgb8)
-            .unwrap();
+        encode_srgb_row_with_format(&row, &SrgbOutputLut::new(), ExportRowFormat::Rgb8).unwrap();
     assert!(encoded.iter().all(|value| *value > 170));
 }
 
@@ -366,7 +365,7 @@ fn resolving_export_halo_never_enlarges_the_requested_tile() {
 
 #[test]
 fn vertical_resize_streams_extreme_upscales_without_retaining_rows() {
-    let transform = crate::pipeline::IccOutputTransform::srgb();
+    let transform = crate::pipeline::SrgbOutputLut::new();
     let mut output = Vec::new();
     let mut resizer = LinearLightResizer::new(1, 1, 1, 128).unwrap();
     resizer
@@ -379,7 +378,7 @@ fn vertical_resize_streams_extreme_upscales_without_retaining_rows() {
 
 #[test]
 fn vertical_resize_streams_extreme_downscales_with_one_active_row() {
-    let transform = crate::pipeline::IccOutputTransform::srgb();
+    let transform = crate::pipeline::SrgbOutputLut::new();
     let mut output = Vec::new();
     let mut resizer = LinearLightResizer::new(1, 128, 1, 1).unwrap();
     for source_y in 0..128 {
@@ -401,7 +400,7 @@ fn vertical_resize_streams_extreme_downscales_with_one_active_row() {
 
 #[test]
 fn srgb_encoding_outputs_opaque_rgba_and_rejects_non_finite_values() {
-    let transform = crate::pipeline::IccOutputTransform::srgb();
+    let transform = crate::pipeline::SrgbOutputLut::new();
     let encoded = encode_srgb_row(&[0.0, 0.18, 1.0], &transform).unwrap();
     assert_eq!(encoded.len(), 4);
     assert_eq!(encoded[3], 255);

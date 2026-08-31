@@ -299,9 +299,6 @@ impl AurawApp {
             (delete_after_decode && !fd_backed_source).then(|| path.clone());
         #[cfg(target_os = "android")]
         let sidecar_android_app = self.android.android_app.clone();
-        #[cfg(not(target_os = "android"))]
-        let display_output_transform = self.preferences.display_output_transform.clone();
-
         self.develop.load_receiver = Some(receiver);
         self.develop.loading_label = Some(label.clone());
         self.ui.notice = None;
@@ -775,10 +772,6 @@ impl AurawApp {
                         "Preview masks rasterized/uploaded in {:.3}s",
                         mask_upload_started.elapsed().as_secs_f64()
                     ));
-                    #[cfg(not(target_os = "android"))]
-                    pipeline
-                        .write_output_transform(&queue, &display_output_transform)
-                        .map_err(|error| format!("display ICC LUT upload failed: {error:#}"))?;
                     let first_render_started = Instant::now();
                     pipeline
                         .recompute_with_remove(

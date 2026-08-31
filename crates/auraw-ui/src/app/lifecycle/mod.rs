@@ -251,7 +251,6 @@ pub(super) fn install_missing_range_sources(masks: &mut MaskStack, source: &Mask
 }
 
 mod cache;
-mod display;
 mod documents;
 mod pickers;
 mod profiles;

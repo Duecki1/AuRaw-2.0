@@ -310,17 +310,6 @@ impl AurawApp {
                 return;
             }
         };
-        #[cfg(not(target_os = "android"))]
-        if let Err(error) = self.apply_display_output_transform(&render_state.queue, &pipeline) {
-            self.ui.notice = Some(
-                "Could not prepare the preview color profile. The previous complete preview remains available."
-                    .to_owned(),
-            );
-            crate::diagnostics::record(format!(
-                "zoom-preview pipeline display-profile install failed: {error:#}"
-            ));
-            return;
-        }
         if let Err(error) = Self::upload_detail_masks(
             &pipeline,
             &render_state.queue,

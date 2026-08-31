@@ -1,8 +1,7 @@
-use super::super::RenderingIntent;
 use super::*;
 
 pub(super) struct ResolvedExportColor {
-    pub(super) transform: Option<IccOutputTransform>,
+    pub(super) transform: Option<SrgbOutputLut>,
     pub(super) embedded_icc: Option<Vec<u8>>,
     pub(super) srgb: bool,
 }
@@ -145,31 +144,9 @@ pub(super) fn resolve_export_color(settings: &ExportSettings) -> Result<Resolved
         });
     }
 
-    match settings.color_profile {
-        ExportColorProfile::Srgb => Ok(ResolvedExportColor {
-            transform: Some(IccOutputTransform::srgb()),
-            embedded_icc: None,
-            srgb: true,
-        }),
-        ExportColorProfile::CustomIcc => {
-            let path = settings
-                .custom_icc_path
-                .as_deref()
-                .context("select a custom ICC profile before exporting")?;
-            let bytes = fs::read(path)
-                .with_context(|| format!("read output ICC profile {}", path.display()))?;
-            anyhow::ensure!(
-                (132..=64 * 1024 * 1024).contains(&bytes.len()),
-                "output ICC profile has an invalid size"
-            );
-            let transform =
-                IccOutputTransform::from_icc(&bytes, RenderingIntent::RelativeColorimetric)
-                    .with_context(|| format!("build output transform from {}", path.display()))?;
-            Ok(ResolvedExportColor {
-                transform: Some(transform),
-                embedded_icc: Some(bytes),
-                srgb: false,
-            })
-        }
-    }
+    Ok(ResolvedExportColor {
+        transform: Some(SrgbOutputLut::new()),
+        embedded_icc: None,
+        srgb: true,
+    })
 }
