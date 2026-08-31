@@ -536,18 +536,24 @@ fn filmstrip_thumbnail(
         Sense::click(),
     );
     let painter = ui.painter();
-    painter.rect_filled(rect, 6.0, crate::ui::theme::THUMBNAIL_BACKDROP);
+    let card_radius = crate::ui::theme::CARD_RADIUS;
+    let card_fill = if response.hovered() {
+        ui.visuals().widgets.hovered.weak_bg_fill
+    } else {
+        ui.visuals().faint_bg_color
+    };
+    painter.rect_filled(rect, card_radius, card_fill);
 
     if let Some(texture) = item.texture.as_ref() {
         let image_rect = egui::Rect::from_min_max(
             rect.min + egui::vec2(3.0, 3.0),
             egui::pos2(rect.right() - 3.0, rect.bottom() - 25.0),
         );
-        painter.image(
-            texture.id(),
-            image_rect,
-            cover_uv(item.thumbnail_size, image_rect.size()),
-            Color32::WHITE,
+        painter.add(
+            egui::epaint::RectShape::filled(image_rect, 5.0, Color32::WHITE).with_texture(
+                texture.id(),
+                cover_uv(item.thumbnail_size, image_rect.size()),
+            ),
         );
     } else {
         painter.text(
@@ -573,24 +579,28 @@ fn filmstrip_thumbnail(
         Align2::CENTER_CENTER,
         elide_name(&item.asset.display_name, 18),
         FontId::proportional(10.0),
-        ui.visuals().weak_text_color(),
+        ui.visuals().text_color(),
     );
 
-    if response.hovered() {
-        painter.rect_filled(rect, 6.0, Color32::from_white_alpha(10));
-    }
     if active {
         painter.rect_stroke(
             rect,
-            6.0,
+            card_radius,
             Stroke::new(2.0, ui.visuals().selection.bg_fill),
             StrokeKind::Inside,
         );
     } else {
         painter.rect_stroke(
             rect,
-            6.0,
-            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            card_radius,
+            Stroke::new(
+                1.0,
+                if response.hovered() {
+                    ui.visuals().widgets.hovered.bg_stroke.color
+                } else {
+                    ui.visuals().widgets.noninteractive.bg_stroke.color
+                },
+            ),
             StrokeKind::Inside,
         );
     }

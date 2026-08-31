@@ -21,6 +21,7 @@ pub(crate) const SPACE_MD: f32 = 12.0;
 pub(crate) const SPACE_LG: f32 = 16.0;
 pub(crate) const CARD_GAP: f32 = SPACE_SM;
 pub(crate) const CONTENT_MARGIN: i8 = 12;
+pub(crate) const CARD_RADIUS: f32 = 8.0;
 const COMPACT_PORTRAIT_CARD_GAP: f32 = SPACE_SM;
 const COMPACT_PORTRAIT_CONTENT_MARGIN: i8 = 8;
 pub(crate) const FORM_STACK_BREAKPOINT: f32 = 520.0;
@@ -53,7 +54,6 @@ pub(crate) const WIDGET_HOVERED_STROKE: Color32 = Color32::from_rgb(79, 86, 98);
 pub(crate) const SURFACE_WIDGET_OPEN: Color32 = Color32::from_rgb(39, 43, 50);
 pub(crate) const WIDGET_OPEN_STROKE: Color32 = Color32::from_rgb(69, 76, 88);
 pub(crate) const CANVAS_BACKDROP: Color32 = Color32::from_rgb(13, 15, 18);
-pub(crate) const THUMBNAIL_BACKDROP: Color32 = Color32::from_rgb(16, 18, 22);
 pub(crate) const STATUS_WARNING: Color32 = Color32::from_rgb(244, 142, 48);
 pub(crate) const MASK_ADD: Color32 = Color32::from_rgb(78, 163, 255);
 pub(crate) const MASK_SUBTRACT: Color32 = Color32::from_rgb(255, 105, 105);
@@ -411,7 +411,10 @@ pub(crate) fn toolbar_frame(ui: &Ui) -> Frame {
             if compact { 10 } else { CONTENT_MARGIN },
             if compact { 4 } else { 6 },
         ))
-        .stroke(Stroke::NONE)
+        .stroke(Stroke::new(
+            1.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
         .corner_radius(0.0)
 }
 
@@ -422,11 +425,18 @@ pub(crate) fn panel_frame(ui: &Ui) -> Frame {
         .stroke(Stroke::NONE)
 }
 
+pub(crate) fn workspace_frame(ui: &Ui) -> Frame {
+    Frame::new()
+        .fill(ui.visuals().window_fill)
+        .inner_margin(Margin::same(content_margin(ui)))
+        .stroke(Stroke::NONE)
+}
+
 pub(crate) fn card_frame(ui: &Ui) -> Frame {
     Frame::new()
         .fill(ui.visuals().faint_bg_color)
         .inner_margin(Margin::same(content_margin(ui) + 2))
-        .corner_radius(6.0)
+        .corner_radius(CARD_RADIUS)
         .stroke(Stroke::new(
             1.0,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
@@ -456,7 +466,7 @@ pub(crate) fn card_header<R>(
     Frame::new()
         .fill(ui.visuals().faint_bg_color)
         .inner_margin(Margin::symmetric(horizontal_margin, 10))
-        .corner_radius(6.0)
+        .corner_radius(CARD_RADIUS)
         .stroke(Stroke::new(
             1.0,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
@@ -531,7 +541,7 @@ pub(crate) fn segmented_button(
             .selected(selected)
             .frame(true)
             .truncate()
-            .corner_radius(6.0),
+            .corner_radius(CARD_RADIUS),
     )
 }
 
@@ -543,6 +553,21 @@ pub(crate) fn toolbar_button(
     ui.add_sized([width, CONTROL_HEIGHT], egui::Button::new(label.into()))
 }
 
+pub(crate) fn primary_button(
+    ui: &mut Ui,
+    label: impl Into<egui::WidgetText>,
+    width: f32,
+) -> Response {
+    let visuals = &ui.visuals().widgets.active;
+    ui.add_sized(
+        [width, CONTROL_HEIGHT],
+        egui::Button::new(label.into())
+            .fill(visuals.weak_bg_fill)
+            .stroke(visuals.bg_stroke)
+            .corner_radius(CARD_RADIUS),
+    )
+}
+
 pub(crate) fn toggle_button(
     ui: &mut Ui,
     label: impl Into<egui::WidgetText>,
@@ -552,7 +577,7 @@ pub(crate) fn toggle_button(
         egui::Button::new(label.into())
             .selected(selected)
             .frame(true)
-            .corner_radius(6.0),
+            .corner_radius(CARD_RADIUS),
     )
 }
 
@@ -787,28 +812,41 @@ pub(crate) fn apply(ctx: &egui::Context, design: UiDesign) {
     visuals.selection.stroke = Stroke::new(1.0, active_text);
     visuals.hyperlink_color = palette.hyperlink;
     visuals.window_stroke = Stroke::new(1.0, palette.border);
-    visuals.window_corner_radius = 8.0.into();
-    visuals.menu_corner_radius = 6.0.into();
+    visuals.window_corner_radius = 10.0.into();
+    visuals.window_shadow = egui::epaint::Shadow {
+        offset: [0, 6],
+        blur: 18,
+        spread: 0,
+        color: Color32::from_black_alpha(if design.is_dark() { 72 } else { 30 }),
+    };
+    visuals.popup_shadow = egui::epaint::Shadow {
+        offset: [0, 4],
+        blur: 14,
+        spread: 0,
+        color: Color32::from_black_alpha(if design.is_dark() { 82 } else { 34 }),
+    };
+    visuals.menu_corner_radius = CARD_RADIUS.into();
 
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);
-    visuals.widgets.noninteractive.corner_radius = 6.0.into();
+    visuals.widgets.noninteractive.corner_radius = CARD_RADIUS.into();
     visuals.widgets.inactive.bg_fill = palette.inactive;
     visuals.widgets.inactive.weak_bg_fill = palette.inactive;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.inactive_stroke);
-    visuals.widgets.inactive.corner_radius = 6.0.into();
+    visuals.widgets.inactive.corner_radius = CARD_RADIUS.into();
     visuals.widgets.hovered.bg_fill = palette.hovered;
     visuals.widgets.hovered.weak_bg_fill = palette.hovered;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.hovered_stroke);
-    visuals.widgets.hovered.corner_radius = 6.0.into();
+    visuals.widgets.hovered.corner_radius = CARD_RADIUS.into();
     visuals.widgets.active.bg_fill = palette.accent;
     visuals.widgets.active.weak_bg_fill = palette.accent;
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, palette.accent_bright);
     visuals.widgets.active.fg_stroke.color = active_text;
-    visuals.widgets.active.corner_radius = 6.0.into();
+    visuals.widgets.active.corner_radius = CARD_RADIUS.into();
     visuals.widgets.open.bg_fill = palette.open;
     visuals.widgets.open.weak_bg_fill = palette.open;
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, palette.open_stroke);
-    visuals.widgets.open.corner_radius = 6.0.into();
+    visuals.widgets.open.corner_radius = CARD_RADIUS.into();
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
 
     let mut style = (*ctx.style_of(theme)).clone();
     style.visuals = visuals;

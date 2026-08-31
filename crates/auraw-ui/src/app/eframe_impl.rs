@@ -374,7 +374,7 @@ impl eframe::App for AurawApp {
                     .inner_margin(egui::Margin::same(0)),
             )
         } else {
-            egui::CentralPanel::default()
+            egui::CentralPanel::default().frame(crate::ui::theme::workspace_frame(ui))
         };
         let _central = central_panel.show(ui, |ui| match self.ui.active_tab {
             AppTab::Library => Library::show(ui, self, frame),

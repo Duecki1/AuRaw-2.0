@@ -3,7 +3,9 @@ use super::*;
 /// Rows with enough images shrink to fit the viewport. Sparse rows retain the
 /// selected thumbnail height rather than enlarging their images to fill space.
 const THUMBNAIL_IMAGE_HORIZONTAL_INSET: f32 = 6.0;
-const THUMBNAIL_IMAGE_VERTICAL_CHROME: f32 = 29.0;
+const THUMBNAIL_IMAGE_VERTICAL_CHROME: f32 = 38.0;
+const THUMBNAIL_CARD_RADIUS: f32 = 9.0;
+const THUMBNAIL_IMAGE_RADIUS: f32 = 6.0;
 
 pub(super) fn send_scan_failure(
     sender: &mpsc::SyncSender<ScanEvent>,
@@ -254,23 +256,28 @@ pub(super) fn thumbnail_tile(
 
     let tile_rect = rect;
     let image_rect = egui::Rect::from_min_max(
-        tile_rect.min
-            + egui::vec2(
-                THUMBNAIL_IMAGE_HORIZONTAL_INSET * 0.5,
-                THUMBNAIL_IMAGE_VERTICAL_CHROME - 26.0,
-            ),
+        tile_rect.min + egui::vec2(THUMBNAIL_IMAGE_HORIZONTAL_INSET * 0.5, 3.0),
         egui::pos2(
             tile_rect.right() - THUMBNAIL_IMAGE_HORIZONTAL_INSET * 0.5,
-            tile_rect.bottom() - 26.0,
+            tile_rect.bottom() - 32.0,
         ),
     );
+    let card_fill = if response.hovered() {
+        visuals.widgets.hovered.weak_bg_fill
+    } else {
+        visuals.faint_bg_color
+    };
     ui.painter()
-        .rect_filled(tile_rect, 6.0, crate::ui::theme::THUMBNAIL_BACKDROP);
+        .rect_filled(tile_rect, THUMBNAIL_CARD_RADIUS, card_fill);
     if let Some(texture) = &entry.texture {
         let uv = thumbnail_cover_uv(entry.thumbnail_size, image_rect.size());
-        ui.painter()
-            .image(texture.id(), image_rect, uv, Color32::WHITE);
+        ui.painter().add(
+            egui::epaint::RectShape::filled(image_rect, THUMBNAIL_IMAGE_RADIUS, Color32::WHITE)
+                .with_texture(texture.id(), uv),
+        );
     } else {
+        ui.painter()
+            .rect_filled(image_rect, THUMBNAIL_IMAGE_RADIUS, visuals.extreme_bg_color);
         ui.painter().text(
             image_rect.center(),
             Align2::CENTER_CENTER,
@@ -300,37 +307,40 @@ pub(super) fn thumbnail_tile(
         );
     }
 
-    if response.hovered() {
-        ui.painter()
-            .rect_filled(tile_rect, 6.0, Color32::from_white_alpha(10));
-    }
     if selected {
         ui.painter().rect_stroke(
             tile_rect,
-            6.0,
+            THUMBNAIL_CARD_RADIUS,
             Stroke::new(2.0, visuals.selection.bg_fill),
             StrokeKind::Inside,
         );
     } else {
         ui.painter().rect_stroke(
             tile_rect,
-            6.0,
-            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+            THUMBNAIL_CARD_RADIUS,
+            Stroke::new(
+                1.0,
+                if response.hovered() {
+                    visuals.widgets.hovered.bg_stroke.color
+                } else {
+                    visuals.widgets.noninteractive.bg_stroke.color
+                },
+            ),
             StrokeKind::Inside,
         );
     }
 
     let label_rect = egui::Rect::from_min_max(
-        egui::pos2(tile_rect.left() + 8.0, tile_rect.bottom() - 20.0),
-        egui::pos2(tile_rect.right() - 8.0, tile_rect.bottom() - 4.0),
+        egui::pos2(tile_rect.left() + 10.0, tile_rect.bottom() - 27.0),
+        egui::pos2(tile_rect.right() - 10.0, tile_rect.bottom() - 5.0),
     );
     let max_chars = ((label_rect.width() - 2.0) / 6.5).floor().max(8.0) as usize;
     ui.painter().text(
         label_rect.left_center(),
         Align2::LEFT_CENTER,
         elide_middle(&entry.asset.display_name, max_chars),
-        FontId::proportional(11.0),
-        visuals.weak_text_color(),
+        FontId::proportional(12.0),
+        visuals.text_color(),
     );
 
     let mut tooltip = entry.asset.display_path.clone();
