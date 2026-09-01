@@ -1974,7 +1974,6 @@ Apache License
 
 Used by:
 - `accesskit_winit 0.32.2` — https://github.com/AccessKit/accesskit
-- `dunce 1.0.5` — https://gitlab.com/kornelski/dunce
 - `gl_generator 0.14.0` — https://github.com/brendanzab/gl-rs/
 - `khronos_api 3.1.0` — https://github.com/brendanzab/gl-rs/
 - `spirv 0.4.0+sdk-1.4.341.0` — https://github.com/gfx-rs/rspirv
@@ -8529,3 +8528,4 @@ the following restrictions:
 
 3. This notice may not be removed or altered from any source distribution.
 ```
+
