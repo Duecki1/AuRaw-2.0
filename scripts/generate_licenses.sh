@@ -2,7 +2,7 @@
 set -euo pipefail
 
 output=${1:-THIRD_PARTY_LICENSES.md}
-temporary=$(mktemp "${TMPDIR:-/tmp}/auraw-licenses.XXXXXX")
+temporary=$(mktemp "${TMPDIR:-/tmp}/calibraw-licenses.XXXXXX")
 trap 'rm -f "$temporary"' EXIT
 
 # cargo-about has emitted CRLF in otherwise identical output on some hosts.

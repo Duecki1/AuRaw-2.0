@@ -37,11 +37,11 @@ def loadCargoMetadata = {
 
 def cargoMetadata = loadCargoMetadata()
 def workspaceMetadata = cargoMetadata.metadata
-def aurawUiPackage = cargoMetadata.packages.find { it.name == "auraw-ui" }
-if (aurawUiPackage == null || !(aurawUiPackage.version instanceof String)) {
-    throw new GradleException("Cargo metadata did not contain the auraw-ui package version.")
+def calibrawUiPackage = cargoMetadata.packages.find { it.name == "calibraw-ui" }
+if (calibrawUiPackage == null || !(calibrawUiPackage.version instanceof String)) {
+    throw new GradleException("Cargo metadata did not contain the calibraw-ui package version.")
 }
-def aurawVersionName = aurawUiPackage.version
+def calibrawVersionName = calibrawUiPackage.version
 def requireMetadata = { String key, Class expectedType ->
     if (!workspaceMetadata.containsKey(key)) {
         throw new GradleException(
@@ -57,36 +57,36 @@ def requireMetadata = { String key, Class expectedType ->
     return value
 }
 
-def aurawNdkVersion = requireMetadata("android_ndk_version", String)
-def aurawBuildToolsVersion = requireMetadata("android_build_tools_version", String)
-def aurawCompileSdk = requireMetadata("android_compile_sdk", Integer)
-def aurawMinSdk = requireMetadata("android_min_sdk", Integer)
-def aurawTargetSdk = requireMetadata("android_target_sdk", Integer)
-def aurawLibrawRevision = requireMetadata("libraw_revision", String)
-def aurawLensfunRevision = requireMetadata("lensfun_revision", String)
-def aurawUseLegacyPackaging = requireMetadata("android_use_legacy_packaging", Boolean)
+def calibrawNdkVersion = requireMetadata("android_ndk_version", String)
+def calibrawBuildToolsVersion = requireMetadata("android_build_tools_version", String)
+def calibrawCompileSdk = requireMetadata("android_compile_sdk", Integer)
+def calibrawMinSdk = requireMetadata("android_min_sdk", Integer)
+def calibrawTargetSdk = requireMetadata("android_target_sdk", Integer)
+def calibrawLibrawRevision = requireMetadata("libraw_revision", String)
+def calibrawLensfunRevision = requireMetadata("lensfun_revision", String)
+def calibrawUseLegacyPackaging = requireMetadata("android_use_legacy_packaging", Boolean)
 
-def aurawVersionCode = providers.gradleProperty("aurawVersionCode")
+def calibrawVersionCode = providers.gradleProperty("calibrawVersionCode")
     .getOrElse("1")
     .toInteger()
 
-def requestedAbis = providers.gradleProperty("aurawAbis")
-    .orElse(providers.gradleProperty("aurawAbi"))
+def requestedAbis = providers.gradleProperty("calibrawAbis")
+    .orElse(providers.gradleProperty("calibrawAbi"))
     .getOrElse("arm64-v8a")
-def aurawAbis = requestedAbis
+def calibrawAbis = requestedAbis
     .split(",")
     .collect { it.trim() }
     .findAll { !it.isEmpty() }
     .unique()
 def supportedAbis = ["arm64-v8a"] as Set
-if (aurawAbis.isEmpty() || !supportedAbis.containsAll(aurawAbis)) {
+if (calibrawAbis.isEmpty() || !supportedAbis.containsAll(calibrawAbis)) {
     throw new GradleException(
-        "aurawAbis must be arm64-v8a; found '${requestedAbis}'"
+        "calibrawAbis must be arm64-v8a; found '${requestedAbis}'"
     )
 }
 
 def nativeStageRoot = new File(repositoryRoot, "android/native")
-def stagedLegalAssets = layout.buildDirectory.dir("generated/auraw-legal-assets/main")
+def stagedLegalAssets = layout.buildDirectory.dir("generated/calibraw-legal-assets/main")
 def stageLegalAssets = tasks.register("stageLegalAssets", Sync) {
     from(repositoryRoot) {
         include("COPYING", "NOTICE.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES.md")
@@ -97,32 +97,32 @@ def stageLegalAssets = tasks.register("stageLegalAssets", Sync) {
 // the same pinned database, so package the copy staged by the first requested ABI.
 def lensfunAssets = new File(
     nativeStageRoot,
-    "lensfun/${aurawAbis.first()}/apk-assets"
+    "lensfun/${calibrawAbis.first()}/apk-assets"
 )
 
 android {
-    namespace "de.duecki.auraw"
-    compileSdk aurawCompileSdk
-    buildToolsVersion aurawBuildToolsVersion
-    ndkVersion aurawNdkVersion
+    namespace "de.duecki.calibraw"
+    compileSdk calibrawCompileSdk
+    buildToolsVersion calibrawBuildToolsVersion
+    ndkVersion calibrawNdkVersion
 
     defaultConfig {
-        applicationId "de.duecki.auraw"
-        minSdk aurawMinSdk
-        targetSdk aurawTargetSdk
-        versionCode aurawVersionCode
-        versionName aurawVersionName
+        applicationId "de.duecki.calibraw"
+        minSdk calibrawMinSdk
+        targetSdk calibrawTargetSdk
+        versionCode calibrawVersionCode
+        versionName calibrawVersionName
         ndk {
-            abiFilters(*aurawAbis)
+            abiFilters(*calibrawAbis)
         }
         externalNativeBuild {
             cmake {
-                targets "auraw_native_deps"
+                targets "calibraw_native_deps"
                 arguments(
-                    "-DAURAW_NATIVE_STAGE_ROOT=${nativeStageRoot.absolutePath}",
-                    "-DAURAW_ANDROID_MIN_SDK=${aurawMinSdk}",
-                    "-DAURAW_LIBRAW_VERSION=${aurawLibrawRevision}",
-                    "-DAURAW_LENSFUN_VERSION=${aurawLensfunRevision}",
+                    "-DCALIBRAW_NATIVE_STAGE_ROOT=${nativeStageRoot.absolutePath}",
+                    "-DCALIBRAW_ANDROID_MIN_SDK=${calibrawMinSdk}",
+                    "-DCALIBRAW_LIBRAW_VERSION=${calibrawLibrawRevision}",
+                    "-DCALIBRAW_LENSFUN_VERSION=${calibrawLensfunRevision}",
                     "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                 )
             }
@@ -138,7 +138,7 @@ android {
     // Keep this explicit so a future packaging-default change cannot regress support.
     packagingOptions {
         jniLibs {
-            useLegacyPackaging aurawUseLegacyPackaging
+            useLegacyPackaging calibrawUseLegacyPackaging
         }
     }
 
@@ -178,7 +178,7 @@ tasks.withType(JavaCompile).configureEach {
     options.compilerArgs += ["-Xlint:deprecation"]
 }
 
-def buildRustEnabled = providers.gradleProperty("aurawBuildRust")
+def buildRustEnabled = providers.gradleProperty("calibrawBuildRust")
     .map { it.toBoolean() }
     .getOrElse(true)
 
@@ -190,18 +190,18 @@ def abiTaskSuffix = { String abi ->
 
 def debugRustTasks = []
 def releaseRustTasks = []
-aurawAbis.each { abi ->
+calibrawAbis.each { abi ->
     def suffix = abiTaskSuffix(abi)
     debugRustTasks << tasks.register("buildRustDebug${suffix}", Exec) {
-        dependsOn("buildCMakeDebug[${abi}][auraw_native_deps]")
+        dependsOn("buildCMakeDebug[${abi}][calibraw_native_deps]")
         workingDir repositoryRoot
-        environment "AURAW_NATIVE_DEPS_READY", "1"
+        environment "CALIBRAW_NATIVE_DEPS_READY", "1"
         commandLine "cargo", "xtask", "build-android", abi, "debug"
     }
     releaseRustTasks << tasks.register("buildRustRelease${suffix}", Exec) {
-        dependsOn("buildCMakeRelWithDebInfo[${abi}][auraw_native_deps]")
+        dependsOn("buildCMakeRelWithDebInfo[${abi}][calibraw_native_deps]")
         workingDir repositoryRoot
-        environment "AURAW_NATIVE_DEPS_READY", "1"
+        environment "CALIBRAW_NATIVE_DEPS_READY", "1"
         commandLine "cargo", "xtask", "build-android", abi, "release"
     }
 }
@@ -216,7 +216,7 @@ tasks.register("buildRustRelease") {
 // The XML asset directory is produced by the external native build, and the
 // Rust cdylib must exist before AGP merges JNI libraries. Wiring at merge time
 // avoids a preBuild <-> externalNativeBuild dependency cycle. Native work is
-// omitted when aurawBuildRust=false so JVM-only unit tests remain host-only.
+// omitted when calibrawBuildRust=false so JVM-only unit tests remain host-only.
 if (buildRustEnabled) {
     tasks.matching { it.name == "mergeDebugAssets" }.configureEach {
         dependsOn("externalNativeBuildDebug")

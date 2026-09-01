@@ -1,0 +1,23 @@
+[package]
+name = "calibraw-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "CalibRaw C ABI and Android JNI bridge"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+calibraw-core.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity.workspace = true
+egui.workspace = true
+jni.workspace = true
+log.workspace = true

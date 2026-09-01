@@ -1,35 +1,35 @@
 cmake_minimum_required(VERSION 3.22.1)
 
-project(auraw_android_native_deps LANGUAGES C CXX)
+project(calibraw_android_native_deps LANGUAGES C CXX)
 
 include(ExternalProject)
 include(FetchContent)
 include(ProcessorCount)
 
 if(NOT ANDROID)
-    message(FATAL_ERROR "AuRaw native dependencies must be configured with the Android NDK toolchain")
+    message(FATAL_ERROR "CalibRaw native dependencies must be configured with the Android NDK toolchain")
 endif()
 
-set(AURAW_SUPPORTED_ABIS arm64-v8a)
-if(NOT ANDROID_ABI IN_LIST AURAW_SUPPORTED_ABIS)
+set(CALIBRAW_SUPPORTED_ABIS arm64-v8a)
+if(NOT ANDROID_ABI IN_LIST CALIBRAW_SUPPORTED_ABIS)
     message(FATAL_ERROR
-        "Unsupported AuRaw ABI '${ANDROID_ABI}'. Supported ABIs: arm64-v8a")
+        "Unsupported CalibRaw ABI '${ANDROID_ABI}'. Supported ABIs: arm64-v8a")
 endif()
 
-if(NOT DEFINED AURAW_NATIVE_STAGE_ROOT)
+if(NOT DEFINED CALIBRAW_NATIVE_STAGE_ROOT)
     get_filename_component(
-        AURAW_REPOSITORY_ROOT
+        CALIBRAW_REPOSITORY_ROOT
         "${CMAKE_CURRENT_LIST_DIR}/../../../../.."
         ABSOLUTE
     )
-    set(AURAW_NATIVE_STAGE_ROOT "${AURAW_REPOSITORY_ROOT}/android/native")
+    set(CALIBRAW_NATIVE_STAGE_ROOT "${CALIBRAW_REPOSITORY_ROOT}/android/native")
 endif()
 
-if(NOT DEFINED AURAW_ANDROID_MIN_SDK)
+if(NOT DEFINED CALIBRAW_ANDROID_MIN_SDK)
     if(DEFINED ANDROID_PLATFORM_LEVEL)
-        set(AURAW_ANDROID_MIN_SDK "${ANDROID_PLATFORM_LEVEL}")
+        set(CALIBRAW_ANDROID_MIN_SDK "${ANDROID_PLATFORM_LEVEL}")
     else()
-        set(AURAW_ANDROID_MIN_SDK 26)
+        set(CALIBRAW_ANDROID_MIN_SDK 26)
     endif()
 endif()
 
@@ -40,13 +40,13 @@ if(NOT CMAKE_ANDROID_NDK)
     message(FATAL_ERROR "The active Android toolchain did not expose the NDK root")
 endif()
 
-if(DEFINED AURAW_LIBRAW_VERSION AND NOT AURAW_LIBRAW_VERSION STREQUAL "0.22.1")
+if(DEFINED CALIBRAW_LIBRAW_VERSION AND NOT CALIBRAW_LIBRAW_VERSION STREQUAL "0.22.1")
     message(FATAL_ERROR
-        "Cargo.toml requests LibRaw ${AURAW_LIBRAW_VERSION}, but this CMake pin is 0.22.1")
+        "Cargo.toml requests LibRaw ${CALIBRAW_LIBRAW_VERSION}, but this CMake pin is 0.22.1")
 endif()
-if(DEFINED AURAW_LENSFUN_VERSION AND NOT AURAW_LENSFUN_VERSION STREQUAL "0.3.4")
+if(DEFINED CALIBRAW_LENSFUN_VERSION AND NOT CALIBRAW_LENSFUN_VERSION STREQUAL "0.3.4")
     message(FATAL_ERROR
-        "Cargo.toml requests Lensfun ${AURAW_LENSFUN_VERSION}, but this CMake pin is 0.3.4")
+        "Cargo.toml requests Lensfun ${CALIBRAW_LENSFUN_VERSION}, but this CMake pin is 0.3.4")
 endif()
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -55,14 +55,14 @@ add_link_options(
     "-Wl,-z,common-page-size=16384"
 )
 
-ProcessorCount(AURAW_BUILD_JOBS)
-if(NOT AURAW_BUILD_JOBS OR AURAW_BUILD_JOBS LESS 1)
-    set(AURAW_BUILD_JOBS 1)
+ProcessorCount(CALIBRAW_BUILD_JOBS)
+if(NOT CALIBRAW_BUILD_JOBS OR CALIBRAW_BUILD_JOBS LESS 1)
+    set(CALIBRAW_BUILD_JOBS 1)
 endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-find_program(AURAW_MAKE_EXECUTABLE NAMES gmake make REQUIRED)
-find_program(AURAW_PKG_CONFIG_EXECUTABLE NAMES pkg-config REQUIRED)
+find_program(CALIBRAW_MAKE_EXECUTABLE NAMES gmake make REQUIRED)
+find_program(CALIBRAW_PKG_CONFIG_EXECUTABLE NAMES pkg-config REQUIRED)
 
 # Immutable source pins. URL hashes protect archive downloads in addition to the
 # Git commit pins used by LibRaw, LibRaw-cmake, and Lensfun.
@@ -70,47 +70,47 @@ find_program(AURAW_PKG_CONFIG_EXECUTABLE NAMES pkg-config REQUIRED)
 # that option is not understood by 3.22 and is folded into URL_HASH, making
 # configuration fail before any native dependency is downloaded.
 FetchContent_Declare(
-    auraw_libraw_source
+    calibraw_libraw_source
     URL https://github.com/LibRaw/LibRaw/archive/b860248a89d9082b8e0a1e202e516f46af9adb29.tar.gz
     URL_HASH SHA256=f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b
-    SOURCE_SUBDIR _auraw_do_not_add
+    SOURCE_SUBDIR _calibraw_do_not_add
 )
 FetchContent_Declare(
-    auraw_libraw_cmake
+    calibraw_libraw_cmake
     URL https://github.com/LibRaw/LibRaw-cmake/archive/eb98e4325aef2ce85d2eb031c2ff18640ca616d3.tar.gz
     URL_HASH SHA256=3cd218bf6d1254de86e27269541277fbfc5bae57a9002ce0b46fbe2a97088b43
-    SOURCE_SUBDIR _auraw_do_not_add
+    SOURCE_SUBDIR _calibraw_do_not_add
 )
 FetchContent_Declare(
-    auraw_lensfun_source
+    calibraw_lensfun_source
     URL https://github.com/lensfun/lensfun/archive/101c745e847a5de4a1e569a94368ce2027198598.tar.gz
     URL_HASH SHA256=a11cbe6aeec657839540448b253217c25d20b7a45b6aebfef406f7239933c7a6
-    SOURCE_SUBDIR _auraw_do_not_add
+    SOURCE_SUBDIR _calibraw_do_not_add
 )
 # GLib uses Meson. Fetch Meson's pinned source and invoke meson.py directly;
 # this avoids the old project-local Python virtualenv and pip bootstrap.
 FetchContent_Declare(
-    auraw_meson_source
+    calibraw_meson_source
     URL https://files.pythonhosted.org/packages/02/98/bbcaf6caaaa0510a68834f119ac793a8abade6ff827fc2791eeb6f8b4a66/meson-1.7.0.tar.gz
     URL_HASH SHA256=08efbe84803eed07f863b05092d653a9d348f7038761d900412fddf56deb0284
-    SOURCE_SUBDIR _auraw_do_not_add
+    SOURCE_SUBDIR _calibraw_do_not_add
 )
 FetchContent_MakeAvailable(
-    auraw_libraw_source
-    auraw_libraw_cmake
-    auraw_lensfun_source
-    auraw_meson_source
+    calibraw_libraw_source
+    calibraw_libraw_cmake
+    calibraw_lensfun_source
+    calibraw_meson_source
 )
 
-set(AURAW_ABI_STAGE "${AURAW_NATIVE_STAGE_ROOT}")
-set(AURAW_LIBRAW_STAGE "${AURAW_ABI_STAGE}/libraw/${ANDROID_ABI}")
-set(AURAW_LENSFUN_STAGE "${AURAW_ABI_STAGE}/lensfun/${ANDROID_ABI}")
-set(AURAW_EXTERNAL_ROOT "${CMAKE_BINARY_DIR}/auraw-external")
+set(CALIBRAW_ABI_STAGE "${CALIBRAW_NATIVE_STAGE_ROOT}")
+set(CALIBRAW_LIBRAW_STAGE "${CALIBRAW_ABI_STAGE}/libraw/${ANDROID_ABI}")
+set(CALIBRAW_LENSFUN_STAGE "${CALIBRAW_ABI_STAGE}/lensfun/${ANDROID_ABI}")
+set(CALIBRAW_EXTERNAL_ROOT "${CMAKE_BINARY_DIR}/calibraw-external")
 file(MAKE_DIRECTORY
-    "${AURAW_LIBRAW_STAGE}/include/libraw"
-    "${AURAW_LIBRAW_STAGE}/lib"
-    "${AURAW_LENSFUN_STAGE}/include"
-    "${AURAW_LENSFUN_STAGE}/lib/pkgconfig"
+    "${CALIBRAW_LIBRAW_STAGE}/include/libraw"
+    "${CALIBRAW_LIBRAW_STAGE}/lib"
+    "${CALIBRAW_LENSFUN_STAGE}/include"
+    "${CALIBRAW_LENSFUN_STAGE}/lib/pkgconfig"
 )
 
 # -----------------------------------------------------------------------------
@@ -118,11 +118,11 @@ file(MAKE_DIRECTORY
 # -----------------------------------------------------------------------------
 # Upstream LibRaw does not ship the CMake project used by Android, so overlay the
 # separately pinned LibRaw-cmake files onto FetchContent's private source tree.
-file(COPY "${auraw_libraw_cmake_SOURCE_DIR}/CMakeLists.txt"
-     DESTINATION "${auraw_libraw_source_SOURCE_DIR}")
-file(REMOVE_RECURSE "${auraw_libraw_source_SOURCE_DIR}/cmake")
-file(COPY "${auraw_libraw_cmake_SOURCE_DIR}/cmake"
-     DESTINATION "${auraw_libraw_source_SOURCE_DIR}")
+file(COPY "${calibraw_libraw_cmake_SOURCE_DIR}/CMakeLists.txt"
+     DESTINATION "${calibraw_libraw_source_SOURCE_DIR}")
+file(REMOVE_RECURSE "${calibraw_libraw_source_SOURCE_DIR}/cmake")
+file(COPY "${calibraw_libraw_cmake_SOURCE_DIR}/cmake"
+     DESTINATION "${calibraw_libraw_source_SOURCE_DIR}")
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(ENABLE_OPENMP OFF CACHE BOOL "" FORCE)
@@ -135,8 +135,8 @@ set(LIBRAW_UNINSTALL_TARGET OFF CACHE BOOL "" FORCE)
 set(CMAKE_DISABLE_FIND_PACKAGE_JPEG ON CACHE BOOL "" FORCE)
 
 add_subdirectory(
-    "${auraw_libraw_source_SOURCE_DIR}"
-    "${CMAKE_BINARY_DIR}/auraw-libraw"
+    "${calibraw_libraw_source_SOURCE_DIR}"
+    "${CMAKE_BINARY_DIR}/calibraw-libraw"
     EXCLUDE_FROM_ALL
 )
 if(NOT TARGET raw)
@@ -144,20 +144,20 @@ if(NOT TARGET raw)
 endif()
 set_property(TARGET raw PROPERTY POSITION_INDEPENDENT_CODE ON)
 
-add_custom_target(auraw_stage_libraw
+add_custom_target(calibraw_stage_libraw
     COMMAND "${CMAKE_COMMAND}" -E make_directory
-            "${AURAW_LIBRAW_STAGE}/include/libraw"
-            "${AURAW_LIBRAW_STAGE}/lib"
+            "${CALIBRAW_LIBRAW_STAGE}/include/libraw"
+            "${CALIBRAW_LIBRAW_STAGE}/lib"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
-            "${auraw_libraw_source_SOURCE_DIR}/libraw"
-            "${AURAW_LIBRAW_STAGE}/include/libraw"
+            "${calibraw_libraw_source_SOURCE_DIR}/libraw"
+            "${CALIBRAW_LIBRAW_STAGE}/include/libraw"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "$<TARGET_FILE:raw>"
-            "${AURAW_LIBRAW_STAGE}/lib/libraw.a"
+            "${CALIBRAW_LIBRAW_STAGE}/lib/libraw.a"
     DEPENDS raw
     BYPRODUCTS
-        "${AURAW_LIBRAW_STAGE}/include/libraw/libraw.h"
-        "${AURAW_LIBRAW_STAGE}/lib/libraw.a"
+        "${CALIBRAW_LIBRAW_STAGE}/include/libraw/libraw.h"
+        "${CALIBRAW_LIBRAW_STAGE}/lib/libraw.a"
     VERBATIM
 )
 
@@ -168,51 +168,51 @@ add_custom_target(auraw_stage_libraw
 # but Lensfun 0.3.4 still calls find_package(GLIB2 REQUIRED) for the core library.
 # Build the smallest pinned static GLib stack as CMake ExternalProject targets.
 if(ANDROID_ABI STREQUAL "arm64-v8a")
-    set(AURAW_CLANG_TARGET "aarch64-linux-android${AURAW_ANDROID_MIN_SDK}")
-    set(AURAW_AUTOCONF_HOST "aarch64-linux-android")
-    set(AURAW_MESON_CPU_FAMILY "aarch64")
-    set(AURAW_MESON_CPU "aarch64")
+    set(CALIBRAW_CLANG_TARGET "aarch64-linux-android${CALIBRAW_ANDROID_MIN_SDK}")
+    set(CALIBRAW_AUTOCONF_HOST "aarch64-linux-android")
+    set(CALIBRAW_MESON_CPU_FAMILY "aarch64")
+    set(CALIBRAW_MESON_CPU "aarch64")
 endif()
 
-get_filename_component(AURAW_NDK_TOOLCHAIN_BIN "${CMAKE_C_COMPILER}" DIRECTORY)
-set(AURAW_NDK_CC "${AURAW_NDK_TOOLCHAIN_BIN}/${AURAW_CLANG_TARGET}-clang")
-set(AURAW_NDK_CXX "${AURAW_NDK_TOOLCHAIN_BIN}/${AURAW_CLANG_TARGET}-clang++")
-set(AURAW_NDK_AR "${AURAW_NDK_TOOLCHAIN_BIN}/llvm-ar")
-set(AURAW_NDK_RANLIB "${AURAW_NDK_TOOLCHAIN_BIN}/llvm-ranlib")
-set(AURAW_NDK_STRIP "${AURAW_NDK_TOOLCHAIN_BIN}/llvm-strip")
+get_filename_component(CALIBRAW_NDK_TOOLCHAIN_BIN "${CMAKE_C_COMPILER}" DIRECTORY)
+set(CALIBRAW_NDK_CC "${CALIBRAW_NDK_TOOLCHAIN_BIN}/${CALIBRAW_CLANG_TARGET}-clang")
+set(CALIBRAW_NDK_CXX "${CALIBRAW_NDK_TOOLCHAIN_BIN}/${CALIBRAW_CLANG_TARGET}-clang++")
+set(CALIBRAW_NDK_AR "${CALIBRAW_NDK_TOOLCHAIN_BIN}/llvm-ar")
+set(CALIBRAW_NDK_RANLIB "${CALIBRAW_NDK_TOOLCHAIN_BIN}/llvm-ranlib")
+set(CALIBRAW_NDK_STRIP "${CALIBRAW_NDK_TOOLCHAIN_BIN}/llvm-strip")
 foreach(tool IN ITEMS
-        AURAW_NDK_CC AURAW_NDK_CXX AURAW_NDK_AR AURAW_NDK_RANLIB AURAW_NDK_STRIP)
+        CALIBRAW_NDK_CC CALIBRAW_NDK_CXX CALIBRAW_NDK_AR CALIBRAW_NDK_RANLIB CALIBRAW_NDK_STRIP)
     if(NOT EXISTS "${${tool}}")
         message(FATAL_ERROR "Android NDK tool is missing: ${${tool}}")
     endif()
 endforeach()
 
-file(TO_CMAKE_PATH "${AURAW_LENSFUN_STAGE}" AURAW_LENSFUN_STAGE_MESON)
-file(TO_CMAKE_PATH "${AURAW_PKG_CONFIG_EXECUTABLE}" AURAW_PKG_CONFIG_MESON)
-file(TO_CMAKE_PATH "${AURAW_NDK_CC}" AURAW_NDK_CC_MESON)
-file(TO_CMAKE_PATH "${AURAW_NDK_CXX}" AURAW_NDK_CXX_MESON)
-file(TO_CMAKE_PATH "${AURAW_NDK_AR}" AURAW_NDK_AR_MESON)
-file(TO_CMAKE_PATH "${AURAW_NDK_STRIP}" AURAW_NDK_STRIP_MESON)
-set(AURAW_GLIB_CROSS_FILE "${AURAW_EXTERNAL_ROOT}/glib-${ANDROID_ABI}.cross")
-file(MAKE_DIRECTORY "${AURAW_EXTERNAL_ROOT}")
-file(WRITE "${AURAW_GLIB_CROSS_FILE}"
+file(TO_CMAKE_PATH "${CALIBRAW_LENSFUN_STAGE}" CALIBRAW_LENSFUN_STAGE_MESON)
+file(TO_CMAKE_PATH "${CALIBRAW_PKG_CONFIG_EXECUTABLE}" CALIBRAW_PKG_CONFIG_MESON)
+file(TO_CMAKE_PATH "${CALIBRAW_NDK_CC}" CALIBRAW_NDK_CC_MESON)
+file(TO_CMAKE_PATH "${CALIBRAW_NDK_CXX}" CALIBRAW_NDK_CXX_MESON)
+file(TO_CMAKE_PATH "${CALIBRAW_NDK_AR}" CALIBRAW_NDK_AR_MESON)
+file(TO_CMAKE_PATH "${CALIBRAW_NDK_STRIP}" CALIBRAW_NDK_STRIP_MESON)
+set(CALIBRAW_GLIB_CROSS_FILE "${CALIBRAW_EXTERNAL_ROOT}/glib-${ANDROID_ABI}.cross")
+file(MAKE_DIRECTORY "${CALIBRAW_EXTERNAL_ROOT}")
+file(WRITE "${CALIBRAW_GLIB_CROSS_FILE}"
 "[binaries]\n"
-"c = '${AURAW_NDK_CC_MESON}'\n"
-"cpp = '${AURAW_NDK_CXX_MESON}'\n"
-"ar = '${AURAW_NDK_AR_MESON}'\n"
-"strip = '${AURAW_NDK_STRIP_MESON}'\n"
-"pkg-config = '${AURAW_PKG_CONFIG_MESON}'\n\n"
+"c = '${CALIBRAW_NDK_CC_MESON}'\n"
+"cpp = '${CALIBRAW_NDK_CXX_MESON}'\n"
+"ar = '${CALIBRAW_NDK_AR_MESON}'\n"
+"strip = '${CALIBRAW_NDK_STRIP_MESON}'\n"
+"pkg-config = '${CALIBRAW_PKG_CONFIG_MESON}'\n\n"
 "[properties]\n"
 "needs_exe_wrapper = true\n\n"
 "[built-in options]\n"
-"c_args = ['-fPIC', '-I${AURAW_LENSFUN_STAGE_MESON}/include']\n"
-"cpp_args = ['-fPIC', '-I${AURAW_LENSFUN_STAGE_MESON}/include']\n"
-"c_link_args = ['-L${AURAW_LENSFUN_STAGE_MESON}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384']\n"
-"cpp_link_args = ['-L${AURAW_LENSFUN_STAGE_MESON}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384']\n\n"
+"c_args = ['-fPIC', '-I${CALIBRAW_LENSFUN_STAGE_MESON}/include']\n"
+"cpp_args = ['-fPIC', '-I${CALIBRAW_LENSFUN_STAGE_MESON}/include']\n"
+"c_link_args = ['-L${CALIBRAW_LENSFUN_STAGE_MESON}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384']\n"
+"cpp_link_args = ['-L${CALIBRAW_LENSFUN_STAGE_MESON}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384']\n\n"
 "[host_machine]\n"
 "system = 'android'\n"
-"cpu_family = '${AURAW_MESON_CPU_FAMILY}'\n"
-"cpu = '${AURAW_MESON_CPU}'\n"
+"cpu_family = '${CALIBRAW_MESON_CPU_FAMILY}'\n"
+"cpu = '${CALIBRAW_MESON_CPU}'\n"
 "endian = 'little'\n")
 
 # libiconv installs the iconv/charset archives consumed by GLib and Lensfun.
@@ -220,47 +220,47 @@ file(WRITE "${AURAW_GLIB_CROSS_FILE}"
 # retrying/checksum-verifying bootstrap helper. Prefer that local archive so
 # Ninja never depends on ftp.gnu.org being reachable. Local developer builds
 # still have a direct HTTPS fallback to the kernel.org GNU mirror.
-set(AURAW_LIBICONV_ARCHIVE
-    "${AURAW_NATIVE_STAGE_ROOT}/downloads/libiconv-1.17.tar.gz")
-if(EXISTS "${AURAW_LIBICONV_ARCHIVE}")
-    set(AURAW_LIBICONV_URL "${AURAW_LIBICONV_ARCHIVE}")
+set(CALIBRAW_LIBICONV_ARCHIVE
+    "${CALIBRAW_NATIVE_STAGE_ROOT}/downloads/libiconv-1.17.tar.gz")
+if(EXISTS "${CALIBRAW_LIBICONV_ARCHIVE}")
+    set(CALIBRAW_LIBICONV_URL "${CALIBRAW_LIBICONV_ARCHIVE}")
 else()
-    set(AURAW_LIBICONV_URL
+    set(CALIBRAW_LIBICONV_URL
         "https://mirrors.edge.kernel.org/gnu/libiconv/libiconv-1.17.tar.gz")
 endif()
-ExternalProject_Add(auraw_iconv
-    URL "${AURAW_LIBICONV_URL}"
+ExternalProject_Add(calibraw_iconv
+    URL "${CALIBRAW_LIBICONV_URL}"
     URL_HASH SHA256=8f74213b56238c85a50a5329f77e06198771e70dd9a739779f4c02f65d971313
-    PREFIX "${AURAW_EXTERNAL_ROOT}/iconv-prefix"
-    BINARY_DIR "${AURAW_EXTERNAL_ROOT}/iconv-build"
+    PREFIX "${CALIBRAW_EXTERNAL_ROOT}/iconv-prefix"
+    BINARY_DIR "${CALIBRAW_EXTERNAL_ROOT}/iconv-build"
     CONFIGURE_COMMAND
         "${CMAKE_COMMAND}" -E env
-        "CC=${AURAW_NDK_CC}"
-        "CXX=${AURAW_NDK_CXX}"
-        "AR=${AURAW_NDK_AR}"
-        "RANLIB=${AURAW_NDK_RANLIB}"
+        "CC=${CALIBRAW_NDK_CC}"
+        "CXX=${CALIBRAW_NDK_CXX}"
+        "AR=${CALIBRAW_NDK_AR}"
+        "RANLIB=${CALIBRAW_NDK_RANLIB}"
         "CFLAGS=-fPIC"
         "CXXFLAGS=-fPIC"
         "LDFLAGS=-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
         <SOURCE_DIR>/configure
-        "--host=${AURAW_AUTOCONF_HOST}"
-        "--prefix=${AURAW_LENSFUN_STAGE}"
+        "--host=${CALIBRAW_AUTOCONF_HOST}"
+        "--prefix=${CALIBRAW_LENSFUN_STAGE}"
         --disable-shared
         --enable-static
         --with-pic
-    BUILD_COMMAND "${AURAW_MAKE_EXECUTABLE}" "-j${AURAW_BUILD_JOBS}"
-    INSTALL_COMMAND "${AURAW_MAKE_EXECUTABLE}" "-j${AURAW_BUILD_JOBS}" install
+    BUILD_COMMAND "${CALIBRAW_MAKE_EXECUTABLE}" "-j${CALIBRAW_BUILD_JOBS}"
+    INSTALL_COMMAND "${CALIBRAW_MAKE_EXECUTABLE}" "-j${CALIBRAW_BUILD_JOBS}" install
     BUILD_BYPRODUCTS
-        "${AURAW_LENSFUN_STAGE}/lib/libiconv.a"
-        "${AURAW_LENSFUN_STAGE}/lib/libcharset.a"
-        "${AURAW_LENSFUN_STAGE}/lib/libintl.a"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libiconv.a"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libcharset.a"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libintl.a"
 )
 
-file(WRITE "${AURAW_LENSFUN_STAGE}/lib/pkgconfig/iconv.pc"
-"prefix=${AURAW_LENSFUN_STAGE}\n"
+file(WRITE "${CALIBRAW_LENSFUN_STAGE}/lib/pkgconfig/iconv.pc"
+"prefix=${CALIBRAW_LENSFUN_STAGE}\n"
 "libdir=\${prefix}/lib\n\n"
 "Name: iconv\n"
-"Description: GNU libiconv for AuRaw Android Lensfun\n"
+"Description: GNU libiconv for CalibRaw Android Lensfun\n"
 "Version: 1.17\n"
 "Libs: -L\${libdir} -liconv -lcharset\n")
 
@@ -269,11 +269,11 @@ file(WRITE "${AURAW_LENSFUN_STAGE}/lib/pkgconfig/iconv.pc"
 # zlib from its official GitHub release and expose it through the isolated
 # Android pkg-config directory used below. This also keeps Meson from ever
 # resolving a zlib from the build host.
-ExternalProject_Add(auraw_zlib
+ExternalProject_Add(calibraw_zlib
     URL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
     URL_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
-    PREFIX "${AURAW_EXTERNAL_ROOT}/zlib-prefix"
-    BINARY_DIR "${AURAW_EXTERNAL_ROOT}/zlib-build"
+    PREFIX "${CALIBRAW_EXTERNAL_ROOT}/zlib-prefix"
+    BINARY_DIR "${CALIBRAW_EXTERNAL_ROOT}/zlib-build"
     CONFIGURE_COMMAND
         "${CMAKE_COMMAND}"
         -S <SOURCE_DIR>
@@ -283,61 +283,61 @@ ExternalProject_Add(auraw_zlib
         "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
         "-DANDROID_NDK=${CMAKE_ANDROID_NDK}"
         "-DANDROID_ABI=${ANDROID_ABI}"
-        "-DANDROID_PLATFORM=android-${AURAW_ANDROID_MIN_SDK}"
+        "-DANDROID_PLATFORM=android-${CALIBRAW_ANDROID_MIN_SDK}"
         -DANDROID_STL=c++_shared
         -DCMAKE_BUILD_TYPE=Release
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DZLIB_BUILD_EXAMPLES=OFF
     BUILD_COMMAND
         "${CMAKE_COMMAND}" --build <BINARY_DIR> --target zlibstatic
-        --parallel "${AURAW_BUILD_JOBS}"
+        --parallel "${CALIBRAW_BUILD_JOBS}"
     INSTALL_COMMAND
         "${CMAKE_COMMAND}" -E rm -f
-        "${AURAW_LENSFUN_STAGE}/lib/libz.so"
-        "${AURAW_LENSFUN_STAGE}/lib/libz.so.1"
-        "${AURAW_LENSFUN_STAGE}/lib/libz.so.1.3.1"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libz.so"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libz.so.1"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libz.so.1.3.1"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        <BINARY_DIR>/libz.a "${AURAW_LENSFUN_STAGE}/lib/libz.a"
+        <BINARY_DIR>/libz.a "${CALIBRAW_LENSFUN_STAGE}/lib/libz.a"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        <SOURCE_DIR>/zlib.h "${AURAW_LENSFUN_STAGE}/include/zlib.h"
+        <SOURCE_DIR>/zlib.h "${CALIBRAW_LENSFUN_STAGE}/include/zlib.h"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        <BINARY_DIR>/zconf.h "${AURAW_LENSFUN_STAGE}/include/zconf.h"
+        <BINARY_DIR>/zconf.h "${CALIBRAW_LENSFUN_STAGE}/include/zconf.h"
     BUILD_BYPRODUCTS
-        "${AURAW_LENSFUN_STAGE}/include/zlib.h"
-        "${AURAW_LENSFUN_STAGE}/lib/libz.a"
-        "${AURAW_LENSFUN_STAGE}/lib/pkgconfig/zlib.pc"
+        "${CALIBRAW_LENSFUN_STAGE}/include/zlib.h"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libz.a"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/pkgconfig/zlib.pc"
 )
 
-file(WRITE "${AURAW_LENSFUN_STAGE}/lib/pkgconfig/zlib.pc"
-"prefix=${AURAW_LENSFUN_STAGE}\n"
+file(WRITE "${CALIBRAW_LENSFUN_STAGE}/lib/pkgconfig/zlib.pc"
+"prefix=${CALIBRAW_LENSFUN_STAGE}\n"
 "includedir=\${prefix}/include\n"
 "libdir=\${prefix}/lib\n\n"
 "Name: zlib\n"
-"Description: zlib compression library for AuRaw Android GLib\n"
+"Description: zlib compression library for CalibRaw Android GLib\n"
 "Version: 1.3.1\n"
 "Libs: -L\${libdir} -lz\n"
 "Cflags: -I\${includedir}\n")
 
-set(AURAW_PKG_CONFIG_DIR "${AURAW_LENSFUN_STAGE}/lib/pkgconfig")
-set(AURAW_MESON "${Python3_EXECUTABLE};${auraw_meson_source_SOURCE_DIR}/meson.py")
-ExternalProject_Add(auraw_glib
+set(CALIBRAW_PKG_CONFIG_DIR "${CALIBRAW_LENSFUN_STAGE}/lib/pkgconfig")
+set(CALIBRAW_MESON "${Python3_EXECUTABLE};${calibraw_meson_source_SOURCE_DIR}/meson.py")
+ExternalProject_Add(calibraw_glib
     URL https://download.gnome.org/sources/glib/2.78/glib-2.78.6.tar.xz
     URL_HASH SHA256=244854654dd82c7ebcb2f8e246156d2a05eb9cd1ad07ed7a779659b4602c9fae
-    PREFIX "${AURAW_EXTERNAL_ROOT}/glib-prefix"
-    BINARY_DIR "${AURAW_EXTERNAL_ROOT}/glib-build"
-    DEPENDS auraw_iconv auraw_zlib
+    PREFIX "${CALIBRAW_EXTERNAL_ROOT}/glib-prefix"
+    BINARY_DIR "${CALIBRAW_EXTERNAL_ROOT}/glib-build"
+    DEPENDS calibraw_iconv calibraw_zlib
     CONFIGURE_COMMAND
         "${CMAKE_COMMAND}" -E env
-        "PKG_CONFIG_LIBDIR=${AURAW_PKG_CONFIG_DIR}"
-        "PKG_CONFIG_PATH=${AURAW_PKG_CONFIG_DIR}"
-        ${AURAW_MESON}
+        "PKG_CONFIG_LIBDIR=${CALIBRAW_PKG_CONFIG_DIR}"
+        "PKG_CONFIG_PATH=${CALIBRAW_PKG_CONFIG_DIR}"
+        ${CALIBRAW_MESON}
         setup
         <BINARY_DIR>
         <SOURCE_DIR>
-        --cross-file "${AURAW_GLIB_CROSS_FILE}"
+        --cross-file "${CALIBRAW_GLIB_CROSS_FILE}"
         --wrap-mode=default
         --force-fallback-for=libpcre2-8,libffi
-        --prefix "${AURAW_LENSFUN_STAGE}"
+        --prefix "${CALIBRAW_LENSFUN_STAGE}"
         --libdir lib
         --default-library static
         --buildtype release
@@ -353,31 +353,31 @@ ExternalProject_Add(auraw_glib
         -Dgtk_doc=false
     BUILD_COMMAND
         "${CMAKE_COMMAND}" -E env
-        "PKG_CONFIG_LIBDIR=${AURAW_PKG_CONFIG_DIR}"
-        "PKG_CONFIG_PATH=${AURAW_PKG_CONFIG_DIR}"
-        ${AURAW_MESON} compile -C <BINARY_DIR>
+        "PKG_CONFIG_LIBDIR=${CALIBRAW_PKG_CONFIG_DIR}"
+        "PKG_CONFIG_PATH=${CALIBRAW_PKG_CONFIG_DIR}"
+        ${CALIBRAW_MESON} compile -C <BINARY_DIR>
     INSTALL_COMMAND
         "${CMAKE_COMMAND}" -E env
-        "PKG_CONFIG_LIBDIR=${AURAW_PKG_CONFIG_DIR}"
-        "PKG_CONFIG_PATH=${AURAW_PKG_CONFIG_DIR}"
-        ${AURAW_MESON} install -C <BINARY_DIR>
+        "PKG_CONFIG_LIBDIR=${CALIBRAW_PKG_CONFIG_DIR}"
+        "PKG_CONFIG_PATH=${CALIBRAW_PKG_CONFIG_DIR}"
+        ${CALIBRAW_MESON} install -C <BINARY_DIR>
     BUILD_BYPRODUCTS
-        "${AURAW_LENSFUN_STAGE}/lib/libglib-2.0.a"
-        "${AURAW_LENSFUN_STAGE}/lib/libpcre2-8.a"
-        "${AURAW_LENSFUN_STAGE}/lib/libffi.a"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libglib-2.0.a"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libpcre2-8.a"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/libffi.a"
 )
 
-ExternalProject_Add(auraw_lensfun
-    SOURCE_DIR "${auraw_lensfun_source_SOURCE_DIR}"
+ExternalProject_Add(calibraw_lensfun
+    SOURCE_DIR "${calibraw_lensfun_source_SOURCE_DIR}"
     DOWNLOAD_COMMAND ""
     UPDATE_COMMAND ""
-    PREFIX "${AURAW_EXTERNAL_ROOT}/lensfun-prefix"
-    BINARY_DIR "${AURAW_EXTERNAL_ROOT}/lensfun-build"
-    DEPENDS auraw_glib
+    PREFIX "${CALIBRAW_EXTERNAL_ROOT}/lensfun-prefix"
+    BINARY_DIR "${CALIBRAW_EXTERNAL_ROOT}/lensfun-build"
+    DEPENDS calibraw_glib
     CONFIGURE_COMMAND
         "${CMAKE_COMMAND}" -E env
-        "PKG_CONFIG_LIBDIR=${AURAW_PKG_CONFIG_DIR}"
-        "PKG_CONFIG_PATH=${AURAW_PKG_CONFIG_DIR}"
+        "PKG_CONFIG_LIBDIR=${CALIBRAW_PKG_CONFIG_DIR}"
+        "PKG_CONFIG_PATH=${CALIBRAW_PKG_CONFIG_DIR}"
         "${CMAKE_COMMAND}"
         -S <SOURCE_DIR>
         -B <BINARY_DIR>
@@ -386,15 +386,15 @@ ExternalProject_Add(auraw_lensfun
         "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
         "-DANDROID_NDK=${CMAKE_ANDROID_NDK}"
         "-DANDROID_ABI=${ANDROID_ABI}"
-        "-DANDROID_PLATFORM=android-${AURAW_ANDROID_MIN_SDK}"
+        "-DANDROID_PLATFORM=android-${CALIBRAW_ANDROID_MIN_SDK}"
         -DANDROID_STL=c++_shared
         -DCMAKE_BUILD_TYPE=Release
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-        "-DCMAKE_PREFIX_PATH=${AURAW_LENSFUN_STAGE}"
-        "-DCMAKE_INSTALL_PREFIX=${AURAW_LENSFUN_STAGE}"
+        "-DCMAKE_PREFIX_PATH=${CALIBRAW_LENSFUN_STAGE}"
+        "-DCMAKE_INSTALL_PREFIX=${CALIBRAW_LENSFUN_STAGE}"
         -DCMAKE_INSTALL_LIBDIR=lib
         -DCMAKE_INSTALL_DATAROOTDIR=apk-assets
-        "-DPKG_CONFIG_EXECUTABLE=${AURAW_PKG_CONFIG_EXECUTABLE}"
+        "-DPKG_CONFIG_EXECUTABLE=${CALIBRAW_PKG_CONFIG_EXECUTABLE}"
         -DBUILD_STATIC=ON
         -DBUILD_TESTS=OFF
         -DBUILD_LENSTOOL=OFF
@@ -406,37 +406,37 @@ ExternalProject_Add(auraw_lensfun
         "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
         "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
     BUILD_COMMAND
-        "${CMAKE_COMMAND}" --build <BINARY_DIR> --target install --parallel "${AURAW_BUILD_JOBS}"
+        "${CMAKE_COMMAND}" --build <BINARY_DIR> --target install --parallel "${CALIBRAW_BUILD_JOBS}"
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS
-        "${AURAW_LENSFUN_STAGE}/include/lensfun/lensfun.h"
-        "${AURAW_LENSFUN_STAGE}/lib/liblensfun.a"
+        "${CALIBRAW_LENSFUN_STAGE}/include/lensfun/lensfun.h"
+        "${CALIBRAW_LENSFUN_STAGE}/lib/liblensfun.a"
 )
 
-add_custom_target(auraw_verify_lensfun
+add_custom_target(calibraw_verify_lensfun
     COMMAND "${CMAKE_COMMAND}"
-            "-DSTAGE_ROOT=${AURAW_LENSFUN_STAGE}"
+            "-DSTAGE_ROOT=${CALIBRAW_LENSFUN_STAGE}"
             -P "${CMAKE_CURRENT_LIST_DIR}/cmake/VerifyLensfunStage.cmake"
-    DEPENDS auraw_lensfun
+    DEPENDS calibraw_lensfun
     VERBATIM
 )
 
 # Targets available to a future C++ JNI target in this project. The existing
-# Rust cdylib consumes the same staged archives through auraw-core/build.rs.
-add_library(auraw_lensfun_static STATIC IMPORTED GLOBAL)
-set_target_properties(auraw_lensfun_static PROPERTIES
-    IMPORTED_LOCATION "${AURAW_LENSFUN_STAGE}/lib/liblensfun.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${AURAW_LENSFUN_STAGE}/include"
+# Rust cdylib consumes the same staged archives through calibraw-core/build.rs.
+add_library(calibraw_lensfun_static STATIC IMPORTED GLOBAL)
+set_target_properties(calibraw_lensfun_static PROPERTIES
+    IMPORTED_LOCATION "${CALIBRAW_LENSFUN_STAGE}/lib/liblensfun.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${CALIBRAW_LENSFUN_STAGE}/include"
 )
-add_dependencies(auraw_lensfun_static auraw_verify_lensfun)
-add_library(auraw::lensfun ALIAS auraw_lensfun_static)
-add_library(auraw::libraw ALIAS raw)
+add_dependencies(calibraw_lensfun_static calibraw_verify_lensfun)
+add_library(calibraw::lensfun ALIAS calibraw_lensfun_static)
+add_library(calibraw::libraw ALIAS raw)
 
-add_library(auraw_native_static INTERFACE)
-target_link_libraries(auraw_native_static INTERFACE raw auraw_lensfun_static)
-add_dependencies(auraw_native_static auraw_stage_libraw auraw_verify_lensfun)
-add_library(auraw::native_static ALIAS auraw_native_static)
+add_library(calibraw_native_static INTERFACE)
+target_link_libraries(calibraw_native_static INTERFACE raw calibraw_lensfun_static)
+add_dependencies(calibraw_native_static calibraw_stage_libraw calibraw_verify_lensfun)
+add_library(calibraw::native_static ALIAS calibraw_native_static)
 
 # AGP builds this explicit target for every ABI in ndk.abiFilters.
-add_custom_target(auraw_native_deps ALL)
-add_dependencies(auraw_native_deps auraw_stage_libraw auraw_verify_lensfun)
+add_custom_target(calibraw_native_deps ALL)
+add_dependencies(calibraw_native_deps calibraw_stage_libraw calibraw_verify_lensfun)

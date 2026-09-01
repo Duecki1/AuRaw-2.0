@@ -16,6 +16,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "AuRaw"
+rootProject.name = "CalibRaw"
 rootProject.projectDir = file("android")
 include(":app")

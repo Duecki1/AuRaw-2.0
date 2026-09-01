@@ -69,24 +69,24 @@ jobs:
 
       - name: Build release application
         env:
-          AURAW_DISCORD_APPLICATION_ID: ${{ secrets.AURAW_DISCORD_APPLICATION_ID }}
+          CALIBRAW_DISCORD_APPLICATION_ID: ${{ secrets.CALIBRAW_DISCORD_APPLICATION_ID }}
         run: |
           set -euxo pipefail
 
           revision="$(git rev-parse --verify HEAD)"
-          export AURAW_REQUIRE_COMMITTED_SOURCE=1
-          export AURAW_SOURCE_REVISION="$revision"
+          export CALIBRAW_REQUIRE_COMMITTED_SOURCE=1
+          export CALIBRAW_SOURCE_REVISION="$revision"
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$revision")"
           export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
 
           cargo build \
             --locked \
             --release \
-            --package auraw-ui \
+            --package calibraw-ui \
             --target "${{ matrix.target }}" \
-            --bin auraw
+            --bin calibraw
 
-          binary="target/${{ matrix.target }}/release/auraw"
+          binary="target/${{ matrix.target }}/release/calibraw"
           test -f "$binary"
           test "$(file "$binary")" != "${binary}: data"
           file "$binary" | grep -q "${{ matrix.artifact_arch }}"
@@ -98,10 +98,10 @@ jobs:
           set -euxo pipefail
 
           version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
-          package_name="AuRaw-macos-${{ matrix.artifact_arch }}"
-          app_dir="dist/$package_name/AuRaw.app"
+          package_name="CalibRaw-macos-${{ matrix.artifact_arch }}"
+          app_dir="dist/$package_name/CalibRaw.app"
           contents="$app_dir/Contents"
-          executable="$contents/MacOS/auraw"
+          executable="$contents/MacOS/calibraw"
 
           rm -rf dist
           mkdir -p \
@@ -110,12 +110,12 @@ jobs:
             "$contents/Frameworks" \
             "$contents/Resources"
 
-          cp "target/${{ matrix.target }}/release/auraw" "$executable"
+          cp "target/${{ matrix.target }}/release/calibraw" "$executable"
           chmod +x "$executable"
           cp COPYING NOTICE.md THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md README.md "$contents/Resources/"
 
-          icon_source="packaging/icons/auraw-1024.png"
-          iconset="$contents/Resources/AuRaw.iconset"
+          icon_source="packaging/icons/calibraw-1024.png"
+          iconset="$contents/Resources/CalibRaw.iconset"
           mkdir -p "$iconset"
           for icon_size in 16 32 128 256 512; do
             retina_size=$((icon_size * 2))
@@ -124,12 +124,12 @@ jobs:
             sips -z "$retina_size" "$retina_size" "$icon_source" \
               --out "$iconset/icon_${icon_size}x${icon_size}@2x.png"
           done
-          iconutil -c icns "$iconset" -o "$contents/Resources/AuRaw.icns"
+          iconutil -c icns "$iconset" -o "$contents/Resources/CalibRaw.icns"
           rm -rf "$iconset"
-          test -s "$contents/Resources/AuRaw.icns"
+          test -s "$contents/Resources/CalibRaw.icns"
           # iconutil re-encodes PNG entries, so validate content dimensions rather than bytes.
-          verify_iconset="$(mktemp -d)/AuRaw.iconset"
-          iconutil -c iconset "$contents/Resources/AuRaw.icns" -o "$verify_iconset"
+          verify_iconset="$(mktemp -d)/CalibRaw.iconset"
+          iconutil -c iconset "$contents/Resources/CalibRaw.icns" -o "$verify_iconset"
           verify_icon="$verify_iconset/icon_512x512@2x.png"
           test -s "$verify_icon"
           test "$(sips -g pixelWidth "$verify_icon" | awk '/pixelWidth/ { print $2 }')" = "1024"
@@ -150,17 +150,17 @@ jobs:
             <key>CFBundleDevelopmentRegion</key>
             <string>en</string>
             <key>CFBundleDisplayName</key>
-            <string>AuRaw</string>
+            <string>CalibRaw</string>
             <key>CFBundleExecutable</key>
-            <string>auraw</string>
+            <string>calibraw</string>
             <key>CFBundleIdentifier</key>
-            <string>de.duecki.auraw</string>
+            <string>de.duecki.calibraw</string>
             <key>CFBundleIconFile</key>
-            <string>AuRaw.icns</string>
+            <string>CalibRaw.icns</string>
             <key>CFBundleInfoDictionaryVersion</key>
             <string>6.0</string>
             <key>CFBundleName</key>
-            <string>AuRaw</string>
+            <string>CalibRaw</string>
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleShortVersionString</key>
@@ -183,7 +183,7 @@ jobs:
             -p '@executable_path/../Frameworks'
 
           {
-            echo "AuRaw macOS ${{ matrix.artifact_arch }} build"
+            echo "CalibRaw macOS ${{ matrix.artifact_arch }} build"
             echo "Source revision: $(git rev-parse --verify HEAD)"
             echo "Rust compiler: $(rustc --version)"
             echo "Target: ${{ matrix.target }}"
@@ -202,7 +202,7 @@ jobs:
 
           (
             cd "dist/$package_name"
-            shasum -a 256 "AuRaw.app/Contents/MacOS/auraw" > SHA256SUMS.txt
+            shasum -a 256 "CalibRaw.app/Contents/MacOS/calibraw" > SHA256SUMS.txt
           )
           ditto -c -k --sequesterRsrc --keepParent \
             "$app_dir" \
@@ -211,8 +211,8 @@ jobs:
       - name: Upload macOS artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: AuRaw-macos-${{ matrix.artifact_arch }}
+          name: CalibRaw-macos-${{ matrix.artifact_arch }}
           path: |
-            dist/AuRaw-macos-${{ matrix.artifact_arch }}.zip
-            dist/AuRaw-macos-${{ matrix.artifact_arch }}/SHA256SUMS.txt
+            dist/CalibRaw-macos-${{ matrix.artifact_arch }}.zip
+            dist/CalibRaw-macos-${{ matrix.artifact_arch }}/SHA256SUMS.txt
           if-no-files-found: error

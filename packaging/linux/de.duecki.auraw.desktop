@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=AuRaw
-Comment=GPU-first RAW image editor
-Exec=auraw
-Icon=de.duecki.auraw
-StartupWMClass=de.duecki.auraw
-Categories=Graphics;Photography;
-Terminal=false

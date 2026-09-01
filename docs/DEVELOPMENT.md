@@ -11,11 +11,11 @@ cargo clippy --workspace --all-targets --all-features -- \
   -D warnings -W clippy::perf -W clippy::large_stack_arrays \
   -W clippy::redundant_clone -W unreachable-pub
 cargo deny check
-cargo run -p auraw-ui --bin auraw --release
+cargo run -p calibraw-ui --bin calibraw --release
 ```
 
 The CPU brush-raster baseline is a harness-free benchmark (kept independent
-of the test suite): `cargo bench -p auraw-core --bench mask_rasterization`.
+of the test suite): `cargo bench -p calibraw-core --bench mask_rasterization`.
 It reports throughput for positive and erase dabs on a fixed 512x512 raster;
 the benchmark does not alter production rasterization or numerical behavior.
 
@@ -32,10 +32,10 @@ ColorChecker patches using CIEDE2000. Run `python3 tools/colorchecker_wb_validat
 `patch`, `reference_x/y/z`, and `rendered_x/y/z` columns. `--json PATH`
 additionally writes machine-readable results.
 
-`auraw-wb-diagnostics` is an intentionally separate CLI binary for inspecting
+`calibraw-wb-diagnostics` is an intentionally separate CLI binary for inspecting
 camera white-balance coefficients and the camera-to-working matrix without
-starting the UI. Build it with `cargo build -p auraw-cli --bin auraw-wb-diagnostics`,
-then run `target/debug/auraw-wb-diagnostics RAW [--dcp PROFILE]
+starting the UI. Build it with `cargo build -p calibraw-cli --bin calibraw-wb-diagnostics`,
+then run `target/debug/calibraw-wb-diagnostics RAW [--dcp PROFILE]
 [--temperature K] [--tint T]`.
 
 The workspace crates are application-internal and explicitly set

@@ -1,0 +1,34 @@
+[package]
+name = "calibraw-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "CalibRaw wgpu pipelines, WGSL shaders, GPU memory management, and tiled export"
+publish = false
+build = "build.rs"
+
+[dependencies]
+calibraw-core.workspace = true
+anyhow.workspace = true
+bytemuck.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+half.workspace = true
+image.workspace = true
+jpeg-encoder.workspace = true
+log.workspace = true
+memmap2.workspace = true
+png.workspace = true
+pollster.workspace = true
+wgpu = { workspace = true, features = ["naga-ir"] }
+naga_oil.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+calibraw-ffi.workspace = true
+
+[dev-dependencies]
+naga.workspace = true

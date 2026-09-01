@@ -35,9 +35,9 @@ cargo xtask verify-android-16kb android/app/build/outputs/apk/debug/app-debug.ap
 ## Storage
 
 Imports use Android's document picker and are copied to
-`Android/media/de.duecki.auraw/.library`; matching `.auraw` sidecars remain next
+`Android/media/de.duecki.calibraw/.library`; matching `.calibraw` sidecars remain next
 to each RAW. Legacy layouts are migrated only after a successful copy. Exports
-are published to `Pictures/AuRaw` through MediaStore where available.
+are published to `Pictures/CalibRaw` through MediaStore where available.
 
 
 Long-running operations require the app to remain open. Android 13 and newer

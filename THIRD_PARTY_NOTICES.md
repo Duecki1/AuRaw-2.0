@@ -1,30 +1,30 @@
 # Third-party notices
 
-AuRaw is GPL-3.0-or-later software, but it uses adapted source, data, native
+CalibRaw is GPL-3.0-or-later software, but it uses adapted source, data, native
 libraries, and optional downloaded AI models from other projects. Those works
 retain their own copyright and license terms. A name below identifies
-provenance; it does not imply sponsorship or endorsement of AuRaw.
+provenance; it does not imply sponsorship or endorsement of CalibRaw.
 
 ## Adapted source and algorithms
 
 ### darktable 5.6.0
 
-The following AuRaw implementations were adapted from or validated directly
+The following CalibRaw implementations were adapted from or validated directly
 against darktable release 5.6.0:
 
-- Bayer RCD demosaicing in `crates/auraw-gpu/src/shaders/pass1.wgsl` through
+- Bayer RCD demosaicing in `crates/calibraw-gpu/src/shaders/pass1.wgsl` through
   `pass4.wgsl`, based on `src/iop/demosaicing/rcd.c` and its OpenCL kernels.
 - Markesteijn X-Trans demosaicing and dual-demosaic behavior in
-  `crates/auraw-gpu/src/shaders/xtrans/`, `xtrans_demosaic.wgsl`, and
+  `crates/calibraw-gpu/src/shaders/xtrans/`, `xtrans_demosaic.wgsl`, and
   `xtrans_finish.wgsl`, based on
   `src/iop/demosaicing/xtrans.c`, `dual.c`, and their OpenCL kernels.
 - LCh and inpaint-opposed highlight reconstruction in
-  `crates/auraw-gpu/src/shaders/highlights.wgsl` and
-  `crates/auraw-core/src/pipeline/raw_loader.rs`, based primarily on
+  `crates/calibraw-gpu/src/shaders/highlights.wgsl` and
+  `crates/calibraw-core/src/pipeline/raw_loader.rs`, based primarily on
   `src/iop/highlights.c`, `src/iop/hlreconstruct/opposed.c`,
   `src/iop/hlreconstruct/segbased.c`, and `data/kernels/basic.cl`.
-- The sigmoid display transform in `crates/auraw-core/src/pipeline/sigmoid.rs`
-  and `crates/auraw-gpu/src/shaders/tonemap.wgsl`, based on
+- The sigmoid display transform in `crates/calibraw-core/src/pipeline/sigmoid.rs`
+  and `crates/calibraw-gpu/src/shaders/tonemap.wgsl`, based on
   `src/iop/sigmoid.c` and `data/kernels/sigmoid.cl`.
 
 Copyright (C) 2010-2026 darktable developers and the authors named in the
@@ -40,8 +40,8 @@ darktable. Their applicable notices are retained through the darktable notice.
 ### Ansel and dcraw
 
 The XYZ-to-camera normalization and related temperature/tint conventions in
-`crates/auraw-core/src/pipeline/raw_loader/libraw_loader.rs` follow darktable
-and the related Ansel/dcraw implementations. AuRaw's former Ansel-derived
+`crates/calibraw-core/src/pipeline/raw_loader/libraw_loader.rs` follow darktable
+and the related Ansel/dcraw implementations. CalibRaw's former Ansel-derived
 highlight path was subsequently replaced by the darktable 5.6.0 implementation
 documented above.
 
@@ -52,7 +52,7 @@ was reviewed at Ansel revision
 ### GIMP 3.0.4
 
 The clone/heal behavior and checkerboard Gauss-Seidel/SOR perceptual Laplace
-solver in `crates/auraw-ai/src/remove.rs` are adapted from
+solver in `crates/calibraw-ai/src/remove.rs` are adapted from
 `app/paint/gimpheal.c` in GIMP 3.0.4.
 
 Copyright GIMP contributors. GIMP 3.0.4 and this adaptation are
@@ -62,14 +62,14 @@ and [GIMP license](https://www.gimp.org/docs/userfaq.html#legal).
 
 ### RapidRAW design reference
 
-RapidRAW influenced parts of AuRaw's interface and workflow. No RapidRAW source
+RapidRAW influenced parts of CalibRaw's interface and workflow. No RapidRAW source
 code is included or adapted. RapidRAW itself is AGPL-3.0.
 
 ## Bundled data
 
 `data/wb_presets.json` is a compact snapshot derived from darktable's white
 balance preset database. It is covered by the darktable GPL-3.0-or-later notice
-above. The exact AuRaw snapshot has SHA-256
+above. The exact CalibRaw snapshot has SHA-256
 `70abcc507668b9a3588a650902666369e27bfc3261dec9e04391b45f172624e7`.
 
 Release packages include the Lensfun profile database. Lensfun licenses its
@@ -80,10 +80,10 @@ Lensfun library version.
 
 ## Optional AI models
 
-AI model files are not committed to this repository. AuRaw downloads them only
+AI model files are not committed to this repository. CalibRaw downloads them only
 after user consent, stores them in its model cache, and verifies their size and
 SHA-256 digest before use. Model copyright and license terms remain separate
-from AuRaw's GPL license; users must comply with the model terms for their use.
+from CalibRaw's GPL license; users must comply with the model terms for their use.
 
 | Feature | Model and immutable source | License |
 | --- | --- | --- |
@@ -100,7 +100,7 @@ native components:
 
 - [LibRaw 0.22.1](https://github.com/LibRaw/LibRaw/tree/0.22.1), Copyright
   LibRaw LLC and other named contributors. LibRaw is dual-licensed under
-  LGPL-2.1 and CDDL-1.0; AuRaw uses the LGPL-2.1 option.
+  LGPL-2.1 and CDDL-1.0; CalibRaw uses the LGPL-2.1 option.
 - [Lensfun 0.3.4](https://github.com/lensfun/lensfun/tree/v0.3.4). The library
   is LGPL-3.0 and its separately packaged profile database is CC BY-SA 3.0.
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime), under the MIT
@@ -121,7 +121,7 @@ upstream licenses.
 
 Resolved Rust crate names, versions, and checksums are recorded in
 `Cargo.lock`. Each crate retains the license declared by its package and source
-repository. AuRaw does not relicense those dependencies. This includes the
+repository. CalibRaw does not relicense those dependencies. This includes the
 bundled egui default fonts (Hack, Noto Emoji, Ubuntu Light, and emoji-icon-font)
 and the Phosphor icon font; their MIT, OFL-1.1, Ubuntu Font Licence 1.0, and
 other applicable terms are reproduced with the crate notices.
@@ -138,5 +138,5 @@ unreviewed Rust dependency license fails that check. Native components,
 adapted source, bundled data, and optional model licenses require separate
 manual review and are recorded above.
 
-The full GPL-3.0 text governing AuRaw and compatible adaptations is in
+The full GPL-3.0 text governing CalibRaw and compatible adaptations is in
 [`COPYING`](COPYING).

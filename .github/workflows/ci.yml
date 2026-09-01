@@ -71,5 +71,5 @@ jobs:
 
       - name: Build release artifacts
         env:
-          AURAW_DISCORD_APPLICATION_ID: ${{ secrets.AURAW_DISCORD_APPLICATION_ID }}
+          CALIBRAW_DISCORD_APPLICATION_ID: ${{ secrets.CALIBRAW_DISCORD_APPLICATION_ID }}
         run: cargo build --workspace --release --locked

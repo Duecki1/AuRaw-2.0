@@ -61,7 +61,7 @@ fn run() -> Result<()> {
 
 fn print_help() {
     println!(
-        "AuRaw project-specific build helpers.\n\n\
+        "CalibRaw project-specific build helpers.\n\n\
          Usage: cargo xtask <command> [options]\n\n\
          Commands:\n\
            icons\n\
@@ -620,8 +620,8 @@ fn run_gradle_android_native_dependencies(
         Command::new(&gradlew)
             .current_dir(root)
             .arg(task)
-            .arg(format!("-PaurawAbis={abi}"))
-            .arg("-PaurawBuildRust=false"),
+            .arg(format!("-PcalibrawAbis={abi}"))
+            .arg("-PcalibrawBuildRust=false"),
         &gradlew.display().to_string(),
     )
 }
@@ -717,7 +717,7 @@ fn command_build_android(args: BuildAndroidArgs) -> Result<()> {
         )));
     }
 
-    if env::var_os("AURAW_NATIVE_DEPS_READY").as_deref() != Some(OsStr::new("1")) {
+    if env::var_os("CALIBRAW_NATIVE_DEPS_READY").as_deref() != Some(OsStr::new("1")) {
         run_gradle_android_native_dependencies(&root, &args.abi, &args.profile, contract.min_sdk)?;
     }
 
@@ -735,8 +735,8 @@ fn command_build_android(args: BuildAndroidArgs) -> Result<()> {
             "BINDGEN_EXTRA_CLANG_ARGS",
             format!("--target={clang_target} --sysroot={}", sysroot.display()),
         )
-        .env("AURAW_LIBRAW_ROOT", &libraw_root)
-        .env("AURAW_LENSFUN_ROOT", &lensfun_root)
+        .env("CALIBRAW_LIBRAW_ROOT", &libraw_root)
+        .env("CALIBRAW_LENSFUN_ROOT", &lensfun_root)
         .env("CARGO_INCREMENTAL", "0")
         .env("CARGO_TARGET_DIR", root.join("target"))
         .args(["ndk", "-t"])
@@ -767,11 +767,11 @@ fn command_build_android(args: BuildAndroidArgs) -> Result<()> {
         )?;
         command
             .arg("--release")
-            .env("AURAW_REQUIRE_COMMITTED_SOURCE", "1")
+            .env("CALIBRAW_REQUIRE_COMMITTED_SOURCE", "1")
             .env("SOURCE_DATE_EPOCH", source_date_epoch.trim());
     }
     command
-        .args(["--package", "auraw-ui", "--lib", "--manifest-path"])
+        .args(["--package", "calibraw-ui", "--lib", "--manifest-path"])
         .arg(root.join("Cargo.toml"));
     run_checked(&mut command, &cargo.display().to_string())?;
 
@@ -782,7 +782,7 @@ fn command_build_android(args: BuildAndroidArgs) -> Result<()> {
     require_file(&cxx_runtime)?;
     fs::create_dir_all(&abi_jni)?;
     fs::copy(&cxx_runtime, abi_jni.join("libc++_shared.so"))?;
-    require_file(&abi_jni.join("libauraw.so"))?;
+    require_file(&abi_jni.join("libcalibraw.so"))?;
     require_file(&abi_jni.join("libc++_shared.so"))?;
 
     let lensfun_assets = lensfun_root.join("apk-assets/lensfun");
@@ -893,12 +893,12 @@ fn command_icons() -> Result<()> {
     let output = workspace_root().join("packaging/icons");
     fs::create_dir_all(&output)?;
     DynamicImage::ImageRgba8(render_icon(1024))
-        .save_with_format(output.join("auraw-1024.png"), ImageFormat::Png)
-        .map_err(|error| XtaskError::new(format!("cannot write auraw-1024.png: {error}")))?;
+        .save_with_format(output.join("calibraw-1024.png"), ImageFormat::Png)
+        .map_err(|error| XtaskError::new(format!("cannot write calibraw-1024.png: {error}")))?;
     DynamicImage::ImageRgba8(render_icon(256))
-        .save_with_format(output.join("auraw-256.png"), ImageFormat::Png)
-        .map_err(|error| XtaskError::new(format!("cannot write auraw-256.png: {error}")))?;
-    write_ico(&output.join("auraw.ico"))?;
+        .save_with_format(output.join("calibraw-256.png"), ImageFormat::Png)
+        .map_err(|error| XtaskError::new(format!("cannot write calibraw-256.png: {error}")))?;
+    write_ico(&output.join("calibraw.ico"))?;
     Ok(())
 }
 
@@ -941,7 +941,7 @@ fn command_verify_android_16kb(args: AndroidArgs) -> Result<()> {
         )));
     }
 
-    let temporary = temporary_directory("auraw-16kb")?;
+    let temporary = temporary_directory("calibraw-16kb")?;
     let libraries = extract_64_bit_libraries(&apk, temporary.path())?;
     if libraries.is_empty() {
         println!("No 64-bit native libraries found; ELF 16 KB check not applicable.");

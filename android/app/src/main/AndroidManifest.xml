@@ -19,13 +19,13 @@
         android:label="@string/app_name"
         android:theme="@style/AppTheme">
         <activity
-            android:name=".AuRawActivity"
+            android:name=".CalibRawActivity"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|uiMode|density"
             android:exported="true"
             android:launchMode="singleTask">
             <meta-data
                 android:name="android.app.lib_name"
-                android:value="auraw" />
+                android:value="calibraw" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

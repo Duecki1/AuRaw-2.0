@@ -1,7 +1,7 @@
 # Rust dependency licenses
 
 This file is generated from `Cargo.lock` by cargo-about. It covers the resolved
-Rust dependencies used by AuRaw's supported release targets. Regenerate it with:
+Rust dependencies used by CalibRaw's supported release targets. Regenerate it with:
 
 `scripts/generate_licenses.sh THIRD_PARTY_LICENSES.md`
 
@@ -2383,13 +2383,13 @@ insights.
 ## GNU General Public License v3.0 or later (`GPL-3.0-or-later`)
 
 Used by:
-- `auraw-ai 2.0.0` — https://github.com/Duecki1/AuRaw-2.0
-- `auraw-cli 2.0.0` — https://github.com/Duecki1/AuRaw-2.0
-- `auraw-core 2.0.0` — https://github.com/Duecki1/AuRaw-2.0
-- `auraw-ffi 2.0.0` — https://github.com/Duecki1/AuRaw-2.0
-- `auraw-gpu 2.0.0` — https://github.com/Duecki1/AuRaw-2.0
-- `auraw-ui 2.0.0` — https://github.com/Duecki1/AuRaw-2.0
-- `xtask 2.0.0` — https://github.com/Duecki1/AuRaw-2.0
+- `calibraw-ai 2.0.0` — https://github.com/Duecki1/CalibRaw
+- `calibraw-cli 2.0.0` — https://github.com/Duecki1/CalibRaw
+- `calibraw-core 2.0.0` — https://github.com/Duecki1/CalibRaw
+- `calibraw-ffi 2.0.0` — https://github.com/Duecki1/CalibRaw
+- `calibraw-gpu 2.0.0` — https://github.com/Duecki1/CalibRaw
+- `calibraw-ui 2.0.0` — https://github.com/Duecki1/CalibRaw
+- `xtask 2.0.0` — https://github.com/Duecki1/CalibRaw
 
 ```text
 GNU GENERAL PUBLIC LICENSE

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+    width="1024"
+    height="1024"
+    viewBox="0 0 108 108"
+    role="img"
+    aria-label="CalibRaw">
+    <rect width="108" height="108" fill="#111827" />
+    <path
+        fill="#ffffff"
+        fill-rule="evenodd"
+        d="M54 18 84 88H69L62 70H46L39 88H24Zm-3 39h6l-3-13Z" />
+</svg>

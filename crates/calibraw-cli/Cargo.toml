@@ -1,0 +1,21 @@
+[package]
+name = "calibraw-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "CalibRaw headless export tool"
+publish = false
+
+[[bin]]
+name = "calibraw-develop-export"
+path = "src/bin/calibraw-develop-export.rs"
+
+[dependencies]
+calibraw-core.workspace = true
+calibraw-gpu.workspace = true
+anyhow.workspace = true
+pollster.workspace = true

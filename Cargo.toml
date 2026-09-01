@@ -2,20 +2,20 @@
 resolver = "2"
 members = [
     "xtask",
-    "crates/auraw-core",
-    "crates/auraw-gpu",
-    "crates/auraw-ai",
-    "crates/auraw-ui",
-    "crates/auraw-ffi",
-    "crates/auraw-cli",
+    "crates/calibraw-core",
+    "crates/calibraw-gpu",
+    "crates/calibraw-ai",
+    "crates/calibraw-ui",
+    "crates/calibraw-ffi",
+    "crates/calibraw-cli",
 ]
 default-members = [
-    "crates/auraw-core",
-    "crates/auraw-gpu",
-    "crates/auraw-ai",
-    "crates/auraw-ui",
-    "crates/auraw-ffi",
-    "crates/auraw-cli",
+    "crates/calibraw-core",
+    "crates/calibraw-gpu",
+    "crates/calibraw-ai",
+    "crates/calibraw-ui",
+    "crates/calibraw-ffi",
+    "crates/calibraw-cli",
 ]
 
 [workspace.metadata]
@@ -34,16 +34,16 @@ edition = "2021"
 rust-version = "1.92.0"
 authors = ["Duecki <dueckis@dueckis.de>"]
 license = "GPL-3.0-or-later"
-repository = "https://github.com/Duecki1/AuRaw-2.0"
+repository = "https://github.com/Duecki1/CalibRaw"
 readme = "README.md"
 
 [workspace.dependencies]
-auraw-core = { version = "2.0.0", path = "crates/auraw-core" }
-auraw-gpu = { version = "2.0.0", path = "crates/auraw-gpu" }
-auraw-ai = { version = "2.0.0", path = "crates/auraw-ai" }
-auraw-ui = { version = "2.0.0", path = "crates/auraw-ui" }
-auraw-ffi = { version = "2.0.0", path = "crates/auraw-ffi" }
-auraw-cli = { version = "2.0.0", path = "crates/auraw-cli" }
+calibraw-core = { version = "2.0.0", path = "crates/calibraw-core" }
+calibraw-gpu = { version = "2.0.0", path = "crates/calibraw-gpu" }
+calibraw-ai = { version = "2.0.0", path = "crates/calibraw-ai" }
+calibraw-ui = { version = "2.0.0", path = "crates/calibraw-ui" }
+calibraw-ffi = { version = "2.0.0", path = "crates/calibraw-ffi" }
+calibraw-cli = { version = "2.0.0", path = "crates/calibraw-cli" }
 
 anyhow = "1.0"
 base64 = "0.22"

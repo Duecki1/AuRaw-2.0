@@ -1,0 +1,3036 @@
+use super::geometry::GeometryInverseMap;
+use super::{
+    build_region_proxy, export_mask_atlas_edge, extract_padded_tile, extract_padded_tile_into,
+    mask_atlas_edge, required_export_tile_halo, CfaKind, ExposureParams, GeometryTransform,
+    GpuParams, GpuProgramPrewarm, LensGeometryMap, LoadedRaw, MaskStack, NativeRect,
+    ProcessingQuality, ProcessingStage, ProxySpec, RawGpuPipeline, RawGpuProgramTemplate,
+    RemoveEditState, RemoveSceneContext, SrgbOutputLut, TilePlan, TileSpec, EXPORT_TILE_HALO,
+    MAX_LOCAL_MASKS, MIN_EXPORT_TILE_HALO,
+};
+use crate::file_ops::{replace_file, sync_parent_directory};
+use anyhow::{Context, Result};
+use std::borrow::Cow;
+use std::fs::{self, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc, Arc,
+};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportFormat {
+    #[default]
+    Png,
+    Jpeg,
+    Tiff,
+}
+
+/// `width` and `height` describe `pixels`; the pixels still cover the complete
+/// native crop supplied to [`render_remove_scene_crop_resized`].
+pub struct ResizedRemoveSceneCrop {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<f32>,
+}
+
+/// Renders a complete native Remove crop through one bounded GPU pipeline.
+pub fn render_remove_scene_crop_resized(
+    job: DevelopedCropJob,
+    maximum_edge: u32,
+) -> Result<ResizedRemoveSceneCrop> {
+    anyhow::ensure!(maximum_edge > 0, "Remove working edge is zero");
+    anyhow::ensure!(
+        job.crop.width > 0 && job.crop.height > 0,
+        "Remove crop is empty"
+    );
+    anyhow::ensure!(
+        job.crop.right() <= job.raw.width && job.crop.bottom() <= job.raw.height,
+        "Remove crop lies outside the native source image"
+    );
+
+    let working_raw = build_region_proxy(
+        &job.raw,
+        job.crop.x,
+        job.crop.y,
+        job.crop.width,
+        job.crop.height,
+        ProxySpec {
+            max_edge: maximum_edge,
+        },
+    );
+    anyhow::ensure!(
+        working_raw.width <= maximum_edge && working_raw.height <= maximum_edge,
+        "Remove working scene {}x{} exceeds the {}px edge limit",
+        working_raw.width,
+        working_raw.height,
+        maximum_edge
+    );
+
+    // Express image-global shader coordinates in the same reduced coordinate
+    // system as the working RAW. Existing Remove patches are uploaded below
+    // using their native crop mapping, so their placement remains exact.
+    let scale_x = f64::from(working_raw.width) / f64::from(job.crop.width);
+    let scale_y = f64::from(working_raw.height) / f64::from(job.crop.height);
+    let full_width = (f64::from(job.raw.width) * scale_x)
+        .round()
+        .clamp(f64::from(working_raw.width), f64::from(u32::MAX)) as u32;
+    let full_height = (f64::from(job.raw.height) * scale_y)
+        .round()
+        .clamp(f64::from(working_raw.height), f64::from(u32::MAX)) as u32;
+    let origin_x = (f64::from(job.crop.x) * scale_x)
+        .round()
+        .clamp(0.0, f64::from(i32::MAX)) as i32;
+    let origin_y = (f64::from(job.crop.y) * scale_y)
+        .round()
+        .clamp(0.0, f64::from(i32::MAX)) as i32;
+
+    let empty_masks = MaskStack::default();
+    let mask_edge = mask_atlas_edge();
+    let params = GpuParams::new_for_tile(
+        &job.exposure,
+        &empty_masks,
+        &working_raw,
+        origin_x,
+        origin_y,
+        full_width,
+        full_height,
+    );
+    let template = job
+        .program_prewarm
+        .as_deref()
+        .and_then(|prewarm| prewarm.wait().ok());
+    let pipeline = if let Some(template) = template.as_deref() {
+        RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
+            &job.device,
+            &job.queue,
+            &working_raw,
+            &params,
+            ProcessingQuality::High,
+            template,
+            mask_edge,
+        )
+        .or_else(|_| {
+            RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+                &job.device,
+                &job.queue,
+                &working_raw,
+                &params,
+                ProcessingQuality::High,
+                mask_edge,
+            )
+        })?
+    } else {
+        RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+            &job.device,
+            &job.queue,
+            &working_raw,
+            &params,
+            ProcessingQuality::High,
+            mask_edge,
+        )?
+    };
+
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
+    pipeline.upload_remove_scene_patches(
+        &job.queue,
+        &job.device,
+        RemoveSceneContext::new(
+            &job.remove,
+            &job.raw,
+            &job.exposure,
+            [job.crop.x as f32, job.crop.y as f32],
+            [job.crop.width as f32, job.crop.height as f32],
+        ),
+    )?;
+    let pixels = pipeline.read_scene_texture_blocking(&job.device, &job.queue)?;
+    Ok(ResizedRemoveSceneCrop {
+        width: working_raw.width,
+        height: working_raw.height,
+        pixels,
+    })
+}
+
+pub fn render_remove_scene_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        job.crop.width > 0 && job.crop.height > 0,
+        "Remove crop is empty"
+    );
+    anyhow::ensure!(
+        job.crop.right() <= job.raw.width && job.crop.bottom() <= job.raw.height,
+        "Remove crop lies outside the native source image"
+    );
+    let empty_masks = MaskStack::default();
+    let halo = required_export_tile_halo(&job.exposure, &empty_masks);
+    let tile = crate::pipeline::ExportTile {
+        core_x: job.crop.x,
+        core_y: job.crop.y,
+        core_width: job.crop.width,
+        core_height: job.crop.height,
+        local_core_x: halo,
+        local_core_y: halo,
+        padded_width: job.crop.width.saturating_add(halo.saturating_mul(2)),
+        padded_height: job.crop.height.saturating_add(halo.saturating_mul(2)),
+        global_origin_x: job.crop.x as i32 - halo as i32,
+        global_origin_y: job.crop.y as i32 - halo as i32,
+    };
+    let tile_raw = extract_padded_tile(&job.raw, tile);
+    let mask_edge = mask_atlas_edge();
+    let params = GpuParams::new_for_tile(
+        &job.exposure,
+        &empty_masks,
+        &tile_raw,
+        tile.global_origin_x,
+        tile.global_origin_y,
+        job.raw.width,
+        job.raw.height,
+    );
+    let template = job
+        .program_prewarm
+        .as_deref()
+        .and_then(|prewarm| prewarm.wait().ok());
+    let pipeline = if let Some(template) = template.as_deref() {
+        RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
+            &job.device,
+            &job.queue,
+            &tile_raw,
+            &params,
+            ProcessingQuality::High,
+            template,
+            mask_edge,
+        )
+        .or_else(|_| {
+            RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+                &job.device,
+                &job.queue,
+                &tile_raw,
+                &params,
+                ProcessingQuality::High,
+                mask_edge,
+            )
+        })?
+    } else {
+        RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+            &job.device,
+            &job.queue,
+            &tile_raw,
+            &params,
+            ProcessingQuality::High,
+            mask_edge,
+        )?
+    };
+
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
+    pipeline.upload_remove_scene_patches(
+        &job.queue,
+        &job.device,
+        RemoveSceneContext::new(
+            &job.remove,
+            &job.raw,
+            &job.exposure,
+            [tile.global_origin_x as f32, tile.global_origin_y as f32],
+            [tile.padded_width as f32, tile.padded_height as f32],
+        ),
+    )?;
+    let scene = pipeline.read_scene_texture_blocking(&job.device, &job.queue)?;
+    let mut crop = vec![0.0f32; job.crop.width as usize * job.crop.height as usize * 3];
+    for y in 0..job.crop.height as usize {
+        let source_y = tile.local_core_y as usize + y;
+        let source_start = (source_y * tile.padded_width as usize + tile.local_core_x as usize) * 3;
+        let source_end = source_start + job.crop.width as usize * 3;
+        let destination_start = y * job.crop.width as usize * 3;
+        crop[destination_start..destination_start + job.crop.width as usize * 3]
+            .copy_from_slice(&scene[source_start..source_end]);
+    }
+    Ok(crop)
+}
+
+impl ExportFormat {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::Tiff => "TIFF",
+        }
+    }
+
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Tiff => "tif",
+        }
+    }
+
+    pub const fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Png => &["png"],
+            Self::Jpeg => &["jpg", "jpeg"],
+            Self::Tiff => &["tif", "tiff"],
+        }
+    }
+
+    pub fn matches_extension(self, extension: &str) -> bool {
+        self.extensions()
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    }
+
+    pub const fn mime_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Tiff => "image/tiff",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportBitDepth {
+    Eight,
+    #[default]
+    Sixteen,
+    Float32Linear,
+}
+
+impl ExportBitDepth {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Eight => "8-bit integer",
+            Self::Sixteen => "16-bit integer",
+            Self::Float32Linear => "32-bit float / linear master",
+        }
+    }
+
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::Float32Linear)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportResizeMode {
+    #[default]
+    Original,
+    LongEdge,
+    ShortEdge,
+    Width,
+    Height,
+    Percentage,
+}
+
+impl ExportResizeMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Original => "Original size",
+            Self::LongEdge => "Long edge",
+            Self::ShortEdge => "Short edge",
+            Self::Width => "Width",
+            Self::Height => "Height",
+            Self::Percentage => "Percentage",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportSettings {
+    pub resize_mode: ExportResizeMode,
+    pub edge_or_dimension: u32,
+    pub percentage: f32,
+    pub allow_upscale: bool,
+    pub keep_metadata: bool,
+    pub jpeg_quality: u8,
+    pub bit_depth: ExportBitDepth,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            resize_mode: ExportResizeMode::Original,
+            edge_or_dimension: 3000,
+            percentage: 100.0,
+            allow_upscale: false,
+            keep_metadata: true,
+            jpeg_quality: 90,
+            bit_depth: ExportBitDepth::Sixteen,
+        }
+    }
+}
+
+pub const MAX_EXPORT_EDGE: u32 = 32_768;
+#[cfg(target_os = "android")]
+pub const MAX_EXPORT_PIXELS: u64 = 50_000_000;
+#[cfg(not(target_os = "android"))]
+pub const MAX_EXPORT_PIXELS: u64 = 120_000_000;
+#[cfg(target_os = "android")]
+const MAX_EXPORT_BAND_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(not(target_os = "android"))]
+const MAX_EXPORT_BAND_BYTES: u64 = 192 * 1024 * 1024;
+const STALE_EXPORT_PART_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+static NEXT_EXPORT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
+impl ExportSettings {
+    pub fn output_dimensions(&self, source_width: u32, source_height: u32) -> (u32, u32) {
+        let source_width = source_width.max(1);
+        let source_height = source_height.max(1);
+        if self.resize_mode == ExportResizeMode::Original {
+            return (source_width, source_height);
+        }
+
+        let width = source_width as f64;
+        let height = source_height as f64;
+        let requested = self.edge_or_dimension.max(1) as f64;
+        let mut scale = match self.resize_mode {
+            ExportResizeMode::Original => 1.0,
+            ExportResizeMode::LongEdge => requested / width.max(height),
+            ExportResizeMode::ShortEdge => requested / width.min(height),
+            ExportResizeMode::Width => requested / width,
+            ExportResizeMode::Height => requested / height,
+            ExportResizeMode::Percentage => f64::from(self.percentage.clamp(1.0, 400.0)) / 100.0,
+        };
+        if !self.allow_upscale {
+            scale = scale.min(1.0);
+        }
+        scale = scale.max(1.0 / width.max(height));
+
+        let output_width = (width * scale).round().clamp(1.0, u32::MAX as f64) as u32;
+        let output_height = (height * scale).round().clamp(1.0, u32::MAX as f64) as u32;
+        (output_width, output_height)
+    }
+
+    pub fn checked_output_dimensions(
+        &self,
+        source_width: u32,
+        source_height: u32,
+    ) -> Result<(u32, u32)> {
+        let dimensions = self.output_dimensions(source_width, source_height);
+        validate_export_dimensions(dimensions.0, dimensions.1)?;
+        Ok(dimensions)
+    }
+}
+
+fn validate_export_dimensions(width: u32, height: u32) -> Result<()> {
+    anyhow::ensure!(
+        width > 0 && height > 0,
+        "export dimensions must be non-zero"
+    );
+    anyhow::ensure!(
+        width <= MAX_EXPORT_EDGE && height <= MAX_EXPORT_EDGE,
+        "export dimensions {width}x{height} exceed the {MAX_EXPORT_EDGE}-pixel edge limit"
+    );
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .context("export pixel count overflow")?;
+    anyhow::ensure!(
+        pixels <= MAX_EXPORT_PIXELS,
+        "export dimensions {width}x{height} contain {pixels} pixels; the limit is {MAX_EXPORT_PIXELS}"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportMetadata {
+    pub source_file_name: Option<String>,
+    pub camera_make: String,
+    pub camera_model: String,
+    pub lens_make: String,
+    pub lens_model: String,
+    pub focal_length: f32,
+    pub aperture: f32,
+    pub focus_distance: f32,
+    pub iso_speed: f32,
+    pub shutter_seconds: f32,
+    pub description: String,
+    pub artist: String,
+    pub source_width: u32,
+    pub source_height: u32,
+}
+
+impl ExportMetadata {
+    pub fn from_raw(raw: &LoadedRaw, source_file_name: Option<String>) -> Self {
+        Self {
+            source_file_name,
+            camera_make: raw.camera_make.clone(),
+            camera_model: raw.camera_model.clone(),
+            lens_make: raw.lens_make.clone(),
+            lens_model: raw.lens_model.clone(),
+            focal_length: raw.focal_length,
+            aperture: raw.aperture,
+            focus_distance: raw.focus_distance,
+            iso_speed: raw.capture_metadata.iso_speed,
+            shutter_seconds: raw.capture_metadata.shutter_seconds,
+            description: raw.capture_metadata.description.clone(),
+            artist: raw.capture_metadata.artist.clone(),
+            source_width: raw.width,
+            source_height: raw.height,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ExportEvent {
+    Progress {
+        completed_tiles: usize,
+        total_tiles: usize,
+    },
+    Finished(Result<PathBuf, String>),
+}
+
+pub struct TiledExportJob {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub raw: Arc<LoadedRaw>,
+    pub geometry: GeometryTransform,
+    pub exposure: ExposureParams,
+    pub masks: MaskStack,
+    pub remove: RemoveEditState,
+    pub path: PathBuf,
+    pub tile_spec: TileSpec,
+    pub settings: ExportSettings,
+    pub metadata: ExportMetadata,
+    pub cancellation: Arc<AtomicBool>,
+    pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
+}
+
+pub struct DevelopedCropJob {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub raw: Arc<LoadedRaw>,
+    pub geometry: GeometryTransform,
+    pub exposure: ExposureParams,
+    pub masks: MaskStack,
+    pub remove: RemoveEditState,
+    pub crop: NativeRect,
+    pub program_prewarm: Option<Arc<GpuProgramPrewarm>>,
+}
+
+pub fn render_developed_linear_crop(job: DevelopedCropJob) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        job.crop.width > 0 && job.crop.height > 0,
+        "Remove crop is empty"
+    );
+    anyhow::ensure!(
+        job.crop.right() <= job.raw.width && job.crop.bottom() <= job.raw.height,
+        "Remove crop lies outside the native source image"
+    );
+    let halo = required_export_tile_halo(&job.exposure, &job.masks);
+    let tile = crate::pipeline::ExportTile {
+        core_x: job.crop.x,
+        core_y: job.crop.y,
+        core_width: job.crop.width,
+        core_height: job.crop.height,
+        local_core_x: halo,
+        local_core_y: halo,
+        padded_width: job.crop.width.saturating_add(halo.saturating_mul(2)),
+        padded_height: job.crop.height.saturating_add(halo.saturating_mul(2)),
+        global_origin_x: job.crop.x as i32 - halo as i32,
+        global_origin_y: job.crop.y as i32 - halo as i32,
+    };
+    let tile_raw = extract_padded_tile(&job.raw, tile);
+    let mask_region = tile_mask_source_region(
+        &job.masks,
+        tile.global_origin_x,
+        tile.global_origin_y,
+        tile.padded_width,
+        tile.padded_height,
+        job.raw.width,
+        job.raw.height,
+    );
+    let mask_edge = if job.masks.masks.is_empty() {
+        mask_atlas_edge()
+    } else {
+        export_mask_atlas_edge(tile.padded_width, tile.padded_height)
+    };
+    let mask_extent = mask_region_texture_extent(mask_region, mask_edge);
+    let params = GpuParams::new_for_tile(
+        &job.exposure,
+        &job.masks,
+        &tile_raw,
+        tile.global_origin_x,
+        tile.global_origin_y,
+        job.raw.width,
+        job.raw.height,
+    )
+    .with_vignette_geometry(job.geometry)
+    .with_mask_uv_rect_and_extent(
+        mask_source_region_uv(mask_region, job.raw.width, job.raw.height),
+        mask_extent,
+    );
+    let template = job
+        .program_prewarm
+        .as_deref()
+        .and_then(|prewarm| prewarm.wait().ok());
+    let pipeline = if let Some(template) = template.as_deref() {
+        RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
+            &job.device,
+            &job.queue,
+            &tile_raw,
+            &params,
+            ProcessingQuality::High,
+            template,
+            mask_edge,
+        )
+        .or_else(|_| {
+            RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+                &job.device,
+                &job.queue,
+                &tile_raw,
+                &params,
+                ProcessingQuality::High,
+                mask_edge,
+            )
+        })?
+    } else {
+        RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+            &job.device,
+            &job.queue,
+            &tile_raw,
+            &params,
+            ProcessingQuality::High,
+            mask_edge,
+        )?
+    };
+    upload_mask_atlas(
+        &pipeline,
+        &job.queue,
+        &job.masks,
+        job.raw.width,
+        job.raw.height,
+        mask_region,
+    )?;
+    pipeline.update_light_rays_mask_layers(
+        &job.queue,
+        &job.masks,
+        job.raw.width,
+        job.raw.height,
+    )?;
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Raw);
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Tone);
+    pipeline.dispatch_stage(&job.queue, &job.device, &params, ProcessingStage::Output);
+    let mut rgb = pipeline.read_display_linear_region_blocking(
+        &job.device,
+        &job.queue,
+        tile.local_core_x,
+        tile.local_core_y,
+        tile.core_width,
+        tile.core_height,
+    )?;
+    crate::pipeline::composite_remove_edits_into_linear_region(&job.remove, job.crop, &mut rgb);
+    Ok(rgb)
+}
+
+impl ExportFormat {
+    fn worker_name(self) -> &'static str {
+        match self {
+            Self::Png => "calibraw-tiled-export",
+            Self::Jpeg => "calibraw-tiled-jpeg-export",
+            Self::Tiff => "calibraw-tiled-tiff-export",
+        }
+    }
+
+    fn worker_spawn_error(self) -> &'static str {
+        match self {
+            Self::Png => "could not start export worker",
+            Self::Jpeg => "could not start JPEG export worker",
+            Self::Tiff => "could not start TIFF export worker",
+        }
+    }
+}
+
+pub fn spawn_tiled_export(
+    format: ExportFormat,
+    job: TiledExportJob,
+) -> mpsc::Receiver<ExportEvent> {
+    let (sender, receiver) = mpsc::channel();
+    let worker_sender = sender.clone();
+    let worker_path = job.path.clone();
+    let worker_name = format.worker_name();
+
+    let spawn_result = std::thread::Builder::new()
+        .name(worker_name.to_owned())
+        .spawn(move || {
+            let worker_started = Instant::now();
+            record_export_worker_started(format, &job);
+            let result = run_export_worker(format, &job, &worker_sender, &worker_path);
+            record_export_worker_finished(format, worker_started, &result);
+            let _ = worker_sender.send(ExportEvent::Finished(
+                result
+                    .map(|_| worker_path)
+                    .map_err(|error| format!("{error:#}")),
+            ));
+        });
+
+    if let Err(error) = spawn_result {
+        let _ = sender.send(ExportEvent::Finished(Err(format!(
+            "{}: {error}",
+            format.worker_spawn_error()
+        ))));
+    }
+    receiver
+}
+
+fn record_export_worker_started(format: ExportFormat, job: &TiledExportJob) {
+    match format {
+        ExportFormat::Png => crate::diagnostics::record(format!(
+            "PNG export worker started: source={}x{} cfa={:?} requested_tile_core={} halo={} exposure={:.3} temperature={:.3} tint={:.3} demosaic={:?} highlight={:?}",
+            job.raw.width,
+            job.raw.height,
+            job.raw.cfa_kind,
+            job.tile_spec.core_edge,
+            job.tile_spec.halo,
+            job.exposure.exposure,
+            job.exposure.temperature,
+            job.exposure.tint,
+            job.exposure.demosaic_mode,
+            job.exposure.highlight_method,
+        )),
+        ExportFormat::Jpeg => crate::diagnostics::record(format!(
+            "JPEG export worker started: source={}x{} quality={} cfa={:?} requested_tile_core={} halo={}",
+            job.raw.width,
+            job.raw.height,
+            job.settings.jpeg_quality,
+            job.raw.cfa_kind,
+            job.tile_spec.core_edge,
+            job.tile_spec.halo,
+        )),
+        ExportFormat::Tiff => {}
+    }
+}
+
+fn record_export_worker_finished(format: ExportFormat, started: Instant, result: &Result<()>) {
+    let format_name = match format {
+        ExportFormat::Png => "PNG",
+        ExportFormat::Jpeg => "JPEG",
+        ExportFormat::Tiff => return,
+    };
+    match result {
+        Ok(()) => crate::diagnostics::record(format!(
+            "{format_name} export worker finished successfully in {:.3}s",
+            started.elapsed().as_secs_f64()
+        )),
+        Err(error) => crate::diagnostics::record(format!(
+            "{format_name} export worker failed after {:.3}s: {error:#}",
+            started.elapsed().as_secs_f64()
+        )),
+    }
+}
+
+fn run_export_worker(
+    format: ExportFormat,
+    job: &TiledExportJob,
+    events: &mpsc::Sender<ExportEvent>,
+    destination: &Path,
+) -> Result<()> {
+    let program_template = (job.raw.cfa_kind == CfaKind::Bayer)
+        .then(|| await_export_program_template(job.program_prewarm.as_deref()))
+        .flatten();
+    let geometry = job.geometry.sanitized();
+    let (geometry_width, geometry_height) =
+        geometry.crop_pixel_dimensions(job.raw.width, job.raw.height);
+    let (output_width, output_height) = job
+        .settings
+        .checked_output_dimensions(geometry_width, geometry_height)?;
+    let tile_spec =
+        resolved_export_tile_spec(job.tile_spec, &job.exposure, &job.masks, job.raw.width)?;
+
+    let color_settings = match format {
+        ExportFormat::Jpeg => {
+            let mut settings = job.settings.clone();
+            settings.bit_depth = ExportBitDepth::Eight;
+            Cow::Owned(settings)
+        }
+        ExportFormat::Png | ExportFormat::Tiff => Cow::Borrowed(&job.settings),
+    };
+    let color = resolve_export_color(color_settings.as_ref())?;
+    let bit_depth = if format == ExportFormat::Jpeg {
+        ExportBitDepth::Eight
+    } else {
+        job.settings.bit_depth
+    };
+
+    export_to_destination(destination, &job.cancellation, |path| {
+        let context = ExportContext {
+            device: &job.device,
+            queue: &job.queue,
+            events,
+            cancellation: &job.cancellation,
+            program_template: program_template.as_deref(),
+        };
+        let request = ExportRequest {
+            raw: &job.raw,
+            exposure: &job.exposure,
+            masks: &job.masks,
+            remove: &job.remove,
+            path,
+            tile_spec,
+            output_width,
+            output_height,
+            keep_metadata: job.settings.keep_metadata,
+            metadata: &job.metadata,
+            geometry,
+            bit_depth,
+            color: &color,
+        };
+        match format {
+            ExportFormat::Png => export_tiled_png(context, request),
+            ExportFormat::Jpeg => export_tiled_jpeg(context, request, job.settings.jpeg_quality),
+            ExportFormat::Tiff => export_tiled_tiff(context, request),
+        }
+    })
+}
+
+fn resolved_export_tile_spec(
+    mut tile_spec: TileSpec,
+    exposure: &ExposureParams,
+    masks: &MaskStack,
+    source_width: u32,
+) -> Result<TileSpec> {
+    let required_halo = required_export_tile_halo(exposure, masks);
+    tile_spec.halo = if tile_spec.halo == EXPORT_TILE_HALO {
+        required_halo
+    } else {
+        tile_spec.halo.max(required_halo)
+    };
+    bounded_tile_spec(tile_spec, source_width)
+}
+
+fn export_to_destination<F>(destination: &Path, cancellation: &AtomicBool, export: F) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    ensure_export_not_cancelled(cancellation)?;
+    if is_direct_export_destination(destination) {
+        export(destination)?;
+        return ensure_export_not_cancelled(cancellation);
+    }
+
+    with_temporary_export_path(destination, |temporary| {
+        export(temporary)?;
+        ensure_export_not_cancelled(cancellation)?;
+        publish_completed_export(temporary, destination)
+    })
+}
+
+fn ensure_export_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
+    anyhow::ensure!(!cancellation.load(Ordering::Acquire), "export cancelled");
+    Ok(())
+}
+
+fn await_export_program_template(
+    prewarm: Option<&GpuProgramPrewarm>,
+) -> Option<Arc<RawGpuProgramTemplate>> {
+    let prewarm = prewarm?;
+    let wait_started = Instant::now();
+    match prewarm.wait() {
+        Ok(template) => {
+            crate::diagnostics::record(format!(
+                "Full-quality export program prewarm available after {:.3}s wait",
+                wait_started.elapsed().as_secs_f64()
+            ));
+            Some(template)
+        }
+        Err(error) => {
+            crate::diagnostics::record(format!(
+                "Full-quality export program prewarm unavailable: {error}"
+            ));
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExportContext<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    events: &'a mpsc::Sender<ExportEvent>,
+    cancellation: &'a AtomicBool,
+    program_template: Option<&'a RawGpuProgramTemplate>,
+}
+
+#[derive(Clone, Copy)]
+struct ExportRequest<'a> {
+    raw: &'a LoadedRaw,
+    exposure: &'a ExposureParams,
+    masks: &'a MaskStack,
+    remove: &'a RemoveEditState,
+    path: &'a Path,
+    tile_spec: TileSpec,
+    output_width: u32,
+    output_height: u32,
+    keep_metadata: bool,
+    metadata: &'a ExportMetadata,
+    geometry: GeometryTransform,
+    bit_depth: ExportBitDepth,
+    color: &'a ResolvedExportColor,
+}
+
+mod color;
+use color::{built_in_srgb_icc, resolve_export_color, ResolvedExportColor};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportRowFormat {
+    Rgb8,
+    Rgba8,
+    Rgba16Be,
+    Rgb16Le,
+    RgbF32Le,
+}
+
+fn export_tiled_png(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
+    validate_export_dimensions(request.output_width, request.output_height)?;
+    anyhow::ensure!(
+        !request.bit_depth.is_float(),
+        "PNG export supports 8-bit or 16-bit integer output; use TIFF for a float/linear master"
+    );
+    let file = open_export_destination(request.path)
+        .with_context(|| format!("create export {}", request.path.display()))?;
+    let mut info = png::Info::with_size(request.output_width, request.output_height);
+    info.color_type = png::ColorType::Rgba;
+    info.bit_depth = match request.bit_depth {
+        ExportBitDepth::Eight => png::BitDepth::Eight,
+        ExportBitDepth::Sixteen => png::BitDepth::Sixteen,
+        ExportBitDepth::Float32Linear => unreachable!("float PNG rejected above"),
+    };
+    if let Some(profile) = request.color.embedded_icc.as_ref() {
+        info.icc_profile = Some(Cow::Owned(profile.clone()));
+    }
+    if request.keep_metadata {
+        info.exif_metadata = Some(Cow::Owned(build_exif_payload(
+            request.metadata,
+            request.output_width,
+            request.output_height,
+        )));
+    }
+    let mut encoder =
+        png::Encoder::with_info(BufWriter::new(file), info).context("configure PNG encoder")?;
+    if request.color.srgb {
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    }
+    if request.keep_metadata {
+        add_png_text_metadata(
+            &mut encoder,
+            request.metadata,
+            request.output_width,
+            request.output_height,
+        )?;
+    }
+    let mut writer = encoder
+        .write_header()
+        .with_context(|| format!("write PNG header for {}", request.path.display()))?;
+    let mut stream = writer
+        .stream_writer_with_size(64 * 1024)
+        .context("create streaming PNG writer")?;
+    let row_format = match request.bit_depth {
+        ExportBitDepth::Eight => ExportRowFormat::Rgba8,
+        ExportBitDepth::Sixteen => ExportRowFormat::Rgba16Be,
+        ExportBitDepth::Float32Linear => unreachable!("float PNG rejected above"),
+    };
+    render_export_output(context, request, &mut stream, row_format)?;
+    stream.finish().context("finish streaming PNG data")?;
+    writer.finish().context("finish PNG file")?;
+    Ok(())
+}
+
+fn render_export_output<W: Write>(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+    output: &mut W,
+    row_format: ExportRowFormat,
+) -> Result<()> {
+    validate_export_dimensions(request.output_width, request.output_height)?;
+    if !request.geometry.is_identity() || request.raw.lens_geometry.is_some() {
+        return render_geometry_output(context, request, output, row_format);
+    }
+
+    let output_transform = request.color.transform.as_ref();
+    let mut resizer = LinearLightResizer::new_with_format(
+        request.raw.width,
+        request.raw.height,
+        request.output_width,
+        request.output_height,
+        row_format,
+    )?;
+    stream_tiled_linear_rows(context, request, |source_y, source| {
+        resizer.push_source_row(source_y, source, output_transform, output)
+    })?;
+    resizer.finish(output_transform, output)?;
+    Ok(())
+}
+
+fn render_geometry_output<W: Write>(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+    output: &mut W,
+    row_format: ExportRowFormat,
+) -> Result<()> {
+    with_temporary_export_path(request.path, |staged_linear| {
+        {
+            let linear_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(staged_linear)
+                .with_context(|| {
+                    format!("create geometry linear raster {}", staged_linear.display())
+                })?;
+            let mut linear_writer = BufWriter::new(linear_file);
+            stream_tiled_linear_rows(context, request, |_source_y, row| {
+                linear_writer
+                    .write_all(bytemuck::cast_slice(row))
+                    .context("write geometry linear source row")
+            })?;
+            linear_writer
+                .flush()
+                .context("flush geometry linear source raster")?;
+        }
+
+        let linear_file = fs::File::open(staged_linear)
+            .with_context(|| format!("open geometry linear raster {}", staged_linear.display()))?;
+        let mapped = unsafe { memmap2::MmapOptions::new().map(&linear_file) }
+            .with_context(|| format!("map geometry linear raster {}", staged_linear.display()))?;
+        let source = validate_linear_rgb_raster(&mapped, request.raw.width, request.raw.height)?;
+        let resampler = GeometryResampler::new_with_lens(
+            source,
+            request.raw.width,
+            request.raw.height,
+            request.geometry,
+            request.raw.lens_geometry.as_deref(),
+            request.output_width,
+            request.output_height,
+        )?;
+        let (geometry_width, geometry_height) = request
+            .geometry
+            .crop_pixel_dimensions(request.raw.width, request.raw.height);
+        let mut output_sharpen = FinalSizeOutputSharpen::new(
+            geometry_width,
+            geometry_height,
+            request.output_width,
+            request.output_height,
+        )
+        .with_passthrough(row_format == ExportRowFormat::RgbF32Le);
+        let output_transform = request.color.transform.as_ref();
+        for y in 0..request.output_height {
+            ensure_export_not_cancelled(context.cancellation)?;
+            output_sharpen.push_row(
+                resampler.output_row(y)?,
+                output_transform,
+                row_format,
+                output,
+            )?;
+        }
+        output_sharpen.finish(output_transform, row_format, output)?;
+        Ok(())
+    })
+}
+
+fn stream_tiled_linear_rows<F>(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+    mut row_sink: F,
+) -> Result<()>
+where
+    F: FnMut(u32, &[f32]) -> Result<()>,
+{
+    let ExportContext {
+        device,
+        queue,
+        events,
+        cancellation,
+        program_template,
+    } = context;
+    let ExportRequest {
+        raw,
+        exposure,
+        masks,
+        remove,
+        path: _,
+        tile_spec,
+        output_width,
+        output_height,
+        keep_metadata: _,
+        metadata: _,
+        geometry,
+        bit_depth: _,
+        color: _,
+    } = request;
+    let export_started = Instant::now();
+    ensure_export_not_cancelled(cancellation)?;
+    anyhow::ensure!(
+        !exposure.ai_denoise_enabled || raw.ai_denoised_image().is_some(),
+        "AI denoise is enabled but its full-resolution RawNIND result is not ready"
+    );
+    validate_export_dimensions(output_width, output_height)?;
+    if exposure.highlight_method == crate::pipeline::HighlightReconstructionMethod::InpaintOpposed
+        || (raw.cfa_kind == CfaKind::XTrans
+            && exposure.highlight_method == crate::pipeline::HighlightReconstructionMethod::Lch)
+    {
+        raw.inpaint_opposed_chroma(
+            exposure.black_point,
+            exposure.highlight_clip,
+            exposure.ai_denoise_enabled,
+        );
+    }
+    let plan = TilePlan::new(raw.width, raw.height, tile_spec);
+    crate::diagnostics::record(format!(
+        "Tiled export plan: source={}x{} requested_output={}x{} tiles={} core={} halo={} linear_row_stream=f32",
+        raw.width,
+        raw.height,
+        output_width,
+        output_height,
+        plan.tile_count(),
+        tile_spec.core_edge,
+        tile_spec.halo,
+    ));
+    let first = *plan
+        .tiles
+        .first()
+        .context("cannot export an empty RAW image")?;
+    let first_raw = extract_padded_tile(raw, first);
+    let first_mask_region = tile_mask_source_region(
+        masks,
+        first.global_origin_x,
+        first.global_origin_y,
+        first.padded_width,
+        first.padded_height,
+        raw.width,
+        raw.height,
+    );
+    let first_params = GpuParams::new_for_tile(
+        exposure,
+        masks,
+        &first_raw,
+        first.global_origin_x,
+        first.global_origin_y,
+        raw.width,
+        raw.height,
+    )
+    .with_vignette_geometry(geometry)
+    .with_mask_uv_rect(mask_source_region_uv(
+        first_mask_region,
+        raw.width,
+        raw.height,
+    ));
+    let pipeline_started = Instant::now();
+    let export_mask_edge = if masks.masks.is_empty() {
+        mask_atlas_edge()
+    } else {
+        let margin = masks.raster_margin_pixels(raw.width, raw.height);
+        export_mask_atlas_edge(
+            first.padded_width.saturating_add(margin.saturating_mul(2)),
+            first.padded_height.saturating_add(margin.saturating_mul(2)),
+        )
+    };
+    let tile_pipeline = if let Some(template) = program_template {
+        match RawGpuPipeline::new_headless_reusing_program_template_with_mask_edge(
+            device,
+            queue,
+            &first_raw,
+            &first_params,
+            ProcessingQuality::High,
+            template,
+            export_mask_edge,
+        ) {
+            Ok(pipeline) => {
+                crate::diagnostics::record(
+                    "Full-quality export reused startup-precompiled GPU programs",
+                );
+                pipeline
+            }
+            Err(reuse_error) => {
+                crate::diagnostics::record(format!(
+                    "Full-quality export program reuse unavailable ({reuse_error:#}); compiling programs"
+                ));
+                RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+                    device,
+                    queue,
+                    &first_raw,
+                    &first_params,
+                    ProcessingQuality::High,
+                    export_mask_edge,
+                )
+                .context("create reusable full-quality export pipeline")?
+            }
+        }
+    } else {
+        RawGpuPipeline::new_headless_with_quality_and_mask_edge(
+            device,
+            queue,
+            &first_raw,
+            &first_params,
+            ProcessingQuality::High,
+            export_mask_edge,
+        )
+        .context("create reusable full-quality export pipeline")?
+    };
+    crate::diagnostics::record(format!(
+        "Full-quality export pipeline prepared in {:.3}s; padded_tile={}x{} viewport-local mask_atlas={}x{} R16F",
+        pipeline_started.elapsed().as_secs_f64(),
+        first_raw.width,
+        first_raw.height,
+        export_mask_edge,
+        export_mask_edge
+    ));
+    tile_pipeline
+        .update_light_rays_mask_layers(queue, masks, raw.width, raw.height)
+        .context("upload full-image Light Rays emission masks")?;
+
+    let tone_analysis_started = Instant::now();
+    let mut tile_scratch = first_raw;
+    tile_pipeline.begin_export_tone_analysis(queue, device);
+    for (index, tile) in plan.tiles.iter().copied().enumerate() {
+        ensure_export_not_cancelled(cancellation)?;
+        if index != 0 {
+            extract_padded_tile_into(raw, tile, &mut tile_scratch);
+        }
+        tile_pipeline
+            .upload_raw_tile(queue, &tile_scratch)
+            .with_context(|| format!("upload tone-analysis tile {}", index + 1))?;
+        let tone_params = GpuParams::new_for_tile(
+            exposure,
+            masks,
+            &tile_scratch,
+            tile.global_origin_x,
+            tile.global_origin_y,
+            raw.width,
+            raw.height,
+        )
+        .with_vignette_geometry(geometry)
+        .with_tone_histogram_bounds(
+            tile.local_core_x,
+            tile.local_core_y,
+            tile.core_width,
+            tile.core_height,
+        );
+        tile_pipeline
+            .accumulate_export_tone_tile_with_remove(
+                queue,
+                device,
+                &tone_params,
+                RemoveSceneContext::new(
+                    remove,
+                    raw,
+                    exposure,
+                    [tile.global_origin_x as f32, tile.global_origin_y as f32],
+                    [tile.padded_width as f32, tile.padded_height as f32],
+                ),
+            )
+            .with_context(|| format!("apply Remove to tone-analysis tile {}", index + 1))?;
+    }
+    tile_pipeline.finish_export_tone_analysis(queue, device);
+    crate::diagnostics::record(format!(
+        "Exact full-resolution tone-analysis prepass queued in {:.3}s across {} tiles",
+        tone_analysis_started.elapsed().as_secs_f64(),
+        plan.tile_count()
+    ));
+
+    let total_tiles = plan.tile_count();
+    let mut completed_tiles = 0usize;
+    let mut first_progress_logged = false;
+    let mut tile_index = 0usize;
+
+    while tile_index < plan.tiles.len() {
+        ensure_export_not_cancelled(cancellation)?;
+        let band_y = plan.tiles[tile_index].core_y;
+        let band_height = plan.tiles[tile_index].core_height;
+        let band_start = tile_index;
+        while tile_index < plan.tiles.len() && plan.tiles[tile_index].core_y == band_y {
+            tile_index += 1;
+        }
+
+        let band_values = checked_rgb_len(raw.width, band_height)?;
+        let mut band = Vec::new();
+        band.try_reserve_exact(band_values)
+            .context("reserve bounded export source band")?;
+        band.resize(band_values, 0.0f32);
+        let mut pending_readback = None;
+        for (absolute_index, tile) in plan.tiles[band_start..tile_index]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            ensure_export_not_cancelled(cancellation)?;
+            let global_index = band_start + absolute_index;
+            extract_padded_tile_into(raw, tile, &mut tile_scratch);
+            tile_pipeline
+                .upload_raw_tile(queue, &tile_scratch)
+                .with_context(|| format!("upload export tile {}", global_index + 1))?;
+            let mask_region = tile_mask_source_region(
+                masks,
+                tile.global_origin_x,
+                tile.global_origin_y,
+                tile.padded_width,
+                tile.padded_height,
+                raw.width,
+                raw.height,
+            );
+            let mask_extent =
+                mask_region_texture_extent(mask_region, tile_pipeline.mask_atlas_edge());
+            upload_mask_atlas(
+                &tile_pipeline,
+                queue,
+                masks,
+                raw.width,
+                raw.height,
+                mask_region,
+            )?;
+
+            let params = GpuParams::new_for_tile(
+                exposure,
+                masks,
+                &tile_scratch,
+                tile.global_origin_x,
+                tile.global_origin_y,
+                raw.width,
+                raw.height,
+            )
+            .with_vignette_geometry(geometry)
+            .with_mask_uv_rect_and_extent(
+                mask_source_region_uv(mask_region, raw.width, raw.height),
+                mask_extent,
+            );
+            tile_pipeline
+                .dispatch_export_tile_with_remove(
+                    queue,
+                    device,
+                    &params,
+                    RemoveSceneContext::new(
+                        remove,
+                        raw,
+                        exposure,
+                        [tile.global_origin_x as f32, tile.global_origin_y as f32],
+                        [tile.padded_width as f32, tile.padded_height as f32],
+                    ),
+                )
+                .with_context(|| format!("apply Remove to export tile {}", global_index + 1))?;
+            let readback = tile_pipeline
+                .begin_display_linear_region_readback(
+                    device,
+                    queue,
+                    tile.local_core_x,
+                    tile.local_core_y,
+                    tile.core_width,
+                    tile.core_height,
+                )
+                .with_context(|| format!("queue export tile readback {}", global_index + 1))?;
+
+            let previous = pending_readback.replace((tile, global_index, readback));
+            if let Some((previous_tile, previous_index, previous_readback)) = previous {
+                let rgb = previous_readback
+                    .finish(device)
+                    .with_context(|| format!("read export tile {}", previous_index + 1))?;
+                stitch_linear_tile_into_band(&mut band, raw.width, band_y, previous_tile, &rgb)?;
+                report_completed_export_tile(
+                    events,
+                    &mut completed_tiles,
+                    total_tiles,
+                    &mut first_progress_logged,
+                    export_started,
+                );
+            }
+        }
+
+        if let Some((last_tile, last_index, last_readback)) = pending_readback.take() {
+            let rgb = last_readback
+                .finish(device)
+                .with_context(|| format!("read export tile {}", last_index + 1))?;
+            stitch_linear_tile_into_band(&mut band, raw.width, band_y, last_tile, &rgb)?;
+            report_completed_export_tile(
+                events,
+                &mut completed_tiles,
+                total_tiles,
+                &mut first_progress_logged,
+                export_started,
+            );
+        }
+
+        let source_row_values = checked_rgb_len(raw.width, 1)?;
+        for local_y in 0..band_height {
+            ensure_export_not_cancelled(cancellation)?;
+            let start = usize::try_from(local_y)
+                .ok()
+                .and_then(|row| row.checked_mul(source_row_values))
+                .context("source export row offset overflow")?;
+            let end = start
+                .checked_add(source_row_values)
+                .context("source export row end overflow")?;
+            let source_y = band_y + local_y;
+            row_sink(source_y, &band[start..end])?;
+        }
+    }
+    Ok(())
+}
+
+fn report_completed_export_tile(
+    events: &mpsc::Sender<ExportEvent>,
+    completed_tiles: &mut usize,
+    total_tiles: usize,
+    first_progress_logged: &mut bool,
+    export_started: Instant,
+) {
+    *completed_tiles += 1;
+    if !*first_progress_logged {
+        *first_progress_logged = true;
+        crate::diagnostics::record(format!(
+            "First export tile completed after {:.3}s; pipelined GPU readback is active",
+            export_started.elapsed().as_secs_f64()
+        ));
+    }
+    let _ = events.send(ExportEvent::Progress {
+        completed_tiles: *completed_tiles,
+        total_tiles,
+    });
+}
+
+fn export_tiled_tiff(context: ExportContext<'_>, request: ExportRequest<'_>) -> Result<()> {
+    validate_export_dimensions(request.output_width, request.output_height)?;
+
+    let file = open_export_destination(request.path)
+        .with_context(|| format!("create TIFF {}", request.path.display()))?;
+    let mut writer = BufWriter::new(file);
+    let row_format = tiff_row_format(request.bit_depth);
+    let profile = tiff_embedded_profile(request.color);
+    write_tiff_header(&mut writer, request, row_format, &profile)?;
+    render_export_output(context, request, &mut writer, row_format)?;
+    writer.flush().context("flush TIFF export")?;
+    Ok(())
+}
+
+fn tiff_row_format(bit_depth: ExportBitDepth) -> ExportRowFormat {
+    match bit_depth {
+        ExportBitDepth::Eight => ExportRowFormat::Rgb8,
+        ExportBitDepth::Sixteen => ExportRowFormat::Rgb16Le,
+        ExportBitDepth::Float32Linear => ExportRowFormat::RgbF32Le,
+    }
+}
+
+fn tiff_embedded_profile(color: &ResolvedExportColor) -> Vec<u8> {
+    color.embedded_icc.clone().unwrap_or_else(built_in_srgb_icc)
+}
+
+const TIFF_TARGET_STRIP_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone)]
+struct TiffEntry {
+    tag: u16,
+    field_type: u16,
+    count: u32,
+    data: Vec<u8>,
+}
+
+fn tiff_short(value: u16) -> Vec<u8> {
+    value.to_le_bytes().to_vec()
+}
+
+fn tiff_long(value: u32) -> Vec<u8> {
+    value.to_le_bytes().to_vec()
+}
+
+fn tiff_long_values(values: &[u32]) -> Result<Vec<u8>> {
+    let capacity = values
+        .len()
+        .checked_mul(std::mem::size_of::<u32>())
+        .context("TIFF LONG array size overflow")?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(capacity)
+        .context("reserve TIFF LONG array")?;
+    for value in values {
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(data)
+}
+
+fn tiff_ascii(value: &str) -> Vec<u8> {
+    let mut bytes = value.as_bytes().to_vec();
+    if bytes.last().copied() != Some(0) {
+        bytes.push(0);
+    }
+    bytes
+}
+
+fn tiff_ascii_entry(tag: u16, value: &str) -> Result<TiffEntry> {
+    let data = tiff_ascii(value);
+    Ok(TiffEntry {
+        tag,
+        field_type: 2,
+        count: u32::try_from(data.len()).context("TIFF ASCII tag is too large")?,
+        data,
+    })
+}
+
+fn tiff_strip_layout(width: u32, height: u32, bits_per_sample: u16) -> Result<(u32, Vec<u32>)> {
+    anyhow::ensure!(width > 0 && height > 0, "TIFF dimensions must be non-zero");
+    anyhow::ensure!(
+        matches!(bits_per_sample, 8 | 16 | 32),
+        "unsupported TIFF bit depth"
+    );
+
+    let bytes_per_pixel = u64::from(bits_per_sample / 8)
+        .checked_mul(3)
+        .context("TIFF bytes-per-pixel overflow")?;
+    let bytes_per_row = u64::from(width)
+        .checked_mul(bytes_per_pixel)
+        .context("TIFF row byte count overflow")?;
+    let rows_per_strip = (TIFF_TARGET_STRIP_BYTES / bytes_per_row)
+        .max(1)
+        .min(u64::from(height));
+    let rows_per_strip = u32::try_from(rows_per_strip).context("TIFF rows-per-strip overflow")?;
+    let strip_count = height.div_ceil(rows_per_strip);
+    let mut byte_counts = Vec::new();
+    byte_counts
+        .try_reserve_exact(strip_count as usize)
+        .context("reserve TIFF strip byte counts")?;
+
+    for strip in 0..strip_count {
+        let first_row = strip
+            .checked_mul(rows_per_strip)
+            .context("TIFF strip row offset overflow")?;
+        let rows = rows_per_strip.min(height - first_row);
+        let bytes = u64::from(rows)
+            .checked_mul(bytes_per_row)
+            .context("TIFF strip byte count overflow")?;
+        byte_counts.push(
+            u32::try_from(bytes).context("individual TIFF strip exceeds classic TIFF limits")?,
+        );
+    }
+
+    Ok((rows_per_strip, byte_counts))
+}
+
+fn write_tiff_header<W: Write>(
+    output: &mut W,
+    request: ExportRequest<'_>,
+    row_format: ExportRowFormat,
+    profile: &[u8],
+) -> Result<()> {
+    let bits = match row_format {
+        ExportRowFormat::Rgb8 => 8u16,
+        ExportRowFormat::Rgb16Le => 16u16,
+        ExportRowFormat::RgbF32Le => 32u16,
+        _ => return Err(anyhow::anyhow!("unsupported TIFF row encoding")),
+    };
+    let sample_format = if row_format == ExportRowFormat::RgbF32Le {
+        3u16
+    } else {
+        1u16
+    };
+    let bytes_per_pixel = u64::from(bits / 8) * 3;
+    let pixel_bytes = u64::from(request.output_width)
+        .checked_mul(u64::from(request.output_height))
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+        .context("TIFF pixel byte count overflow")?;
+    anyhow::ensure!(
+        pixel_bytes <= u64::from(u32::MAX),
+        "TIFF pixel data exceeds classic TIFF's 4 GiB limit"
+    );
+
+    let (rows_per_strip, strip_byte_counts) =
+        tiff_strip_layout(request.output_width, request.output_height, bits)?;
+    let strip_count = u32::try_from(strip_byte_counts.len()).context("too many TIFF strips")?;
+    let strip_offsets_placeholder = vec![
+        0u8;
+        strip_byte_counts
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .context("TIFF strip-offset array size overflow")?
+    ];
+    let software = tiff_ascii_entry(305, "CalibRaw 2.0")?;
+
+    let mut entries = vec![
+        TiffEntry {
+            tag: 256,
+            field_type: 4,
+            count: 1,
+            data: tiff_long(request.output_width),
+        },
+        TiffEntry {
+            tag: 257,
+            field_type: 4,
+            count: 1,
+            data: tiff_long(request.output_height),
+        },
+        TiffEntry {
+            tag: 258,
+            field_type: 3,
+            count: 3,
+            data: [bits.to_le_bytes(), bits.to_le_bytes(), bits.to_le_bytes()].concat(),
+        },
+        TiffEntry {
+            tag: 259,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(1),
+        },
+        TiffEntry {
+            tag: 262,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(2),
+        },
+        TiffEntry {
+            tag: 273,
+            field_type: 4,
+            count: strip_count,
+            data: strip_offsets_placeholder,
+        },
+        TiffEntry {
+            tag: 274,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(1),
+        },
+        TiffEntry {
+            tag: 277,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(3),
+        },
+        TiffEntry {
+            tag: 278,
+            field_type: 4,
+            count: 1,
+            data: tiff_long(rows_per_strip),
+        },
+        TiffEntry {
+            tag: 279,
+            field_type: 4,
+            count: strip_count,
+            data: tiff_long_values(&strip_byte_counts)?,
+        },
+        TiffEntry {
+            tag: 284,
+            field_type: 3,
+            count: 1,
+            data: tiff_short(1),
+        },
+        software,
+        TiffEntry {
+            tag: 339,
+            field_type: 3,
+            count: 3,
+            data: [
+                sample_format.to_le_bytes(),
+                sample_format.to_le_bytes(),
+                sample_format.to_le_bytes(),
+            ]
+            .concat(),
+        },
+        TiffEntry {
+            tag: 34675,
+            field_type: 7,
+            count: u32::try_from(profile.len()).context("ICC profile is too large for TIFF")?,
+            data: profile.to_vec(),
+        },
+    ];
+
+    if request.keep_metadata {
+        let description = combined_image_description(request.metadata);
+        if !description.is_empty() {
+            entries.push(tiff_ascii_entry(270, &description)?);
+        }
+        if !request.metadata.camera_make.trim().is_empty() {
+            entries.push(tiff_ascii_entry(271, request.metadata.camera_make.trim())?);
+        }
+        if !request.metadata.camera_model.trim().is_empty() {
+            entries.push(tiff_ascii_entry(272, request.metadata.camera_model.trim())?);
+        }
+        if !request.metadata.artist.trim().is_empty() {
+            entries.push(tiff_ascii_entry(315, request.metadata.artist.trim())?);
+        }
+    }
+
+    entries.sort_by_key(|entry| entry.tag);
+    let entry_count = u16::try_from(entries.len()).context("too many TIFF IFD entries")?;
+    let ifd_size = 2usize
+        .checked_add(
+            entries
+                .len()
+                .checked_mul(12)
+                .context("TIFF IFD size overflow")?,
+        )
+        .and_then(|value| value.checked_add(4))
+        .context("TIFF IFD size overflow")?;
+    let mut cursor = 8usize
+        .checked_add(ifd_size)
+        .context("TIFF header size overflow")?;
+    let mut external_offsets = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        if entry.data.len() > 4 {
+            cursor = cursor
+                .checked_add(3)
+                .map(|value| value & !3)
+                .context("TIFF metadata alignment overflow")?;
+            external_offsets.push(Some(cursor));
+            cursor = cursor
+                .checked_add(entry.data.len())
+                .context("TIFF metadata size overflow")?;
+        } else {
+            external_offsets.push(None);
+        }
+    }
+    cursor = cursor
+        .checked_add(3)
+        .map(|value| value & !3)
+        .context("TIFF pixel alignment overflow")?;
+    let pixel_offset =
+        u32::try_from(cursor).context("TIFF header exceeds classic TIFF offset range")?;
+    let total_len = u64::from(pixel_offset)
+        .checked_add(pixel_bytes)
+        .context("TIFF file size overflow")?;
+    anyhow::ensure!(
+        total_len <= u64::from(u32::MAX),
+        "TIFF export exceeds classic TIFF's 4 GiB limit"
+    );
+
+    let mut strip_offsets = Vec::new();
+    strip_offsets
+        .try_reserve_exact(strip_byte_counts.len())
+        .context("reserve TIFF strip offsets")?;
+    let mut next_strip_offset = u64::from(pixel_offset);
+    for byte_count in &strip_byte_counts {
+        strip_offsets.push(
+            u32::try_from(next_strip_offset).context("TIFF strip offset exceeds classic limits")?,
+        );
+        next_strip_offset = next_strip_offset
+            .checked_add(u64::from(*byte_count))
+            .context("TIFF strip offset overflow")?;
+    }
+    anyhow::ensure!(
+        next_strip_offset == total_len,
+        "TIFF strip layout does not cover the complete raster"
+    );
+    if let Some(strip_offsets_entry) = entries.iter_mut().find(|entry| entry.tag == 273) {
+        strip_offsets_entry.data = tiff_long_values(&strip_offsets)?;
+    }
+
+    output.write_all(b"II").context("write TIFF byte order")?;
+    output
+        .write_all(&42u16.to_le_bytes())
+        .context("write TIFF magic")?;
+    output
+        .write_all(&8u32.to_le_bytes())
+        .context("write TIFF IFD offset")?;
+    output
+        .write_all(&entry_count.to_le_bytes())
+        .context("write TIFF entry count")?;
+
+    for (entry, external_offset) in entries.iter().zip(&external_offsets) {
+        output
+            .write_all(&entry.tag.to_le_bytes())
+            .context("write TIFF tag")?;
+        output
+            .write_all(&entry.field_type.to_le_bytes())
+            .context("write TIFF field type")?;
+        output
+            .write_all(&entry.count.to_le_bytes())
+            .context("write TIFF field count")?;
+        if let Some(offset) = external_offset {
+            output
+                .write_all(
+                    &u32::try_from(*offset)
+                        .context("TIFF metadata offset overflow")?
+                        .to_le_bytes(),
+                )
+                .context("write TIFF value offset")?;
+        } else {
+            let mut inline = [0u8; 4];
+            inline[..entry.data.len()].copy_from_slice(&entry.data);
+            output
+                .write_all(&inline)
+                .context("write TIFF inline value")?;
+        }
+    }
+    output
+        .write_all(&0u32.to_le_bytes())
+        .context("write TIFF next IFD")?;
+
+    let mut written = 8usize
+        .checked_add(ifd_size)
+        .context("TIFF header write count overflow")?;
+    for (entry, external_offset) in entries.iter().zip(external_offsets) {
+        if let Some(offset) = external_offset {
+            while written < offset {
+                output.write_all(&[0]).context("pad TIFF metadata")?;
+                written += 1;
+            }
+            output
+                .write_all(&entry.data)
+                .context("write TIFF metadata payload")?;
+            written = written
+                .checked_add(entry.data.len())
+                .context("TIFF metadata write count overflow")?;
+        }
+    }
+    while written < pixel_offset as usize {
+        output.write_all(&[0]).context("pad TIFF pixel offset")?;
+        written += 1;
+    }
+    Ok(())
+}
+
+fn validate_linear_rgb_raster(bytes: &[u8], width: u32, height: u32) -> Result<&[f32]> {
+    let expected_values = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(3))
+        .context("linear RGB raster size overflow")?;
+    let expected_bytes = expected_values
+        .checked_mul(std::mem::size_of::<f32>() as u64)
+        .context("linear RGB raster byte size overflow")?;
+    anyhow::ensure!(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) == expected_bytes,
+        "linear RGB raster length does not match its dimensions"
+    );
+    bytemuck::try_cast_slice(bytes)
+        .map_err(|error| anyhow::anyhow!("map linear RGB raster: {error}"))
+}
+
+fn validate_rgb_raster_len(bytes: &[u8], width: u32, height: u32) -> Result<()> {
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(3))
+        .context("RGB raster size overflow")?;
+    anyhow::ensure!(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) == expected,
+        "RGB raster length does not match its dimensions"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GeometryFilterAxes {
+    major: [f32; 2],
+    minor: [f32; 2],
+    major_scale: f32,
+    minor_scale: f32,
+    radius_x: f32,
+    radius_y: f32,
+}
+
+struct GeometryResampler<'a> {
+    source: &'a [f32],
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+    inverse_map: GeometryInverseMap<'a>,
+    affine_filter: Option<GeometryFilterAxes>,
+}
+
+impl<'a> GeometryResampler<'a> {
+    #[cfg(test)]
+    fn new(
+        source: &'a [f32],
+        source_width: u32,
+        source_height: u32,
+        geometry: GeometryTransform,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Self> {
+        Self::new_with_lens(
+            source,
+            source_width,
+            source_height,
+            geometry,
+            None,
+            output_width,
+            output_height,
+        )
+    }
+
+    fn new_with_lens(
+        source: &'a [f32],
+        source_width: u32,
+        source_height: u32,
+        geometry: GeometryTransform,
+        lens_geometry: Option<&'a LensGeometryMap>,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Self> {
+        validate_export_dimensions(output_width, output_height)?;
+        anyhow::ensure!(
+            source_width > 0 && source_height > 0,
+            "source image is empty"
+        );
+        anyhow::ensure!(
+            source.len() == checked_rgb_len(source_width, source_height)?,
+            "linear geometry raster length does not match its dimensions"
+        );
+        let inverse_map = GeometryInverseMap::new_with_lens(
+            geometry,
+            lens_geometry,
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+        );
+        let affine_filter = lens_geometry
+            .is_none()
+            .then(|| geometry_filter_axes(inverse_map.pixel_jacobian()));
+        Ok(Self {
+            source,
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+            inverse_map,
+            affine_filter,
+        })
+    }
+
+    fn output_row(&self, output_y: u32) -> Result<Vec<f32>> {
+        anyhow::ensure!(
+            output_y < self.output_height,
+            "geometry row is outside the output image"
+        );
+        let values = checked_rgb_len(self.output_width, 1)?;
+        let mut row = Vec::new();
+        row.try_reserve_exact(values)
+            .context("reserve transformed linear output row")?;
+        row.resize(values, 0.0);
+        for output_x in 0..self.output_width {
+            let [source_x, source_y] = self
+                .inverse_map
+                .source_position(output_x as f32, output_y as f32);
+            let filter = self.affine_filter.unwrap_or_else(|| {
+                geometry_filter_axes(
+                    self.inverse_map
+                        .pixel_jacobian_at(output_x as f32, output_y as f32),
+                )
+            });
+            let rgb = self.sample(source_x, source_y, filter);
+            let start = output_x as usize * 3;
+            row[start..start + 3].copy_from_slice(&rgb);
+        }
+        Ok(row)
+    }
+
+    fn sample(&self, x: f32, y: f32, filter: GeometryFilterAxes) -> [f32; 3] {
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < -0.5
+            || y < -0.5
+            || x > self.source_width as f32 - 0.5
+            || y > self.source_height as f32 - 0.5
+        {
+            return [0.0; 3];
+        }
+
+        if filter.major_scale <= 1.0 + 1e-6 && filter.minor_scale <= 1.0 + 1e-6 {
+            let nearest_x = x.round();
+            let nearest_y = y.round();
+            if (x - nearest_x).abs() <= 1e-6 && (y - nearest_y).abs() <= 1e-6 {
+                let source_x = nearest_x as u32;
+                let source_y = nearest_y as u32;
+                let index =
+                    (source_y as usize * self.source_width as usize + source_x as usize) * 3;
+                return [
+                    self.source[index],
+                    self.source[index + 1],
+                    self.source[index + 2],
+                ];
+            }
+        }
+        let min_x = (x - filter.radius_x).floor().max(0.0) as u32;
+        let max_x = (x + filter.radius_x)
+            .ceil()
+            .min(self.source_width.saturating_sub(1) as f32) as u32;
+        let min_y = (y - filter.radius_y).floor().max(0.0) as u32;
+        let max_y = (y + filter.radius_y)
+            .ceil()
+            .min(self.source_height.saturating_sub(1) as f32) as u32;
+
+        let mut sum = [0.0f32; 3];
+        let mut weight_sum = 0.0f32;
+        for source_y in min_y..=max_y {
+            for source_x in min_x..=max_x {
+                let dx = source_x as f32 - x;
+                let dy = source_y as f32 - y;
+                let major_distance =
+                    (dx * filter.major[0] + dy * filter.major[1]) / filter.major_scale;
+                let minor_distance =
+                    (dx * filter.minor[0] + dy * filter.minor[1]) / filter.minor_scale;
+                let radius_squared =
+                    major_distance * major_distance + minor_distance * minor_distance;
+                if radius_squared >= 4.0 {
+                    continue;
+                }
+                let weight = mitchell_netravali_f32(radius_squared.sqrt());
+                if weight == 0.0 {
+                    continue;
+                }
+                let index =
+                    (source_y as usize * self.source_width as usize + source_x as usize) * 3;
+                for (channel, value) in sum.iter_mut().enumerate() {
+                    *value += self.source[index + channel] * weight;
+                }
+                weight_sum += weight;
+            }
+        }
+
+        if weight_sum.abs() > 1e-6 {
+            for value in &mut sum {
+                *value /= weight_sum;
+            }
+            return sum;
+        }
+
+        let nearest_x = x
+            .round()
+            .clamp(0.0, self.source_width.saturating_sub(1) as f32) as u32;
+        let nearest_y = y
+            .round()
+            .clamp(0.0, self.source_height.saturating_sub(1) as f32) as u32;
+        let index = (nearest_y as usize * self.source_width as usize + nearest_x as usize) * 3;
+        [
+            self.source[index],
+            self.source[index + 1],
+            self.source[index + 2],
+        ]
+    }
+}
+
+fn geometry_filter_axes(jacobian: [[f32; 2]; 2]) -> GeometryFilterAxes {
+    let jx = jacobian[0];
+    let jy = jacobian[1];
+    let c00 = jx[0] * jx[0] + jy[0] * jy[0];
+    let c01 = jx[0] * jx[1] + jy[0] * jy[1];
+    let c11 = jx[1] * jx[1] + jy[1] * jy[1];
+    let trace = c00 + c11;
+    let discriminant = ((c00 - c11) * (c00 - c11) + 4.0 * c01 * c01).sqrt();
+    let lambda_major = ((trace + discriminant) * 0.5).max(0.0);
+    let lambda_minor = ((trace - discriminant) * 0.5).max(0.0);
+
+    let major = if discriminant <= 1e-8 {
+        [1.0, 0.0]
+    } else {
+        let candidate_a = [c01, lambda_major - c00];
+        let candidate_b = [lambda_major - c11, c01];
+        let norm_a = candidate_a[0] * candidate_a[0] + candidate_a[1] * candidate_a[1];
+        let norm_b = candidate_b[0] * candidate_b[0] + candidate_b[1] * candidate_b[1];
+        let candidate = if norm_a >= norm_b {
+            candidate_a
+        } else {
+            candidate_b
+        };
+        let length = (candidate[0] * candidate[0] + candidate[1] * candidate[1]).sqrt();
+        if length > 1e-8 {
+            [candidate[0] / length, candidate[1] / length]
+        } else {
+            [1.0, 0.0]
+        }
+    };
+    let minor = [-major[1], major[0]];
+    let major_scale = lambda_major.sqrt().max(1.0);
+    let minor_scale = lambda_minor.sqrt().max(1.0);
+    let radius_x = 2.0 * (major[0].abs() * major_scale + minor[0].abs() * minor_scale);
+    let radius_y = 2.0 * (major[1].abs() * major_scale + minor[1].abs() * minor_scale);
+    GeometryFilterAxes {
+        major,
+        minor,
+        major_scale,
+        minor_scale,
+        radius_x,
+        radius_y,
+    }
+}
+
+fn mitchell_netravali_f32(value: f32) -> f32 {
+    let value = value.abs();
+    if value >= 2.0 {
+        return 0.0;
+    }
+    const B: f32 = 1.0 / 3.0;
+    const C: f32 = 1.0 / 3.0;
+    let value2 = value * value;
+    let value3 = value2 * value;
+    if value < 1.0 {
+        ((12.0 - 9.0 * B - 6.0 * C) * value3
+            + (-18.0 + 12.0 * B + 6.0 * C) * value2
+            + (6.0 - 2.0 * B))
+            / 6.0
+    } else {
+        ((-B - 6.0 * C) * value3
+            + (6.0 * B + 30.0 * C) * value2
+            + (-12.0 * B - 48.0 * C) * value
+            + (8.0 * B + 24.0 * C))
+            / 6.0
+    }
+}
+
+fn export_tiled_jpeg(
+    context: ExportContext<'_>,
+    request: ExportRequest<'_>,
+    quality: u8,
+) -> Result<()> {
+    let quality = quality.clamp(1, 100);
+    with_temporary_export_path(request.path, |staged_rgb| {
+        {
+            let rgb_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(staged_rgb)
+                .with_context(|| format!("create staged RGB raster {}", staged_rgb.display()))?;
+            let mut rgb_writer = BufWriter::new(rgb_file);
+            render_export_output(context, request, &mut rgb_writer, ExportRowFormat::Rgb8)?;
+            rgb_writer.flush().context("flush staged RGB raster")?;
+        }
+
+        let rgb_file = fs::File::open(staged_rgb)
+            .with_context(|| format!("open staged RGB raster {}", staged_rgb.display()))?;
+        let mapped = unsafe { memmap2::MmapOptions::new().map(&rgb_file) }
+            .with_context(|| format!("map staged RGB raster {}", staged_rgb.display()))?;
+
+        encode_jpeg_rgb(JpegEncodeRequest {
+            rgb: &mapped,
+            output_path: request.path,
+            width: request.output_width,
+            height: request.output_height,
+            quality,
+            keep_metadata: request.keep_metadata,
+            metadata: request.metadata,
+            icc_profile: request.color.embedded_icc.as_deref(),
+        })?;
+        drop(mapped);
+        drop(rgb_file);
+        Ok(())
+    })
+}
+
+struct JpegEncodeRequest<'a> {
+    rgb: &'a [u8],
+    output_path: &'a Path,
+    width: u32,
+    height: u32,
+    quality: u8,
+    keep_metadata: bool,
+    metadata: &'a ExportMetadata,
+    icc_profile: Option<&'a [u8]>,
+}
+
+fn encode_jpeg_rgb(request: JpegEncodeRequest<'_>) -> Result<()> {
+    let JpegEncodeRequest {
+        rgb,
+        output_path,
+        width: output_width,
+        height: output_height,
+        quality,
+        keep_metadata,
+        metadata,
+        icc_profile,
+    } = request;
+    validate_rgb_raster_len(rgb, output_width, output_height)?;
+    let width = u16::try_from(output_width).context("JPEG width exceeds baseline limit")?;
+    let height = u16::try_from(output_height).context("JPEG height exceeds baseline limit")?;
+    let file = open_export_destination(output_path)
+        .with_context(|| format!("create JPEG {}", output_path.display()))?;
+    let mut writer = BufWriter::with_capacity(256 * 1024, file);
+    let encode_started = Instant::now();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut writer, quality.clamp(1, 100));
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_1_1);
+    if let Some(profile) = icc_profile {
+        encoder
+            .add_icc_profile(profile)
+            .context("embed JPEG ICC profile")?;
+    }
+    if keep_metadata {
+        encoder
+            .add_exif_metadata(&build_exif_payload(metadata, output_width, output_height))
+            .context("embed JPEG EXIF metadata")?;
+    }
+    encoder
+        .encode(rgb, width, height, jpeg_encoder::ColorType::Rgb)
+        .with_context(|| format!("encode JPEG {}", output_path.display()))?;
+    writer.flush().context("flush JPEG export")?;
+    crate::diagnostics::record(format!(
+        "JPEG compression finished in {:.3}s: {}x{} quality={}",
+        encode_started.elapsed().as_secs_f64(),
+        output_width,
+        output_height,
+        quality,
+    ));
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SampleWeight {
+    index: u32,
+    weight: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OutputSampleWeight {
+    output_index: u32,
+    weight: f32,
+}
+
+struct FinalSizeOutputSharpen {
+    width: u32,
+    strength: f32,
+    previous: Option<Vec<f32>>,
+    current: Option<Vec<f32>>,
+    encoded_rows: u32,
+    passthrough: bool,
+}
+
+impl FinalSizeOutputSharpen {
+    fn new(source_width: u32, source_height: u32, output_width: u32, output_height: u32) -> Self {
+        let scale_x = source_width as f32 / output_width.max(1) as f32;
+        let scale_y = source_height as f32 / output_height.max(1) as f32;
+        let downsample = scale_x.max(scale_y).max(1.0);
+        let upscale = (output_width as f32 / source_width.max(1) as f32)
+            .max(output_height as f32 / source_height.max(1) as f32)
+            .max(1.0);
+        let downsample_boost = (downsample.log2() / 3.0).clamp(0.0, 1.0);
+        let upscale_reduction = ((upscale - 1.0) / 2.0).clamp(0.0, 1.0);
+        let strength = (0.44 + 0.22 * downsample_boost) * (1.0 - 0.28 * upscale_reduction);
+        Self {
+            width: output_width,
+            strength,
+            previous: None,
+            current: None,
+            encoded_rows: 0,
+            passthrough: false,
+        }
+    }
+
+    fn with_passthrough(mut self, passthrough: bool) -> Self {
+        self.passthrough = passthrough;
+        self
+    }
+
+    fn push_row<W: Write>(
+        &mut self,
+        row: Vec<f32>,
+        output_transform: Option<&SrgbOutputLut>,
+        row_format: ExportRowFormat,
+        output: &mut W,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            row.len() == checked_rgb_len(self.width, 1)?,
+            "final-size sharpen row length does not match output width"
+        );
+        if self.passthrough {
+            return self.write_encoded_row(&row, output_transform, row_format, output);
+        }
+        let Some(current) = self.current.take() else {
+            self.current = Some(row);
+            return Ok(());
+        };
+        let top = self.previous.as_deref().unwrap_or(&current);
+        let sharpened = output_sharpen_linear_row(top, &current, &row, self.strength)?;
+        self.write_encoded_row(&sharpened, output_transform, row_format, output)?;
+        self.previous = Some(current);
+        self.current = Some(row);
+        Ok(())
+    }
+
+    fn finish<W: Write>(
+        &mut self,
+        output_transform: Option<&SrgbOutputLut>,
+        row_format: ExportRowFormat,
+        output: &mut W,
+    ) -> Result<()> {
+        if self.passthrough {
+            return Ok(());
+        }
+        if let Some(current) = self.current.take() {
+            let top = self.previous.as_deref().unwrap_or(&current);
+            let sharpened = output_sharpen_linear_row(top, &current, &current, self.strength)?;
+            self.write_encoded_row(&sharpened, output_transform, row_format, output)?;
+        }
+        self.previous = None;
+        Ok(())
+    }
+
+    fn write_encoded_row<W: Write>(
+        &mut self,
+        row: &[f32],
+        output_transform: Option<&SrgbOutputLut>,
+        row_format: ExportRowFormat,
+        output: &mut W,
+    ) -> Result<()> {
+        let encoded = encode_output_row(row, output_transform, row_format)?;
+        output
+            .write_all(&encoded)
+            .with_context(|| format!("write output row {}", self.encoded_rows))?;
+        self.encoded_rows += 1;
+        Ok(())
+    }
+}
+
+fn rec2020_luminance(pixel: &[f32]) -> f32 {
+    (pixel[0] * 0.2627 + pixel[1] * 0.6780 + pixel[2] * 0.0593).max(1e-8)
+}
+
+fn output_sharpen_linear_row(
+    top: &[f32],
+    center: &[f32],
+    bottom: &[f32],
+    strength: f32,
+) -> Result<Vec<f32>> {
+    anyhow::ensure!(
+        top.len() == center.len() && center.len() == bottom.len() && center.len().is_multiple_of(3),
+        "output sharpen rows have incompatible lengths"
+    );
+    let pixels = center.len() / 3;
+    let mut sharpened = Vec::new();
+    sharpened
+        .try_reserve_exact(center.len())
+        .context("reserve final-size sharpen row")?;
+    sharpened.resize(center.len(), 0.0);
+
+    for x in 0..pixels {
+        let x_left = x.saturating_sub(1);
+        let x_right = (x + 1).min(pixels.saturating_sub(1));
+        let center_start = x * 3;
+        let left_start = x_left * 3;
+        let right_start = x_right * 3;
+        let c = rec2020_luminance(&center[center_start..center_start + 3]);
+        let l = rec2020_luminance(&center[left_start..left_start + 3]);
+        let r = rec2020_luminance(&center[right_start..right_start + 3]);
+        let u = rec2020_luminance(&top[center_start..center_start + 3]);
+        let d = rec2020_luminance(&bottom[center_start..center_start + 3]);
+        let center_ev = c.log2();
+
+        let mut weighted = c * 4.0;
+        let mut weight_sum = 4.0;
+        for neighbour in [l, r, u, d] {
+            let delta = neighbour.log2() - center_ev;
+            let weight = (-4.2 * delta * delta).exp();
+            weighted += neighbour * weight;
+            weight_sum += weight;
+        }
+        let base = (weighted / weight_sum.max(1e-6)).max(1e-8);
+        let detail_ev = center_ev - base.log2();
+
+        let shadow = (1.0 - ((center_ev + 7.5) / 4.5).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let threshold = 0.0065 + 0.012 * shadow;
+        let thresholded = detail_ev.signum() * (detail_ev.abs() - threshold).max(0.0);
+        let edge = [l, r, u, d]
+            .into_iter()
+            .map(|value| (value.log2() - center_ev).abs())
+            .fold(0.0f32, f32::max);
+        let edge_select = (0.30 + 0.70 * ((edge - 0.008) / 0.16).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let delta_ev = (thresholded * strength * edge_select).clamp(-0.16, 0.18);
+        let proposed = c * 2.0f32.powf(delta_ev);
+
+        let local_min = c.min(l).min(r).min(u).min(d);
+        let local_max = c.max(l).max(r).max(u).max(d);
+        let target_luma = proposed.clamp(local_min * 0.985, local_max * 1.015);
+        let gain = (target_luma / c).clamp(0.78, 1.28);
+        for channel in 0..3 {
+            sharpened[center_start + channel] = (center[center_start + channel] * gain).max(0.0);
+        }
+    }
+    Ok(sharpened)
+}
+
+struct LinearLightResizer {
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+    horizontal: Vec<Vec<SampleWeight>>,
+    vertical_by_source: Vec<Vec<OutputSampleWeight>>,
+    output_last_source: Vec<u32>,
+    pending_rows: Vec<Option<Vec<f32>>>,
+    next_source_row: u32,
+    next_output_row: u32,
+    row_format: ExportRowFormat,
+    output_sharpen: FinalSizeOutputSharpen,
+}
+
+impl LinearLightResizer {
+    #[cfg(test)]
+    fn new(
+        source_width: u32,
+        source_height: u32,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<Self> {
+        Self::new_with_format(
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+            ExportRowFormat::Rgba8,
+        )
+    }
+
+    fn new_with_format(
+        source_width: u32,
+        source_height: u32,
+        output_width: u32,
+        output_height: u32,
+        row_format: ExportRowFormat,
+    ) -> Result<Self> {
+        validate_export_dimensions(output_width, output_height)?;
+        anyhow::ensure!(
+            source_width > 0 && source_height > 0,
+            "source image is empty"
+        );
+        let vertical = build_lanczos_contributions(source_height, output_height)?;
+        let (vertical_by_source, output_last_source) =
+            invert_vertical_contributions(source_height, &vertical)?;
+        let mut pending_rows = Vec::new();
+        pending_rows
+            .try_reserve_exact(output_height as usize)
+            .context("reserve vertical resize row slots")?;
+        pending_rows.resize_with(output_height as usize, || None);
+        Ok(Self {
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+            horizontal: build_lanczos_contributions(source_width, output_width)?,
+            vertical_by_source,
+            output_last_source,
+            pending_rows,
+            next_source_row: 0,
+            next_output_row: 0,
+            row_format,
+            output_sharpen: FinalSizeOutputSharpen::new(
+                source_width,
+                source_height,
+                output_width,
+                output_height,
+            )
+            .with_passthrough(row_format == ExportRowFormat::RgbF32Le),
+        })
+    }
+
+    fn push_source_row<W: Write>(
+        &mut self,
+        source_y: u32,
+        source: &[f32],
+        output_transform: Option<&SrgbOutputLut>,
+        output: &mut W,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            source_y == self.next_source_row,
+            "source rows arrived out of order: got {source_y}, expected {}",
+            self.next_source_row
+        );
+        anyhow::ensure!(
+            source.len() == checked_rgb_len(self.source_width, 1)?,
+            "source row length does not match export width"
+        );
+        let horizontal = resize_horizontal_row(source, &self.horizontal)?;
+        let contribution_count = self
+            .vertical_by_source
+            .get(source_y as usize)
+            .context("source resize row is outside the contribution table")?
+            .len();
+        for contribution_index in 0..contribution_count {
+            let contribution = self.vertical_by_source[source_y as usize][contribution_index];
+            {
+                let output_index = contribution.output_index as usize;
+                let slot = self
+                    .pending_rows
+                    .get_mut(output_index)
+                    .context("output resize row is outside the pending table")?;
+                if slot.is_none() {
+                    let row_values = checked_rgb_len(self.output_width, 1)?;
+                    let mut row = Vec::new();
+                    row.try_reserve_exact(row_values)
+                        .context("reserve active vertical resize row")?;
+                    row.resize(row_values, 0.0f32);
+                    *slot = Some(row);
+                }
+                let row = slot
+                    .as_mut()
+                    .context("pending output row failed to initialize")?;
+                for (destination, value) in row.iter_mut().zip(&horizontal) {
+                    *destination += *value * contribution.weight;
+                }
+            }
+            self.write_ready_rows_through(
+                source_y,
+                contribution.output_index,
+                output_transform,
+                output,
+            )?;
+        }
+        self.next_source_row += 1;
+        Ok(())
+    }
+
+    fn finish<W: Write>(
+        &mut self,
+        output_transform: Option<&SrgbOutputLut>,
+        output: &mut W,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.next_source_row == self.source_height,
+            "linear resizer received {} of {} source rows",
+            self.next_source_row,
+            self.source_height
+        );
+        self.write_ready_rows_through(
+            self.source_height - 1,
+            self.output_height - 1,
+            output_transform,
+            output,
+        )?;
+        self.output_sharpen
+            .finish(output_transform, self.row_format, output)?;
+        anyhow::ensure!(
+            self.next_output_row == self.output_height,
+            "linear resizer produced {} of {} output rows",
+            self.next_output_row,
+            self.output_height
+        );
+        anyhow::ensure!(
+            self.output_sharpen.encoded_rows == self.output_height,
+            "output sharpen produced {} of {} rows",
+            self.output_sharpen.encoded_rows,
+            self.output_height
+        );
+        anyhow::ensure!(
+            self.pending_rows.iter().all(Option::is_none),
+            "linear resizer retained incomplete output rows"
+        );
+        Ok(())
+    }
+
+    fn write_ready_rows_through<W: Write>(
+        &mut self,
+        source_y: u32,
+        completed_through_output: u32,
+        output_transform: Option<&SrgbOutputLut>,
+        output: &mut W,
+    ) -> Result<()> {
+        while self.next_output_row < self.output_height
+            && self.next_output_row <= completed_through_output
+            && self.output_last_source[self.next_output_row as usize] <= source_y
+        {
+            let row = self.pending_rows[self.next_output_row as usize]
+                .take()
+                .context("completed resize row has no accumulated pixels")?;
+            self.output_sharpen
+                .push_row(row, output_transform, self.row_format, output)?;
+            self.next_output_row += 1;
+        }
+        Ok(())
+    }
+}
+
+fn invert_vertical_contributions(
+    source_height: u32,
+    vertical: &[Vec<SampleWeight>],
+) -> Result<(Vec<Vec<OutputSampleWeight>>, Vec<u32>)> {
+    let source_rows = source_height as usize;
+    let mut counts = Vec::new();
+    counts
+        .try_reserve_exact(source_rows)
+        .context("reserve vertical contribution counts")?;
+    counts.resize(source_rows, 0usize);
+    let mut output_last_source = Vec::new();
+    output_last_source
+        .try_reserve_exact(vertical.len())
+        .context("reserve output resize boundaries")?;
+    for samples in vertical {
+        let last = samples
+            .last()
+            .map(|sample| sample.index)
+            .context("vertical resampling kernel is empty")?;
+        output_last_source.push(last);
+        for sample in samples {
+            let count = counts
+                .get_mut(sample.index as usize)
+                .context("vertical contribution references an invalid source row")?;
+            *count = count
+                .checked_add(1)
+                .context("vertical contribution count overflow")?;
+        }
+    }
+
+    let mut by_source = Vec::new();
+    by_source
+        .try_reserve_exact(source_rows)
+        .context("reserve vertical contribution rows")?;
+    for count in counts {
+        let mut row = Vec::new();
+        row.try_reserve_exact(count)
+            .context("reserve vertical source contributions")?;
+        by_source.push(row);
+    }
+    for (output_index, samples) in vertical.iter().enumerate() {
+        let output_index =
+            u32::try_from(output_index).context("output resize index does not fit in u32")?;
+        for sample in samples {
+            by_source[sample.index as usize].push(OutputSampleWeight {
+                output_index,
+                weight: sample.weight,
+            });
+        }
+    }
+    Ok((by_source, output_last_source))
+}
+
+fn build_lanczos_contributions(source: u32, output: u32) -> Result<Vec<Vec<SampleWeight>>> {
+    anyhow::ensure!(
+        source > 0 && output > 0,
+        "resize dimensions must be non-zero"
+    );
+    let mut all = Vec::new();
+    all.try_reserve_exact(output as usize)
+        .context("reserve resize contribution table")?;
+    if source == output {
+        for index in 0..output {
+            all.push(vec![SampleWeight { index, weight: 1.0 }]);
+        }
+        return Ok(all);
+    }
+
+    let scale = source as f64 / output as f64;
+    let filter_scale = scale.max(1.0);
+    let support = 3.0 * filter_scale;
+    for destination in 0..output {
+        let center = (destination as f64 + 0.5) * scale - 0.5;
+        let first = ((center - support).floor() as i64 + 1).max(0);
+        let last = ((center + support).ceil() as i64 - 1).min(i64::from(source) - 1);
+        anyhow::ensure!(first <= last, "resize kernel contains no source samples");
+        let capacity = usize::try_from(last - first + 1)
+            .context("resize kernel is too large for this platform")?;
+        let mut samples = Vec::<SampleWeight>::new();
+        samples
+            .try_reserve_exact(capacity)
+            .context("reserve resize kernel")?;
+        for source_index in first..=last {
+            let distance = (center - source_index as f64) / filter_scale;
+            let weight = lanczos3(distance) / filter_scale;
+            if weight.abs() <= 1e-15 {
+                continue;
+            }
+            samples.push(SampleWeight {
+                index: source_index as u32,
+                weight: weight as f32,
+            });
+        }
+        let sum: f32 = samples.iter().map(|sample| sample.weight).sum();
+        anyhow::ensure!(
+            sum.is_finite() && sum.abs() > 1e-12,
+            "invalid resize kernel"
+        );
+        for sample in &mut samples {
+            sample.weight /= sum;
+        }
+        all.push(samples);
+    }
+    Ok(all)
+}
+
+fn lanczos3(value: f64) -> f64 {
+    let value = value.abs();
+    if value < 1e-12 {
+        return 1.0;
+    }
+    if value >= 3.0 {
+        return 0.0;
+    }
+    let pi_value = std::f64::consts::PI * value;
+    (pi_value.sin() / pi_value) * ((pi_value / 3.0).sin() / (pi_value / 3.0))
+}
+
+fn resize_horizontal_row(source: &[f32], weights: &[Vec<SampleWeight>]) -> Result<Vec<f32>> {
+    let values = weights
+        .len()
+        .checked_mul(3)
+        .context("resize row overflow")?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(values)
+        .context("reserve horizontal resize row")?;
+    output.resize(values, 0.0f32);
+    for (destination, samples) in weights.iter().enumerate() {
+        for sample in samples {
+            let source_start = usize::try_from(sample.index)
+                .ok()
+                .and_then(|index| index.checked_mul(3))
+                .context("source resize index overflow")?;
+            let destination_start = destination
+                .checked_mul(3)
+                .context("destination resize index overflow")?;
+            for channel in 0..3 {
+                output[destination_start + channel] +=
+                    source[source_start + channel] * sample.weight;
+            }
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+fn encode_srgb_row(row: &[f32], transform: &SrgbOutputLut) -> Result<Vec<u8>> {
+    encode_output_row(row, Some(transform), ExportRowFormat::Rgba8)
+}
+
+#[cfg(test)]
+fn encode_srgb_row_with_format(
+    row: &[f32],
+    transform: &SrgbOutputLut,
+    row_format: ExportRowFormat,
+) -> Result<Vec<u8>> {
+    encode_output_row(row, Some(transform), row_format)
+}
+
+fn encode_output_row(
+    row: &[f32],
+    transform: Option<&SrgbOutputLut>,
+    row_format: ExportRowFormat,
+) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        row.len().is_multiple_of(3),
+        "linear RGB row has an invalid length"
+    );
+    let pixels = row.len() / 3;
+    let bytes_per_pixel = match row_format {
+        ExportRowFormat::Rgb8 => 3,
+        ExportRowFormat::Rgba8 => 4,
+        ExportRowFormat::Rgb16Le => 6,
+        ExportRowFormat::Rgba16Be => 8,
+        ExportRowFormat::RgbF32Le => 12,
+    };
+    let bytes = pixels
+        .checked_mul(bytes_per_pixel)
+        .context("encoded row overflow")?;
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(bytes)
+        .context("reserve encoded export row")?;
+
+    for rgb in row.chunks_exact(3) {
+        anyhow::ensure!(
+            rgb.iter().all(|value| value.is_finite()),
+            "export contains NaN or infinity"
+        );
+        if row_format == ExportRowFormat::RgbF32Le {
+            for value in rgb {
+                encoded.extend_from_slice(&value.to_le_bytes());
+            }
+            continue;
+        }
+
+        let transform = transform.context("integer export requires an output color transform")?;
+        let device = transform.transform_rgb([rgb[0], rgb[1], rgb[2]]);
+        match row_format {
+            ExportRowFormat::Rgb8 | ExportRowFormat::Rgba8 => {
+                for value in device {
+                    encoded.push((value.clamp(0.0, 1.0) * 255.0).round() as u8);
+                }
+                if row_format == ExportRowFormat::Rgba8 {
+                    encoded.push(255);
+                }
+            }
+            ExportRowFormat::Rgba16Be | ExportRowFormat::Rgb16Le => {
+                for value in device {
+                    let sample = (value.clamp(0.0, 1.0) * 65_535.0).round() as u16;
+                    if row_format == ExportRowFormat::Rgb16Le {
+                        encoded.extend_from_slice(&sample.to_le_bytes());
+                    } else {
+                        encoded.extend_from_slice(&sample.to_be_bytes());
+                    }
+                }
+                if row_format == ExportRowFormat::Rgba16Be {
+                    encoded.extend_from_slice(&u16::MAX.to_be_bytes());
+                }
+            }
+            ExportRowFormat::RgbF32Le => unreachable!(),
+        }
+    }
+    Ok(encoded)
+}
+
+fn stitch_linear_tile_into_band(
+    band: &mut [f32],
+    source_width: u32,
+    band_y: u32,
+    tile: super::ExportTile,
+    rgb: &[f32],
+) -> Result<()> {
+    anyhow::ensure!(tile.core_y == band_y, "tile is in the wrong export band");
+    let source_row_values = checked_rgb_len(tile.core_width, 1)?;
+    anyhow::ensure!(
+        rgb.len() == checked_rgb_len(tile.core_width, tile.core_height)?,
+        "GPU tile readback length does not match tile dimensions"
+    );
+    for row in 0..tile.core_height as usize {
+        let source_start = row
+            .checked_mul(source_row_values)
+            .context("tile source row overflow")?;
+        let destination_pixel = row
+            .checked_mul(source_width as usize)
+            .and_then(|value| value.checked_add(tile.core_x as usize))
+            .context("tile destination row overflow")?;
+        let destination_start = destination_pixel
+            .checked_mul(3)
+            .context("tile destination channel overflow")?;
+        let destination_end = destination_start
+            .checked_add(source_row_values)
+            .context("tile destination end overflow")?;
+        band.get_mut(destination_start..destination_end)
+            .context("tile destination is outside its export band")?
+            .copy_from_slice(&rgb[source_start..source_start + source_row_values]);
+    }
+    Ok(())
+}
+
+fn checked_rgb_len(width: u32, height: u32) -> Result<usize> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .context("image pixel count overflow")?;
+    let values = pixels.checked_mul(3).context("RGB value count overflow")?;
+    usize::try_from(values).context("RGB allocation does not fit this platform")
+}
+
+fn validate_tile_spec(spec: TileSpec) -> Result<()> {
+    let maximum_core = 1024;
+    let maximum_halo = 768;
+    let scale = if cfg!(target_os = "android") { 8 } else { 4 };
+    anyhow::ensure!(
+        (64..=maximum_core).contains(&spec.core_edge),
+        "export tile core must be between 64 and {maximum_core} pixels"
+    );
+    anyhow::ensure!(
+        (MIN_EXPORT_TILE_HALO..=maximum_halo).contains(&spec.halo),
+        "export halo must be between {MIN_EXPORT_TILE_HALO} and {maximum_halo} pixels"
+    );
+    anyhow::ensure!(
+        spec.core_edge.is_multiple_of(scale) && spec.halo.is_multiple_of(scale),
+        "export tile core and halo must align to the global tone-guide grid"
+    );
+    spec.core_edge
+        .checked_add(spec.halo.checked_mul(2).context("export halo overflow")?)
+        .context("padded export tile overflow")?;
+    Ok(())
+}
+
+fn bounded_tile_spec(mut spec: TileSpec, source_width: u32) -> Result<TileSpec> {
+    validate_tile_spec(spec)?;
+    let bytes_per_source_row = u64::from(source_width)
+        .checked_mul(3)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>() as u64))
+        .context("export source-band row size overflow")?;
+    anyhow::ensure!(bytes_per_source_row > 0, "export source width is zero");
+    let alignment = if cfg!(target_os = "android") { 8 } else { 4 };
+    let maximum_rows =
+        (MAX_EXPORT_BAND_BYTES / bytes_per_source_row).min(u64::from(spec.core_edge)) as u32;
+    let aligned_rows = maximum_rows - maximum_rows % alignment;
+    anyhow::ensure!(
+        aligned_rows >= 64,
+        "the source image is too wide for the bounded export memory budget"
+    );
+    spec.core_edge = spec.core_edge.min(aligned_rows);
+    validate_tile_spec(spec)?;
+    Ok(spec)
+}
+
+fn is_direct_export_destination(path: &Path) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::is_direct_export_path(path)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn open_export_destination(destination: &Path) -> Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if is_direct_export_destination(destination) {
+        options.truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    options
+        .open(destination)
+        .with_context(|| format!("open export destination {}", destination.display()))
+}
+
+fn temporary_export_path(destination: &Path) -> Result<PathBuf> {
+    let direct = is_direct_export_destination(destination);
+    let parent = if direct {
+        #[cfg(target_os = "android")]
+        {
+            crate::android::direct_export_temp_dir(destination)
+                .context("Android direct export has no temporary staging directory")?
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            unreachable!("direct export destinations only exist on Android")
+        }
+    } else {
+        destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    };
+    fs::create_dir_all(&parent)
+        .with_context(|| format!("create export directory {}", parent.display()))?;
+    let name = if direct {
+        "calibraw-direct-export"
+    } else {
+        destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("export path has no valid file name")?
+    };
+    cleanup_stale_export_parts(&parent, name);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary_id = NEXT_EXPORT_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(
+        ".{name}.{}.{}.{}.part",
+        std::process::id(),
+        nonce,
+        temporary_id
+    )))
+}
+
+fn with_temporary_export_path<T, F>(destination: &Path, action: F) -> Result<T>
+where
+    F: FnOnce(&Path) -> Result<T>,
+{
+    let temporary = temporary_export_path(destination)?;
+    let result = action(&temporary);
+    let _ = fs::remove_file(&temporary);
+    result
+}
+
+fn cleanup_stale_export_parts(parent: &Path, destination_name: &str) {
+    let prefix = format!(".{destination_name}.");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(".part") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_EXPORT_PART_AGE);
+        if old_enough {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn publish_completed_export(temporary: &Path, destination: &Path) -> Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .open(temporary)
+        .with_context(|| format!("open completed export {}", temporary.display()))?
+        .sync_all()
+        .with_context(|| format!("flush completed export {}", temporary.display()))?;
+
+    replace_file(temporary, destination).with_context(|| {
+        format!(
+            "publish completed export {} to {}",
+            temporary.display(),
+            destination.display()
+        )
+    })?;
+
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    sync_parent_directory(parent)
+        .with_context(|| format!("flush export directory {}", parent.display()))
+}
+
+fn tile_mask_source_region(
+    masks: &MaskStack,
+    tile_origin_x: i32,
+    tile_origin_y: i32,
+    tile_width: u32,
+    tile_height: u32,
+    full_width: u32,
+    full_height: u32,
+) -> [u32; 4] {
+    let full_width = full_width.max(1);
+    let full_height = full_height.max(1);
+    let margin = i64::from(masks.raster_margin_pixels(full_width, full_height));
+    let x0 = (i64::from(tile_origin_x) - margin).clamp(0, i64::from(full_width - 1));
+    let y0 = (i64::from(tile_origin_y) - margin).clamp(0, i64::from(full_height - 1));
+    let x1 = (i64::from(tile_origin_x) + i64::from(tile_width) + margin)
+        .clamp(x0 + 1, i64::from(full_width));
+    let y1 = (i64::from(tile_origin_y) + i64::from(tile_height) + margin)
+        .clamp(y0 + 1, i64::from(full_height));
+    [x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32]
+}
+
+fn mask_source_region_uv(region: [u32; 4], full_width: u32, full_height: u32) -> [f32; 4] {
+    let width = full_width.max(1) as f32;
+    let height = full_height.max(1) as f32;
+    [
+        region[0] as f32 / width,
+        region[1] as f32 / height,
+        region[0].saturating_add(region[2]) as f32 / width,
+        region[1].saturating_add(region[3]) as f32 / height,
+    ]
+}
+
+fn mask_region_texture_extent(region: [u32; 4], max_edge: u32) -> [u32; 2] {
+    let width = region[2].max(1);
+    let height = region[3].max(1);
+    let longest = width.max(height);
+    if longest <= max_edge {
+        return [width, height];
+    }
+    let scale = max_edge.max(1) as f64 / longest as f64;
+    [
+        ((width as f64 * scale).round() as u32).clamp(1, max_edge.max(1)),
+        ((height as f64 * scale).round() as u32).clamp(1, max_edge.max(1)),
+    ]
+}
+
+fn upload_mask_atlas(
+    pipeline: &RawGpuPipeline,
+    queue: &wgpu::Queue,
+    masks: &MaskStack,
+    image_width: u32,
+    image_height: u32,
+    region: [u32; 4],
+) -> Result<()> {
+    let cropped = masks.cropped_for_region(
+        region[0],
+        region[1],
+        region[2],
+        region[3],
+        image_width,
+        image_height,
+    );
+    let edge = pipeline.mask_atlas_edge();
+    let extent = mask_region_texture_extent(region, edge);
+    for layer in 0..masks.masks.len().min(MAX_LOCAL_MASKS) {
+        let bytes = cropped.rasterize_layer_f16(layer, extent[0], extent[1], region[2], region[3]);
+        pipeline
+            .update_mask_layer_region(queue, layer, extent[0], extent[1], &bytes)
+            .with_context(|| format!("upload local-mask layer {}", layer + 1))?;
+    }
+    Ok(())
+}
+
+mod metadata;
+use metadata::{add_png_text_metadata, build_exif_payload, combined_image_description};
+
+#[cfg(test)]
+mod tests;

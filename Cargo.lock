@@ -422,113 +422,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "auraw-ai"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "auraw-core",
- "auraw-gpu",
- "bytemuck",
- "half",
- "hex",
- "image",
- "log",
- "ort",
- "pollster",
- "rayon",
- "ring",
- "serde",
- "tempfile",
- "ureq",
- "wgpu",
- "zip",
-]
-
-[[package]]
-name = "auraw-cli"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "auraw-core",
- "auraw-gpu",
- "pollster",
-]
-
-[[package]]
-name = "auraw-core"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "base64",
- "bindgen",
- "half",
- "image",
- "log",
- "pkg-config",
- "png",
- "rayon",
- "serde",
- "serde_json",
- "toml_edit",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "auraw-ffi"
-version = "2.0.0"
-dependencies = [
- "android-activity",
- "auraw-core",
- "egui",
- "jni",
- "log",
-]
-
-[[package]]
-name = "auraw-gpu"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "auraw-core",
- "auraw-ffi",
- "bytemuck",
- "egui",
- "egui-wgpu",
- "half",
- "image",
- "jpeg-encoder",
- "log",
- "memmap2",
- "naga",
- "naga_oil",
- "png",
- "pollster",
- "wgpu",
-]
-
-[[package]]
-name = "auraw-ui"
-version = "2.0.0"
-dependencies = [
- "android_logger",
- "anyhow",
- "auraw-ai",
- "auraw-core",
- "auraw-ffi",
- "auraw-gpu",
- "discord-rich-presence",
- "eframe",
- "egui-phosphor",
- "env_logger",
- "image",
- "log",
- "pollster",
- "rfd",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -661,6 +554,113 @@ name = "bytes"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
+
+[[package]]
+name = "calibraw-ai"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "calibraw-core",
+ "calibraw-gpu",
+ "half",
+ "hex",
+ "image",
+ "log",
+ "ort",
+ "pollster",
+ "rayon",
+ "ring",
+ "serde",
+ "tempfile",
+ "ureq",
+ "wgpu",
+ "zip",
+]
+
+[[package]]
+name = "calibraw-cli"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "calibraw-core",
+ "calibraw-gpu",
+ "pollster",
+]
+
+[[package]]
+name = "calibraw-core"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bindgen",
+ "half",
+ "image",
+ "log",
+ "pkg-config",
+ "png",
+ "rayon",
+ "serde",
+ "serde_json",
+ "toml_edit",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "calibraw-ffi"
+version = "2.0.0"
+dependencies = [
+ "android-activity",
+ "calibraw-core",
+ "egui",
+ "jni",
+ "log",
+]
+
+[[package]]
+name = "calibraw-gpu"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "calibraw-core",
+ "calibraw-ffi",
+ "egui",
+ "egui-wgpu",
+ "half",
+ "image",
+ "jpeg-encoder",
+ "log",
+ "memmap2",
+ "naga",
+ "naga_oil",
+ "png",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
+name = "calibraw-ui"
+version = "2.0.0"
+dependencies = [
+ "android_logger",
+ "anyhow",
+ "calibraw-ai",
+ "calibraw-core",
+ "calibraw-ffi",
+ "calibraw-gpu",
+ "discord-rich-presence",
+ "eframe",
+ "egui-phosphor",
+ "env_logger",
+ "image",
+ "log",
+ "pollster",
+ "rfd",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "calloop"

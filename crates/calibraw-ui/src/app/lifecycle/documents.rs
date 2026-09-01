@@ -1,0 +1,1030 @@
+use super::*;
+
+impl CalibRawApp {
+    #[cfg(target_os = "android")]
+    pub fn open_android_library_document(&mut self, uri: &str, display_name: &str) {
+        if self.android_foreground_task_active() {
+            self.ui.notice = Some(format!(
+                "{display_name} cannot be opened while an export or another foreground operation is running. Wait for it to finish or cancel it first."
+            ));
+            self.egui_ctx.request_repaint();
+            return;
+        }
+        if self.android.picker_pending {
+            return;
+        }
+
+        let already_loaded = self.develop.loaded_raw.is_some()
+            && self.develop.preview_raw.is_some()
+            && self.preview.gpu_pipeline.is_some()
+            && matches!(
+                self.persistence.sidecar_target.as_ref(),
+                Some(crate::sidecar::SidecarTarget::Android {
+                    raw_uri,
+                    display_name: current_name,
+                }) if raw_uri == uri && current_name == display_name
+            );
+        if already_loaded {
+            self.activate_tab(AppTab::Develop);
+            self.ui.notice = None;
+            self.refresh_status();
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
+        self.prepare_android_develop_loading_thumbnail(uri);
+
+        self.export.android_batch_load_pending = false;
+        match crate::android::open_library_document(&self.android.android_app, uri, display_name) {
+            Ok(()) => {
+                self.android.picker_pending = true;
+                self.ui.notice = None;
+                self.ui.status = format!("Opening {display_name}…");
+            }
+            Err(error) => {
+                self.develop_ui.loading_thumbnail.clear();
+                self.ui.notice = Some(error);
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn reload_android_library_document_after_reset(
+        &mut self,
+        uri: &str,
+        display_name: &str,
+    ) {
+        if self.android.picker_pending {
+            self.ui.notice = Some(format!(
+                "Could not reload {display_name} after resetting adjustments because another Android document operation is still pending."
+            ));
+            return;
+        }
+        self.export.android_batch_load_pending = false;
+        self.android.pending_android_library_reset_reload = true;
+        match crate::android::open_library_document(&self.android.android_app, uri, display_name) {
+            Ok(()) => {
+                self.android.picker_pending = true;
+                self.ui.notice = None;
+                self.ui.status = format!("Reloading {display_name} after reset…");
+            }
+            Err(error) => {
+                self.android.pending_android_library_reset_reload = false;
+                self.ui.notice = Some(format!(
+                    "Could not reload {display_name} after resetting adjustments: {error}"
+                ));
+            }
+        }
+    }
+
+    pub fn open_path(&mut self, path: PathBuf, frame: &eframe::Frame) {
+        let label = path.display().to_string();
+        self.ui.active_tab = AppTab::Develop;
+        let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
+            raw_path: path.clone(),
+        };
+        self.open_path_labeled(path, label, false, sidecar_target, frame, None);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn reload_desktop_library_document_after_reset(
+        &mut self,
+        path: PathBuf,
+        frame: &eframe::Frame,
+    ) {
+        let label = path.display().to_string();
+        let sidecar_target = crate::sidecar::SidecarTarget::Desktop {
+            raw_path: path.clone(),
+        };
+        self.open_path_labeled(path, label, false, sidecar_target, frame, None);
+    }
+
+    pub(crate) fn open_path_labeled(
+        &mut self,
+        path: PathBuf,
+        label: String,
+        delete_after_decode: bool,
+        sidecar_target: crate::sidecar::SidecarTarget,
+        frame: &eframe::Frame,
+        raw_fd_guard: Option<std::fs::File>,
+    ) {
+        self.open_path_labeled_with_options(
+            path,
+            label,
+            delete_after_decode,
+            sidecar_target,
+            frame,
+            None,
+            None,
+            raw_fd_guard,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::app) fn open_path_labeled_with_options(
+        &mut self,
+        path: PathBuf,
+        label: String,
+        delete_after_decode: bool,
+        sidecar_target: crate::sidecar::SidecarTarget,
+        frame: &eframe::Frame,
+        profile_selection_override: Option<Option<PathBuf>>,
+        edit_override: Option<SidecarEditState>,
+        raw_fd_guard: Option<std::fs::File>,
+    ) {
+        if self.develop.load_receiver.is_some() {
+            if delete_after_decode && raw_fd_guard.is_none() {
+                remove_temporary_raw(&path);
+            }
+            self.ui.notice = Some("Wait for the current RAW to finish opening.".to_owned());
+            return;
+        }
+        let Some(render_state) = frame.wgpu_render_state() else {
+            if delete_after_decode && raw_fd_guard.is_none() {
+                remove_temporary_raw(&path);
+            }
+            self.ui.notice = Some("eframe is not running with the wgpu backend.".to_owned());
+            self.refresh_status();
+            return;
+        };
+
+        #[cfg(not(target_os = "android"))]
+        {
+            if self.ui.active_tab == AppTab::Develop {
+                let crate::sidecar::SidecarTarget::Desktop { raw_path } = &sidecar_target;
+                self.prepare_develop_loading_thumbnail(raw_path);
+            } else {
+                self.develop_ui.loading_thumbnail.clear();
+            }
+        }
+        #[cfg(target_os = "android")]
+        {
+            let loading_thumbnail_matches = self.ui.active_tab == AppTab::Develop
+                && matches!(
+                    &sidecar_target,
+                    crate::sidecar::SidecarTarget::Android { raw_uri, .. }
+                        if self.develop_ui.loading_thumbnail.source_uri.as_deref()
+                            == Some(raw_uri.as_str())
+                );
+            if !loading_thumbnail_matches {
+                self.develop_ui.loading_thumbnail.clear();
+            }
+        }
+
+        let device = render_state.device.clone();
+        let queue = render_state.queue.clone();
+        self.library.prepare_for_develop();
+        let decode_gate = self.library.decode_gate();
+        let profile_selection_key = match profile_selection_override.as_ref() {
+            Some(Some(path)) => path.to_string_lossy().into_owned(),
+            Some(None) => "automatic".to_owned(),
+            None => "sidecar".to_owned(),
+        };
+        let raw_cache_key = format!(
+            "{}|profile:{}|folder:{}|selection:{}",
+            raw_cache_key_for_target(&sidecar_target),
+            self.preferences.camera_profile_mode.cache_key(),
+            self.preferences
+                .camera_profile_folder
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            profile_selection_key,
+        );
+        let cache_selection_is_known = profile_selection_override.is_some()
+            || self.preferences.camera_profile_mode == CameraProfileMode::MatrixOnly
+            || self.preferences.camera_profile_folder.is_none();
+        let cached_original_raw = cache_selection_is_known
+            .then(|| self.cached_raw_decode(&raw_cache_key))
+            .flatten();
+        let decode_was_cached = cached_original_raw.is_some();
+        crate::diagnostics::record(format!(
+            "RAW open requested: label=\"{label}\" cached={decode_was_cached} preview_quality={}",
+            self.preview.quality.label()
+        ));
+        self.cancel_document_bound_foreground_operation();
+        self.abandon_ai_denoise_worker();
+        self.preview.rebuild_receiver = None;
+        self.preview.detail_rebuild_receiver = None;
+        let sidecar_generation = self.begin_sidecar_open();
+        let reusable_preview_pipeline = {
+            let mut renderer = render_state.renderer.write();
+            self.take_preview_pipeline_and_release_textures(&mut renderer)
+        };
+        let retained_preview_program_template = self.preview.program_template.clone();
+        #[cfg(target_os = "android")]
+        let export_active_while_opening = self.export.task.is_some();
+        let startup_gpu_prewarm_receiver = self.preview.gpu_prewarm_receiver.take();
+        self.develop.original_raw = None;
+        self.develop.loaded_raw = None;
+        self.develop.preview_raw = None;
+        self.develop_ui.white_balance_picker_active = false;
+        self.develop_ui.white_balance_picker_drag = None;
+        self.develop.current_path = None;
+        self.develop.current_label = None;
+        self.develop.selected_camera_profile = None;
+        self.develop.image_status = format!("Loading {label}…");
+        let initial_exposure = self.new_image_exposure();
+        let preview_quality_setting = self.preview.quality;
+        let preview_viewport_pixels_setting = self.preview.viewport_pixels;
+        let camera_profile_mode = self.preferences.camera_profile_mode;
+        let camera_profile_folder = self.preferences.camera_profile_folder.clone();
+        let last_camera_profile = self.preferences.last_camera_profile.clone();
+        let ai_denoise_cache_path = self.rawnind_result_cache_path_for_target(&sidecar_target);
+        self.preview.original_exposure = initial_exposure;
+        self.preview.original_requested = false;
+        self.preview.original_rendered_state = None;
+        self.clear_android_original_hold();
+        self.develop.exposure = initial_exposure;
+        self.develop.target_exposure = initial_exposure;
+        self.masks.stack.clear();
+        self.reset_inpainting_state();
+        self.masks.active_tool = None;
+        self.masks.brush_mode = BrushMode::Paint;
+        self.masks.subject_refinement_active = false;
+        self.masks.drag = None;
+        self.masks.last_brush_point = None;
+        self.masks.touch_gesture_backup = None;
+        self.masks.interaction_dirty_layer = None;
+        self.masks.interaction_last_upload = None;
+        self.masks.interaction_has_uncommitted_change = false;
+        self.masks.overlay_revision = self.masks.overlay_revision.wrapping_add(1);
+        self.masks.overlay_texture = None;
+        self.masks.overlay_texture_key = None;
+        self.masks.overlay_blink = None;
+        self.masks.thumbnail_group_textures.clear();
+        self.masks.thumbnail_component_mask = None;
+        self.masks.thumbnail_component_textures.clear();
+        self.masks.thumbnail_revision = self.masks.overlay_revision;
+        self.masks.source_cache = None;
+        self.masks.subject_cache = None;
+        self.ai.masks_need_update = false;
+        self.ai.mask_update_active = false;
+        self.ai.mask_update_subject_pending = false;
+        self.ai.mask_update_object_queue.clear();
+        self.ai.mask_update_failed = false;
+        self.ai.subject_consent_open = false;
+        self.ai.object_consent_open = false;
+        self.ai.object_pending_target = None;
+        self.ai.object_cache = None;
+        self.masks.dirty_layers = [false; MAX_LOCAL_MASKS];
+        self.masks.detail_dirty_layers = [false; MAX_LOCAL_MASKS];
+        self.masks.navigation_dirty_layers = [false; MAX_LOCAL_MASKS];
+        self.preview.pending_stage = None;
+        self.preview.detail_pending_stage = None;
+        self.preview.navigation_pending_stage = None;
+        self.preview.detail_urgent = false;
+        self.preview.zoom = 1.0;
+        self.preview.center = [0.5, 0.5];
+        self.preview.visible_uv = PreviewUvRect {
+            min: [0.0, 0.0],
+            max: [1.0, 1.0],
+        };
+        self.preview.motion_at = None;
+        self.preview.touch_navigation_active = false;
+        self.preview.revision = self.preview.revision.wrapping_add(1);
+        self.develop.lens_correction = LensCorrectionState::default();
+        self.develop.lens_correction_dirty = false;
+        #[cfg(target_os = "android")]
+        {
+            self.preview.lens_original_cache = None;
+            self.preview.lens_corrected_cache = None;
+        }
+        self.reset_edit_history();
+        let fd_backed_source = raw_fd_guard.is_some();
+        let source_path = (!delete_after_decode && !fd_backed_source).then_some(path.clone());
+        let repaint = self.egui_ctx.clone();
+        let (sender, receiver) = mpsc::channel();
+        let cleanup_path_on_spawn_failure =
+            (delete_after_decode && !fd_backed_source).then(|| path.clone());
+        #[cfg(target_os = "android")]
+        let sidecar_android_app = self.android.android_app.clone();
+        self.develop.load_receiver = Some(receiver);
+        self.develop.loading_label = Some(label.clone());
+        self.ui.notice = None;
+        self.refresh_status();
+
+        let spawn_result = std::thread::Builder::new()
+            .name("calibraw-decode-preview".to_owned())
+            .spawn(move || {
+                let open_started = Instant::now();
+                #[cfg(target_os = "android")]
+                let reusable_preview_pipeline = if export_active_while_opening {
+                    crate::diagnostics::record(
+                        "Released the previous Android preview before concurrent RAW open",
+                    );
+                    drop(reusable_preview_pipeline);
+                    None
+                } else {
+                    reusable_preview_pipeline
+                };
+                let sidecar_started = Instant::now();
+                let loaded_sidecar = load_sidecar_for_target(
+                    &sidecar_target,
+                    #[cfg(target_os = "android")]
+                    &sidecar_android_app,
+                );
+                crate::diagnostics::record(format!(
+                    "RAW sidecar lookup finished in {:.3}s",
+                    sidecar_started.elapsed().as_secs_f64()
+                ));
+                let (requested_camera_profile, requested_profile_from_sidecar) =
+                    match profile_selection_override {
+                        Some(selection) => (selection, false),
+                        None => match loaded_sidecar.as_ref() {
+                            Ok(Some(loaded)) => (
+                                loaded
+                                    .edits
+                                    .camera_profile
+                                    .as_ref()
+                                    .and_then(|relative| {
+                                        camera_profile_folder.as_ref().map(|root| {
+                                            if relative == std::path::Path::new(".") {
+                                                root.clone()
+                                            } else {
+                                                root.join(relative)
+                                            }
+                                        })
+                                    }),
+                                loaded.edits.camera_profile.is_some(),
+                            ),
+                            Ok(None) => (
+                                last_camera_profile.as_ref().and_then(|relative| {
+                                    camera_profile_folder
+                                        .as_ref()
+                                        .map(|root| root.join(relative))
+                                }),
+                                false,
+                            ),
+                            Err(_) => (None, false),
+                        },
+                    };
+                let embedded_matrix_selected = requested_camera_profile
+                    .as_ref()
+                    .zip(camera_profile_folder.as_ref())
+                    .is_some_and(|(selected, root)| selected == root);
+                let effective_camera_profile_mode = if embedded_matrix_selected {
+                    CameraProfileMode::MatrixOnly
+                } else {
+                    camera_profile_mode
+                };
+                let decode_started = Instant::now();
+                let decoded: anyhow::Result<Arc<LoadedRaw>> = match cached_original_raw {
+                    Some(raw) => Ok(raw),
+                    None => match decode_gate.write() {
+                        Ok(_decode_guard) => load_raw_file_with_profile_selection(
+                            &path,
+                            effective_camera_profile_mode,
+                            camera_profile_folder.as_deref(),
+                            (!embedded_matrix_selected)
+                                .then_some(requested_camera_profile.as_deref())
+                                .flatten(),
+                        )
+                        .map(Arc::new),
+                        Err(_) => Err(anyhow::anyhow!("RAW decode gate was poisoned")),
+                    },
+                };
+                match &decoded {
+                    Ok(raw) => {
+                        crate::diagnostics::record(format!(
+                            "RAW decode finished in {:.3}s (cached={decode_was_cached})",
+                            decode_started.elapsed().as_secs_f64()
+                        ));
+                        crate::diagnostics::record_raw("Decoded RAW", raw);
+                    }
+                    Err(error) => crate::diagnostics::record(format!(
+                        "RAW decode failed after {:.3}s: {error:#}",
+                        decode_started.elapsed().as_secs_f64()
+                    )),
+                }
+                drop(raw_fd_guard);
+                if delete_after_decode && !fd_backed_source {
+                    remove_temporary_raw(&path);
+                }
+
+                let result = (|| {
+                    let (
+                        mut rendered_exposure,
+                        mut rendered_masks,
+                        remove_edits,
+                        saved_lens,
+                        pasted_ai_masks_need_update,
+                        mut sidecar_warning,
+                        mut sidecar_needs_rewrite,
+                        geometry,
+                        use_adaptive_detail_defaults,
+                    ) = if let Some(edits) = edit_override {
+                        (
+                            edits.exposure,
+                            Arc::unwrap_or_clone(edits.masks),
+                            Arc::unwrap_or_clone(edits.remove),
+                            Some(edits.lens),
+                            edits.ai_masks_need_update,
+                            None,
+                            true,
+                            edits.geometry.sanitized(),
+                            false,
+                        )
+                    } else {
+                        match loaded_sidecar {
+                            Ok(Some(loaded)) => {
+                                let warning = loaded.migrated.then(|| {
+                                    "Loaded edits were migrated to the current sidecar format."
+                                        .to_owned()
+                                });
+                                let use_adaptive_detail_defaults = false;
+                                (
+                                    loaded.edits.exposure,
+                                    Arc::unwrap_or_clone(loaded.edits.masks),
+                                    Arc::unwrap_or_clone(loaded.edits.remove),
+                                    Some(loaded.edits.lens),
+                                    loaded.edits.ai_masks_need_update,
+                                    warning,
+                                    loaded.migrated,
+                                    loaded.edits.geometry.sanitized(),
+                                    use_adaptive_detail_defaults,
+                                )
+                            }
+                            Ok(None) => (
+                                initial_exposure,
+                                MaskStack::default(),
+                                RemoveEditState::default(),
+                                None,
+                                false,
+                                None,
+                                false,
+                                GeometryTransform::default(),
+                                true,
+                            ),
+                            Err(error) => (
+                                initial_exposure,
+                                MaskStack::default(),
+                                RemoveEditState::default(),
+                                None,
+                                false,
+                                Some(format!(
+                                    "Could not load this RAW's sidecar; using default edits: {error}"
+                                )),
+                                false,
+                                GeometryTransform::default(),
+                                true,
+                            ),
+                        }
+                    };
+                    let original_raw = decoded.map_err(|error| format!("{error:#}"))?;
+                    if use_adaptive_detail_defaults {
+                        original_raw.apply_adaptive_detail_defaults(&mut rendered_exposure);
+                    }
+                    crate::diagnostics::record(format!(
+                        "Edit state: exposure={:.3} temperature={:.3} tint={:.3} saturation={:.3} vibrance={:.3} luminance_nr={:.1} color_nr={:.1} demosaic={:?} highlight={:?} masks={}",
+                        rendered_exposure.exposure,
+                        rendered_exposure.temperature,
+                        rendered_exposure.tint,
+                        rendered_exposure.saturation,
+                        rendered_exposure.vibrance,
+                        rendered_exposure.luminance_denoise,
+                        rendered_exposure.chroma_denoise * 100.0,
+                        rendered_exposure.demosaic_mode,
+                        rendered_exposure.highlight_method,
+                        rendered_masks.masks.len(),
+                    ));
+                    let selected_camera_profile = embedded_matrix_selected
+                        .then(|| camera_profile_folder.clone())
+                        .flatten()
+                        .or_else(|| requested_camera_profile
+                        .clone()
+                        .filter(|requested| {
+                            original_raw
+                                .camera_profile_source
+                                .as_ref()
+                                .is_some_and(|applied| applied == requested)
+                        }));
+                    if requested_profile_from_sidecar
+                        && requested_camera_profile.is_some()
+                        && selected_camera_profile.is_none()
+                    {
+                        sidecar_needs_rewrite = true;
+                        append_notice(
+                            &mut sidecar_warning,
+                            "The saved camera profile was not found or did not match this camera; automatic profile selection was used instead.",
+                        );
+                    }
+                    let lens_started = Instant::now();
+                    let lens_catalog_started = Instant::now();
+                    let mut lens_correction =
+                        LensCorrectionState::from_catalog(lensfun_catalog(&original_raw));
+                    crate::diagnostics::record(format!(
+                        "Lensfun catalog lookup finished in {:.3}s",
+                        lens_catalog_started.elapsed().as_secs_f64()
+                    ));
+                    if let Some(saved) = saved_lens {
+                        lens_correction.selected_maker = saved.maker;
+                        lens_correction.selected_model = saved.model;
+                        lens_correction.enabled = saved.enabled && lens_correction.catalog.available;
+                        if saved.enabled && !lens_correction.catalog.available {
+                            append_notice(
+                                &mut sidecar_warning,
+                                "The saved lens correction is unavailable in this build.",
+                            );
+                        }
+                    }
+                    let full_raw = if lens_correction.enabled {
+                        if let Some(selection) = lens_correction.selected_lens() {
+                            let lens_apply_started = Instant::now();
+                            match apply_lensfun_correction(&original_raw, &selection) {
+                                Ok(corrected) => {
+                                    crate::diagnostics::record(format!(
+                                        "Lensfun full-resolution correction applied in {:.3}s",
+                                        lens_apply_started.elapsed().as_secs_f64()
+                                    ));
+                                    lens_correction.applied = true;
+                                    lens_correction.catalog.status = format!(
+                                        "Automatically applied {} from RAW metadata",
+                                        selection.label()
+                                    );
+                                    Arc::new(corrected)
+                                }
+                                Err(error) => {
+                                    crate::diagnostics::record(format!(
+                                        "Lensfun full-resolution correction failed after {:.3}s",
+                                        lens_apply_started.elapsed().as_secs_f64()
+                                    ));
+                                    lens_correction.enabled = false;
+                                    lens_correction.applied = false;
+                                    lens_correction.catalog.status = format!(
+                                        "Matched {}, but correction failed: {error:#}",
+                                        selection.label()
+                                    );
+                                    append_notice(
+                                        &mut sidecar_warning,
+                                        "The saved lens correction failed; the original RAW geometry is shown.",
+                                    );
+                                    Arc::clone(&original_raw)
+                                }
+                            }
+                        } else {
+                            lens_correction.enabled = false;
+                            Arc::clone(&original_raw)
+                        }
+                    } else {
+                        Arc::clone(&original_raw)
+                    };
+                    crate::diagnostics::record(format!(
+                        "Lensfun catalog/correction prepared in {:.3}s",
+                        lens_started.elapsed().as_secs_f64()
+                    ));
+                    if rendered_exposure.ai_denoise_enabled {
+                        if full_raw.ai_denoised_image().is_none() {
+                            let cache_started = Instant::now();
+                            match crate::ai_denoise::load_result_cache(
+                                &ai_denoise_cache_path,
+                                &full_raw,
+                            ) {
+                                Ok(Some(image)) => {
+                                    full_raw.set_ai_denoised_image(image).map_err(|error| {
+                                        format!(
+                                            "could not install saved AI-denoise result: {error:#}"
+                                        )
+                                    })?;
+                                    crate::diagnostics::record(format!(
+                                        "AI-denoise result cache restored in {:.3}s from {}",
+                                        cache_started.elapsed().as_secs_f64(),
+                                        ai_denoise_cache_path.display()
+                                    ));
+                                }
+                                Ok(None) => crate::diagnostics::record(
+                                    "AI-denoise result cache miss; RawNIND will run after open",
+                                ),
+                                Err(error) => {
+                                    log::warn!(
+                                        "discarding invalid AI-denoise result cache {}: {error:#}",
+                                        ai_denoise_cache_path.display()
+                                    );
+                                    crate::diagnostics::record(format!(
+                                        "AI-denoise result cache rejected: {error:#}"
+                                    ));
+                                    if let Err(remove_error) =
+                                        std::fs::remove_file(&ai_denoise_cache_path)
+                                    {
+                                        if remove_error.kind() != std::io::ErrorKind::NotFound {
+                                            log::warn!(
+                                                "could not remove invalid AI-denoise cache {}: {remove_error}",
+                                                ai_denoise_cache_path.display()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        full_raw.clear_ai_denoised_image();
+                    }
+                    let preview_spec = ProxySpec {
+                        max_edge: preview_quality_setting.proxy_edge_for_fitted_source(
+                            preview_viewport_pixels_setting,
+                            full_raw.width,
+                            full_raw.height,
+                            geometry,
+                        ),
+                    };
+                    let proxy_started = Instant::now();
+                    let preview_raw =
+                        if full_raw.width.max(full_raw.height) <= preview_spec.max_edge {
+                            Arc::clone(&full_raw)
+                        } else {
+                            Arc::new(build_proxy(&full_raw, preview_spec))
+                        };
+                    crate::diagnostics::record(format!(
+                        "Preview proxy prepared in {:.3}s: {}x{} -> {}x{}",
+                        proxy_started.elapsed().as_secs_f64(),
+                        full_raw.width,
+                        full_raw.height,
+                        preview_raw.width,
+                        preview_raw.height
+                    ));
+                    crate::diagnostics::record_raw("Preview proxy", &preview_raw);
+                    let initial_params =
+                        GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw)
+                            .with_vignette_geometry(geometry);
+                    let preview_quality = ProcessingQuality::Preview;
+                    let mut startup_gpu_prewarm_template = None;
+                    if reusable_preview_pipeline.is_none()
+                        && retained_preview_program_template.is_none()
+                    {
+                        if let Some(receiver) = startup_gpu_prewarm_receiver {
+                            let wait_started = Instant::now();
+                            match receiver.recv() {
+                                Ok(Ok(template)) => {
+                                    crate::diagnostics::record(format!(
+                                        "GPU preview startup prewarm available after {:.3}s wait",
+                                        wait_started.elapsed().as_secs_f64()
+                                    ));
+                                    startup_gpu_prewarm_template = Some(template);
+                                }
+                                Ok(Err(error)) => crate::diagnostics::record(error),
+                                Err(error) => crate::diagnostics::record(format!(
+                                    "GPU preview startup prewarm unavailable: {error}"
+                                )),
+                            }
+                        }
+                    }
+                    let reusable_program_template = reusable_preview_pipeline
+                        .as_ref()
+                        .map(RawGpuPipeline::program_template)
+                        .or(retained_preview_program_template)
+                        .or_else(|| {
+                            startup_gpu_prewarm_template
+                                .as_ref()
+                                .map(RawGpuPipeline::program_template)
+                        });
+                    let pipeline_started = Instant::now();
+                    let pipeline = if let Some(template) = reusable_program_template.as_ref() {
+                        match RawGpuPipeline::new_headless_reusing_program_template(
+                            &device,
+                            &queue,
+                            &preview_raw,
+                            &initial_params,
+                            preview_quality,
+                            template,
+                        ) {
+                            Ok(pipeline) => {
+                                crate::diagnostics::record(
+                                    "GPU preview reused precompiled programs",
+                                );
+                                pipeline
+                            }
+                            Err(reuse_error) => {
+                                crate::diagnostics::record(format!(
+                                    "GPU preview program reuse unavailable ({reuse_error:#}); compiling programs"
+                                ));
+                                RawGpuPipeline::new_headless_with_quality(
+                                    &device,
+                                    &queue,
+                                    &preview_raw,
+                                    &initial_params,
+                                    preview_quality,
+                                )
+                                .map_err(|error| {
+                                    format!("GPU preview setup failed: {error:#}")
+                                })?
+                            }
+                        }
+                    } else {
+                        RawGpuPipeline::new_headless_with_quality(
+                            &device,
+                            &queue,
+                            &preview_raw,
+                            &initial_params,
+                            preview_quality,
+                        )
+                        .map_err(|error| format!("GPU preview setup failed: {error:#}"))?
+                    };
+                    crate::diagnostics::record(format!(
+                        "GPU preview pipeline created in {:.3}s",
+                        pipeline_started.elapsed().as_secs_f64()
+                    ));
+                    drop(reusable_preview_pipeline);
+                    drop(startup_gpu_prewarm_template);
+
+                    let mut mask_source = None;
+                    if needs_canonical_mask_source(&rendered_masks) {
+                        let mask_source_started = Instant::now();
+                        let reference_exposure = ExposureParams::scene_referred_default();
+                        let reference_masks = MaskStack::default();
+                        let reference_params =
+                            GpuParams::new(&reference_exposure, &reference_masks, &preview_raw);
+                        pipeline.recompute(&queue, &device, &reference_params);
+                        let rgba = pipeline
+                            .read_output_region_blocking(
+                                &device,
+                                &queue,
+                                0,
+                                0,
+                                pipeline.width,
+                                pipeline.height,
+                            )
+                            .map_err(|error| {
+                                format!("range-mask source readback failed: {error:#}")
+                            })?;
+                        let source = MaskRgbImage::new(pipeline.width, pipeline.height, rgba)
+                            .ok_or_else(|| {
+                                "range-mask source dimensions are invalid".to_owned()
+                            })?;
+                        install_missing_range_sources(&mut rendered_masks, &source);
+                        mask_source = Some(source);
+                        crate::diagnostics::record(format!(
+                            "Canonical mask source reconstructed with the preview pipeline in {:.3}s",
+                            mask_source_started.elapsed().as_secs_f64()
+                        ));
+                    }
+
+                    let params =
+                        GpuParams::new(&rendered_exposure, &rendered_masks, &preview_raw)
+                            .with_vignette_geometry(geometry);
+                    let mask_upload_started = Instant::now();
+                    Self::upload_preview_masks(
+                        &pipeline,
+                        &queue,
+                        &rendered_masks,
+                        &preview_raw,
+                    )?;
+                    crate::diagnostics::record(format!(
+                        "Preview masks rasterized/uploaded in {:.3}s",
+                        mask_upload_started.elapsed().as_secs_f64()
+                    ));
+                    let first_render_started = Instant::now();
+                    pipeline
+                        .recompute_with_remove(
+                            &queue,
+                            &device,
+                            &params,
+                            RemoveSceneContext::new(
+                                &remove_edits,
+                                &full_raw,
+                                &rendered_exposure,
+                                [0.0, 0.0],
+                                [full_raw.width as f32, full_raw.height as f32],
+                            ),
+                        )
+                        .map_err(|error| {
+                            format!("initial Remove scene integration failed: {error:#}")
+                        })?;
+                    crate::diagnostics::record(format!(
+                        "Initial GPU preview dispatch submitted in {:.3}s",
+                        first_render_started.elapsed().as_secs_f64()
+                    ));
+
+                    crate::diagnostics::record(format!(
+                        "RAW open worker finished in {:.3}s",
+                        open_started.elapsed().as_secs_f64()
+                    ));
+
+                    Ok(LoadedPreview {
+                        source_path,
+                        raw_cache_key,
+                        label,
+                        original_raw,
+                        full_raw,
+                        preview_raw,
+                        pipeline,
+                        rendered_exposure,
+                        rendered_masks,
+                        remove: remove_edits,
+                        ai_masks_need_update: pasted_ai_masks_need_update,
+                        mask_source,
+                        lens_correction,
+                        sidecar_target,
+                        sidecar_generation,
+                        sidecar_warning,
+                        sidecar_needs_rewrite,
+                        selected_camera_profile,
+                        geometry,
+                    })
+                })();
+
+                if let Err(error) = &result {
+                    crate::diagnostics::record(format!(
+                        "RAW open worker failed after {:.3}s: {error}",
+                        open_started.elapsed().as_secs_f64()
+                    ));
+                }
+                let _ = sender.send(LoadEvent::Finished(result));
+                repaint.request_repaint();
+            });
+
+        if let Err(error) = spawn_result {
+            if let Some(path) = cleanup_path_on_spawn_failure {
+                remove_temporary_raw(&path);
+            }
+            self.develop.load_receiver = None;
+            self.develop.loading_label = None;
+            self.develop_ui.loading_thumbnail.clear();
+            self.ui.notice = Some(format!("could not start RAW decode worker: {error}"));
+            self.refresh_status();
+        }
+    }
+
+    pub(in crate::app) fn poll_load_worker(&mut self, frame: &eframe::Frame) {
+        let received = self
+            .develop
+            .load_receiver
+            .as_ref()
+            .map(|receiver| receiver.try_recv());
+        let event = match received {
+            Some(Ok(event)) => Some(event),
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.develop.load_receiver = None;
+                self.develop.loading_label = None;
+                self.develop_ui.loading_thumbnail.clear();
+                self.ui.notice = Some("RAW decode worker stopped unexpectedly.".to_owned());
+                self.on_library_ai_mask_refresh_load_finished(false, frame);
+                #[cfg(target_os = "android")]
+                if std::mem::take(&mut self.export.android_batch_load_pending) {
+                    self.on_library_batch_load_finished(false, frame);
+                }
+                #[cfg(not(target_os = "android"))]
+                self.on_library_batch_load_finished(false, frame);
+                None
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => None,
+        };
+        let Some(LoadEvent::Finished(result)) = event else {
+            return;
+        };
+
+        self.develop.load_receiver = None;
+        self.develop.loading_label = None;
+        self.develop_ui.loading_thumbnail.clear();
+        #[cfg(target_os = "android")]
+        let batch_owned_load = std::mem::take(&mut self.export.android_batch_load_pending);
+
+        match result {
+            Ok(mut loaded) => {
+                let Some(render_state) = frame.wgpu_render_state() else {
+                    self.ui.notice =
+                        Some("eframe is not running with the wgpu backend.".to_owned());
+                    self.on_library_ai_mask_refresh_load_finished(false, frame);
+                    #[cfg(target_os = "android")]
+                    if batch_owned_load {
+                        self.on_library_batch_load_finished(false, frame);
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    self.on_library_batch_load_finished(false, frame);
+                    return;
+                };
+                let previous_pipeline = {
+                    let mut renderer = render_state.renderer.write();
+                    let previous = self.take_preview_pipeline_and_release_textures(&mut renderer);
+                    loaded
+                        .pipeline
+                        .register_egui_texture(&render_state.device, &mut renderer);
+                    previous
+                };
+                drop(previous_pipeline);
+
+                let full_width = loaded.full_raw.width;
+                let full_height = loaded.full_raw.height;
+                let preview_width = loaded.preview_raw.width;
+                let preview_height = loaded.preview_raw.height;
+                let profile_label = loaded
+                    .full_raw
+                    .camera_profile
+                    .name
+                    .as_deref()
+                    .map(|name| format!(", profile {name}"))
+                    .unwrap_or_default();
+                self.develop.image_status = format!(
+                    "{} {} — full {}×{}, preview {}×{} ({}{})",
+                    loaded.full_raw.camera_make,
+                    loaded.full_raw.camera_model,
+                    full_width,
+                    full_height,
+                    preview_width,
+                    preview_height,
+                    self.preview.quality.label(),
+                    profile_label,
+                );
+                self.develop.current_path = loaded.source_path;
+                self.develop.current_label = Some(loaded.label.clone());
+                self.develop.selected_camera_profile = loaded.selected_camera_profile.clone();
+                self.cache_raw_decode(loaded.raw_cache_key, Arc::clone(&loaded.original_raw));
+                self.develop.original_raw = Some(loaded.original_raw);
+                self.develop.loaded_raw = Some(loaded.full_raw);
+                self.develop.preview_raw = Some(loaded.preview_raw);
+                self.preview.program_template = Some(loaded.pipeline.program_template());
+                self.preview.gpu_pipeline = Some(loaded.pipeline);
+                self.develop.exposure = loaded.rendered_exposure;
+                self.develop.geometry = loaded.geometry.sanitized();
+                self.develop_ui.crop_constraint_reference = None;
+                self.develop_ui.crop_drag = None;
+                self.develop_ui.straighten_tool_active = false;
+                self.develop_ui.straighten_drag = None;
+                self.develop.geometry_revision = 0;
+                self.masks.stack = loaded.rendered_masks;
+                self.install_remove_edits(Arc::new(loaded.remove));
+                self.ai.masks_need_update = loaded.ai_masks_need_update;
+                self.rehydrate_restored_mask_state();
+                self.ai.masks_need_update |= loaded.ai_masks_need_update;
+                if loaded.mask_source.is_some() {
+                    self.masks.source_cache = loaded.mask_source;
+                }
+                self.preview.zoom = 1.0;
+                self.preview.center = [0.5, 0.5];
+                self.preview.visible_uv = PreviewUvRect {
+                    min: [0.0, 0.0],
+                    max: [1.0, 1.0],
+                };
+                self.preview.motion_at = None;
+                self.preview.touch_navigation_active = false;
+                self.preview.revision = self.preview.revision.wrapping_add(1);
+                self.preview.original_rendered_state = None;
+                self.preview.detail = None;
+                self.preview.navigation = None;
+                self.preview.detail_pending_stage = None;
+                self.preview.navigation_pending_stage = None;
+                self.preview.detail_urgent = false;
+                self.masks.detail_dirty_layers.fill(false);
+                self.masks.navigation_dirty_layers.fill(false);
+                self.masks.dirty_layers.fill(false);
+                self.develop.lens_correction = loaded.lens_correction;
+                self.develop.lens_correction_dirty = false;
+                #[cfg(target_os = "android")]
+                {
+                    if self.develop.lens_correction.applied {
+                        self.preview.lens_corrected_cache = match (
+                            self.develop.lens_correction.selected_lens(),
+                            self.develop.loaded_raw.as_ref(),
+                            self.develop.preview_raw.as_ref(),
+                        ) {
+                            (Some(selection), Some(full_raw), Some(preview_raw)) => Some((
+                                selection,
+                                self.preview.quality,
+                                Arc::clone(full_raw),
+                                Arc::clone(preview_raw),
+                            )),
+                            _ => None,
+                        };
+                        self.preview.lens_original_cache = None;
+                    } else {
+                        self.preview.lens_original_cache = self
+                            .develop
+                            .preview_raw
+                            .as_ref()
+                            .map(|raw| (self.preview.quality, Arc::clone(raw)));
+                        self.preview.lens_corrected_cache = None;
+                    }
+                }
+                self.develop.target_exposure = loaded.rendered_exposure;
+                self.preview.pending_stage = None;
+                self.ui.notice = loaded.sidecar_warning;
+                self.reset_edit_history();
+                self.install_sidecar_target(
+                    loaded.sidecar_target,
+                    loaded.sidecar_generation,
+                    loaded.sidecar_needs_rewrite,
+                );
+                self.cancel_document_bound_foreground_operation();
+                self.resume_persisted_ai_denoise(frame);
+                log::info!("loaded RAW preview for {}", loaded.label);
+                self.on_library_ai_mask_refresh_load_finished(true, frame);
+                #[cfg(target_os = "android")]
+                if batch_owned_load {
+                    self.on_library_batch_load_finished(true, frame);
+                }
+                #[cfg(not(target_os = "android"))]
+                self.on_library_batch_load_finished(true, frame);
+            }
+            Err(error) => {
+                self.ui.notice = Some(format!("Failed to decode or render RAW: {error}"));
+                log::error!("RAW load failed: {error}");
+                self.on_library_ai_mask_refresh_load_finished(false, frame);
+                #[cfg(target_os = "android")]
+                if batch_owned_load {
+                    self.on_library_batch_load_finished(false, frame);
+                }
+                #[cfg(not(target_os = "android"))]
+                self.on_library_batch_load_finished(false, frame);
+            }
+        }
+    }
+}

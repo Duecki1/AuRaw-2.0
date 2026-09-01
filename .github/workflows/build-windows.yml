@@ -130,28 +130,28 @@ jobs:
 
       - name: Build release binaries
         env:
-          AURAW_DISCORD_APPLICATION_ID: ${{ secrets.AURAW_DISCORD_APPLICATION_ID }}
+          CALIBRAW_DISCORD_APPLICATION_ID: ${{ secrets.CALIBRAW_DISCORD_APPLICATION_ID }}
         run: |
           export PKG_CONFIG_PATH="$(cygpath -w ${{ matrix.msys_prefix }}/lib/pkgconfig);$(cygpath -w ${{ matrix.msys_prefix }}/share/pkgconfig)"
           export LIBCLANG_PATH="$(cygpath -w ${{ matrix.msys_prefix }}/bin)"
 
           revision="$(git rev-parse --verify HEAD)"
-          export AURAW_REQUIRE_COMMITTED_SOURCE=1
-          export AURAW_SOURCE_REVISION="$revision"
+          export CALIBRAW_REQUIRE_COMMITTED_SOURCE=1
+          export CALIBRAW_SOURCE_REVISION="$revision"
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$revision")"
 
           cargo build \
             --locked \
             --release \
-            --package auraw-ui \
+            --package calibraw-ui \
             --target "${{ matrix.target }}" \
-            --bin auraw
+            --bin calibraw
 
           release_dir="target/${{ matrix.target }}/release"
-          test -f "$release_dir/auraw.exe"
-          objdump -h "$release_dir/auraw.exe" | grep -q '\.rsrc'
+          test -f "$release_dir/calibraw.exe"
+          objdump -h "$release_dir/calibraw.exe" | grep -q '\.rsrc'
           # GUI subsystem
-          objdump -p "$release_dir/auraw.exe" | grep -Eq 'Subsystem[[:space:]]+00000002[[:space:]]+\(Windows GUI\)'
+          objdump -p "$release_dir/calibraw.exe" | grep -Eq 'Subsystem[[:space:]]+00000002[[:space:]]+\(Windows GUI\)'
           test "$(git rev-parse --verify HEAD)" = "$revision"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
@@ -160,12 +160,12 @@ jobs:
           export PKG_CONFIG_PATH="$(cygpath -w ${{ matrix.msys_prefix }}/lib/pkgconfig);$(cygpath -w ${{ matrix.msys_prefix }}/share/pkgconfig)"
 
           release_dir="target/${{ matrix.target }}/release"
-          package_name="AuRaw-windows-${{ matrix.artifact_arch }}"
+          package_name="CalibRaw-windows-${{ matrix.artifact_arch }}"
           package_dir="dist/$package_name"
 
           rm -rf dist
           mkdir -p "$package_dir"
-          cp "$release_dir/auraw.exe" "$package_dir/"
+          cp "$release_dir/calibraw.exe" "$package_dir/"
           cp COPYING NOTICE.md THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md README.md "$package_dir/"
 
           lensfun_db="$(find ${{ matrix.msys_prefix }}/share/lensfun -type f -name '*.xml' -printf '%h\n' | head -n 1)"
@@ -177,7 +177,7 @@ jobs:
           # Resolve the PE import table without executing target binaries. In
           # particular, MSYS2's ldd can hang while inspecting ARM64 binaries.
           declare -A inspected_dlls=()
-          dependency_queue=("$package_dir/auraw.exe")
+          dependency_queue=("$package_dir/calibraw.exe")
           while [ "${#dependency_queue[@]}" -gt 0 ]; do
             binary="${dependency_queue[0]}"
             dependency_queue=("${dependency_queue[@]:1}")
@@ -206,7 +206,7 @@ jobs:
           libraw_version="$(pkg-config --modversion libraw 2>/dev/null || pkg-config --modversion libraw_r)"
           lensfun_version="$(pkg-config --modversion lensfun)"
           {
-            echo "AuRaw Windows ${{ matrix.artifact_arch }} build"
+            echo "CalibRaw Windows ${{ matrix.artifact_arch }} build"
             echo "Source revision: $(git rev-parse --verify HEAD)"
             echo "Rust compiler: $(rustc --version)"
             echo "Target: ${{ matrix.target }}"
@@ -215,14 +215,14 @@ jobs:
           } > "$package_dir/BUILD-INFO.txt"
 
           # Artifact
-          test -f "$package_dir/auraw.exe"
+          test -f "$package_dir/calibraw.exe"
           # Checksums
-          (cd "$package_dir" && sha256sum auraw.exe *.dll 2>/dev/null | sort -k2 > SHA256SUMS.txt || true)
+          (cd "$package_dir" && sha256sum calibraw.exe *.dll 2>/dev/null | sort -k2 > SHA256SUMS.txt || true)
           test -s "$package_dir/SHA256SUMS.txt"
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: AuRaw-windows-${{ matrix.artifact_arch }}
-          path: dist/AuRaw-windows-${{ matrix.artifact_arch }}/
+          name: CalibRaw-windows-${{ matrix.artifact_arch }}
+          path: dist/CalibRaw-windows-${{ matrix.artifact_arch }}/
           if-no-files-found: error

@@ -52,7 +52,7 @@ def download_https(
         HttpsOnlyRedirectHandler(),
         urllib.request.HTTPSHandler(context=context),
     )
-    request = urllib.request.Request(url, headers={"User-Agent": "AuRaw-bootstrap/1"})
+    request = urllib.request.Request(url, headers={"User-Agent": "CalibRaw-bootstrap/1"})
 
     last_error: Exception | None = None
     curl = shutil.which("curl")
@@ -109,7 +109,7 @@ def download_https(
 
 def parse_expected_digest(source: str) -> tuple[str, str]:
     if source.startswith("https://"):
-        with tempfile.TemporaryDirectory(prefix="auraw-checksum-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="calibraw-checksum-") as temporary:
             checksum_file = Path(temporary) / "checksum.txt"
             download_https(source, checksum_file, attempts=9, timeout=300)
             try:

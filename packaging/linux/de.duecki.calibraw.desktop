@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CalibRaw
+Comment=GPU-first RAW image editor
+Exec=calibraw
+Icon=de.duecki.calibraw
+StartupWMClass=de.duecki.calibraw
+Categories=Graphics;Photography;
+Terminal=false

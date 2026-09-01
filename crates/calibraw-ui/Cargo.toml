@@ -1,0 +1,43 @@
+[package]
+name = "calibraw-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "CalibRaw egui/eframe desktop and Android user interface"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "calibraw"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "calibraw"
+path = "src/main.rs"
+
+[dependencies]
+calibraw-ai.workspace = true
+calibraw-core.workspace = true
+calibraw-gpu.workspace = true
+anyhow.workspace = true
+egui-phosphor.workspace = true
+image.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+discord-rich-presence.workspace = true
+eframe = { workspace = true, features = ["accesskit", "wgpu", "default_fonts", "wayland", "x11"] }
+env_logger.workspace = true
+pollster.workspace = true
+rfd.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+calibraw-ffi.workspace = true
+eframe = { workspace = true, features = ["wgpu", "default_fonts", "android-native-activity"] }
+android_logger.workspace = true

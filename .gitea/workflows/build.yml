@@ -1,4 +1,4 @@
-name: Build AuRaw
+name: Build CalibRaw
 
 on:
   push:
@@ -17,9 +17,9 @@ jobs:
     name: Linux AppImage
     runs-on: ubuntu-latest
     env:
-      LIBRAW_PREFIX: /tmp/auraw-libraw
-      PKG_CONFIG_PATH: /tmp/auraw-libraw/lib/pkgconfig
-      LD_LIBRARY_PATH: /tmp/auraw-libraw/lib
+      LIBRAW_PREFIX: /tmp/calibraw-libraw
+      PKG_CONFIG_PATH: /tmp/calibraw-libraw/lib/pkgconfig
+      LD_LIBRARY_PATH: /tmp/calibraw-libraw/lib
 
     steps:
       - name: Check out repository
@@ -34,11 +34,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            /tmp/auraw-libraw
+            /tmp/calibraw-libraw
             /tmp/linuxdeploy-x86_64.AppImage
-          key: auraw-linux-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-libraw-823f25d-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs') }}
+          key: calibraw-linux-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-libraw-823f25d-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs') }}
           restore-keys: |
-            auraw-linux-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-libraw-823f25d-
+            calibraw-linux-${{ runner.os }}-${{ runner.arch }}-rust-1.92.0-libraw-823f25d-
 
       - name: Install Linux build dependencies
         shell: bash
@@ -84,7 +84,7 @@ jobs:
 
       - name: Build release binary
         env:
-          AURAW_DISCORD_APPLICATION_ID: ${{ secrets.AURAW_DISCORD_APPLICATION_ID }}
+          CALIBRAW_DISCORD_APPLICATION_ID: ${{ secrets.CALIBRAW_DISCORD_APPLICATION_ID }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -101,24 +101,24 @@ jobs:
           /tmp/rustup-init -y --profile minimal --default-toolchain 1.92.0
           source "$HOME/.cargo/env"
 
-          AURAW_LIBRAW_REVISION="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["libraw_revision"])')"
+          CALIBRAW_LIBRAW_REVISION="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["libraw_revision"])')"
           LIBRAW_SOURCE_REVISION=b860248a89d9082b8e0a1e202e516f46af9adb29
           LIBRAW_ARCHIVE_SHA256=f5da1e522ea195b54b30f3ff105ef2193daa04ea165dea825b4d6fe9d886395b
           if [ -f "$LIBRAW_PREFIX/lib/pkgconfig/libraw.pc" ] \
             && [ -f "$LIBRAW_PREFIX/lib/libraw.so" ] \
-            && [ "$(pkg-config --modversion libraw)" = "$AURAW_LIBRAW_REVISION" ]; then
+            && [ "$(pkg-config --modversion libraw)" = "$CALIBRAW_LIBRAW_REVISION" ]; then
             echo "Using cached desktop LibRaw $LIBRAW_SOURCE_REVISION"
           else
-            rm -rf /tmp/auraw-libraw-src "$LIBRAW_PREFIX"
-            mkdir -p /tmp/auraw-libraw-src
+            rm -rf /tmp/calibraw-libraw-src "$LIBRAW_PREFIX"
+            mkdir -p /tmp/calibraw-libraw-src
             python3 scripts/bootstrap_download.py \
               "https://github.com/LibRaw/LibRaw/archive/$LIBRAW_SOURCE_REVISION.tar.gz" \
-              /tmp/auraw-libraw.tar.gz "$LIBRAW_ARCHIVE_SHA256"
-            tar -xzf /tmp/auraw-libraw.tar.gz \
+              /tmp/calibraw-libraw.tar.gz "$LIBRAW_ARCHIVE_SHA256"
+            tar -xzf /tmp/calibraw-libraw.tar.gz \
               --strip-components=1 \
-              -C /tmp/auraw-libraw-src
+              -C /tmp/calibraw-libraw-src
             (
-              cd /tmp/auraw-libraw-src
+              cd /tmp/calibraw-libraw-src
               autoreconf --install --force
               ./configure --prefix="$LIBRAW_PREFIX"
               make --jobs="$(nproc)"
@@ -131,19 +131,19 @@ jobs:
             export LIBCLANG_PATH="$(dirname "$LIBCLANG_SO")"
           fi
 
-          test "$(pkg-config --modversion libraw)" = "$AURAW_LIBRAW_REVISION"
+          test "$(pkg-config --modversion libraw)" = "$CALIBRAW_LIBRAW_REVISION"
           pkg-config --modversion lensfun
           REVISION="$(git rev-parse --verify HEAD)"
-          export AURAW_REQUIRE_COMMITTED_SOURCE=1
-          export AURAW_SOURCE_REVISION="$REVISION"
+          export CALIBRAW_REQUIRE_COMMITTED_SOURCE=1
+          export CALIBRAW_SOURCE_REVISION="$REVISION"
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$REVISION")"
 
           cargo build --release --locked
-          strip target/release/auraw
+          strip target/release/calibraw
 
-          ldd target/release/auraw | tee /tmp/auraw-ldd.txt
-          grep -Eq 'libraw(_r)?\.so' /tmp/auraw-ldd.txt
-          grep -Eq 'liblensfun\.so' /tmp/auraw-ldd.txt
+          ldd target/release/calibraw | tee /tmp/calibraw-ldd.txt
+          grep -Eq 'libraw(_r)?\.so' /tmp/calibraw-ldd.txt
+          grep -Eq 'liblensfun\.so' /tmp/calibraw-ldd.txt
 
       - name: Package AppImage
         shell: bash
@@ -156,8 +156,8 @@ jobs:
           VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
           test -n "$VERSION"
 
-          LIBRAW_SO="$(ldd target/release/auraw | awk '/libraw(_r)?\.so/{print $3; exit}')"
-          LENSFUN_SO="$(ldd target/release/auraw | awk '/liblensfun\.so/{print $3; exit}')"
+          LIBRAW_SO="$(ldd target/release/calibraw | awk '/libraw(_r)?\.so/{print $3; exit}')"
+          LENSFUN_SO="$(ldd target/release/calibraw | awk '/liblensfun\.so/{print $3; exit}')"
           test -f "$LIBRAW_SO"
           test -f "$LENSFUN_SO"
           echo "Bundling LibRaw from $LIBRAW_SO"
@@ -167,20 +167,20 @@ jobs:
           test -n "$LENSFUN_DB"
 
           rm -rf AppDir dist appimage-packaging
-          mkdir -p dist appimage-packaging AppDir/usr/share/auraw/lensfun AppDir/usr/share/doc/auraw
+          mkdir -p dist appimage-packaging AppDir/usr/share/calibraw/lensfun AppDir/usr/share/doc/calibraw
           install -m 0644 COPYING NOTICE.md THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md \
-            AppDir/usr/share/doc/auraw/
-          cp -a "$LENSFUN_DB"/. AppDir/usr/share/auraw/lensfun/
-          test -n "$(find AppDir/usr/share/auraw/lensfun -name '*.xml' -print -quit)"
+            AppDir/usr/share/doc/calibraw/
+          cp -a "$LENSFUN_DB"/. AppDir/usr/share/calibraw/lensfun/
+          test -n "$(find AppDir/usr/share/calibraw/lensfun -name '*.xml' -print -quit)"
 
-          APP_ID=de.duecki.auraw
+          APP_ID=de.duecki.calibraw
           DESKTOP_FILE="$PWD/packaging/linux/$APP_ID.desktop"
           APPIMAGE_ICON="$PWD/appimage-packaging/$APP_ID.png"
           test -s "$DESKTOP_FILE"
           grep -qx "Icon=$APP_ID" "$DESKTOP_FILE"
           grep -qx "StartupWMClass=$APP_ID" "$DESKTOP_FILE"
 
-          install -m 0644 packaging/icons/auraw-256.png "$APPIMAGE_ICON"
+          install -m 0644 packaging/icons/calibraw-256.png "$APPIMAGE_ICON"
           install -m 0644 "$DESKTOP_FILE" "AppDir/$APP_ID.desktop"
           install -Dm 0644 "$DESKTOP_FILE" \
             "AppDir/usr/share/applications/$APP_ID.desktop"
@@ -198,10 +198,10 @@ jobs:
           chmod +x /tmp/linuxdeploy-x86_64.AppImage
 
           export APPIMAGE_EXTRACT_AND_RUN=1
-          export LDAI_OUTPUT="AuRaw-${VERSION}-x86_64.AppImage"
+          export LDAI_OUTPUT="CalibRaw-${VERSION}-x86_64.AppImage"
           /tmp/linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
-            --executable "$PWD/target/release/auraw" \
+            --executable "$PWD/target/release/calibraw" \
             --library "$LIBRAW_SO" \
             --library "$LENSFUN_SO" \
             --desktop-file "$DESKTOP_FILE" \
@@ -217,7 +217,7 @@ jobs:
       - name: Upload AppImage
         uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
         with:
-          name: auraw-linux-appimage
+          name: calibraw-linux-appimage
           path: dist/*
           if-no-files-found: error
 
@@ -241,7 +241,7 @@ jobs:
             ~/.cargo/bin/cargo-ndk-env
             ~/.cargo/bin/cargo-ndk-runner
             ~/.cargo/bin/cargo-ndk-test
-          key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/bootstrap_download.py', 'xtask/src/main.rs') }}-v2
+          key: calibraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/bootstrap_download.py', 'xtask/src/main.rs') }}-v2
 
       - name: Restore Android dependency and build cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
@@ -253,9 +253,9 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/notifications
             android/.gradle
-          key: auraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs', 'android/build.gradle', 'android/app/build.gradle') }}
+          key: calibraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs', 'android/build.gradle', 'android/app/build.gradle') }}
           restore-keys: |
-            auraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-
+            calibraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-
 
       - name: Restore Android native dependency cache
         uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
@@ -333,18 +333,18 @@ jobs:
           fi
 
           build_metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-          export AURAW_ANDROID_COMPILE_SDK="$(printf '%s' "$build_metadata" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["android_compile_sdk"])')"
-          export AURAW_ANDROID_BUILD_TOOLS_VERSION="$(printf '%s' "$build_metadata" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["android_build_tools_version"])')"
-          export AURAW_ANDROID_NDK_VERSION="$(printf '%s' "$build_metadata" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["android_ndk_version"])')"
+          export CALIBRAW_ANDROID_COMPILE_SDK="$(printf '%s' "$build_metadata" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["android_compile_sdk"])')"
+          export CALIBRAW_ANDROID_BUILD_TOOLS_VERSION="$(printf '%s' "$build_metadata" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["android_build_tools_version"])')"
+          export CALIBRAW_ANDROID_NDK_VERSION="$(printf '%s' "$build_metadata" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["android_ndk_version"])')"
 
           install_sdk_packages() {
             local attempt
             for attempt in 1 2 3 4; do
               if sdkmanager \
                 "platform-tools" \
-                "platforms;android-$AURAW_ANDROID_COMPILE_SDK" \
-                "build-tools;$AURAW_ANDROID_BUILD_TOOLS_VERSION" \
-                "ndk;$AURAW_ANDROID_NDK_VERSION" \
+                "platforms;android-$CALIBRAW_ANDROID_COMPILE_SDK" \
+                "build-tools;$CALIBRAW_ANDROID_BUILD_TOOLS_VERSION" \
+                "ndk;$CALIBRAW_ANDROID_NDK_VERSION" \
                 "cmake;$ANDROID_CMAKE_VERSION"; then
                 return 0
               fi
@@ -376,7 +376,7 @@ jobs:
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager --licenses >/dev/null || true
           install_sdk_packages
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$AURAW_ANDROID_NDK_VERSION"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$CALIBRAW_ANDROID_NDK_VERSION"
           export PATH="$ANDROID_HOME/cmake/$ANDROID_CMAKE_VERSION/bin:$PATH"
 
           LIBCLANG_SO="$(find /usr/lib -path '*/llvm-*/lib/libclang.so*' -print -quit 2>/dev/null || true)"
@@ -387,7 +387,7 @@ jobs:
           # This is a host-side compile preflight, not the Android native build.
           # The runner intentionally does not install desktop LibRaw; the real
           # target build below stages and links the pinned Android LibRaw/Lensfun.
-          AURAW_ALLOW_NO_LIBRAW=1 cargo check --locked --workspace
+          CALIBRAW_ALLOW_NO_LIBRAW=1 cargo check --locked --workspace
           ./gradlew --version
 
           ./gradlew \
@@ -395,20 +395,20 @@ jobs:
             --stacktrace \
             -p android \
             assembleDebug \
-            -PaurawAbis=arm64-v8a \
-            -PaurawVersionCode="$GITHUB_RUN_NUMBER"
+            -PcalibrawAbis=arm64-v8a \
+            -PcalibrawVersionCode="$GITHUB_RUN_NUMBER"
 
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
           cargo xtask verify-android-16kb "$APK"
           mkdir -p dist
-          cp "$APK" dist/AuRaw-debug-arm64-v8a.apk
-          sha256sum dist/AuRaw-debug-arm64-v8a.apk \
-            > dist/AuRaw-debug-arm64-v8a.apk.sha256
+          cp "$APK" dist/CalibRaw-debug-arm64-v8a.apk
+          sha256sum dist/CalibRaw-debug-arm64-v8a.apk \
+            > dist/CalibRaw-debug-arm64-v8a.apk.sha256
 
       - name: Upload debug APK
         uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
         with:
-          name: auraw-android-debug-arm64-v8a
+          name: calibraw-android-debug-arm64-v8a
           path: dist/*
           if-no-files-found: error

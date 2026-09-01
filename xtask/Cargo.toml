@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "AuRaw project build and release automation"
+description = "CalibRaw project build and release automation"
 publish = false
 
 [dependencies]
