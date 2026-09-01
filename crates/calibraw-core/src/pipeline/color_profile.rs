@@ -297,6 +297,12 @@ pub struct SrgbOutputLut {
     entries: Vec<[f32; 4]>,
 }
 
+impl Default for SrgbOutputLut {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SrgbOutputLut {
     pub fn new() -> Self {
         let size = OUTPUT_LUT_EDGE;
