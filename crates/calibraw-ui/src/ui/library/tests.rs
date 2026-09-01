@@ -325,7 +325,7 @@ fn sparse_row_keeps_the_selected_thumbnail_height() {
     entries[0].layout_size = Some([2, 3]);
     entries[1].layout_size = Some([3, 2]);
 
-    let available_width = 368.0;
+    let available_width = 420.0;
     let (small_rects, small_height) =
         justified_thumbnail_layout(&entries, available_width, 120.0, 6.0);
     let (large_rects, large_height) =
@@ -336,6 +336,13 @@ fn sparse_row_keeps_the_selected_thumbnail_height() {
     assert_eq!(large_height, 180.0);
     assert!(small_rects.last().unwrap().right() < available_width);
     assert!(large_rects[0].width() > small_rects[0].width());
+}
+
+#[test]
+fn thumbnail_hover_details_include_format_and_dimensions() {
+    let asset = test_asset("portrait.CR3");
+
+    assert_eq!(thumbnail_hover_details(&asset), "CR3  ·  6000 × 4000");
 }
 
 #[test]

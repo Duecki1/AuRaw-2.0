@@ -2,10 +2,10 @@ use super::*;
 
 /// Rows with enough images shrink to fit the viewport. Sparse rows retain the
 /// selected thumbnail height rather than enlarging their images to fill space.
-const THUMBNAIL_IMAGE_HORIZONTAL_INSET: f32 = 6.0;
-const THUMBNAIL_IMAGE_VERTICAL_CHROME: f32 = 38.0;
-const THUMBNAIL_CARD_RADIUS: f32 = 9.0;
-const THUMBNAIL_IMAGE_RADIUS: f32 = 6.0;
+const THUMBNAIL_IMAGE_HORIZONTAL_INSET: f32 = 0.0;
+const THUMBNAIL_IMAGE_VERTICAL_CHROME: f32 = 0.0;
+const THUMBNAIL_CARD_RADIUS: f32 = crate::ui::theme::CARD_RADIUS;
+const THUMBNAIL_HOVER_OVERLAY: Color32 = Color32::from_black_alpha(156);
 
 pub(super) fn send_scan_failure(
     sender: &mpsc::SyncSender<ScanEvent>,
@@ -247,38 +247,29 @@ pub(super) fn thumbnail_tile(
     rect: egui::Rect,
     selected: bool,
 ) -> egui::Response {
+    #[cfg(target_os = "android")]
+    let _ = selected;
     let response = ui.interact(
         rect,
         ui.make_persistent_id(("library-thumbnail-tile", entry.asset.display_path.as_str())),
         Sense::click(),
     );
-    let visuals = ui.visuals();
-
     let tile_rect = rect;
-    let image_rect = egui::Rect::from_min_max(
-        tile_rect.min + egui::vec2(THUMBNAIL_IMAGE_HORIZONTAL_INSET * 0.5, 3.0),
-        egui::pos2(
-            tile_rect.right() - THUMBNAIL_IMAGE_HORIZONTAL_INSET * 0.5,
-            tile_rect.bottom() - 32.0,
-        ),
-    );
-    let card_fill = if response.hovered() {
-        visuals.widgets.hovered.weak_bg_fill
-    } else {
-        visuals.faint_bg_color
-    };
-    ui.painter()
-        .rect_filled(tile_rect, THUMBNAIL_CARD_RADIUS, card_fill);
+    let image_rect = tile_rect;
+    let painter = ui.painter_at(tile_rect);
     if let Some(texture) = &entry.texture {
         let uv = thumbnail_cover_uv(entry.thumbnail_size, image_rect.size());
-        ui.painter().add(
-            egui::epaint::RectShape::filled(image_rect, THUMBNAIL_IMAGE_RADIUS, Color32::WHITE)
+        painter.add(
+            egui::epaint::RectShape::filled(image_rect, THUMBNAIL_CARD_RADIUS, Color32::WHITE)
                 .with_texture(texture.id(), uv),
         );
     } else {
-        ui.painter()
-            .rect_filled(image_rect, THUMBNAIL_IMAGE_RADIUS, visuals.extreme_bg_color);
-        ui.painter().text(
+        painter.rect_filled(
+            image_rect,
+            THUMBNAIL_CARD_RADIUS,
+            ui.visuals().extreme_bg_color,
+        );
+        painter.text(
             image_rect.center(),
             Align2::CENTER_CENTER,
             if entry.thumbnail_error.is_some() {
@@ -289,7 +280,30 @@ pub(super) fn thumbnail_tile(
                 "RAW"
             },
             FontId::proportional(11.0),
-            visuals.weak_text_color(),
+            ui.visuals().weak_text_color(),
+        );
+    }
+
+    if response.hovered() {
+        painter.rect_filled(tile_rect, THUMBNAIL_CARD_RADIUS, THUMBNAIL_HOVER_OVERLAY);
+        let text_width = (tile_rect.width() - 24.0).max(24.0);
+        let max_chars = (text_width / 7.2).floor().max(6.0) as usize;
+        let title = elide_middle(&entry.asset.display_name, max_chars);
+        let details = elide_middle(&thumbnail_hover_details(&entry.asset), max_chars);
+        let title_center = tile_rect.center() - egui::vec2(0.0, 8.0);
+        painter.text(
+            title_center,
+            Align2::CENTER_CENTER,
+            title,
+            FontId::proportional(13.0),
+            Color32::WHITE,
+        );
+        painter.text(
+            title_center + egui::vec2(0.0, 19.0),
+            Align2::CENTER_CENTER,
+            details,
+            FontId::proportional(10.5),
+            Color32::from_white_alpha(190),
         );
     }
 
@@ -300,48 +314,29 @@ pub(super) fn thumbnail_tile(
             rect.top() + badge_edge * 0.5 + 6.0,
         );
         crate::ui::components::pending_indicator(
-            ui.painter(),
+            &painter,
             center,
             badge_edge * 0.5,
             (badge_edge * 0.72).max(12.0),
         );
     }
 
+    #[cfg(not(target_os = "android"))]
     if selected {
-        ui.painter().rect_stroke(
-            tile_rect,
-            THUMBNAIL_CARD_RADIUS,
-            Stroke::new(2.0, visuals.selection.bg_fill),
-            StrokeKind::Inside,
+        let badge_edge = 24.0_f32.min(tile_rect.width() * 0.28);
+        let badge_rect = egui::Rect::from_min_size(
+            tile_rect.min + egui::vec2(7.0, 7.0),
+            egui::Vec2::splat(badge_edge),
         );
-    } else {
-        ui.painter().rect_stroke(
-            tile_rect,
-            THUMBNAIL_CARD_RADIUS,
-            Stroke::new(
-                1.0,
-                if response.hovered() {
-                    visuals.widgets.hovered.bg_stroke.color
-                } else {
-                    visuals.widgets.noninteractive.bg_stroke.color
-                },
-            ),
-            StrokeKind::Inside,
+        painter.rect_filled(badge_rect, badge_edge * 0.5, ui.visuals().selection.bg_fill);
+        painter.text(
+            badge_rect.center(),
+            Align2::CENTER_CENTER,
+            egui_phosphor::regular::CHECK,
+            FontId::proportional((badge_edge * 0.58).max(10.0)),
+            Color32::WHITE,
         );
     }
-
-    let label_rect = egui::Rect::from_min_max(
-        egui::pos2(tile_rect.left() + 10.0, tile_rect.bottom() - 27.0),
-        egui::pos2(tile_rect.right() - 10.0, tile_rect.bottom() - 5.0),
-    );
-    let max_chars = ((label_rect.width() - 2.0) / 6.5).floor().max(8.0) as usize;
-    ui.painter().text(
-        label_rect.left_center(),
-        Align2::LEFT_CENTER,
-        elide_middle(&entry.asset.display_name, max_chars),
-        FontId::proportional(12.0),
-        visuals.text_color(),
-    );
 
     let mut tooltip = entry.asset.display_path.clone();
     if let Some(error) = &entry.thumbnail_error {
@@ -356,6 +351,21 @@ pub(super) fn thumbnail_tile(
         });
     }
     response.on_hover_text(tooltip)
+}
+
+pub(super) fn thumbnail_hover_details(asset: &LibraryAsset) -> String {
+    let format = Path::new(&asset.display_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_uppercase)
+        .unwrap_or_else(|| "RAW".to_owned());
+    asset
+        .metadata
+        .dimensions_hint
+        .map_or(format.clone(), |[width, height]| {
+            format!("{format}  ·  {width} × {height}")
+        })
 }
 
 #[cfg(target_os = "android")]

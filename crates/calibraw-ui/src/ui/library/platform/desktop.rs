@@ -31,6 +31,7 @@ pub(super) fn show_library_folder_node(
     ui.push_id(&node.path, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
+            let disclosure_size = egui::vec2(26.0, crate::ui::theme::CONTROL_HEIGHT);
             if has_children {
                 let caret = if expanded {
                     egui_phosphor::regular::CARET_DOWN
@@ -39,7 +40,7 @@ pub(super) fn show_library_folder_node(
                 };
                 if ui
                     .add_sized(
-                        egui::Vec2::splat(crate::ui::theme::CONTROL_HEIGHT),
+                        disclosure_size,
                         egui::Button::new(egui::RichText::new(caret).size(12.0)).frame(false),
                     )
                     .on_hover_text(if expanded {
@@ -56,7 +57,7 @@ pub(super) fn show_library_folder_node(
                     }
                 }
             } else {
-                ui.allocate_space(egui::Vec2::splat(crate::ui::theme::CONTROL_HEIGHT));
+                ui.allocate_space(disclosure_size);
             }
 
             let folder_icon = if expanded && has_children {
@@ -176,8 +177,8 @@ pub(super) fn show_library_folder_node(
         });
 
         if expanded {
-            ui.horizontal(|ui| {
-                ui.add_space(14.0);
+            let children = ui.horizontal(|ui| {
+                ui.add_space(10.0);
                 ui.vertical(|ui| {
                     ui.set_width(ui.available_width());
                     for child in &node.children {
@@ -196,6 +197,12 @@ pub(super) fn show_library_folder_node(
                     }
                 });
             });
+            let guide_x = children.response.rect.left() + 5.0;
+            ui.painter().vline(
+                guide_x,
+                children.response.rect.y_range(),
+                Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            );
         }
     });
 }
