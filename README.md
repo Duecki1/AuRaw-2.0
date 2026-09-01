@@ -1,11 +1,11 @@
-# AuRaw
-AuRaw is a fast, GPU-accelerated RAW photo editor. <br>
+# CalibRaw
+CalibRaw is a fast, GPU-accelerated RAW photo editor. <br>
 It was made not to focus on design, but to be performant and non-destructive to the export.
 
 I developed this project because I could not find a suitable alternative to Lightroom® that is both performant and easy to use. <br>
-AuRaw is available for Linux, Android, Windows, and macOS, with Linux and Android being the primary focus.
+CalibRaw is available for Linux, Android, Windows, and macOS, with Linux and Android being the primary focus.
 
-Download the latest release [here](https://github.com/Duecki1/AuRaw-2.0/releases).
+Download the latest release [here](https://github.com/Duecki1/CalibRaw/releases).
 
 ## Showcase
 <img width="100%" alt="image" src="https://github.com/user-attachments/assets/69d52204-05e4-4c40-8a74-f9200ec01e5b" />
@@ -18,7 +18,7 @@ Download the latest release [here](https://github.com/Duecki1/AuRaw-2.0/releases
 ## Key Features
 
 - **GPU-accelerated:** Built with Rust, wgpu, and custom WGSL compute shaders for real-time performance.
-- **Non-destructive:** All edits and adjustments are non-destructive and saved to lightweight `.auraw` sidecar files.
+- **Non-destructive:** All edits and adjustments are non-destructive and saved to lightweight `.CalibRaw` sidecar files.
 - **Advanced demosaicing:** Features Bayer RCD, Fujifilm X-Trans (Markesteijn), and noise-resilient Dual Demosaicing.
 - **Masking:** Supports brush and shape masks with independent tone curves and adjustments.
 - **Creative effects:** Unique mask effects like light rays, lens blur, motion blur, fog, Glow, and more.
@@ -46,11 +46,11 @@ Feel free to open a Pull Request or create an issue :D.
 
 This project was developed with the assistance of LLMs.
 
-AuRaw also supports optional, locally run AI models for smart masking, denoising, and object removal.
+CalibRaw also supports optional, locally run AI models for smart masking, denoising, and object removal.
 
 ## License
 
-AuRaw is GPL-3.0-or-later. See [COPYING](COPYING), [NOTICE.md](NOTICE.md), and
+CalibRaw is GPL-3.0-or-later. See [COPYING](COPYING), [NOTICE.md](NOTICE.md), and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Complete resolved Rust
 dependency, font, and icon terms are in
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
