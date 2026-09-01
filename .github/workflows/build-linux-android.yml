@@ -45,7 +45,7 @@ jobs:
           fetch-depth: 0
 
       - name: Restore Linux build cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -249,7 +249,7 @@ jobs:
           fetch-depth: 0
 
       - name: Restore pinned Android toolchains
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/android-sdk
@@ -261,7 +261,7 @@ jobs:
           key: auraw-android-tools-${{ runner.os }}-${{ runner.arch }}-arm64-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'gradle/wrapper/gradle-wrapper.properties', 'scripts/bootstrap_download.py', 'xtask/src/main.rs') }}-v2
 
       - name: Restore Android dependency and build cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -275,7 +275,7 @@ jobs:
             auraw-android-build-${{ runner.os }}-${{ runner.arch }}-arm64-rust-1.92.0-
 
       - name: Restore Android native dependency cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: android/native
           key: android-native-deps-v1-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'android/app/src/main/cpp/CMakeLists.txt', 'xtask/src/main.rs') }}
