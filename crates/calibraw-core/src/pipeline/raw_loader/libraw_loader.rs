@@ -102,6 +102,7 @@ pub(super) fn load_raw_file_with_profile_selection(
     selected_profile: Option<&Path>,
 ) -> Result<LoadedRaw> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW input")?;
+    let exif_flash = read_exif_flash(path);
 
     let c_path = path_to_libraw_cstring(path)?;
     let ctx = LibRawContext::new()?;
@@ -233,6 +234,7 @@ pub(super) fn load_raw_file_with_profile_selection(
     ));
     let materialize_started = Instant::now();
     let mut loaded = unsafe { loaded_raw_from_context(&ctx, selected_profile) }?;
+    loaded.capture_metadata.flash = exif_flash.or(loaded.capture_metadata.flash);
     crate::diagnostics::record(format!(
         "Decoded mosaic materialization finished in {:.3}s",
         materialize_started.elapsed().as_secs_f64()
@@ -954,6 +956,7 @@ fn load_raw_file_with_selected_profile(
     dcp_profile: Option<DcpProfile>,
 ) -> Result<LoadedRaw> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW input")?;
+    let exif_flash = read_exif_flash(path);
 
     let c_path = path_to_libraw_cstring(path)?;
     let ctx = LibRawContext::new()?;
@@ -965,7 +968,30 @@ fn load_raw_file_with_selected_profile(
     unsafe { validate_opened_raw_geometry(&ctx) }?;
     check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
 
-    unsafe { loaded_raw_from_context(&ctx, dcp_profile) }
+    let mut loaded = unsafe { loaded_raw_from_context(&ctx, dcp_profile) }?;
+    loaded.capture_metadata.flash = exif_flash.or(loaded.capture_metadata.flash);
+    Ok(loaded)
+}
+
+fn read_exif_flash(path: &Path) -> Option<u16> {
+    const MAX_EXIF_SCAN_BYTES: u64 = 256_000_000;
+    if std::fs::metadata(path).ok()?.len() > MAX_EXIF_SCAN_BYTES {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut input = std::io::BufReader::new(file);
+    let mut reader = exif::Reader::new();
+    reader.continue_on_error(true);
+    let metadata = reader
+        .read_from_container(&mut input)
+        .or_else(|error| error.distill_partial_result(|_| {}))
+        .ok()?;
+    let value = metadata
+        .fields()
+        .find(|field| field.tag == exif::Tag::Flash)?
+        .value
+        .get_uint(0)?;
+    u16::try_from(value).ok()
 }
 
 #[cfg(unix)]
@@ -1227,6 +1253,7 @@ unsafe fn loaded_raw_from_context(
         capture_metadata: super::CaptureMetadata {
             iso_speed: finite_positive_or_zero(other.iso_speed),
             shutter_seconds: finite_positive_or_zero(other.shutter),
+            flash: (color.flash_used.is_finite() && color.flash_used > 0.0).then_some(1),
             description: c_array_to_string(&other.desc),
             artist: c_array_to_string(&other.artist),
         },

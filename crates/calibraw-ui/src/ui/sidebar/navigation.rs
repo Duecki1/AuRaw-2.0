@@ -47,6 +47,7 @@ impl Sidebar {
             SidebarTab::Masks => "Masking",
             SidebarTab::Inpainting => "Inpaint",
             SidebarTab::Export => "Export",
+            SidebarTab::Info => "Image Info",
         };
         crate::ui::theme::card_header(ui, |ui| {
             let width = ui.available_width().max(1.0);
@@ -118,7 +119,7 @@ impl Sidebar {
                                     app.reset_masks();
                                 }
                             }
-                            SidebarTab::Export => {}
+                            SidebarTab::Export | SidebarTab::Info => {}
                         }
                     });
                 },
@@ -195,7 +196,7 @@ impl Sidebar {
             56.0
         };
         let previous = app.ui.sidebar_tab;
-        let item_width = (ui.available_width() / 5.0).max(1.0);
+        let item_width = (ui.available_width() / 6.0).max(1.0);
         ui.horizontal(|ui| {
             for (tab, icon, label, tooltip) in [
                 (
@@ -218,6 +219,7 @@ impl Sidebar {
                     "Remove unwanted objects",
                 ),
                 (SidebarTab::Export, regular::EXPORT, "Export", "Export"),
+                (SidebarTab::Info, regular::INFO, "Info", "Image information"),
             ] {
                 if Self::mobile_icon_tab(
                     ui,
@@ -340,7 +342,10 @@ impl Sidebar {
                     }
                 }
             }
-            SidebarTab::Crop | SidebarTab::Inpainting | SidebarTab::Export => {}
+            SidebarTab::Crop
+            | SidebarTab::Inpainting
+            | SidebarTab::Export
+            | SidebarTab::Info => {}
         });
     }
 
@@ -440,6 +445,7 @@ impl Sidebar {
                                     Self::show_inpainting(ui, app, layout, frame)
                                 }
                                 SidebarTab::Export => Self::show_export(ui, app, frame),
+                                SidebarTab::Info => Self::show_info(ui, app),
                             }
                             ui.add_space(10.0);
                         },
@@ -478,6 +484,7 @@ impl Sidebar {
                     "Remove unwanted objects",
                 ),
                 (SidebarTab::Export, UiIcon::Export, "Export"),
+                (SidebarTab::Info, UiIcon::Info, "Image information"),
             ] {
                 if icon_toggle_button(
                     ui,
@@ -564,6 +571,7 @@ impl Sidebar {
                     "Remove unwanted objects",
                 ),
                 (SidebarTab::Export, regular::EXPORT, "Export", "Export"),
+                (SidebarTab::Info, regular::INFO, "Info", "Image information"),
             ] {
                 if Self::mobile_icon_tab(
                     ui,

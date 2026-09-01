@@ -14,6 +14,8 @@ pub(crate) enum UiIcon {
     #[cfg(not(target_os = "android"))]
     Export,
     #[cfg(not(target_os = "android"))]
+    Info,
+    #[cfg(not(target_os = "android"))]
     Sidebar,
     #[cfg(not(target_os = "android"))]
     Filmstrip,
@@ -34,6 +36,8 @@ impl UiIcon {
             Self::Heal => regular::BANDAIDS,
             #[cfg(not(target_os = "android"))]
             Self::Export => regular::EXPORT,
+            #[cfg(not(target_os = "android"))]
+            Self::Info => regular::INFO,
             #[cfg(not(target_os = "android"))]
             Self::Sidebar => regular::SIDEBAR_SIMPLE,
             #[cfg(not(target_os = "android"))]

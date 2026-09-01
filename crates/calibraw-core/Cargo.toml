@@ -18,6 +18,7 @@ harness = false
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+exif.workspace = true
 half.workspace = true
 image.workspace = true
 log.workspace = true

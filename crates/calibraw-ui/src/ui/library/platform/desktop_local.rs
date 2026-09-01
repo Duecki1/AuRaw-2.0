@@ -31,6 +31,11 @@ impl LibraryState {
             .copied()
     }
 
+    pub(crate) fn desktop_asset_bytes(&self, path: &Path) -> Option<u64> {
+        let index = self.filmstrip_index_for_path(path)?;
+        Some(self.entries.get(index)?.asset.metadata.bytes)
+    }
+
     pub(crate) fn desktop_loading_thumbnail_for_path(
         &mut self,
         path: &Path,

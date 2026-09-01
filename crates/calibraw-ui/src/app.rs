@@ -301,6 +301,7 @@ pub(crate) enum SidebarTab {
     Masks,
     Inpainting,
     Export,
+    Info,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1189,7 +1190,10 @@ impl CalibRawApp {
             match self.ui.sidebar_tab {
                 SidebarTab::Masks => Some(calibraw_ai::AiRuntimeContext::Masks),
                 SidebarTab::Inpainting => Some(calibraw_ai::AiRuntimeContext::Remove),
-                SidebarTab::Adjustments | SidebarTab::Crop | SidebarTab::Export => None,
+                SidebarTab::Adjustments
+                | SidebarTab::Crop
+                | SidebarTab::Export
+                | SidebarTab::Info => None,
             }
         } else {
             None

@@ -81,6 +81,7 @@ include!("sidebar/navigation.rs");
 mod masks;
 include!("sidebar/inpainting.rs");
 include!("sidebar/export.rs");
+include!("sidebar/info.rs");
 include!("sidebar/develop.rs");
 include!("sidebar/crop.rs");
 

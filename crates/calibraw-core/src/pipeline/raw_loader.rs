@@ -370,6 +370,7 @@ impl<'a, T> IntoIterator for &'a CompactPixelMap<T> {
 pub struct CaptureMetadata {
     pub iso_speed: f32,
     pub shutter_seconds: f32,
+    pub flash: Option<u16>,
     pub description: String,
     pub artist: String,
 }
