@@ -216,17 +216,15 @@ impl Library {
             #[cfg(not(target_os = "android"))]
             if show_library_empty_state(
                 ui,
-                egui_phosphor::regular::FOLDER_OPEN,
                 "Build your photo library",
                 "Choose a top-level photo folder. AuRaw keeps your hierarchy intact and shows the RAW files in each folder.",
-                Some("Open photo folder…"),
+                Some("Open Folder…"),
             ) {
                 app.open_library_folder_dialog();
             }
             #[cfg(target_os = "android")]
             show_library_empty_state(
                 ui,
-                egui_phosphor::regular::IMAGES,
                 "Your library is ready",
                 "Use the folder sidebar to browse your Library, or tap + to import RAW files.",
                 None,
@@ -235,7 +233,6 @@ impl Library {
             #[cfg(not(target_os = "android"))]
             show_library_empty_state(
                 ui,
-                egui_phosphor::regular::IMAGE,
                 "No RAW photos here yet",
                 "Choose another folder in the sidebar or add RAW files to this folder.",
                 None,
@@ -243,7 +240,6 @@ impl Library {
             #[cfg(target_os = "android")]
             show_library_empty_state(
                 ui,
-                egui_phosphor::regular::IMAGE,
                 "No RAW photos here yet",
                 "Tap + to import one or more RAW files.",
                 None,
@@ -254,7 +250,6 @@ impl Library {
         {
             if show_library_empty_state(
                 ui,
-                egui_phosphor::regular::MAGNIFYING_GLASS,
                 "No matching photos",
                 "Try another filename, or clear the search to show every RAW photo.",
                 Some("Clear search"),
@@ -524,7 +519,6 @@ fn show_library_status(ui: &mut Ui, status: &str) {
 
 fn show_library_empty_state(
     ui: &mut Ui,
-    icon: &str,
     title: &str,
     description: &str,
     action: Option<&str>,
@@ -532,25 +526,24 @@ fn show_library_empty_state(
     let mut action_clicked = false;
     ui.centered_and_justified(|ui| {
         ui.vertical_centered(|ui| {
-            let text_width = ui.available_width().clamp(180.0, 460.0);
+            let text_width = ui.available_width().clamp(220.0, 420.0);
             ui.label(
-                egui::RichText::new(icon)
-                    .size(38.0)
-                    .color(ui.visuals().selection.bg_fill),
+                egui::RichText::new(title)
+                    .strong()
+                    .size(crate::ui::theme::PANEL_TITLE_TEXT_SIZE),
             );
-            ui.add_space(crate::ui::theme::SPACE_SM);
-            ui.heading(title);
             ui.add_space(crate::ui::theme::SPACE_XS);
             ui.add_sized(
-                [text_width, 38.0],
+                [text_width, 0.0],
                 egui::Label::new(
                     egui::RichText::new(description).color(ui.visuals().weak_text_color()),
                 )
-                .wrap(),
+                .wrap()
+                .halign(egui::Align::Center),
             );
             if let Some(action) = action {
                 ui.add_space(crate::ui::theme::SPACE_MD);
-                action_clicked = crate::ui::theme::primary_button(ui, action, 168.0).clicked();
+                action_clicked = crate::ui::theme::primary_button(ui, action, 132.0).clicked();
             }
         });
     });

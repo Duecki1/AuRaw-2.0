@@ -561,7 +561,7 @@ pub(crate) fn primary_button(
     let visuals = &ui.visuals().widgets.active;
     ui.add_sized(
         [width, CONTROL_HEIGHT],
-        egui::Button::new(label.into())
+        egui::Button::new(label.into().color(Color32::WHITE))
             .fill(visuals.weak_bg_fill)
             .stroke(visuals.bg_stroke)
             .corner_radius(CARD_RADIUS),
