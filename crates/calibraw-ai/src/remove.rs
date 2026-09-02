@@ -32,7 +32,7 @@ use std::{
 
 pub const BIG_LAMA_MODEL_FILENAME: &str = "big-lama-places2-fp32-512.onnx";
 pub const BIG_LAMA_MODEL_URL: &str =
-    "https://huggingface.co/Carve/LaMa-ONNX/resolve/a3ee2fca54baebec351b8fa7786154ffa7555aa6/lama_fp32.onnx";
+    "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/models/lama/lama_fp32.onnx";
 pub const BIG_LAMA_MODEL_SHA256_HEX: &str =
     "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6";
 pub const BIG_LAMA_MODEL_BYTES: u64 = 208_044_816;

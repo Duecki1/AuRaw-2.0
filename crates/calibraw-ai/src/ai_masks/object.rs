@@ -1,14 +1,14 @@
 use super::*;
 
 pub const SAM21_ENCODER_MODEL_URL: &str = concat!(
-    "https://huggingface.co/akiyamanx/sam2.1-hiera-tiny-onnx/resolve/",
-    "aa11669045f8d82c74e46f8f77c9b56792c90ebb/",
-    "sam2.1_hiera_tiny.encoder.onnx"
+    "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/",
+    "91085ce0ec322a4a7cbd20059688690218e52f9a/",
+    "models/sam2/sam2.1-hiera-tiny.encoder.onnx"
 );
 pub const SAM21_DECODER_MODEL_URL: &str = concat!(
-    "https://huggingface.co/akiyamanx/sam2.1-hiera-tiny-onnx/resolve/",
-    "aa11669045f8d82c74e46f8f77c9b56792c90ebb/",
-    "sam2.1_hiera_tiny.decoder.onnx"
+    "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/",
+    "91085ce0ec322a4a7cbd20059688690218e52f9a/",
+    "models/sam2/sam2.1-hiera-tiny.decoder.onnx"
 );
 pub const SAM21_ENCODER_SHA256_HEX: &str =
     "667384d1e686de6828b841ac8a24db0fafa2b3452494225f82eeedac56141230";
@@ -1478,7 +1478,8 @@ mod object_mask_tests {
     #[test]
     fn sam_model_urls_are_immutable_revision_pins() {
         for url in [SAM21_ENCODER_MODEL_URL, SAM21_DECODER_MODEL_URL] {
-            assert!(url.contains("/resolve/aa11669045f8d82c74e46f8f77c9b56792c90ebb/"));
+            assert!(url.starts_with("https://huggingface.co/Duecki/CalibRaw-Artifacts/"));
+            assert!(url.contains("/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/"));
             assert!(!url.contains("/resolve/main/"));
         }
     }

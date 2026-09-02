@@ -33,15 +33,15 @@ fn ensure_ai_not_cancelled(cancellation: &AtomicBool) -> Result<()> {
 pub use crate::model_artifact::sha256_file_hex;
 
 pub const BIREFNET_LOW_MODEL_BYTES: u64 = 224_005_088;
-pub const BIREFNET_LOW_MODEL_URL: &str = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx";
+pub const BIREFNET_LOW_MODEL_URL: &str = "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/models/briefnet/birefnet-lowQ.onnx";
 pub const BIREFNET_LOW_MODEL_SHA256_HEX: &str =
     "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333";
 pub const BIREFNET_MEDIUM_MODEL_BYTES: u64 = 331_082_421;
-pub const BIREFNET_MEDIUM_MODEL_URL: &str = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet_lite-general-2K-epoch_232.onnx";
+pub const BIREFNET_MEDIUM_MODEL_URL: &str = "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/models/briefnet/birefnet-medQ.onnx";
 pub const BIREFNET_MEDIUM_MODEL_SHA256_HEX: &str =
     "6003d2f758bdb4e4802a09e39167529bc2eef9288d5b8fa537331467cbc4759d";
 pub const BIREFNET_HIGH_MODEL_BYTES: u64 = 1_098_928_953;
-pub const BIREFNET_HIGH_MODEL_URL: &str = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet_HR-general-epoch_130.onnx";
+pub const BIREFNET_HIGH_MODEL_URL: &str = "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/models/briefnet/birefnet-highQ.onnx";
 pub const BIREFNET_HIGH_MODEL_SHA256_HEX: &str =
     "db0217e99b25e0c4f6f4dca2892ff1f7ea7aba38fb6ad84f93122a4024be536a";
 

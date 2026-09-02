@@ -26,7 +26,7 @@ use crate::pipeline::{
 };
 
 pub const RAWNIND_PACKAGE_URL: &str =
-    "https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/rawdenoise-nind.dtmodel";
+    "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/models/rawnind/rawdenoise-nind.dtmodel";
 pub const RAWNIND_PACKAGE_BYTES: u64 = 57_700_134;
 pub const RAWNIND_PACKAGE_SHA256: &str =
     "d71b5f1e727c85a359e6f74dca9e2016c9d8fc3e2f7ac3e9b347d80ceca969af";
