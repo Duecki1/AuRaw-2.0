@@ -13,6 +13,17 @@ impl LibraryState {
         self.entries.len()
     }
 
+    pub(crate) fn filmstrip_item_aspect(&self, index: usize) -> f32 {
+        self.entries
+            .get(index)
+            .and_then(|entry| entry.layout_size.or(entry.thumbnail_size))
+            .and_then(|[width, height]| {
+                (width > 0 && height > 0).then_some(width as f32 / height as f32)
+            })
+            .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
+            .unwrap_or(1.5)
+    }
+
     pub(crate) fn filmstrip_item(&self, index: usize) -> Option<DesktopFilmstripItem> {
         let entry = self.entries.get(index)?;
         let path = entry.asset.desktop_path()?.to_owned();

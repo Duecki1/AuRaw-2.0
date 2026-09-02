@@ -10,10 +10,11 @@ use std::collections::HashSet;
 use std::sync::{mpsc, Mutex, OnceLock};
 
 pub(crate) const FILMSTRIP_HEIGHT: f32 = 128.0;
-const FILMSTRIP_CARD_WIDTH: f32 = 132.0;
 const FILMSTRIP_CARD_HEIGHT: f32 = 96.0;
 const FILMSTRIP_GAP: f32 = 8.0;
 const FILMSTRIP_PRELOAD_POINTS: f32 = 360.0;
+const FILMSTRIP_HOVER_OVERLAY_ALPHA: u8 = 156;
+const FILMSTRIP_HOVER_ANIMATION_SECONDS: f32 = 0.18;
 const SPLIT_GAP: f32 = 8.0;
 const SPLIT_MIN_PANE_WIDTH: f32 = 160.0;
 const SPLIT_HANDLE_HIT_SLOP: f32 = 5.0;
@@ -199,8 +200,16 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut CalibRawApp, frame: &eframe::F
     let mut open_path: Option<std::path::PathBuf> = None;
     let mut library_action = None;
     let mut protected_indices = HashSet::new();
-    let stride = FILMSTRIP_CARD_WIDTH + FILMSTRIP_GAP;
-    let cards_width = count as f32 * stride - FILMSTRIP_GAP;
+    let mut cards_width = 0.0;
+    let filmstrip_cards = (0..count)
+        .map(|index| {
+            let width = app.library.filmstrip_item_aspect(index) * FILMSTRIP_CARD_HEIGHT;
+            let card = (cards_width, width);
+            cards_width += width + FILMSTRIP_GAP;
+            card
+        })
+        .collect::<Vec<_>>();
+    cards_width = (cards_width - FILMSTRIP_GAP).max(0.0);
 
     ui.style_mut().always_scroll_the_only_direction = true;
 
@@ -218,11 +227,12 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut CalibRawApp, frame: &eframe::F
             let items_left = content_rect.left();
 
             if let Some((index, path)) = center_request.as_ref() {
-                let x = items_left + *index as f32 * stride;
+                let (offset, width) = filmstrip_cards[*index];
+                let x = items_left + offset;
                 let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
                 let active_rect = egui::Rect::from_min_size(
                     egui::pos2(x, y),
-                    egui::vec2(FILMSTRIP_CARD_WIDTH, FILMSTRIP_CARD_HEIGHT),
+                    egui::vec2(width, FILMSTRIP_CARD_HEIGHT),
                 );
                 ui.scroll_to_rect(active_rect, Some(egui::Align::Center));
                 centered_path = Some(path.clone());
@@ -237,8 +247,11 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut CalibRawApp, frame: &eframe::F
                 (preload.left() - items_origin_in_content).clamp(0.0, cards_width.max(0.0));
             let relative_right =
                 (preload.right() - items_origin_in_content).clamp(0.0, cards_width.max(0.0));
-            let first = ((relative_left / stride).floor() as usize).min(count.saturating_sub(1));
-            let last = (((relative_right / stride).ceil() as usize) + 1).min(count);
+            let first = filmstrip_cards
+                .partition_point(|(offset, width)| offset + width + FILMSTRIP_GAP < relative_left);
+            let last = filmstrip_cards
+                .partition_point(|(offset, _)| *offset <= relative_right)
+                .min(count);
 
             for index in first..last {
                 protected_indices.insert(index);
@@ -247,11 +260,12 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut CalibRawApp, frame: &eframe::F
                     continue;
                 };
 
-                let x = items_left + index as f32 * stride;
+                let (offset, width) = filmstrip_cards[index];
+                let x = items_left + offset;
                 let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
                 let rect = egui::Rect::from_min_size(
                     egui::pos2(x, y),
-                    egui::vec2(FILMSTRIP_CARD_WIDTH, FILMSTRIP_CARD_HEIGHT),
+                    egui::vec2(width, FILMSTRIP_CARD_HEIGHT),
                 );
                 let active = active_path.as_deref() == Some(item.path.as_path());
                 let reference = reference_path.as_deref() == Some(item.path.as_path());
@@ -547,29 +561,18 @@ fn filmstrip_thumbnail(
         ui.make_persistent_id(("develop-filmstrip-thumbnail", &item.asset.id)),
         Sense::click(),
     );
-    let painter = ui.painter();
+    let painter = ui.painter_at(rect);
     let card_radius = crate::ui::theme::CARD_RADIUS;
-    let card_fill = if response.hovered() {
-        ui.visuals().widgets.hovered.weak_bg_fill
-    } else {
-        ui.visuals().faint_bg_color
-    };
-    painter.rect_filled(rect, card_radius, card_fill);
 
     if let Some(texture) = item.texture.as_ref() {
-        let image_rect = egui::Rect::from_min_max(
-            rect.min + egui::vec2(3.0, 3.0),
-            egui::pos2(rect.right() - 3.0, rect.bottom() - 25.0),
-        );
         painter.add(
-            egui::epaint::RectShape::filled(image_rect, 5.0, Color32::WHITE).with_texture(
-                texture.id(),
-                cover_uv(item.thumbnail_size, image_rect.size()),
-            ),
+            egui::epaint::RectShape::filled(rect, card_radius, Color32::WHITE)
+                .with_texture(texture.id(), cover_uv(item.thumbnail_size, rect.size())),
         );
     } else {
+        painter.rect_filled(rect, card_radius, ui.visuals().extreme_bg_color);
         painter.text(
-            egui::pos2(rect.center().x, rect.center().y - 9.0),
+            rect.center(),
             Align2::CENTER_CENTER,
             "RAW",
             FontId::proportional(11.0),
@@ -577,22 +580,12 @@ fn filmstrip_thumbnail(
         );
     }
 
+    filmstrip_name_hover_overlay(ui, &response, rect, &item.asset.display_name);
+
     if item.developed_thumbnail_pending {
         let center = rect.right_top() + egui::vec2(-13.0, 13.0);
-        crate::ui::components::pending_indicator(painter, center, 10.0, 13.0);
+        crate::ui::components::pending_indicator(&painter, center, 10.0, 13.0);
     }
-
-    let label_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + 6.0, rect.bottom() - 21.0),
-        egui::pos2(rect.right() - 6.0, rect.bottom() - 4.0),
-    );
-    painter.text(
-        label_rect.center(),
-        Align2::CENTER_CENTER,
-        elide_name(&item.asset.display_name, 18),
-        FontId::proportional(10.0),
-        ui.visuals().text_color(),
-    );
 
     if active {
         painter.rect_stroke(
@@ -630,11 +623,40 @@ fn filmstrip_thumbnail(
         );
     }
 
-    let mut tooltip = item.path.display().to_string();
-    if item.developed_thumbnail_pending {
-        tooltip.push_str("\nThis preview does not include the latest saved edits.");
+    response
+}
+
+fn filmstrip_name_hover_overlay(ui: &Ui, response: &egui::Response, rect: egui::Rect, name: &str) {
+    let hover_progress = ui.ctx().animate_bool_with_time_and_easing(
+        response.id.with("overlay"),
+        response.hovered(),
+        FILMSTRIP_HOVER_ANIMATION_SECONDS,
+        egui::emath::easing::cubic_out,
+    );
+    if hover_progress <= 0.0 {
+        return;
     }
-    response.on_hover_text(tooltip)
+
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        crate::ui::theme::CARD_RADIUS,
+        Color32::from_black_alpha(
+            (f32::from(FILMSTRIP_HOVER_OVERLAY_ALPHA) * hover_progress).round() as u8,
+        ),
+    );
+    let font_size = 14.5;
+    let text_width = (rect.width() - 24.0).max(1.0);
+    let maximum_chars = (text_width / (font_size * 0.55)).floor().max(6.0) as usize;
+    let title = elide_middle(name, maximum_chars);
+    let slide = egui::vec2(0.0, 7.0 * (1.0 - hover_progress));
+    painter.text(
+        rect.center() + slide,
+        Align2::CENTER_CENTER,
+        title,
+        FontId::proportional(font_size),
+        Color32::from_white_alpha((255.0 * hover_progress).round() as u8),
+    );
 }
 
 fn cover_uv(source_size: Option<[u32; 2]>, target_size: egui::Vec2) -> egui::Rect {
@@ -655,6 +677,18 @@ fn cover_uv(source_size: Option<[u32; 2]>, target_size: egui::Vec2) -> egui::Rec
     }
 }
 
+fn elide_middle(value: &str, maximum_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= maximum_chars || maximum_chars < 5 {
+        return value.to_owned();
+    }
+    let left = (maximum_chars - 1) / 2;
+    let right = maximum_chars - 1 - left;
+    let prefix = value.chars().take(left).collect::<String>();
+    let suffix = value.chars().skip(count - right).collect::<String>();
+    format!("{prefix}…{suffix}")
+}
+
 fn fitted_size(available: egui::Vec2, source: egui::Vec2) -> egui::Vec2 {
     if source.x <= 0.0 || source.y <= 0.0 {
         return egui::Vec2::ZERO;
@@ -663,25 +697,6 @@ fn fitted_size(available: egui::Vec2, source: egui::Vec2) -> egui::Vec2 {
         .min(available.y / source.y)
         .max(0.0);
     source * scale
-}
-
-fn elide_name(name: &str, max_chars: usize) -> String {
-    if name.chars().count() <= max_chars {
-        return name.to_owned();
-    }
-    let keep = max_chars.saturating_sub(1);
-    let left = keep / 2;
-    let right = keep - left;
-    let prefix = name.chars().take(left).collect::<String>();
-    let suffix = name
-        .chars()
-        .rev()
-        .take(right)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>();
-    format!("{prefix}…{suffix}")
 }
 
 #[cfg(test)]

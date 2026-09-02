@@ -289,55 +289,7 @@ pub(super) fn thumbnail_tile(
 
     #[cfg(not(target_os = "android"))]
     {
-        let hover_progress = ui.ctx().animate_bool_with_time_and_easing(
-            response.id.with("overlay"),
-            response.hovered(),
-            THUMBNAIL_HOVER_ANIMATION_SECONDS,
-            egui::emath::easing::cubic_out,
-        );
-        if hover_progress > 0.0 {
-            painter.rect_filled(
-                tile_rect,
-                THUMBNAIL_CARD_RADIUS,
-                Color32::from_black_alpha(
-                    (f32::from(THUMBNAIL_HOVER_OVERLAY_ALPHA) * hover_progress).round() as u8,
-                ),
-            );
-            let title_font_size = 14.5;
-            let capture_font_size = 11.5;
-            let details_font_size = 10.5;
-            let text_width = (tile_rect.width() - 24.0).max(1.0);
-            let title_chars = (text_width / (title_font_size * 0.55)).floor().max(6.0) as usize;
-            let detail_chars = (text_width / (capture_font_size * 0.52)).floor().max(8.0) as usize;
-            let title = elide_middle(&entry.asset.display_name, title_chars);
-            let capture = elide_middle(&thumbnail_capture_details(&entry.asset), detail_chars);
-            let details = elide_middle(&thumbnail_hover_details(&entry.asset), detail_chars);
-            let slide = egui::vec2(0.0, 7.0 * (1.0 - hover_progress));
-            let title_center = tile_rect.center() - egui::vec2(0.0, 20.0) + slide;
-            let title_color = Color32::from_white_alpha((255.0 * hover_progress).round() as u8);
-            let detail_color = Color32::from_white_alpha((205.0 * hover_progress).round() as u8);
-            painter.text(
-                title_center,
-                Align2::CENTER_CENTER,
-                title,
-                FontId::proportional(title_font_size),
-                title_color,
-            );
-            painter.text(
-                title_center + egui::vec2(0.0, 21.0),
-                Align2::CENTER_CENTER,
-                capture,
-                FontId::proportional(capture_font_size),
-                detail_color,
-            );
-            painter.text(
-                title_center + egui::vec2(0.0, 40.0),
-                Align2::CENTER_CENTER,
-                details,
-                FontId::proportional(details_font_size),
-                Color32::from_white_alpha((175.0 * hover_progress).round() as u8),
-            );
-        }
+        thumbnail_hover_overlay(ui, &response, tile_rect, &entry.asset);
     }
 
     if entry.developed_thumbnail_pending {
@@ -389,6 +341,67 @@ pub(super) fn thumbnail_tile(
     }
     #[cfg(target_os = "android")]
     response
+}
+
+#[cfg(not(target_os = "android"))]
+fn thumbnail_hover_overlay(
+    ui: &Ui,
+    response: &egui::Response,
+    tile_rect: egui::Rect,
+    asset: &LibraryAsset,
+) {
+    let hover_progress = ui.ctx().animate_bool_with_time_and_easing(
+        response.id.with("overlay"),
+        response.hovered(),
+        THUMBNAIL_HOVER_ANIMATION_SECONDS,
+        egui::emath::easing::cubic_out,
+    );
+    if hover_progress <= 0.0 {
+        return;
+    }
+
+    let painter = ui.painter_at(tile_rect);
+    painter.rect_filled(
+        tile_rect,
+        THUMBNAIL_CARD_RADIUS,
+        Color32::from_black_alpha(
+            (f32::from(THUMBNAIL_HOVER_OVERLAY_ALPHA) * hover_progress).round() as u8,
+        ),
+    );
+    let title_font_size = 14.5;
+    let capture_font_size = 11.5;
+    let details_font_size = 10.5;
+    let text_width = (tile_rect.width() - 24.0).max(1.0);
+    let title_chars = (text_width / (title_font_size * 0.55)).floor().max(6.0) as usize;
+    let detail_chars = (text_width / (capture_font_size * 0.52)).floor().max(8.0) as usize;
+    let title = elide_middle(&asset.display_name, title_chars);
+    let capture = elide_middle(&thumbnail_capture_details(asset), detail_chars);
+    let details = elide_middle(&thumbnail_hover_details(asset), detail_chars);
+    let slide = egui::vec2(0.0, 7.0 * (1.0 - hover_progress));
+    let title_center = tile_rect.center() - egui::vec2(0.0, 20.0) + slide;
+    let title_color = Color32::from_white_alpha((255.0 * hover_progress).round() as u8);
+    let detail_color = Color32::from_white_alpha((205.0 * hover_progress).round() as u8);
+    painter.text(
+        title_center,
+        Align2::CENTER_CENTER,
+        title,
+        FontId::proportional(title_font_size),
+        title_color,
+    );
+    painter.text(
+        title_center + egui::vec2(0.0, 21.0),
+        Align2::CENTER_CENTER,
+        capture,
+        FontId::proportional(capture_font_size),
+        detail_color,
+    );
+    painter.text(
+        title_center + egui::vec2(0.0, 40.0),
+        Align2::CENTER_CENTER,
+        details,
+        FontId::proportional(details_font_size),
+        Color32::from_white_alpha((175.0 * hover_progress).round() as u8),
+    );
 }
 
 #[cfg(any(not(target_os = "android"), test))]
