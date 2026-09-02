@@ -316,7 +316,7 @@ impl CalibRawApp {
         let masks = MaskStack::default();
         let lens_correction = LensCorrectionState::default();
         let edit_history = EditHistory::new(&exposure, &masks, &lens_correction);
-        let app = Self {
+        let mut app = Self {
             develop: DevelopState {
                 current_path: None,
                 original_raw: None,
