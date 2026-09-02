@@ -392,7 +392,7 @@ impl Settings {
             #[cfg(target_os = "android")]
             let camera_folder_help = "Choose a top-level CameraProfiles folder with Android's system picker. CalibRaw recursively imports only .dcp files into private persistent storage, groups matches by camera, and exposes them in Develop.";
             #[cfg(not(target_os = "android"))]
-            let camera_folder_help = "Choose a top-level CameraProfiles folder. CalibRaw searches subfolders recursively. Auto-detect checks Adobe Camera Raw's standard install location on Windows and macOS.";
+            let camera_folder_help = "Choose a top-level DCP profile folder. CalibRaw searches subfolders recursively. Auto-detect checks common CameraProfiles locations on Windows and macOS.";
             crate::ui::theme::strong_with_help(ui, "Camera profile folder", camera_folder_help);
             #[cfg(target_os = "android")]
             if let Some(label) = &app.android.camera_profile_folder_importing_label {
@@ -458,8 +458,8 @@ impl Settings {
                 }
                 #[cfg(not(target_os = "android"))]
                 if ui
-                    .button("Auto-detect Adobe")
-                    .on_hover_text("Check Adobe Camera Raw's standard CameraProfiles location.")
+                    .button("Auto-detect DCP profiles")
+                    .on_hover_text("Check common CameraProfiles locations.")
                     .clicked()
                 {
                     app.auto_detect_camera_profile_folder();

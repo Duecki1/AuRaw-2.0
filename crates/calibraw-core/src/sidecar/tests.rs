@@ -236,7 +236,7 @@ fn mixed_mask_groups_do_not_copy_disabled_manual_components() {
 #[test]
 fn copied_adjustments_include_camera_profile_and_replace_clears_other_categories() {
     let mut source = sample_edits();
-    source.camera_profile = Some(PathBuf::from("Adobe/Camera Standard.dcp"));
+    source.camera_profile = Some(PathBuf::from("Vendor/Camera Standard.dcp"));
     source.exposure.dehaze = 48.0;
 
     let mut destination = sample_edits();
@@ -262,7 +262,7 @@ fn copied_adjustments_include_camera_profile_and_replace_clears_other_categories
     assert_eq!(destination.exposure.dehaze, 48.0);
     assert_eq!(
         destination.camera_profile,
-        Some(PathBuf::from("Adobe/Camera Standard.dcp"))
+        Some(PathBuf::from("Vendor/Camera Standard.dcp"))
     );
     assert!(destination.masks.masks.is_empty());
     assert_eq!(destination.lens, LensEditState::default());

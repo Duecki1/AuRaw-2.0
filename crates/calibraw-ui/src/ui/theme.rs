@@ -393,16 +393,18 @@ pub(crate) fn panel_title(ui: &mut Ui, title: impl Into<RichText>) -> InnerRespo
 
 pub(crate) fn toolbar_frame(ui: &Ui) -> Frame {
     let compact = is_compact_portrait(ui);
+    let stroke = if cfg!(target_os = "android") {
+        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+    } else {
+        Stroke::NONE
+    };
     Frame::new()
         .fill(ui.visuals().panel_fill)
         .inner_margin(Margin::symmetric(
             if compact { 10 } else { CONTENT_MARGIN },
             if compact { 4 } else { 6 },
         ))
-        .stroke(Stroke::new(
-            1.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        ))
+        .stroke(stroke)
         .corner_radius(0.0)
 }
 
@@ -1017,6 +1019,17 @@ mod tests {
                 super::panel_frame(ui).inner_margin,
                 super::workspace_frame(ui).inner_margin
             );
+        });
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_toolbar_removes_its_border_without_removing_padding() {
+        eframe::egui::__run_test_ui(|ui| {
+            let frame = super::toolbar_frame(ui);
+            assert_eq!(frame.inner_margin.left, super::CONTENT_MARGIN);
+            assert_eq!(frame.inner_margin.right, super::CONTENT_MARGIN);
+            assert_eq!(frame.stroke, eframe::egui::Stroke::NONE);
         });
     }
 

@@ -918,13 +918,13 @@ fn dcp_match_score(
     {
         score += 25;
     }
-    if profile_name.contains("adobestandard") || filename.contains("adobestandard") {
-        score += 20;
-    } else if profile_name.contains("camerastandard")
+    if profile_name.contains("camerastandard")
         || filename.contains("camerastandard")
         || profile_name.ends_with("camerast")
         || filename.ends_with("camerast")
     {
+        score += 20;
+    } else if profile_name.contains("standard") || filename.contains("standard") {
         score += 15;
     }
     if profile_name.contains("monochrome")

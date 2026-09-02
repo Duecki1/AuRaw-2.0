@@ -531,7 +531,7 @@ pub(super) fn render_uncached_developed_thumbnail(
             .as_ref()
             .is_none_or(|folder| !folder.is_dir())
     {
-        camera_profile_folder = crate::performance_settings::detected_adobe_camera_profile_folder();
+        camera_profile_folder = crate::performance_settings::detected_camera_profile_folder();
     }
     let requested_camera_profile =
         loaded_sidecar

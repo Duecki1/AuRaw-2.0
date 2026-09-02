@@ -88,16 +88,16 @@ impl CalibRawApp {
     pub(crate) fn auto_detect_camera_profile_folder(&mut self) {
         crate::pipeline::invalidate_dcp_profile_index();
         self.preferences.camera_profile_auto_detect = true;
-        match crate::performance_settings::detected_adobe_camera_profile_folder() {
+        match crate::performance_settings::detected_camera_profile_folder() {
             Some(folder) => {
                 self.preferences.camera_profile_folder = Some(folder.clone());
                 self.preferences.camera_profile_folder_label =
-                    Some("Adobe Camera Raw (auto-detected)".to_owned());
+                    Some("DCP profiles (auto-detected)".to_owned());
                 self.preferences.last_camera_profile = None;
                 self.develop.raw_cache.clear();
                 self.persist_performance_settings();
                 self.ui.notice = Some(format!(
-                    "Using Adobe Camera Raw camera profiles from {}. Reopen the RAW to apply them.",
+                    "Using DCP profiles from {}. Reopen the RAW to apply them.",
                     folder.display()
                 ));
             }
@@ -107,10 +107,8 @@ impl CalibRawApp {
                 self.preferences.last_camera_profile = None;
                 self.develop.raw_cache.clear();
                 self.persist_performance_settings();
-                self.ui.notice = Some(
-                    "No Adobe Camera Raw CameraProfiles folder was found in the standard location."
-                        .to_owned(),
-                );
+                self.ui.notice =
+                    Some("No DCP profile folder was found in the standard locations.".to_owned());
             }
         }
     }

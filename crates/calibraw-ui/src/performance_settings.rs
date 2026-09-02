@@ -259,46 +259,53 @@ pub(crate) fn desktop_path() -> Option<PathBuf> {
 }
 
 #[cfg(not(target_os = "android"))]
-pub(crate) fn detected_adobe_camera_profile_folder() -> Option<PathBuf> {
-    adobe_camera_profile_candidates()
+pub(crate) fn detected_camera_profile_folder() -> Option<PathBuf> {
+    camera_profile_candidates()
         .into_iter()
         .find(|path| path.is_dir())
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn camera_profile_candidates_under(root: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![root.join("CameraRaw").join("CameraProfiles")];
+    if let Ok(entries) = std::fs::read_dir(root) {
+        candidates.extend(
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().join("CameraRaw").join("CameraProfiles")),
+        );
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
 #[cfg(not(target_os = "android"))]
-pub(crate) fn adobe_camera_profile_candidates() -> Vec<PathBuf> {
+pub(crate) fn camera_profile_candidates() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        let mut candidates = Vec::new();
-        if let Some(program_data) =
+        return if let Some(program_data) =
             std::env::var_os("ProgramData").or_else(|| std::env::var_os("ALLUSERSPROFILE"))
         {
-            candidates.push(
-                PathBuf::from(program_data)
-                    .join("Adobe")
-                    .join("CameraRaw")
-                    .join("CameraProfiles"),
-            );
-        }
-        return candidates;
+            camera_profile_candidates_under(&PathBuf::from(program_data))
+        } else {
+            Vec::new()
+        };
     }
 
     #[cfg(target_os = "macos")]
     {
         let mut candidates = Vec::new();
         if let Some(home) = std::env::var_os("HOME") {
-            candidates.push(
-                PathBuf::from(home)
+            candidates.extend(camera_profile_candidates_under(
+                &PathBuf::from(home)
                     .join("Library")
-                    .join("Application Support")
-                    .join("Adobe")
-                    .join("CameraRaw")
-                    .join("CameraProfiles"),
-            );
+                    .join("Application Support"),
+            ));
         }
-        candidates.push(PathBuf::from(
-            "/Library/Application Support/Adobe/CameraRaw/CameraProfiles",
-        ));
+        candidates.extend(camera_profile_candidates_under(&PathBuf::from(
+            "/Library/Application Support",
+        )));
         return candidates;
     }
 

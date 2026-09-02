@@ -99,18 +99,26 @@ native components:
 
 - [LibRaw 0.22.1](https://github.com/LibRaw/LibRaw/tree/0.22.1), Copyright
   LibRaw LLC and other named contributors. LibRaw is dual-licensed under
-  LGPL-2.1 and CDDL-1.0; CalibRaw uses the LGPL-2.1 option.
+  LGPL-2.1 and CDDL-1.0; CalibRaw uses the
+  [LGPL-2.1 option](https://github.com/LibRaw/LibRaw/blob/0.22.1/LICENSE.LGPL).
 - [Lensfun 0.3.4](https://github.com/lensfun/lensfun/tree/v0.3.4). The library
-  is LGPL-3.0 and its separately packaged profile database is CC BY-SA 3.0.
+  is [LGPL-3.0](https://www.gnu.org/licenses/lgpl-3.0.html) and its separately
+  packaged profile database is
+  [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/legalcode).
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime), under the MIT
   license. Desktop Automatic mode downloads a pinned platform archive from
   [CalibRaw Artifacts](https://huggingface.co/Duecki/CalibRaw-Artifacts); Manual
-  mode uses the runtime selected by the user. Android builds obtain the pinned
-  runtime selected by `ort-sys` and package its shared library.
+  mode uses the runtime selected by the user. Android statically links the
+  pinned ONNX Runtime 1.24.2 archive selected by `ort-sys`; see its
+  [license](https://github.com/microsoft/onnxruntime/blob/v1.24.2/LICENSE) and
+  [third-party notices](https://github.com/microsoft/onnxruntime/blob/v1.24.2/ThirdPartyNotices.txt).
 - Android native builds also statically link pinned GLib (LGPL-2.1-or-later),
   GNU libiconv (LGPL-2.1), PCRE2 (BSD-3-Clause), libffi (MIT), and zlib
   (Zlib). Their versions and source hashes are pinned in
   `android/app/src/main/cpp/CMakeLists.txt` or its resolved GLib subprojects.
+- Android packages include the Android NDK's `libc++_shared` runtime, licensed
+  under Apache-2.0 with the LLVM exception. The NDK supplies the applicable
+  notices in its `NOTICE` and `NOTICE.toolchain` files.
 - The committed Gradle wrapper is part of Gradle, licensed under Apache-2.0.
 
 Windows and macOS artifacts may bundle additional runtime libraries discovered

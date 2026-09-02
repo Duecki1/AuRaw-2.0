@@ -499,12 +499,12 @@ impl CalibRawApp {
                         ui.separator();
                         ui.hyperlink_to(
                             "RawNIND model card",
-                            "https://github.com/darktable-org/darktable-ai/tree/master/models/rawdenoise-nind",
+                            "https://github.com/darktable-org/darktable-ai/tree/release-5.6.0/models/rawdenoise-nind",
                         );
                         ui.separator();
                         ui.hyperlink_to(
                             "GPL-3.0 license",
-                            "https://github.com/darktable-org/darktable-ai/blob/master/LICENSE",
+                            "https://github.com/darktable-org/darktable-ai/blob/release-5.6.0/LICENSE",
                         );
                     }
                 });

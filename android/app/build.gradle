@@ -224,6 +224,12 @@ tasks.withType(JavaCompile).configureEach {
     options.compilerArgs += ["-Xlint:deprecation"]
 }
 
+tasks.matching {
+    it.name == "mergeDebugAssets" || it.name == "mergeReleaseAssets"
+}.configureEach {
+    dependsOn(stageLegalAssets)
+}
+
 def buildRustEnabled = providers.gradleProperty("calibrawBuildRust")
     .map { it.toBoolean() }
     .getOrElse(true)

@@ -2,7 +2,7 @@
 CalibRaw is a fast, GPU-accelerated RAW photo editor. <br>
 It was made not to focus on design, but to be performant and non-destructive to the export.
 
-I developed this project because I could not find a suitable alternative to Lightroom® that is both performant and easy to use. <br>
+I developed this project to provide a performant, approachable, open-source RAW editing workflow. <br>
 CalibRaw is available for Linux, Android, Windows, and macOS, with Linux and Android being the primary focus.
 
 Download the latest release [here](https://github.com/Duecki1/CalibRaw/releases).
