@@ -93,8 +93,7 @@ impl CalibRawApp {
         }
 
         let (encoder, decoder) = self.sam21_model_paths();
-        let vitmatte = self.vitmatte_model_path();
-        if crate::ai_masks::object_models_are_verified(&encoder, &decoder, &vitmatte) {
+        if crate::ai_masks::object_models_are_verified(&encoder, &decoder) {
             self.start_object_worker(mask_index, component_index, encoder, decoder, false);
         } else {
             self.ai.object_pending_target = Some((mask_index, component_index));
@@ -185,17 +184,12 @@ impl CalibRawApp {
         #[cfg(target_os = "android")]
         let runtime_sha256 = None;
 
-        let vitmatte_path = self.vitmatte_model_path();
-        let needs_download = !crate::ai_masks::object_models_are_verified(
-            &encoder_path,
-            &decoder_path,
-            &vitmatte_path,
-        );
+        let needs_download =
+            !crate::ai_masks::object_models_are_verified(&encoder_path, &decoder_path);
         let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let receiver = spawn_object_mask(ObjectMaskWorkerRequest {
             encoder_path,
             decoder_path,
-            vitmatte_path,
             allow_download,
             runtime_path,
             runtime_sha256,

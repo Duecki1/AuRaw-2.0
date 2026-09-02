@@ -16,7 +16,6 @@ pub(crate) enum AiModel {
     BiRefNetLow,
     BiRefNetMedium,
     BiRefNetHigh,
-    ViTMatte,
     SamEncoder,
     SamDecoder,
     BigLama,
@@ -343,19 +342,19 @@ mod tests {
             })
         })
         .unwrap();
-        slot.ensure_model(AiModel::ViTMatte, interactive_masks(), 0, true, || {
-            events.lock().unwrap().push("create vitmatte".to_owned());
+        slot.ensure_model(AiModel::SamEncoder, interactive_masks(), 0, true, || {
+            events.lock().unwrap().push("create encoder".to_owned());
             Ok::<_, ()>(DropLog {
-                label: "vitmatte",
+                label: "encoder",
                 events: Arc::clone(&events),
             })
         })
         .unwrap();
         assert_eq!(
             &*events.lock().unwrap(),
-            &["drop low".to_owned(), "create vitmatte".to_owned()]
+            &["drop low".to_owned(), "create encoder".to_owned()]
         );
-        assert_eq!(slot.active_model(), Some(AiModel::ViTMatte));
+        assert_eq!(slot.active_model(), Some(AiModel::SamEncoder));
     }
 
     #[test]
@@ -380,7 +379,7 @@ mod tests {
     #[test]
     fn leaving_ai_context_requests_unload() {
         let mut slot = RuntimeSlot::default();
-        slot.ensure_model(AiModel::ViTMatte, interactive_masks(), 0, true, || {
+        slot.ensure_model(AiModel::SamDecoder, interactive_masks(), 0, true, || {
             Ok::<_, ()>(())
         })
         .unwrap();
@@ -488,7 +487,7 @@ mod tests {
     #[test]
     fn provider_policy_change_invalidates_current_session() {
         let mut slot = RuntimeSlot::default();
-        slot.ensure_model(AiModel::ViTMatte, interactive_masks(), 4, true, || {
+        slot.ensure_model(AiModel::SamDecoder, interactive_masks(), 4, true, || {
             Ok::<_, ()>(())
         })
         .unwrap();

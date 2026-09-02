@@ -136,30 +136,6 @@ impl BiRefNetQuality {
         }
     }
 }
-pub const VITMATTE_MODEL_BYTES: u64 = 103_885_865;
-pub const VITMATTE_MODEL_URL: &str = "https://huggingface.co/Xenova/vitmatte-small-composition-1k/resolve/5e04250c42d7a03dc125b13adb415a47584ec60b/onnx/model.onnx";
-pub const VITMATTE_MODEL_SHA256_HEX: &str =
-    "bf28d2e0be2c073286e88d60ad649d7123da2749a2d99133fd1098d5887e0225";
-
-const VITMATTE_ARTIFACT: ModelArtifact = ModelArtifact {
-    name: "ViTMatte model",
-    url: Some(VITMATTE_MODEL_URL),
-    sha256: VITMATTE_MODEL_SHA256_HEX,
-    size: ArtifactSize::Exact(VITMATTE_MODEL_BYTES),
-    progress_total: VITMATTE_MODEL_BYTES,
-};
-const VITMATTE_DOWNLOAD: DownloadOptions = DownloadOptions {
-    connect_timeout: Duration::from_secs(45),
-    response_timeout: Duration::from_secs(60),
-    body_timeout: Duration::from_secs(30 * 60),
-    attempts: 5,
-    resume: true,
-};
-const VITMATTE_INSTALL: ModelInstallSpec = ModelInstallSpec {
-    artifact: VITMATTE_ARTIFACT,
-    download: VITMATTE_DOWNLOAD,
-    progress_label: "ViTMatte edge-refinement model",
-};
 const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
     connect_timeout: Duration::from_secs(30),
     response_timeout: Duration::from_secs(30),
@@ -167,9 +143,6 @@ const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
     attempts: 1,
     resume: false,
 };
-const VITMATTE_MAX_EDGE_DESKTOP: u32 = 2048;
-const VITMATTE_MAX_EDGE_ANDROID: u32 = 1024;
-const VITMATTE_SIZE_DIVISOR: u32 = 32;
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
@@ -230,10 +203,9 @@ pub fn birefnet_model_is_verified(quality: BiRefNetQuality, path: &Path) -> bool
     quality.model().install().is_installed(path)
 }
 
-pub fn object_models_are_verified(encoder: &Path, decoder: &Path, vitmatte: &Path) -> bool {
+pub fn object_models_are_verified(encoder: &Path, decoder: &Path) -> bool {
     object::SAM21_ENCODER_INSTALL.is_installed(encoder)
         && object::SAM21_DECODER_INSTALL.is_installed(decoder)
-        && VITMATTE_INSTALL.is_installed(vitmatte)
 }
 
 pub struct SubjectMaskWorkerRequest {
@@ -781,236 +753,6 @@ fn restore_birefnet_output(
         .into_iter()
         .map(|probability| (probability.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
         .collect())
-}
-
-fn ensure_vitmatte_model<F>(
-    path: &Path,
-    allow_download: bool,
-    cancellation: &AtomicBool,
-    progress: F,
-) -> Result<()>
-where
-    F: FnMut(ModelDownloadProgress),
-{
-    VITMATTE_INSTALL.ensure_installed(path, allow_download, progress, || {
-        ensure_ai_not_cancelled(cancellation)
-    })
-}
-
-#[derive(Clone, Copy, Debug)]
-struct MatteCrop {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
-fn matte_crop_for_mask(mask: &[u8], width: u32, height: u32) -> Option<MatteCrop> {
-    let mut min_x = width;
-    let mut min_y = height;
-    let mut max_x = 0;
-    let mut max_y = 0;
-    let mut found = false;
-    for (index, &value) in mask.iter().enumerate() {
-        if value <= 4 {
-            continue;
-        }
-        let x = index as u32 % width;
-        let y = index as u32 / width;
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x);
-        max_y = max_y.max(y);
-        found = true;
-    }
-    if !found {
-        return None;
-    }
-    let margin = (((max_x - min_x + 1).max(max_y - min_y + 1) as f32 * 0.08).round() as u32)
-        .clamp(24, width.max(height).max(24));
-    let x = min_x.saturating_sub(margin);
-    let y = min_y.saturating_sub(margin);
-    let x1 = max_x.saturating_add(margin).min(width - 1);
-    let y1 = max_y.saturating_add(margin).min(height - 1);
-    Some(MatteCrop {
-        x,
-        y,
-        width: x1 - x + 1,
-        height: y1 - y + 1,
-    })
-}
-
-fn build_vitmatte_trimap(mask: &[u8], width: usize, height: usize) -> Vec<u8> {
-    let mut unknown = vec![false; mask.len()];
-    for y in 0..height {
-        for x in 0..width {
-            let index = y * width + x;
-            let foreground = mask[index] >= 128;
-            unknown[index] = (96..=160).contains(&mask[index])
-                || (y.saturating_sub(1)..=(y + 1).min(height - 1)).any(|ny| {
-                    (x.saturating_sub(1)..=(x + 1).min(width - 1))
-                        .any(|nx| (mask[ny * width + nx] >= 128) != foreground)
-                });
-        }
-    }
-    let radius = ((width.min(height) as f32 / 64.0).round() as usize).clamp(6, 24);
-    for _ in 0..radius {
-        let source = unknown.clone();
-        for y in 0..height {
-            for x in 0..width {
-                let index = y * width + x;
-                if !unknown[index] {
-                    unknown[index] = (y.saturating_sub(1)..=(y + 1).min(height - 1)).any(|ny| {
-                        (x.saturating_sub(1)..=(x + 1).min(width - 1))
-                            .any(|nx| source[ny * width + nx])
-                    });
-                }
-            }
-        }
-    }
-    mask.iter()
-        .zip(unknown)
-        .map(|(&value, unknown)| {
-            if unknown {
-                128
-            } else if value >= 128 {
-                255
-            } else {
-                0
-            }
-        })
-        .collect()
-}
-
-fn refine_mask_with_vitmatte(
-    model_path: &Path,
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-    coarse_mask: &[u8],
-    strength: f32,
-) -> Result<Vec<u8>> {
-    let pixels = usize::try_from(u64::from(width) * u64::from(height))?;
-    anyhow::ensure!(
-        coarse_mask.len() == pixels,
-        "ViTMatte coarse-mask size mismatch"
-    );
-    anyhow::ensure!(rgba.len() == pixels * 4, "ViTMatte RGB size mismatch");
-    let Some(crop) = matte_crop_for_mask(coarse_mask, width, height) else {
-        return Ok(coarse_mask.to_vec());
-    };
-    let source = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba.to_vec())
-        .context("invalid ViTMatte source image")?;
-    let crop_image =
-        image::imageops::crop_imm(&source, crop.x, crop.y, crop.width, crop.height).to_image();
-    let full_mask = ImageBuffer::<Luma<u8>, _>::from_raw(width, height, coarse_mask.to_vec())
-        .context("invalid ViTMatte coarse mask")?;
-    let crop_mask =
-        image::imageops::crop_imm(&full_mask, crop.x, crop.y, crop.width, crop.height).to_image();
-    let max_edge = if cfg!(target_os = "android") {
-        VITMATTE_MAX_EDGE_ANDROID
-    } else {
-        VITMATTE_MAX_EDGE_DESKTOP
-    };
-    let scale = (max_edge as f64 / crop.width.max(crop.height) as f64).min(1.0);
-    let model_width = (crop.width as f64 * scale).round().max(1.0) as u32;
-    let model_height = (crop.height as f64 * scale).round().max(1.0) as u32;
-    let image =
-        image::imageops::resize(&crop_image, model_width, model_height, FilterType::Lanczos3);
-    let mask = image::imageops::resize(&crop_mask, model_width, model_height, FilterType::Lanczos3);
-    let trimap = build_vitmatte_trimap(mask.as_raw(), model_width as usize, model_height as usize);
-    if !trimap.contains(&128) {
-        return Ok(coarse_mask.to_vec());
-    }
-    let padded_width = model_width.div_ceil(VITMATTE_SIZE_DIVISOR) * VITMATTE_SIZE_DIVISOR;
-    let padded_height = model_height.div_ceil(VITMATTE_SIZE_DIVISOR) * VITMATTE_SIZE_DIVISOR;
-    let plane = padded_width as usize * padded_height as usize;
-    let mut values = vec![0.0; plane * 4];
-    for y in 0..model_height as usize {
-        for x in 0..model_width as usize {
-            let source_index = y * model_width as usize + x;
-            let destination = y * padded_width as usize + x;
-            let rgba_index = source_index * 4;
-            values[destination] = image.as_raw()[rgba_index] as f32 / 127.5 - 1.0;
-            values[plane + destination] = image.as_raw()[rgba_index + 1] as f32 / 127.5 - 1.0;
-            values[plane * 2 + destination] = image.as_raw()[rgba_index + 2] as f32 / 127.5 - 1.0;
-            values[plane * 3 + destination] = trimap[source_index] as f32 / 255.0;
-        }
-    }
-    let input = Tensor::from_array((
-        [1usize, 4, padded_height as usize, padded_width as usize],
-        values,
-    ))
-    .context("create ViTMatte input tensor")?;
-    let (output_width, output_height, alpha) = with_model_session(
-        AiModel::ViTMatte,
-        model_path,
-        SessionOptions::new("ViTMatte"),
-        mask_model_retention(cache_object_ai_sessions()),
-        |session| run_vitmatte_session(session, input),
-    )?;
-    let alpha = ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(output_width, output_height, alpha)
-        .context("invalid ViTMatte alpha buffer")?;
-    let alpha = image::imageops::crop_imm(
-        &alpha,
-        0,
-        0,
-        model_width.min(output_width),
-        model_height.min(output_height),
-    )
-    .to_image();
-    let alpha = image::imageops::resize(&alpha, crop.width, crop.height, FilterType::Lanczos3);
-    let trimap = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(model_width, model_height, trimap)
-        .context("invalid ViTMatte trimap buffer")?;
-    let trimap = image::imageops::resize(&trimap, crop.width, crop.height, FilterType::Nearest);
-    let mut output = coarse_mask.to_vec();
-    for y in 0..crop.height as usize {
-        for x in 0..crop.width as usize {
-            let crop_index = y * crop.width as usize + x;
-            if trimap.as_raw()[crop_index] == 128 {
-                let index = (crop.y as usize + y) * width as usize + crop.x as usize + x;
-                let predicted = alpha.as_raw()[crop_index].clamp(0.0, 1.0) * 255.0;
-                output[index] = (coarse_mask[index] as f32 * (1.0 - strength.clamp(0.0, 1.0))
-                    + predicted * strength.clamp(0.0, 1.0))
-                .round()
-                .clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    Ok(output)
-}
-
-fn run_vitmatte_session(
-    session: &mut FallbackSession,
-    input: Tensor<f32>,
-) -> Result<(u32, u32, Vec<f32>)> {
-    session.run_with_fallback("ViTMatte ONNX inference", |ort_session, _| {
-        let outputs = ort_session
-            .run(ort::inputs![&input])
-            .context("run ViTMatte ONNX inference")?;
-        let output = outputs
-            .values()
-            .next()
-            .context("ViTMatte returned no output tensors")?;
-        let (shape, alpha) = output
-            .try_extract_tensor::<f32>()
-            .context("read ViTMatte output tensor")?;
-        anyhow::ensure!(
-            shape.len() == 4 && shape[0] == 1 && shape[1] == 1,
-            "unexpected ViTMatte output shape {shape:?}"
-        );
-        let height = usize::try_from(shape[2]).context("ViTMatte output height is invalid")?;
-        let width = usize::try_from(shape[3]).context("ViTMatte output width is invalid")?;
-        anyhow::ensure!(
-            alpha.len() == width * height && alpha.iter().all(|value| value.is_finite()),
-            "invalid ViTMatte output"
-        );
-        Ok((
-            u32::try_from(width)?,
-            u32::try_from(height)?,
-            alpha.to_vec(),
-        ))
-    })
 }
 
 fn sigmoid_probability(logit: f32) -> f32 {

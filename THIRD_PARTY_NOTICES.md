@@ -90,7 +90,6 @@ from CalibRaw's GPL license; users must comply with the model terms for their us
 | Remove | [Carve/LaMa-ONNX Big-LaMa](https://huggingface.co/Carve/LaMa-ONNX/tree/a3ee2fca54baebec351b8fa7786154ffa7555aa6), an ONNX port of the original LaMa model | Apache-2.0 |
 | Subject selection | [BiRefNet v1 ONNX checkpoints](https://github.com/ZhengPeng7/BiRefNet/releases/tag/v1) | MIT |
 | Object selection | [SAM 2.1 Hiera Tiny ONNX encoder and decoder](https://huggingface.co/akiyamanx/sam2.1-hiera-tiny-onnx/tree/aa11669045f8d82c74e46f8f77c9b56792c90ebb), based on Meta SAM 2 | Apache-2.0 |
-| Subject/object edge refinement | [ViTMatte ONNX](https://huggingface.co/Xenova/vitmatte-small-composition-1k/tree/5e04250c42d7a03dc125b13adb415a47584ec60b), based on `hustvl/vitmatte-small-composition-1k` | Apache-2.0 |
 | RAW denoise | [darktable-ai RawNIND release 5.6.0](https://github.com/darktable-org/darktable-ai/tree/release-5.6.0/models/rawdenoise-nind) | GPL-3.0 |
 
 ## Native libraries and release packages

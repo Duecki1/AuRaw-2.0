@@ -570,8 +570,7 @@ impl CalibRawApp {
             }
 
             let (encoder, decoder) = self.sam21_model_paths();
-            let vitmatte = self.vitmatte_model_path();
-            if crate::ai_masks::object_models_are_verified(&encoder, &decoder, &vitmatte) {
+            if crate::ai_masks::object_models_are_verified(&encoder, &decoder) {
                 self.start_object_worker(mask_index, component_index, encoder, decoder, false);
             } else {
                 self.ai.object_pending_target = Some((mask_index, component_index));

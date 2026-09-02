@@ -29,11 +29,6 @@ impl CalibRawApp {
             .join(self.ai.birefnet_quality.model().cache_filename)
     }
 
-    pub(in crate::app) fn vitmatte_model_path(&self) -> PathBuf {
-        self.ai_model_root()
-            .join("vitmatte-small-composition-1k.onnx")
-    }
-
     pub(in crate::app) fn big_lama_model_path(&self) -> PathBuf {
         self.ai_model_root()
             .join(crate::remove::BIG_LAMA_MODEL_FILENAME)

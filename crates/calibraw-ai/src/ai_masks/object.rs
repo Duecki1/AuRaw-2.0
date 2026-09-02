@@ -110,7 +110,6 @@ pub enum ObjectMaskEvent {
 pub struct ObjectMaskWorkerRequest {
     pub encoder_path: PathBuf,
     pub decoder_path: PathBuf,
-    pub vitmatte_path: PathBuf,
     pub allow_download: bool,
     pub runtime_path: Option<PathBuf>,
     pub runtime_sha256: Option<String>,
@@ -122,7 +121,6 @@ pub fn spawn_object_mask(worker: ObjectMaskWorkerRequest) -> mpsc::Receiver<Obje
     let ObjectMaskWorkerRequest {
         encoder_path,
         decoder_path,
-        vitmatte_path,
         allow_download,
         runtime_path,
         runtime_sha256,
@@ -150,21 +148,12 @@ pub fn spawn_object_mask(worker: ObjectMaskWorkerRequest) -> mpsc::Receiver<Obje
                         &worker_sender,
                         &cancellation,
                     )?;
-                    ensure_vitmatte_model(
-                        &vitmatte_path,
-                        allow_download,
-                        &cancellation,
-                        |progress| {
-                            let _ = worker_sender.send(ObjectMaskEvent::DownloadProgress(progress));
-                        },
-                    )?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let decoder_only = inference.cache.is_some();
                     let _ = worker_sender.send(ObjectMaskEvent::Inferencing { decoder_only });
                     infer_object_mask(
                         &encoder_path,
                         &decoder_path,
-                        &vitmatte_path,
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
                         inference,
@@ -213,7 +202,6 @@ fn ensure_sam_model(
 fn infer_object_mask(
     encoder_path: &Path,
     decoder_path: &Path,
-    vitmatte_path: &Path,
     runtime_path: Option<&Path>,
     runtime_sha256: Option<&str>,
     request: ObjectMaskRequest,
@@ -363,22 +351,6 @@ fn infer_object_mask(
         full_mask[target_start..target_start + crop.width as usize]
             .copy_from_slice(&crop_mask[source_start..source_start + crop.width as usize]);
     }
-    full_mask = match refine_mask_with_vitmatte(
-        vitmatte_path,
-        source.as_raw(),
-        request.source_width,
-        request.source_height,
-        &full_mask,
-        (0.65 + request.edge_refine.clamp(0.0, 1.0) * 0.35).clamp(0.0, 1.0),
-    ) {
-        Ok(refined) => refined,
-        Err(error) => {
-            log::warn!(
-                "ViTMatte object-edge refinement failed; using the cleaned SAM mask: {error:#}"
-            );
-            full_mask
-        }
-    };
     cache.low_res_logits = resize_f32(
         &decoded.selected_logits,
         decoded.width,

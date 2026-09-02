@@ -1,7 +1,7 @@
 use crate::ai_masks::{
     spawn_object_mask, spawn_subject_mask, BiRefNetQuality, ObjectInferenceCache, ObjectMaskEvent,
     ObjectMaskRequest, ObjectMaskWorkerRequest, SubjectMaskEvent, SubjectMaskWorkerRequest,
-    SAM21_MODEL_BYTES_ESTIMATE, VITMATTE_MODEL_BYTES,
+    SAM21_MODEL_BYTES_ESTIMATE,
 };
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;

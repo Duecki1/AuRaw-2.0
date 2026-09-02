@@ -75,13 +75,12 @@ impl CalibRawApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    ui.label("Object masks use SAM 2.1 Hiera Tiny followed automatically by ViTMatte trimap-guided alpha matting for fine hair, fur, and semi-transparent boundaries.");
+                    ui.label("Object masks use SAM 2.1 Hiera Tiny with local edge-aware cleanup.");
                     ui.label(format!(
-                        "The first use downloads about {:.0} MB for SAM plus {:.0} MB for ViTMatte and stores the ONNX files in CalibRaw's model cache.",
-                        SAM21_MODEL_BYTES_ESTIMATE as f64 / 1_000_000.0,
-                        VITMATTE_MODEL_BYTES as f64 / 1_000_000.0
+                        "The first use downloads about {:.0} MB for SAM and stores the ONNX files in CalibRaw's model cache.",
+                        SAM21_MODEL_BYTES_ESTIMATE as f64 / 1_000_000.0
                     ));
-                    ui.label("Model licenses: Apache-2.0. The models are optional and can be used only after this download.");
+                    ui.label("Model license: Apache-2.0. The model is optional and can be used only after this download.");
                     ui.label("Inference is local. No photograph or prompt stroke is uploaded.");
                     ui.label("When you continue, your device connects directly to Hugging Face. Hugging Face receives connection data such as your IP address and request time under its own privacy policy. CalibRaw sends no account identifier or telemetry.");
                     ui.horizontal_wrapped(|ui| {
