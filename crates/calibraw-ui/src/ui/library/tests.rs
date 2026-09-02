@@ -159,6 +159,37 @@ fn thumbnail_selection_uses_unified_asset_ids() {
     assert!(!library.selection_mode());
 }
 
+#[cfg(not(target_os = "android"))]
+#[test]
+fn desktop_range_and_select_all_selection_follow_library_order() {
+    let mut library = LibraryState::new();
+    library.entries = [
+        test_asset("one.CR3"),
+        test_asset("two.NEF"),
+        test_asset("three.ARW"),
+        test_asset("four.DNG"),
+    ]
+    .into_iter()
+    .map(new_library_entry)
+    .collect();
+    let ordered_ids = library
+        .entries
+        .iter()
+        .map(|entry| entry.asset.id.clone())
+        .collect::<Vec<_>>();
+
+    library.select_thumbnail(&ordered_ids[1]);
+    library.select_thumbnail_range(&ordered_ids[3], &ordered_ids, false);
+    assert_eq!(library.selected_assets.len(), 3);
+    assert!(library.selected_assets.contains(&ordered_ids[1]));
+    assert!(library.selected_assets.contains(&ordered_ids[2]));
+    assert!(library.selected_assets.contains(&ordered_ids[3]));
+
+    library.select_all_thumbnails();
+    assert_eq!(library.selected_assets.len(), ordered_ids.len());
+    assert!(library.selection_mode());
+}
+
 #[test]
 fn filename_search_is_case_insensitive_and_supports_comma_separated_fragments() {
     let terms = library_search_terms(" DSC23824, dsc384384 , ");

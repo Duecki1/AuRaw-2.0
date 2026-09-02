@@ -718,6 +718,7 @@ pub(crate) struct LibraryState {
     search_query: String,
     selected_assets: HashSet<LibraryAssetId>,
     selection_mode: bool,
+    selection_anchor: Option<LibraryAssetId>,
     image_clipboard: Option<ImageClipboard>,
     pub(crate) adjustment_clipboard: Option<LibraryAdjustmentClipboard>,
     asset_transfer_receiver: Option<mpsc::Receiver<AssetTransferCompletion>>,

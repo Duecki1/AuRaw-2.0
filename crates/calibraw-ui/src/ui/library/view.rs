@@ -268,6 +268,13 @@ impl Library {
             };
 
             let mut protected_thumbnail_indices = HashSet::new();
+            #[cfg(not(target_os = "android"))]
+            let selection_order = app
+                .library
+                .entries
+                .iter()
+                .map(|entry| entry.asset.id.clone())
+                .collect::<Vec<_>>();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show_viewport(ui, |ui, viewport| {
@@ -327,7 +334,16 @@ impl Library {
                         #[cfg(not(target_os = "android"))]
                         {
                             if response.clicked() && !response.secondary_clicked() {
-                                if app.library.selection_mode() {
+                                let modifiers = ui.input(|input| input.modifiers);
+                                if modifiers.shift {
+                                    app.library.select_thumbnail_range(
+                                        &asset.id,
+                                        &selection_order,
+                                        modifiers.ctrl || modifiers.command,
+                                    );
+                                } else if modifiers.ctrl || modifiers.command {
+                                    app.library.toggle_thumbnail_selection(&asset.id);
+                                } else if app.library.selection_mode() {
                                     app.library.toggle_thumbnail_selection(&asset.id);
                                 } else {
                                     open_asset = Some(asset.clone());
@@ -337,7 +353,7 @@ impl Library {
                                 && app.library.selection_mode()
                                 && !app.library.selected_assets.contains(&asset.id)
                             {
-                                app.library.selected_assets.insert(asset.id.clone());
+                                app.library.select_thumbnail(&asset.id);
                             }
                             let context_assets = if app.library.selection_mode() {
                                 app.library
@@ -352,6 +368,7 @@ impl Library {
                                 vec![asset.clone()]
                             };
                             let mut select_from_context_menu = false;
+                            let mut select_all_from_context_menu = false;
                             crate::ui::theme::context_menu(&response, |ui| {
                                 if !app.library.selection_mode() {
                                     if crate::ui::theme::context_menu_item(ui, true, "Select")
@@ -360,17 +377,24 @@ impl Library {
                                         select_from_context_menu = true;
                                         ui.close();
                                     }
-                                    ui.separator();
                                 }
+                                if crate::ui::theme::context_menu_item(ui, true, "Select All")
+                                    .clicked()
+                                {
+                                    select_all_from_context_menu = true;
+                                    ui.close();
+                                }
+                                ui.separator();
                                 if let Some(action) =
                                     library_image_context_menu(ui, app, &asset, &context_assets)
                                 {
                                     library_action = Some(action);
                                 }
                             });
-                            if select_from_context_menu {
-                                app.library.begin_selection();
-                                app.library.selected_assets.insert(asset.id.clone());
+                            if select_all_from_context_menu {
+                                app.library.select_all_thumbnails();
+                            } else if select_from_context_menu {
+                                app.library.select_thumbnail(&asset.id);
                             }
                         }
                     }

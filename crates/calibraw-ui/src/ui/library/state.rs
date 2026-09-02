@@ -48,6 +48,7 @@ impl LibraryState {
             search_query: String::new(),
             selected_assets: HashSet::new(),
             selection_mode: false,
+            selection_anchor: None,
             image_clipboard: None,
             adjustment_clipboard: None,
             asset_transfer_receiver: None,
@@ -123,6 +124,7 @@ impl LibraryState {
             search_query: String::new(),
             selected_assets: HashSet::new(),
             selection_mode: false,
+            selection_anchor: None,
             image_clipboard: None,
             adjustment_clipboard: None,
             asset_transfer_receiver: None,
@@ -185,6 +187,7 @@ impl LibraryState {
     pub(crate) fn clear_selection(&mut self) {
         self.selected_assets.clear();
         self.selection_mode = false;
+        self.selection_anchor = None;
     }
 
     #[cfg(not(target_os = "android"))]
@@ -225,6 +228,11 @@ impl LibraryState {
             .map(|entry| entry.asset.id.clone())
             .collect();
         self.selection_mode = !self.selected_assets.is_empty();
+        self.selection_anchor = self
+            .entries
+            .iter()
+            .find(|entry| library_filename_matches(&entry.asset.display_name, &terms))
+            .map(|entry| entry.asset.id.clone());
 
         #[cfg(target_os = "android")]
         crate::android::set_back_navigation_active(self.selection_mode);
@@ -236,11 +244,66 @@ impl LibraryState {
         self.begin_selection();
         if !self.selected_assets.remove(asset_id) {
             self.selected_assets.insert(asset_id.clone());
+            self.selection_anchor = Some(asset_id.clone());
+        } else if self.selection_anchor.as_ref() == Some(asset_id) {
+            self.selection_anchor = self.selected_assets.iter().next().cloned();
         }
         if self.selected_assets.is_empty() {
             self.clear_selection();
         }
         self.selection_mode()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(super) fn select_thumbnail(&mut self, asset_id: &LibraryAssetId) {
+        self.begin_selection();
+        self.selected_assets.insert(asset_id.clone());
+        self.selection_anchor = Some(asset_id.clone());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(super) fn select_thumbnail_range(
+        &mut self,
+        asset_id: &LibraryAssetId,
+        ordered_asset_ids: &[LibraryAssetId],
+        extend_selection: bool,
+    ) {
+        let Some(anchor) = self.selection_anchor.as_ref() else {
+            self.selected_assets.clear();
+            self.select_thumbnail(asset_id);
+            return;
+        };
+        let Some(anchor_index) = ordered_asset_ids.iter().position(|id| id == anchor) else {
+            self.selected_assets.clear();
+            self.select_thumbnail(asset_id);
+            return;
+        };
+        let Some(target_index) = ordered_asset_ids.iter().position(|id| id == asset_id) else {
+            return;
+        };
+
+        if !extend_selection {
+            self.selected_assets.clear();
+        }
+        let (start, end) = if anchor_index <= target_index {
+            (anchor_index, target_index)
+        } else {
+            (target_index, anchor_index)
+        };
+        self.selected_assets
+            .extend(ordered_asset_ids[start..=end].iter().cloned());
+        self.begin_selection();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(super) fn select_all_thumbnails(&mut self) {
+        self.selected_assets = self
+            .entries
+            .iter()
+            .map(|entry| entry.asset.id.clone())
+            .collect();
+        self.selection_anchor = self.entries.first().map(|entry| entry.asset.id.clone());
+        self.selection_mode = !self.selected_assets.is_empty();
     }
 
     pub(crate) fn thumbnail_worker_count(&self) -> usize {
@@ -697,6 +760,13 @@ impl LibraryState {
                     self.sort_entries();
                     self.selected_assets
                         .retain(|asset_id| self.entry_indices.contains_key(asset_id));
+                    if self
+                        .selection_anchor
+                        .as_ref()
+                        .is_some_and(|asset_id| !self.entry_indices.contains_key(asset_id))
+                    {
+                        self.selection_anchor = None;
+                    }
                     if self.selected_assets.is_empty() && !self.selection_mode {
                         #[cfg(target_os = "android")]
                         crate::android::set_back_navigation_active(false);
