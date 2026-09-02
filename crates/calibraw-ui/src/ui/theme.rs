@@ -108,8 +108,8 @@ pub(crate) const LUMINANCE_WHITE: Color32 = Color32::from_rgb(246, 246, 246);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UiDesign {
-    MidnightPink,
     #[default]
+    MidnightPink,
     GraphiteMint,
     Porcelain,
     DaylightBlue,
@@ -126,7 +126,7 @@ impl UiDesign {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::MidnightPink => "Obsidian Blue · Dark",
-            Self::GraphiteMint => "Graphite Blue · Dark",
+            Self::GraphiteMint => "Obsidian Red · Dark",
             Self::Porcelain => "Porcelain · Light",
             Self::DaylightBlue => "Daylight · Light",
         }
@@ -135,7 +135,7 @@ impl UiDesign {
     pub(crate) const fn description(self) -> &'static str {
         match self {
             Self::MidnightPink => "Deep neutral surfaces with a restrained blue accent.",
-            Self::GraphiteMint => "Cool graphite surfaces with a focused blue accent.",
+            Self::GraphiteMint => "Warm near-black surfaces with a restrained ruby accent.",
             Self::Porcelain => "Warm paper-like surfaces with a restrained coral accent.",
             Self::DaylightBlue => "Clean cool surfaces with a focused blue accent.",
         }
@@ -164,20 +164,20 @@ impl UiDesign {
                 open_stroke: WIDGET_OPEN_STROKE,
             },
             Self::GraphiteMint => ThemePalette {
-                accent: Color32::from_rgb(79, 132, 185),
-                accent_bright: Color32::from_rgb(126, 170, 213),
-                hyperlink: Color32::from_rgb(111, 162, 210),
-                border: Color32::from_rgb(47, 55, 66),
-                panel: Color32::from_rgb(19, 24, 30),
-                window: Color32::from_rgb(14, 18, 23),
-                faint: Color32::from_rgb(27, 32, 39),
-                extreme: Color32::from_rgb(9, 12, 16),
-                inactive: Color32::from_rgb(30, 37, 45),
-                inactive_stroke: Color32::from_rgb(52, 63, 76),
-                hovered: Color32::from_rgb(39, 47, 57),
-                hovered_stroke: Color32::from_rgb(75, 88, 104),
-                open: Color32::from_rgb(35, 42, 51),
-                open_stroke: Color32::from_rgb(66, 78, 94),
+                accent: Color32::from_rgb(166, 70, 86),
+                accent_bright: Color32::from_rgb(211, 111, 125),
+                hyperlink: Color32::from_rgb(222, 125, 137),
+                border: Color32::from_rgb(55, 45, 49),
+                panel: Color32::from_rgb(25, 22, 24),
+                window: Color32::from_rgb(18, 16, 18),
+                faint: Color32::from_rgb(34, 29, 31),
+                extreme: Color32::from_rgb(11, 10, 11),
+                inactive: Color32::from_rgb(39, 33, 35),
+                inactive_stroke: Color32::from_rgb(67, 52, 56),
+                hovered: Color32::from_rgb(49, 40, 43),
+                hovered_stroke: Color32::from_rgb(99, 69, 76),
+                open: Color32::from_rgb(44, 36, 39),
+                open_stroke: Color32::from_rgb(88, 61, 67),
             },
             Self::Porcelain => ThemePalette {
                 accent: Color32::from_rgb(232, 132, 169),
@@ -881,9 +881,20 @@ pub(crate) fn apply(ctx: &egui::Context, design: UiDesign) {
 #[cfg(test)]
 mod tests {
     use super::{
-        platform_control_height, platform_floating_action_edge, ANDROID_CONTROL_HEIGHT,
+        platform_control_height, platform_floating_action_edge, UiDesign, ANDROID_CONTROL_HEIGHT,
         CONTROL_HEIGHT, DESKTOP_CONTROL_HEIGHT, FLOATING_ACTION_EDGE, FLOATING_ACTION_MARGIN,
     };
+
+    #[test]
+    fn obsidian_blue_is_the_default_and_dark_accents_are_distinct() {
+        assert_eq!(UiDesign::default(), UiDesign::MidnightPink);
+
+        let blue = UiDesign::MidnightPink.palette().accent;
+        let red = UiDesign::GraphiteMint.palette().accent;
+        assert!(blue.b() > blue.r() && blue.b() > blue.g());
+        assert!(red.r() > red.g() && red.r() > red.b());
+        assert_ne!(blue, red);
+    }
 
     #[test]
     fn android_widgets_request_the_full_touch_target_height() {

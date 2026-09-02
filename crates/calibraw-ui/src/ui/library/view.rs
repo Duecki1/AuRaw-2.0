@@ -8,23 +8,10 @@ impl Library {
         let folders_available = platform::local_folders_available(app);
         let can_create_folder = platform::can_create_local_folder(app);
         let mut requested_toolbar_action = None;
-        let sidebar_summary = selected_library_folder_name(app)
-            .unwrap_or_else(|| "Browse and organize your photos".to_owned());
 
         crate::ui::theme::card_header(ui, |ui| {
             crate::ui::theme::toolbar_row(ui, |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    crate::ui::theme::toolbar_title(ui, "Library");
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&sidebar_summary)
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                        )
-                        .truncate(),
-                    );
-                });
+                crate::ui::theme::toolbar_title(ui, "Folders");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::ui::icons::phosphor_icon_button(
                         ui,
@@ -82,17 +69,6 @@ impl Library {
                             ui.set_width(content_width);
                             ui.set_max_width(content_width);
                             crate::ui::theme::content_card(ui, |ui| {
-                                ui.strong("Folders");
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Choose a folder to browse its RAW photos.",
-                                    )
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                                );
-                                ui.add_space(crate::ui::theme::SPACE_XS);
-                                ui.separator();
-                                ui.add_space(crate::ui::theme::SPACE_XS);
                                 platform::show_local_folder_tree(ui, app, action_in_progress);
                             });
                             ui.add_space(10.0);
