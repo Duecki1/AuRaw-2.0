@@ -1477,8 +1477,10 @@ mod object_mask_tests {
 
     #[test]
     fn sam_downloads_retry_and_resume() {
-        assert!(SAM_DOWNLOAD.attempts > 1);
-        assert!(SAM_DOWNLOAD.resume);
+        const {
+            assert!(SAM_DOWNLOAD.attempts > 1);
+            assert!(SAM_DOWNLOAD.resume);
+        }
     }
 
     #[test]

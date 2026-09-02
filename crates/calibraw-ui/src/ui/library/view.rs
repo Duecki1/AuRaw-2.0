@@ -341,9 +341,10 @@ impl Library {
                                         &selection_order,
                                         modifiers.ctrl || modifiers.command,
                                     );
-                                } else if modifiers.ctrl || modifiers.command {
-                                    app.library.toggle_thumbnail_selection(&asset.id);
-                                } else if app.library.selection_mode() {
+                                } else if modifiers.ctrl
+                                    || modifiers.command
+                                    || app.library.selection_mode()
+                                {
                                     app.library.toggle_thumbnail_selection(&asset.id);
                                 } else {
                                     open_asset = Some(asset.clone());
@@ -370,13 +371,12 @@ impl Library {
                             let mut select_from_context_menu = false;
                             let mut select_all_from_context_menu = false;
                             crate::ui::theme::context_menu(&response, |ui| {
-                                if !app.library.selection_mode() {
-                                    if crate::ui::theme::context_menu_item(ui, true, "Select")
+                                if !app.library.selection_mode()
+                                    && crate::ui::theme::context_menu_item(ui, true, "Select")
                                         .clicked()
-                                    {
-                                        select_from_context_menu = true;
-                                        ui.close();
-                                    }
+                                {
+                                    select_from_context_menu = true;
+                                    ui.close();
                                 }
                                 if crate::ui::theme::context_menu_item(ui, true, "Select All")
                                     .clicked()

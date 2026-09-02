@@ -260,14 +260,15 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut CalibRawApp, frame: &eframe::F
                     .partition_point(|(offset, _)| *offset <= relative_right)
                     .min(count);
 
-                for index in first..last {
+                for (index, &(offset, width)) in
+                    filmstrip_cards.iter().enumerate().take(last).skip(first)
+                {
                     protected_indices.insert(index);
                     app.library.touch_and_request_thumbnail(index, ui.ctx());
                     let Some(item) = app.library.filmstrip_item(index) else {
                         continue;
                     };
 
-                    let (offset, width) = filmstrip_cards[index];
                     let x = items_left + offset;
                     let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
                     let rect = egui::Rect::from_min_size(

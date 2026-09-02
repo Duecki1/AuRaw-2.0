@@ -1078,8 +1078,10 @@ mod tests {
 
     #[test]
     fn big_lama_download_retries_and_resumes() {
-        assert!(BIG_LAMA_DOWNLOAD.attempts > 1);
-        assert!(BIG_LAMA_DOWNLOAD.resume);
+        const {
+            assert!(BIG_LAMA_DOWNLOAD.attempts > 1);
+            assert!(BIG_LAMA_DOWNLOAD.resume);
+        }
     }
 
     #[test]

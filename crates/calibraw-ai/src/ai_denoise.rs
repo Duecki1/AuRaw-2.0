@@ -1342,8 +1342,10 @@ mod tests {
 
     #[test]
     fn rawnind_download_retries_and_resumes() {
-        assert!(RAWNIND_DOWNLOAD.attempts > 1);
-        assert!(RAWNIND_DOWNLOAD.resume);
+        const {
+            assert!(RAWNIND_DOWNLOAD.attempts > 1);
+            assert!(RAWNIND_DOWNLOAD.resume);
+        }
     }
 
     fn cache_test_raw(width: u32, height: u32) -> LoadedRaw {

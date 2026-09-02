@@ -224,17 +224,6 @@ pub fn spawn_subject_mask(
     request: SubjectMaskWorkerRequest,
     cancellation: Arc<AtomicBool>,
 ) -> mpsc::Receiver<SubjectMaskEvent> {
-    let SubjectMaskWorkerRequest {
-        quality,
-        crop_refinement,
-        model_path,
-        allow_download,
-        runtime_path,
-        runtime_sha256,
-        width,
-        height,
-        rgba,
-    } = request;
     let (sender, receiver) = mpsc::channel();
     let worker_sender = sender.clone();
     let spawn = std::thread::Builder::new()
@@ -244,24 +233,15 @@ pub fn spawn_subject_mask(
                 (|| {
                     ensure_ai_not_cancelled(&cancellation)?;
                     ensure_model(
-                        quality,
-                        &model_path,
-                        allow_download,
+                        request.quality,
+                        &request.model_path,
+                        request.allow_download,
                         &worker_sender,
                         &cancellation,
                     )?;
                     ensure_ai_not_cancelled(&cancellation)?;
                     let _ = worker_sender.send(SubjectMaskEvent::Inferencing);
-                    infer_subject(
-                        &model_path,
-                        runtime_path.as_deref(),
-                        runtime_sha256.as_deref(),
-                        quality,
-                        crop_refinement,
-                        width,
-                        height,
-                        rgba,
-                    )
+                    infer_subject(request)
                 })()
             }))
             .unwrap_or_else(|panic| {
@@ -483,16 +463,18 @@ fn cache_object_ai_sessions() -> bool {
     }
 }
 
-fn infer_subject(
-    model_path: &Path,
-    runtime_path: Option<&Path>,
-    runtime_sha256: Option<&str>,
-    quality: BiRefNetQuality,
-    crop_refinement: bool,
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-) -> Result<SubjectMaskResult> {
+fn infer_subject(request: SubjectMaskWorkerRequest) -> Result<SubjectMaskResult> {
+    let SubjectMaskWorkerRequest {
+        quality,
+        crop_refinement,
+        model_path,
+        allow_download: _,
+        runtime_path,
+        runtime_sha256,
+        width,
+        height,
+        rgba,
+    } = request;
     const MAX_SUBJECT_MASK_PIXELS: u64 = 17_000_000;
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
@@ -510,10 +492,10 @@ fn infer_subject(
         "subject-mask RGBA buffer has {} bytes, expected {expected_bytes}",
         rgba.len()
     );
-    initialize_runtime(runtime_path, runtime_sha256)?;
+    initialize_runtime(runtime_path.as_deref(), runtime_sha256.as_deref())?;
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
         .context("invalid preview image for BiRefNet")?;
-    let mask = subject_mask(model_path, quality, &image, crop_refinement)?;
+    let mask = subject_mask(&model_path, quality, &image, crop_refinement)?;
     Ok(SubjectMaskResult {
         width,
         height,
@@ -837,8 +819,10 @@ mod tests {
 
     #[test]
     fn birefnet_downloads_retry_and_resume() {
-        assert!(BIREFNET_DOWNLOAD.attempts > 1);
-        assert!(BIREFNET_DOWNLOAD.resume);
+        const {
+            assert!(BIREFNET_DOWNLOAD.attempts > 1);
+            assert!(BIREFNET_DOWNLOAD.resume);
+        }
     }
 
     #[test]
