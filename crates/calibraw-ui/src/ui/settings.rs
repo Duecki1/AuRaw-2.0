@@ -534,8 +534,8 @@ impl Settings {
                     if crate::ui::theme::checkbox_with_help(
                         ui,
                         &mut crop_refinement,
-                        "Refine subject edges with cropped passes",
-                        "Runs additional BiRefNet passes on cropped subject regions. This may improve edge quality, but it can be worse at recognizing the entire subject and takes longer.",
+                        "Refine subject edges with a cropped pass",
+                        "Runs one additional BiRefNet pass on the cropped subject region. This may improve edge quality, but it can be worse at recognizing the entire subject and takes longer.",
                     )
                     .changed()
                     {

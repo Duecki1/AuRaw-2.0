@@ -517,7 +517,7 @@ fn infer_subject(
 }
 
 /// Runs BiRefNet over the full frame and, when enabled on desktop, follows it
-/// with native-resolution crop passes for finer boundary detail.
+/// with one native-resolution crop pass for finer boundary detail.
 fn subject_mask(
     model_path: &Path,
     quality: BiRefNetQuality,
@@ -536,33 +536,6 @@ fn subject_mask(
                     .to_image();
             let crop_alpha = infer_birefnet(model_path, quality, &crop_image)?;
             mask_refine::merge_crop_pass(&mut mask, width, crop, &crop_alpha, 8);
-
-            // A small, top-biased third pass gives hair and other wispy upper detail
-            // another full native-resolution crop without changing the global mask.
-            let top_height = (crop.height as f32 * 0.30).ceil() as u32;
-            if top_height >= 16 {
-                let hair_crop = mask_refine::expand_crop(
-                    mask_refine::MaskCrop {
-                        x: crop.x,
-                        y: crop.y,
-                        width: crop.width,
-                        height: top_height,
-                    },
-                    width,
-                    height,
-                    0.15,
-                );
-                let hair_image = image::imageops::crop_imm(
-                    image,
-                    hair_crop.x,
-                    hair_crop.y,
-                    hair_crop.width,
-                    hair_crop.height,
-                )
-                .to_image();
-                let hair_alpha = infer_birefnet(model_path, quality, &hair_image)?;
-                mask_refine::merge_crop_pass(&mut mask, width, hair_crop, &hair_alpha, 8);
-            }
         }
     }
     mask_refine::guided_filter_color(image.as_raw(), &mut mask, width, height, 8, 1e-4)?;
