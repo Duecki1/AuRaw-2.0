@@ -151,9 +151,15 @@ impl CalibRawApp {
             return;
         }
         let model_dir = self.rawnind_model_dir();
-        if saved_result_exists || crate::ai_denoise::models_are_verified(&model_dir) {
+        let runtime_download_needed =
+            !saved_result_exists && self.automatic_onnx_runtime_download_needed();
+        if saved_result_exists
+            || (crate::ai_denoise::models_are_verified(&model_dir) && !runtime_download_needed)
+        {
+            self.ai.runtime_download_consent_pending = false;
             self.start_ai_denoise(frame, false);
         } else {
+            self.ai.runtime_download_consent_pending = runtime_download_needed;
             self.ai.denoise_consent_open = true;
             self.egui_ctx.request_repaint();
         }
@@ -404,6 +410,7 @@ impl CalibRawApp {
     pub(crate) fn abandon_ai_denoise_worker(&mut self) {
         self.cancel_foreground_operation_if(ForegroundOperationKind::AiDenoise);
         self.ai.denoise_consent_open = false;
+        self.ai.runtime_download_consent_pending = false;
     }
 
     pub(crate) fn resume_persisted_ai_denoise(&mut self, frame: &eframe::Frame) {
@@ -437,8 +444,17 @@ impl CalibRawApp {
 
     pub(crate) fn show_ai_denoise_dialogs(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if self.ai.denoise_consent_open {
+            let model_download_needed =
+                !crate::ai_denoise::models_are_verified(&self.rawnind_model_dir());
+            let runtime_download_needed = self.ai.runtime_download_consent_pending;
+            let title = match (model_download_needed, runtime_download_needed) {
+                (true, true) => "Download AI denoise models and ONNX Runtime?",
+                (true, false) => "Download RawNIND AI denoise models?",
+                (false, true) => "Download ONNX Runtime?",
+                (false, false) => "Prepare AI denoise?",
+            };
             crate::ui::responsive_popup(
-                egui::Window::new("Download RawNIND AI denoise models?"),
+                egui::Window::new(title),
                 ctx,
                 540.0,
             )
@@ -448,38 +464,58 @@ impl CalibRawApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.label("AI Denoise uses darktable-ai's RawNIND UtNet2 package: joint Bayer denoise/demosaic and a linear Rec.2020 model for X-Trans.");
-                ui.label(format!(
-                    "The first use downloads {:.1} MB from CalibRaw Artifacts on Hugging Face and stores about 62 MB of verified ONNX models in CalibRaw's cache.",
-                    RAWNIND_PACKAGE_BYTES as f64 / 1_000_000.0
-                ));
-                ui.label("Model and integration license: GPL-3.0. Inference is local; no photograph is uploaded.");
+                if model_download_needed {
+                    ui.strong("AI denoise models");
+                    ui.label(format!(
+                        "RawNIND package: {:.1} MB download, producing about 62 MB of verified ONNX models in CalibRaw's cache. Model and integration license: GPL-3.0.",
+                        RAWNIND_PACKAGE_BYTES as f64 / 1_000_000.0
+                    ));
+                }
+                #[cfg(not(target_os = "android"))]
+                if runtime_download_needed {
+                    Self::show_automatic_onnx_runtime_download_details(ui);
+                }
+                if model_download_needed && runtime_download_needed {
+                    ui.separator();
+                    ui.label("CalibRaw downloads and verifies the model package first, followed by ONNX Runtime. Both are cached locally.");
+                }
+                ui.label("Inference is local; no photograph is uploaded.");
                 ui.label("Hugging Face receives ordinary connection data such as your IP address and request time. CalibRaw sends no account identifier or telemetry.");
                 #[cfg(not(target_os = "android"))]
-                if self.ai.runtime_mode == OnnxRuntimeMode::Automatic {
-                    ui.label("Automatic runtime mode also downloads and verifies the ONNX Runtime package for this operating system and CPU when it is not cached yet.");
+                if self.ai.runtime_mode == OnnxRuntimeMode::Manual
+                    && self.ai.runtime_path.is_none()
+                {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Manual runtime mode needs a trusted local ONNX Runtime library. Select one in Settings or switch to Automatic.",
+                    );
                 }
                 ui.horizontal_wrapped(|ui| {
-                    ui.hyperlink_to(
-                        "RawNIND model card",
-                        "https://github.com/darktable-org/darktable-ai/tree/master/models/rawdenoise-nind",
-                    );
-                    ui.separator();
                     ui.hyperlink_to(
                         "Hugging Face privacy policy",
                         "https://huggingface.co/privacy",
                     );
-                    ui.separator();
-                    ui.hyperlink_to(
-                        "GPL-3.0 license",
-                        "https://github.com/darktable-org/darktable-ai/blob/master/LICENSE",
-                    );
+                    if model_download_needed {
+                        ui.separator();
+                        ui.hyperlink_to(
+                            "RawNIND model card",
+                            "https://github.com/darktable-org/darktable-ai/tree/master/models/rawdenoise-nind",
+                        );
+                        ui.separator();
+                        ui.hyperlink_to(
+                            "GPL-3.0 license",
+                            "https://github.com/darktable-org/darktable-ai/blob/master/LICENSE",
+                        );
+                    }
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Consent, download and apply").clicked() {
-                        self.start_ai_denoise(frame, true);
+                        self.ai.runtime_download_consent_pending = false;
+                        self.start_ai_denoise(frame, model_download_needed);
                     }
                     if ui.button("Cancel").clicked() {
+                        self.ai.runtime_download_consent_pending = false;
                         self.ai.denoise_consent_open = false;
                         self.develop.exposure.ai_denoise_enabled = false;
                     }

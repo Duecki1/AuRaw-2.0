@@ -7,6 +7,7 @@ impl CalibRawApp {
             return;
         }
         self.ai.runtime_mode = mode;
+        self.ai.runtime_download_consent_pending = false;
         self.persist_performance_settings();
         self.ui.notice = Some(
             "ONNX Runtime mode changed. Restart CalibRaw if an AI runtime was already used in this session."
@@ -22,6 +23,40 @@ impl CalibRawApp {
                 (self.ai.runtime_path.clone(), self.ai.runtime_sha256.clone())
             }
         }
+    }
+
+    pub(in crate::app) fn automatic_onnx_runtime_download_needed(&self) -> bool {
+        #[cfg(not(target_os = "android"))]
+        {
+            self.ai.runtime_mode == OnnxRuntimeMode::Automatic
+                && !calibraw_ai::automatic_onnx_runtime_is_installed()
+        }
+        #[cfg(target_os = "android")]
+        {
+            false
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(in crate::app) fn show_automatic_onnx_runtime_download_details(ui: &mut egui::Ui) {
+        ui.separator();
+        ui.strong("ONNX Runtime");
+        if let Some(runtime) = calibraw_ai::automatic_onnx_runtime_info() {
+            ui.label(format!(
+                "ONNX Runtime {} for {}: {:.1} MB download.",
+                runtime.version,
+                runtime.platform,
+                runtime.download_bytes as f64 / 1_000_000.0
+            ));
+        } else {
+            ui.label(format!(
+                "Automatic ONNX Runtime for {} / {}.",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ));
+        }
+        ui.label("This native runtime is required to execute the AI model locally. Its archive is downloaded from CalibRaw Artifacts, checked against its pinned size and SHA-256, and cached after extraction.");
+        ui.label("Runtime license: MIT.");
     }
 
     pub(in crate::app) fn ai_model_root(&self) -> PathBuf {

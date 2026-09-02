@@ -186,10 +186,13 @@ impl CalibRawApp {
             return;
         }
         let model_path = self.big_lama_model_path();
-        if crate::remove::big_lama_model_is_verified(&model_path) {
+        let runtime_download_needed = self.automatic_onnx_runtime_download_needed();
+        if crate::remove::big_lama_model_is_verified(&model_path) && !runtime_download_needed {
+            self.ai.runtime_download_consent_pending = false;
             let existing = self.inpaint.edits.as_ref().clone();
             let _ = self.start_remove_request(frame, existing, brush, false);
         } else {
+            self.ai.runtime_download_consent_pending = runtime_download_needed;
             self.inpaint.pending_brush = Some(brush);
             self.inpaint.pending_retouch = None;
             self.inpaint.model_consent_open = true;
@@ -241,8 +244,17 @@ impl CalibRawApp {
         if !self.inpaint.model_consent_open {
             return;
         }
+        let model_download_needed =
+            !crate::remove::big_lama_model_is_verified(&self.big_lama_model_path());
+        let runtime_download_needed = self.ai.runtime_download_consent_pending;
+        let title = match (model_download_needed, runtime_download_needed) {
+            (true, true) => "Download Remove model and ONNX Runtime?",
+            (true, false) => "Download Remove model?",
+            (false, true) => "Download ONNX Runtime?",
+            (false, false) => "Prepare Remove?",
+        };
         crate::ui::responsive_popup(
-            egui::Window::new("Download Remove model?"),
+            egui::Window::new(title),
             ctx,
             520.0,
         )
@@ -251,37 +263,45 @@ impl CalibRawApp {
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.label("Remove uses the Big-LaMa Places2 ONNX inpainting model for local context repair.");
-            ui.label(format!(
-                concat!(
-                    "The first use downloads about {:.0} MB and stores the verified ONNX ",
-                    "file in CalibRaw's shared model cache."
-                ),
-                crate::remove::BIG_LAMA_MODEL_BYTES as f64 / 1_000_000.0
-            ));
-            ui.label(format!(
-                "Model license: {}. Provenance: {}.",
-                crate::remove::BIG_LAMA_MODEL_LICENSE,
-                crate::remove::BIG_LAMA_MODEL_PROVENANCE
-            ));
+            if model_download_needed {
+                ui.strong("Remove model");
+                ui.label(format!(
+                    "Big-LaMa Places2 ONNX: about {:.0} MB download. Model license: {}.",
+                    crate::remove::BIG_LAMA_MODEL_BYTES as f64 / 1_000_000.0,
+                    crate::remove::BIG_LAMA_MODEL_LICENSE
+                ));
+                ui.label(format!(
+                    "Provenance: {}.",
+                    crate::remove::BIG_LAMA_MODEL_PROVENANCE
+                ));
+                ui.label(format!(
+                    "CalibRaw accepts only the pinned model after exact size and SHA-256 verification ({}).",
+                    &crate::remove::BIG_LAMA_MODEL_SHA256_HEX[..12]
+                ));
+            }
+            #[cfg(not(target_os = "android"))]
+            if runtime_download_needed {
+                Self::show_automatic_onnx_runtime_download_details(ui);
+            }
+            if model_download_needed && runtime_download_needed {
+                ui.separator();
+                ui.label("CalibRaw downloads and verifies the model first, followed by ONNX Runtime. Both are cached locally.");
+            }
             ui.label("Inference is local. No photograph or Remove stroke is uploaded.");
             ui.label(concat!(
                 "When you continue, your device connects directly to Hugging Face. Hugging Face ",
                 "receives connection data such as your IP address and request time under its privacy ",
                 "policy. CalibRaw sends no account identifier or telemetry."
             ));
-            ui.label(format!(
-                "CalibRaw accepts only the pinned model after exact size and SHA-256 verification ({}).",
-                &crate::remove::BIG_LAMA_MODEL_SHA256_HEX[..12]
-            ));
             ui.horizontal_wrapped(|ui| {
                 ui.hyperlink_to("Hugging Face privacy policy", "https://huggingface.co/privacy");
-                ui.separator();
-                ui.hyperlink_to("Big-LaMa ONNX model card", "https://huggingface.co/Carve/LaMa-ONNX");
+                if model_download_needed {
+                    ui.separator();
+                    ui.hyperlink_to("Big-LaMa ONNX model card", "https://huggingface.co/Carve/LaMa-ONNX");
+                }
             });
             #[cfg(not(target_os = "android"))]
-            if self.ai.runtime_mode == OnnxRuntimeMode::Automatic {
-                ui.label("Automatic runtime mode also downloads and verifies the ONNX Runtime package for this operating system and CPU when it is not cached yet.");
-            } else if self.ai.runtime_path.is_none() {
+            if self.ai.runtime_mode == OnnxRuntimeMode::Manual && self.ai.runtime_path.is_none() {
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     "Manual runtime mode needs a trusted local ONNX Runtime library. Select one in Settings or switch to Automatic.",
@@ -292,13 +312,20 @@ impl CalibRawApp {
                 if ui.button("Consent, download and continue").clicked()
                     && self.ai_runtime_ready()
                 {
+                    self.ai.runtime_download_consent_pending = false;
                     self.inpaint.model_consent_open = false;
                     if let Some(brush) = self.inpaint.pending_brush.take() {
                         let existing = self.inpaint.edits.as_ref().clone();
-                        let _ = self.start_remove_request(frame, existing, brush, true);
+                        let _ = self.start_remove_request(
+                            frame,
+                            existing,
+                            brush,
+                            model_download_needed,
+                        );
                     }
                 }
                 if ui.button("Cancel").clicked() {
+                    self.ai.runtime_download_consent_pending = false;
                     self.inpaint.model_consent_open = false;
                     self.inpaint.pending_brush = None;
                     self.inpaint.pending_retouch = None;
@@ -360,6 +387,8 @@ impl CalibRawApp {
                         Err(error) => {
                             if error.contains("consent to its download again") {
                                 self.inpaint.pending_brush = pending_brush;
+                                self.ai.runtime_download_consent_pending =
+                                    self.automatic_onnx_runtime_download_needed();
                                 self.inpaint.model_consent_open = true;
                                 self.ui.notice = Some(
                                     "Big-LaMa needs to be installed or re-verified before Remove can continue."

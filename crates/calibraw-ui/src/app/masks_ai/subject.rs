@@ -45,9 +45,14 @@ impl CalibRawApp {
             return;
         }
         let path = self.birefnet_model_path();
-        if crate::ai_masks::birefnet_model_is_verified(self.ai.birefnet_quality, &path) {
+        let runtime_download_needed = self.automatic_onnx_runtime_download_needed();
+        if crate::ai_masks::birefnet_model_is_verified(self.ai.birefnet_quality, &path)
+            && !runtime_download_needed
+        {
+            self.ai.runtime_download_consent_pending = false;
             self.start_subject_worker(path, false);
         } else {
+            self.ai.runtime_download_consent_pending = runtime_download_needed;
             self.ai.subject_consent_open = true;
         }
     }

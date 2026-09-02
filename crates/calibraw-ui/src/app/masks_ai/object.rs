@@ -93,9 +93,14 @@ impl CalibRawApp {
         }
 
         let (encoder, decoder) = self.sam21_model_paths();
-        if crate::ai_masks::object_models_are_verified(&encoder, &decoder) {
+        let runtime_download_needed = self.automatic_onnx_runtime_download_needed();
+        if crate::ai_masks::object_models_are_verified(&encoder, &decoder)
+            && !runtime_download_needed
+        {
+            self.ai.runtime_download_consent_pending = false;
             self.start_object_worker(mask_index, component_index, encoder, decoder, false);
         } else {
+            self.ai.runtime_download_consent_pending = runtime_download_needed;
             self.ai.object_pending_target = Some((mask_index, component_index));
             self.ai.object_consent_open = true;
         }

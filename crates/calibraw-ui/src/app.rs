@@ -1089,6 +1089,7 @@ pub(crate) struct AiState {
     pub(crate) runtime_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
     pub(crate) runtime_sha256: Option<String>,
+    pub(crate) runtime_download_consent_pending: bool,
     pub(crate) library_mask_refresh: Option<LibraryAiMaskRefreshState>,
     pub(crate) subject_consent_open: bool,
     pub(crate) object_consent_open: bool,

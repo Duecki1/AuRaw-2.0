@@ -21,6 +21,7 @@ enum ArchiveFormat {
 #[derive(Clone, Copy)]
 struct RuntimePackage {
     platform: &'static str,
+    version: &'static str,
     archive_name: &'static str,
     url: &'static str,
     bytes: u64,
@@ -32,6 +33,7 @@ fn runtime_package() -> Result<RuntimePackage> {
     let package = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => RuntimePackage {
             platform: "linux-x86_64",
+            version: "1.29.0",
             archive_name: "onnxruntime-linux-x64-1.29.0.tgz",
             url: "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/onnxruntime/linux-x86_64/onnxruntime-linux-x64-1.29.0.tgz",
             bytes: 11_082_880,
@@ -40,6 +42,7 @@ fn runtime_package() -> Result<RuntimePackage> {
         },
         ("linux", "aarch64") => RuntimePackage {
             platform: "linux-arm64",
+            version: "1.29.0",
             archive_name: "onnxruntime-linux-aarch64-1.29.0.tgz",
             url: "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/onnxruntime/linux-arm64/onnxruntime-linux-aarch64-1.29.0.tgz",
             bytes: 10_027_600,
@@ -48,6 +51,7 @@ fn runtime_package() -> Result<RuntimePackage> {
         },
         ("macos", "aarch64") => RuntimePackage {
             platform: "macos-arm64",
+            version: "1.29.0",
             archive_name: "onnxruntime-osx-arm64-1.29.0.tgz",
             url: "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/onnxruntime/macos-arm64/onnxruntime-osx-arm64-1.29.0.tgz",
             bytes: 41_578_864,
@@ -56,6 +60,7 @@ fn runtime_package() -> Result<RuntimePackage> {
         },
         ("macos", "x86_64") => RuntimePackage {
             platform: "macos-x86_64",
+            version: "1.23.2",
             archive_name: "onnxruntime-osx-x86_64-1.23.2.tgz",
             url: "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/onnxruntime/macos-x86_64/onnxruntime-osx-x86_64-1.23.2.tgz",
             bytes: 11_676_322,
@@ -64,6 +69,7 @@ fn runtime_package() -> Result<RuntimePackage> {
         },
         ("windows", "x86_64") => RuntimePackage {
             platform: "windows-x86_64",
+            version: "1.29.0",
             archive_name: "onnxruntime-win-x64-1.29.0.zip",
             url: "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/onnxruntime/windows-x86_64/onnxruntime-win-x64-1.29.0.zip",
             bytes: 79_645_520,
@@ -72,6 +78,7 @@ fn runtime_package() -> Result<RuntimePackage> {
         },
         ("windows", "aarch64") => RuntimePackage {
             platform: "windows-arm64",
+            version: "1.29.0",
             archive_name: "onnxruntime-win-arm64-1.29.0.zip",
             url: "https://huggingface.co/Duecki/CalibRaw-Artifacts/resolve/91085ce0ec322a4a7cbd20059688690218e52f9a/onnxruntime/windows-arm64/onnxruntime-win-arm64-1.29.0.zip",
             bytes: 81_679_033,
@@ -83,6 +90,35 @@ fn runtime_package() -> Result<RuntimePackage> {
         ),
     };
     Ok(package)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AutomaticOnnxRuntimeInfo {
+    pub platform: &'static str,
+    pub version: &'static str,
+    pub download_bytes: u64,
+}
+
+pub fn automatic_onnx_runtime_info() -> Option<AutomaticOnnxRuntimeInfo> {
+    let package = runtime_package().ok()?;
+    Some(AutomaticOnnxRuntimeInfo {
+        platform: package.platform,
+        version: package.version,
+        download_bytes: package.bytes,
+    })
+}
+
+pub fn automatic_onnx_runtime_is_installed() -> bool {
+    let Ok(package) = runtime_package() else {
+        return false;
+    };
+    let install_dir = crate::desktop_model_cache_root()
+        .join("onnxruntime")
+        .join(package.platform);
+    matches!(
+        load_verified_install(&install_dir, package.sha256),
+        Ok(Some(_))
+    )
 }
 
 fn install_lock() -> MutexGuard<'static, ()> {

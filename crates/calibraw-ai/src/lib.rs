@@ -25,7 +25,10 @@ pub use model_runtime::{set_active_ai_context, AiRuntimeContext};
 #[cfg(not(target_os = "android"))]
 pub use model_artifact::desktop_model_cache_root;
 #[cfg(not(target_os = "android"))]
-pub use onnx_runtime_artifact::ensure_automatic_onnx_runtime;
+pub use onnx_runtime_artifact::{
+    automatic_onnx_runtime_info, automatic_onnx_runtime_is_installed,
+    ensure_automatic_onnx_runtime, AutomaticOnnxRuntimeInfo,
+};
 
 #[cfg(not(target_os = "android"))]
 pub use execution_provider::set_ai_acceleration_enabled;
