@@ -2637,13 +2637,13 @@ insights.
 ## GNU General Public License v3.0 or later (`GPL-3.0-or-later`)
 
 Used by:
-- `calibraw-ai 2.0.0` — https://github.com/Duecki1/CalibRaw
-- `calibraw-cli 2.0.0` — https://github.com/Duecki1/CalibRaw
-- `calibraw-core 2.0.0` — https://github.com/Duecki1/CalibRaw
-- `calibraw-ffi 2.0.0` — https://github.com/Duecki1/CalibRaw
-- `calibraw-gpu 2.0.0` — https://github.com/Duecki1/CalibRaw
-- `calibraw-ui 2.0.0` — https://github.com/Duecki1/CalibRaw
-- `xtask 2.0.0` — https://github.com/Duecki1/CalibRaw
+- `calibraw-ai 0.0.1` — https://github.com/Duecki1/CalibRaw
+- `calibraw-cli 0.0.1` — https://github.com/Duecki1/CalibRaw
+- `calibraw-core 0.0.1` — https://github.com/Duecki1/CalibRaw
+- `calibraw-ffi 0.0.1` — https://github.com/Duecki1/CalibRaw
+- `calibraw-gpu 0.0.1` — https://github.com/Duecki1/CalibRaw
+- `calibraw-ui 0.0.1` — https://github.com/Duecki1/CalibRaw
+- `xtask 0.0.1` — https://github.com/Duecki1/CalibRaw
 
 ```text
 GNU GENERAL PUBLIC LICENSE
@@ -3860,6 +3860,7 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 - `cc 1.2.66` — https://github.com/rust-lang/cc-rs
 - `cfg-if 1.0.4` — https://github.com/rust-lang/cfg-if
+- `filetime 0.2.29` — https://github.com/alexcrichton/filetime
 - `find-msvc-tools 0.1.9` — https://github.com/rust-lang/cc-rs
 - `jobserver 0.1.35` — https://github.com/rust-lang/jobserver-rs
 - `pkg-config 0.3.33` — https://github.com/rust-lang/pkg-config-rs
@@ -4310,6 +4311,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - `tempfile 3.27.0` — https://github.com/Stebalien/tempfile
+- `xattr 1.6.1` — https://github.com/Stebalien/xattr
 
 ```text
 Copyright (c) 2015 Steven Allen
@@ -6327,6 +6329,40 @@ Used by:
 
 ```text
 Copyright (c) The rust-url developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+## MIT License (`MIT`)
+
+Used by:
+- `tar 0.4.46` — https://github.com/composefs/tar-rs
+
+```text
+Copyright (c) The tar-rs Project Contributors
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
