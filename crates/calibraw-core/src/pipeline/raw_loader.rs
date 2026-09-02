@@ -375,6 +375,16 @@ pub struct CaptureMetadata {
     pub artist: String,
 }
 
+/// Lightweight metadata available after identifying a RAW, without unpacking
+/// its full pixel payload.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RawDisplayMetadata {
+    pub dimensions: [u32; 2],
+    pub iso_speed: f32,
+    pub shutter_seconds: f32,
+    pub focal_length: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct AiDenoisedImage {
     pub width: u32,
@@ -1073,11 +1083,19 @@ pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail
 
 #[cfg(not(libraw_available))]
 pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
+    load_raw_display_metadata(path).map(|metadata| metadata.dimensions)
+}
+
+#[cfg(not(libraw_available))]
+pub fn load_raw_display_metadata(path: &Path) -> Result<RawDisplayMetadata> {
     if tiff_routes_to_raster(path)? {
-        return super::tiff_loader::load_raster_tiff_dimensions(path);
+        return Ok(RawDisplayMetadata {
+            dimensions: super::tiff_loader::load_raster_tiff_dimensions(path)?,
+            ..Default::default()
+        });
     }
     Err(anyhow!(
-        "this build was compiled without LibRaw, so RAW dimensions are unavailable"
+        "this build was compiled without LibRaw, so RAW display metadata is unavailable"
     ))
 }
 
@@ -1175,10 +1193,18 @@ pub fn load_raw_thumbnail(path: &Path, maximum_edge: u32) -> Result<RawThumbnail
 
 #[cfg(libraw_available)]
 pub fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
+    load_raw_display_metadata(path).map(|metadata| metadata.dimensions)
+}
+
+#[cfg(libraw_available)]
+pub fn load_raw_display_metadata(path: &Path) -> Result<RawDisplayMetadata> {
     if tiff_routes_to_raster(path)? {
-        super::tiff_loader::load_raster_tiff_dimensions(path)
+        Ok(RawDisplayMetadata {
+            dimensions: super::tiff_loader::load_raster_tiff_dimensions(path)?,
+            ..Default::default()
+        })
     } else {
-        libraw_loader::load_raw_display_dimensions(path)
+        libraw_loader::load_raw_display_metadata(path)
     }
 }
 

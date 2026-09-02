@@ -5,7 +5,10 @@ use super::*;
 const THUMBNAIL_IMAGE_HORIZONTAL_INSET: f32 = 0.0;
 const THUMBNAIL_IMAGE_VERTICAL_CHROME: f32 = 0.0;
 const THUMBNAIL_CARD_RADIUS: f32 = crate::ui::theme::CARD_RADIUS;
-const THUMBNAIL_HOVER_OVERLAY: Color32 = Color32::from_black_alpha(156);
+#[cfg(not(target_os = "android"))]
+const THUMBNAIL_HOVER_OVERLAY_ALPHA: u8 = 156;
+#[cfg(not(target_os = "android"))]
+const THUMBNAIL_HOVER_ANIMATION_SECONDS: f32 = 0.18;
 
 pub(super) fn send_scan_failure(
     sender: &mpsc::SyncSender<ScanEvent>,
@@ -284,27 +287,57 @@ pub(super) fn thumbnail_tile(
         );
     }
 
-    if response.hovered() {
-        painter.rect_filled(tile_rect, THUMBNAIL_CARD_RADIUS, THUMBNAIL_HOVER_OVERLAY);
-        let text_width = (tile_rect.width() - 24.0).max(24.0);
-        let max_chars = (text_width / 7.2).floor().max(6.0) as usize;
-        let title = elide_middle(&entry.asset.display_name, max_chars);
-        let details = elide_middle(&thumbnail_hover_details(&entry.asset), max_chars);
-        let title_center = tile_rect.center() - egui::vec2(0.0, 8.0);
-        painter.text(
-            title_center,
-            Align2::CENTER_CENTER,
-            title,
-            FontId::proportional(13.0),
-            Color32::WHITE,
+    #[cfg(not(target_os = "android"))]
+    {
+        let hover_progress = ui.ctx().animate_bool_with_time_and_easing(
+            response.id.with("overlay"),
+            response.hovered(),
+            THUMBNAIL_HOVER_ANIMATION_SECONDS,
+            egui::emath::easing::cubic_out,
         );
-        painter.text(
-            title_center + egui::vec2(0.0, 19.0),
-            Align2::CENTER_CENTER,
-            details,
-            FontId::proportional(10.5),
-            Color32::from_white_alpha(190),
-        );
+        if hover_progress > 0.0 {
+            painter.rect_filled(
+                tile_rect,
+                THUMBNAIL_CARD_RADIUS,
+                Color32::from_black_alpha(
+                    (f32::from(THUMBNAIL_HOVER_OVERLAY_ALPHA) * hover_progress).round() as u8,
+                ),
+            );
+            let title_font_size = 14.5;
+            let capture_font_size = 11.5;
+            let details_font_size = 10.5;
+            let text_width = (tile_rect.width() - 24.0).max(1.0);
+            let title_chars = (text_width / (title_font_size * 0.55)).floor().max(6.0) as usize;
+            let detail_chars = (text_width / (capture_font_size * 0.52)).floor().max(8.0) as usize;
+            let title = elide_middle(&entry.asset.display_name, title_chars);
+            let capture = elide_middle(&thumbnail_capture_details(&entry.asset), detail_chars);
+            let details = elide_middle(&thumbnail_hover_details(&entry.asset), detail_chars);
+            let slide = egui::vec2(0.0, 7.0 * (1.0 - hover_progress));
+            let title_center = tile_rect.center() - egui::vec2(0.0, 20.0) + slide;
+            let title_color = Color32::from_white_alpha((255.0 * hover_progress).round() as u8);
+            let detail_color = Color32::from_white_alpha((205.0 * hover_progress).round() as u8);
+            painter.text(
+                title_center,
+                Align2::CENTER_CENTER,
+                title,
+                FontId::proportional(title_font_size),
+                title_color,
+            );
+            painter.text(
+                title_center + egui::vec2(0.0, 21.0),
+                Align2::CENTER_CENTER,
+                capture,
+                FontId::proportional(capture_font_size),
+                detail_color,
+            );
+            painter.text(
+                title_center + egui::vec2(0.0, 40.0),
+                Align2::CENTER_CENTER,
+                details,
+                FontId::proportional(details_font_size),
+                Color32::from_white_alpha((175.0 * hover_progress).round() as u8),
+            );
+        }
     }
 
     if entry.developed_thumbnail_pending {
@@ -338,21 +371,27 @@ pub(super) fn thumbnail_tile(
         );
     }
 
-    let mut tooltip = entry.asset.display_path.clone();
-    if let Some(error) = &entry.thumbnail_error {
-        tooltip.push_str("\nPreview: ");
-        tooltip.push_str(error);
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut tooltip = entry.asset.display_path.clone();
+        if let Some(error) = &entry.thumbnail_error {
+            tooltip.push_str("\nPreview: ");
+            tooltip.push_str(error);
+        }
+        if entry.developed_thumbnail_pending {
+            tooltip.push_str(if entry.thumbnail_queued {
+                "\nRendering edits in the background."
+            } else {
+                "\nThis original preview does not include saved edits."
+            });
+        }
+        response.on_hover_text(tooltip)
     }
-    if entry.developed_thumbnail_pending {
-        tooltip.push_str(if entry.thumbnail_queued {
-            "\nRendering edits in the background."
-        } else {
-            "\nThis original preview does not include saved edits."
-        });
-    }
-    response.on_hover_text(tooltip)
+    #[cfg(target_os = "android")]
+    response
 }
 
+#[cfg(any(not(target_os = "android"), test))]
 pub(super) fn thumbnail_hover_details(asset: &LibraryAsset) -> String {
     let format = Path::new(&asset.display_name)
         .extension()
@@ -366,6 +405,56 @@ pub(super) fn thumbnail_hover_details(asset: &LibraryAsset) -> String {
         .map_or(format.clone(), |[width, height]| {
             format!("{format}  ·  {width} × {height}")
         })
+}
+
+#[cfg(any(not(target_os = "android"), test))]
+pub(super) fn thumbnail_capture_details(asset: &LibraryAsset) -> String {
+    let metadata = &asset.metadata;
+    format!(
+        "{}  ·  {}  ·  {}",
+        format_thumbnail_iso(metadata.iso_speed),
+        format_thumbnail_shutter(metadata.shutter_seconds),
+        format_thumbnail_focal_length(metadata.focal_length),
+    )
+}
+
+#[cfg(any(not(target_os = "android"), test))]
+fn format_thumbnail_iso(value: f32) -> String {
+    if !value.is_finite() || value <= 0.0 {
+        return "ISO —".to_owned();
+    }
+    if (value - value.round()).abs() < 0.05 {
+        format!("ISO {value:.0}")
+    } else {
+        format!("ISO {value:.1}")
+    }
+}
+
+#[cfg(any(not(target_os = "android"), test))]
+fn format_thumbnail_shutter(seconds: f32) -> String {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return "— s".to_owned();
+    }
+    if seconds < 0.5 {
+        let denominator = (1.0 / seconds).round().max(1.0);
+        format!("1/{denominator:.0} s")
+    } else if (seconds - seconds.round()).abs() < 0.05 {
+        format!("{seconds:.0} s")
+    } else {
+        format!("{seconds:.1} s")
+    }
+}
+
+#[cfg(any(not(target_os = "android"), test))]
+fn format_thumbnail_focal_length(value: f32) -> String {
+    if !value.is_finite() || value <= 0.0 {
+        return "— mm".to_owned();
+    }
+    if (value - value.round()).abs() < 0.05 {
+        format!("{value:.0} mm")
+    } else {
+        format!("{value:.1} mm")
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -432,6 +521,7 @@ pub(super) fn thumbnail_selection_checkbox(
     })
 }
 
+#[cfg(any(not(target_os = "android"), test))]
 pub(super) fn elide_middle(value: &str, maximum_chars: usize) -> String {
     let count = value.chars().count();
     if count <= maximum_chars || maximum_chars < 5 {

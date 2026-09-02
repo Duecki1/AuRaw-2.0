@@ -196,7 +196,12 @@ pub(in crate::ui::library) fn scan_folder_with_limit(
             return Ok(None);
         }
         if let Some(path) = asset.desktop_path() {
-            asset.metadata.dimensions_hint = load_raw_display_dimensions(path).ok();
+            if let Ok(metadata) = load_raw_display_metadata(path) {
+                asset.metadata.dimensions_hint = Some(metadata.dimensions);
+                asset.metadata.iso_speed = metadata.iso_speed;
+                asset.metadata.shutter_seconds = metadata.shutter_seconds;
+                asset.metadata.focal_length = metadata.focal_length;
+            }
         }
     }
 

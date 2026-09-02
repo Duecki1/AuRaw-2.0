@@ -2,7 +2,7 @@ use crate::app::{AppTab, CalibRawApp};
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::{
     apply_lensfun_correction, build_proxy, is_supported_raw_path, lensfun_catalog,
-    load_raw_display_dimensions, load_raw_file_with_profile_selection, load_raw_thumbnail,
+    load_raw_display_metadata, load_raw_file_with_profile_selection, load_raw_thumbnail,
     mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry, MaskRgbImage, MaskStack,
     ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,
 };
@@ -171,6 +171,9 @@ pub(crate) enum LibraryLocator {
 pub(crate) struct LibraryAssetMetadata {
     pub(crate) bytes: u64,
     pub(crate) dimensions_hint: Option<[u32; 2]>,
+    pub(crate) iso_speed: f32,
+    pub(crate) shutter_seconds: f32,
+    pub(crate) focal_length: f32,
     pub(crate) modified_seconds: u64,
 }
 
@@ -203,6 +206,9 @@ impl LibraryAsset {
             metadata: LibraryAssetMetadata {
                 bytes,
                 dimensions_hint,
+                iso_speed: 0.0,
+                shutter_seconds: 0.0,
+                focal_length: 0.0,
                 modified_seconds,
             },
         }
@@ -218,6 +224,9 @@ impl LibraryAsset {
             metadata: LibraryAssetMetadata {
                 bytes: document.bytes,
                 dimensions_hint: None,
+                iso_speed: 0.0,
+                shutter_seconds: 0.0,
+                focal_length: 0.0,
                 modified_seconds: document.modified_seconds,
             },
         }

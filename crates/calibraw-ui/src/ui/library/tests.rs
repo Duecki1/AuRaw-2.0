@@ -84,6 +84,9 @@ fn test_asset(name: impl Into<PathBuf>) -> LibraryAsset {
         metadata: LibraryAssetMetadata {
             bytes: 42,
             dimensions_hint: Some([6000, 4000]),
+            iso_speed: 0.0,
+            shutter_seconds: 0.0,
+            focal_length: 0.0,
             modified_seconds: 123,
         },
     }
@@ -343,6 +346,19 @@ fn thumbnail_hover_details_include_format_and_dimensions() {
     let asset = test_asset("portrait.CR3");
 
     assert_eq!(thumbnail_hover_details(&asset), "CR3  ·  6000 × 4000");
+}
+
+#[test]
+fn thumbnail_capture_details_format_exposure_metadata() {
+    let mut asset = test_asset("portrait.CR3");
+    asset.metadata.iso_speed = 400.0;
+    asset.metadata.shutter_seconds = 1.0 / 125.0;
+    asset.metadata.focal_length = 50.0;
+
+    assert_eq!(
+        thumbnail_capture_details(&asset),
+        "ISO 400  ·  1/125 s  ·  50 mm"
+    );
 }
 
 #[test]

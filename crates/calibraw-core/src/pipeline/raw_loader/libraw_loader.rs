@@ -264,11 +264,12 @@ pub(super) fn load_raw_file_with_dcp(path: &Path, profile_path: &Path) -> Result
     Ok(loaded)
 }
 
-pub(super) fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
+pub(super) fn load_raw_display_metadata(path: &Path) -> Result<super::RawDisplayMetadata> {
     validate_input_file(path, MAX_RAW_FILE_BYTES, "RAW dimension input")?;
     let ctx = open_libraw(path)?;
 
     let sizes = unsafe { &(*ctx.raw).rawdata.sizes };
+    let other = unsafe { &(*ctx.raw).other };
     let width = u32::from(sizes.width);
     let height = u32::from(sizes.height);
     anyhow::ensure!(
@@ -276,9 +277,15 @@ pub(super) fn load_raw_display_dimensions(path: &Path) -> Result<[u32; 2]> {
         "LibRaw header reports empty active dimensions"
     );
 
-    Ok(match sizes.flip {
+    let dimensions = match sizes.flip {
         5 | 6 => [height, width],
         _ => [width, height],
+    };
+    Ok(super::RawDisplayMetadata {
+        dimensions,
+        iso_speed: finite_positive_or_zero(other.iso_speed),
+        shutter_seconds: finite_positive_or_zero(other.shutter),
+        focal_length: finite_positive_or_zero(other.focal_len),
     })
 }
 

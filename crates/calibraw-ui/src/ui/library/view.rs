@@ -192,7 +192,7 @@ impl Library {
                         refresh = true;
                     }
 
-                    if compact_header && !cfg!(target_os = "android") {
+                    if compact_header {
                         ui.menu_button(
                             egui::RichText::new(egui_phosphor::regular::SLIDERS_HORIZONTAL)
                                 .size(17.0),
