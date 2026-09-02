@@ -211,98 +211,110 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut CalibRawApp, frame: &eframe::F
         .collect::<Vec<_>>();
     cards_width = (cards_width - FILMSTRIP_GAP).max(0.0);
 
-    ui.style_mut().always_scroll_the_only_direction = true;
+    ui.scope(|ui| {
+        ui.style_mut().always_scroll_the_only_direction = true;
+        let mut scroll_style = egui::style::ScrollStyle::solid();
+        scroll_style.bar_width = 7.0;
+        scroll_style.bar_inner_margin = 7.0;
+        ui.spacing_mut().scroll = scroll_style;
 
-    egui::ScrollArea::horizontal()
-        .scroll_source(egui::scroll_area::ScrollSource::default())
-        .wheel_scroll_multiplier(egui::vec2(1.35, 1.0))
-        .id_salt("develop-filmstrip-scroll")
-        .auto_shrink([false, false])
-        .show_viewport(ui, |ui, viewport| {
-            let content_height = ui.available_height().max(FILMSTRIP_CARD_HEIGHT);
-            let (content_rect, _) = ui.allocate_exact_size(
-                egui::vec2(cards_width.max(1.0), content_height),
-                Sense::hover(),
-            );
-            let items_left = content_rect.left();
-
-            if let Some((index, path)) = center_request.as_ref() {
-                let (offset, width) = filmstrip_cards[*index];
-                let x = items_left + offset;
-                let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
-                let active_rect = egui::Rect::from_min_size(
-                    egui::pos2(x, y),
-                    egui::vec2(width, FILMSTRIP_CARD_HEIGHT),
+        egui::ScrollArea::horizontal()
+            .scroll_source(egui::scroll_area::ScrollSource::default())
+            .wheel_scroll_multiplier(egui::vec2(1.35, 1.0))
+            .id_salt("develop-filmstrip-scroll")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+            .auto_shrink([false, false])
+            .show_viewport(ui, |ui, viewport| {
+                let content_height = ui.available_height().max(FILMSTRIP_CARD_HEIGHT);
+                let (content_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(cards_width.max(1.0), content_height),
+                    Sense::hover(),
                 );
-                ui.scroll_to_rect(active_rect, Some(egui::Align::Center));
-                centered_path = Some(path.clone());
-                protected_indices.insert(*index);
-                app.library.touch_and_request_thumbnail(*index, ui.ctx());
-                ui.ctx().request_repaint();
-            }
+                let items_left = content_rect.left();
 
-            let items_origin_in_content = items_left - ui.max_rect().left();
-            let preload = viewport.expand(FILMSTRIP_PRELOAD_POINTS);
-            let relative_left =
-                (preload.left() - items_origin_in_content).clamp(0.0, cards_width.max(0.0));
-            let relative_right =
-                (preload.right() - items_origin_in_content).clamp(0.0, cards_width.max(0.0));
-            let first = filmstrip_cards
-                .partition_point(|(offset, width)| offset + width + FILMSTRIP_GAP < relative_left);
-            let last = filmstrip_cards
-                .partition_point(|(offset, _)| *offset <= relative_right)
-                .min(count);
-
-            for index in first..last {
-                protected_indices.insert(index);
-                app.library.touch_and_request_thumbnail(index, ui.ctx());
-                let Some(item) = app.library.filmstrip_item(index) else {
-                    continue;
-                };
-
-                let (offset, width) = filmstrip_cards[index];
-                let x = items_left + offset;
-                let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
-                let rect = egui::Rect::from_min_size(
-                    egui::pos2(x, y),
-                    egui::vec2(width, FILMSTRIP_CARD_HEIGHT),
-                );
-                let active = active_path.as_deref() == Some(item.path.as_path());
-                let reference = reference_path.as_deref() == Some(item.path.as_path());
-                let response = filmstrip_thumbnail(ui, &item, rect, active, reference);
-
-                if response.clicked() && !response.secondary_clicked() && !active {
-                    open_path = Some(item.path.clone());
+                if let Some((index, path)) = center_request.as_ref() {
+                    let (offset, width) = filmstrip_cards[*index];
+                    let x = items_left + offset;
+                    let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
+                    let active_rect = egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(width, FILMSTRIP_CARD_HEIGHT),
+                    );
+                    ui.scroll_to_rect(active_rect, Some(egui::Align::Center));
+                    centered_path = Some(path.clone());
+                    protected_indices.insert(*index);
+                    app.library.touch_and_request_thumbnail(*index, ui.ctx());
+                    ui.ctx().request_repaint();
                 }
 
-                crate::ui::theme::context_menu(&response, |ui| {
-                    let context_assets = [item.asset.clone()];
-                    if let Some(action) =
-                        library_image_context_menu(ui, app, &item.asset, &context_assets)
-                    {
-                        library_action = Some(action);
+                let items_origin_in_content = items_left - ui.max_rect().left();
+                let preload = viewport.expand(FILMSTRIP_PRELOAD_POINTS);
+                let relative_left =
+                    (preload.left() - items_origin_in_content).clamp(0.0, cards_width.max(0.0));
+                let relative_right =
+                    (preload.right() - items_origin_in_content).clamp(0.0, cards_width.max(0.0));
+                let first = filmstrip_cards.partition_point(|(offset, width)| {
+                    offset + width + FILMSTRIP_GAP < relative_left
+                });
+                let last = filmstrip_cards
+                    .partition_point(|(offset, _)| *offset <= relative_right)
+                    .min(count);
+
+                for index in first..last {
+                    protected_indices.insert(index);
+                    app.library.touch_and_request_thumbnail(index, ui.ctx());
+                    let Some(item) = app.library.filmstrip_item(index) else {
+                        continue;
+                    };
+
+                    let (offset, width) = filmstrip_cards[index];
+                    let x = items_left + offset;
+                    let y = content_rect.center().y - FILMSTRIP_CARD_HEIGHT * 0.5;
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(width, FILMSTRIP_CARD_HEIGHT),
+                    );
+                    let active = active_path.as_deref() == Some(item.path.as_path());
+                    let reference = reference_path.as_deref() == Some(item.path.as_path());
+                    let response = filmstrip_thumbnail(ui, &item, rect, active, reference);
+
+                    if response.clicked() && !response.secondary_clicked() && !active {
+                        open_path = Some(item.path.clone());
                     }
-                    ui.separator();
-                    if reference {
-                        if crate::ui::theme::context_menu_item(ui, true, "Clear Reference Image")
-                            .clicked()
+
+                    crate::ui::theme::context_menu(&response, |ui| {
+                        let context_assets = [item.asset.clone()];
+                        if let Some(action) =
+                            library_image_context_menu(ui, app, &item.asset, &context_assets)
                         {
-                            app.develop_ui.reference.clear();
+                            library_action = Some(action);
+                        }
+                        ui.separator();
+                        if reference {
+                            if crate::ui::theme::context_menu_item(
+                                ui,
+                                true,
+                                "Clear Reference Image",
+                            )
+                            .clicked()
+                            {
+                                app.develop_ui.reference.clear();
+                                ui.close();
+                            }
+                        } else if crate::ui::theme::context_menu_item(
+                            ui,
+                            true,
+                            "Set as Reference Image",
+                        )
+                        .clicked()
+                        {
+                            set_reference_image(app, &item, ui.ctx());
                             ui.close();
                         }
-                    } else if crate::ui::theme::context_menu_item(
-                        ui,
-                        true,
-                        "Set as Reference Image",
-                    )
-                    .clicked()
-                    {
-                        set_reference_image(app, &item, ui.ctx());
-                        ui.close();
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
+    });
 
     if let Some(path) = centered_path {
         app.develop_ui.filmstrip_centered_path = Some(path);
@@ -650,13 +662,21 @@ fn filmstrip_name_hover_overlay(ui: &Ui, response: &egui::Response, rect: egui::
     let maximum_chars = (text_width / (font_size * 0.55)).floor().max(6.0) as usize;
     let title = elide_middle(name, maximum_chars);
     let slide = egui::vec2(0.0, 7.0 * (1.0 - hover_progress));
-    painter.text(
-        rect.center() + slide,
-        Align2::CENTER_CENTER,
-        title,
-        FontId::proportional(font_size),
-        Color32::from_white_alpha((255.0 * hover_progress).round() as u8),
-    );
+    let text_center = rect.center() + slide;
+    let text_color = Color32::from_white_alpha((255.0 * hover_progress).round() as u8);
+    let font = FontId::proportional(font_size);
+    if rect.height() > rect.width() {
+        let galley = painter.layout_no_wrap(title, font, text_color);
+        let text_pos = Align2::CENTER_CENTER
+            .anchor_size(text_center, galley.size())
+            .min;
+        painter.add(
+            egui::epaint::TextShape::new(text_pos, galley, text_color)
+                .with_angle_and_anchor(std::f32::consts::FRAC_PI_2, Align2::CENTER_CENTER),
+        );
+    } else {
+        painter.text(text_center, Align2::CENTER_CENTER, title, font, text_color);
+    }
 }
 
 fn cover_uv(source_size: Option<[u32; 2]>, target_size: egui::Vec2) -> egui::Rect {
