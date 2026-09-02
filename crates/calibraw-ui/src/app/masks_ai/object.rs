@@ -176,9 +176,7 @@ impl CalibRawApp {
         };
         self.ai.object_pending_target = None;
         #[cfg(not(target_os = "android"))]
-        let runtime_path = self.ai.runtime_path.clone();
-        #[cfg(not(target_os = "android"))]
-        let runtime_sha256 = self.ai.runtime_sha256.clone();
+        let (runtime_path, runtime_sha256) = self.onnx_runtime_for_ai();
         #[cfg(target_os = "android")]
         let runtime_path = None;
         #[cfg(target_os = "android")]

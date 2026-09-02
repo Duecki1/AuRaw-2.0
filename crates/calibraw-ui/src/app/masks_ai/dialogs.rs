@@ -28,11 +28,11 @@ impl CalibRawApp {
                     ));
                     ui.label("Model license: BiRefNet MIT. The model is optional and used only after this download.");
                     ui.label("Inference is local. No photograph is uploaded.");
-                    ui.label("When you continue, your device connects directly to GitHub for BiRefNet. GitHub receives connection data such as your IP address and request time under its privacy policy. CalibRaw sends no account identifier or telemetry.");
+                    ui.label("When you continue, your device connects directly to CalibRaw Artifacts on Hugging Face. Hugging Face receives connection data such as your IP address and request time under its privacy policy. CalibRaw sends no account identifier or telemetry.");
                     ui.horizontal_wrapped(|ui| {
                         ui.hyperlink_to(
-                            "GitHub privacy statement",
-                            "https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement",
+                            "Hugging Face privacy policy",
+                            "https://huggingface.co/privacy",
                         );
                         ui.separator();
                         ui.hyperlink_to(
@@ -41,10 +41,12 @@ impl CalibRawApp {
                         );
                     });
                     #[cfg(not(target_os = "android"))]
-                    if self.ai.runtime_path.is_none() {
+                    if self.ai.runtime_mode == OnnxRuntimeMode::Automatic {
+                        ui.label("Automatic runtime mode also downloads and verifies the ONNX Runtime package for this operating system and CPU when it is not cached yet.");
+                    } else if self.ai.runtime_path.is_none() {
                         ui.colored_label(
                             egui::Color32::YELLOW,
-                            "Select a trusted local ONNX Runtime library in Settings before continuing. CalibRaw never downloads native runtime code.",
+                            "Manual runtime mode needs a trusted local ONNX Runtime library. Select one in Settings or switch to Automatic.",
                         );
                     }
                     ui.add_space(8.0);
@@ -95,10 +97,12 @@ impl CalibRawApp {
                         );
                     });
                     #[cfg(not(target_os = "android"))]
-                    if self.ai.runtime_path.is_none() {
+                    if self.ai.runtime_mode == OnnxRuntimeMode::Automatic {
+                        ui.label("Automatic runtime mode also downloads and verifies the ONNX Runtime package for this operating system and CPU when it is not cached yet.");
+                    } else if self.ai.runtime_path.is_none() {
                         ui.colored_label(
                             egui::Color32::YELLOW,
-                            "Select a trusted local ONNX Runtime library in Settings before continuing.",
+                            "Manual runtime mode needs a trusted local ONNX Runtime library. Select one in Settings or switch to Automatic.",
                         );
                     }
                     ui.add_space(8.0);

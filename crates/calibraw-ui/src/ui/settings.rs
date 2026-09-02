@@ -1,3 +1,5 @@
+#[cfg(not(target_os = "android"))]
+use crate::app::OnnxRuntimeMode;
 use crate::app::{maximum_raw_cache_limit, CalibRawApp, PreviewQuality};
 use crate::pipeline::CameraProfileMode;
 use crate::ui::components::adjustment_slider::adjustment_slider;
@@ -544,49 +546,89 @@ impl Settings {
                 });
 
                 ui.separator();
-                let runtime_help = if cfg!(target_os = "windows") {
-                    "Choose a trusted ONNX Runtime 1.18 or newer onnxruntime.dll that matches this CalibRaw build's CPU architecture. CalibRaw validates the DLL in an isolated helper process before AI tools use it. GPU provider libraries and their dependencies must remain beside it."
-                } else {
-                    "Choose a trusted ONNX Runtime 1.18 or newer shared library built for your hardware. CalibRaw never downloads or dynamically loads a native runtime without this explicit selection. GPU provider libraries and their dependencies must remain beside it."
-                };
+                let runtime_help = "Automatic downloads the verified ONNX Runtime package matching this operating system and CPU architecture when an AI tool first needs it. Manual uses a local shared-library override.";
                 crate::ui::theme::strong_with_help(ui, "ONNX Runtime", runtime_help);
-                if let Some(path) = &app.ai.runtime_path {
-                    ui.label("Selected runtime:");
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(path.display().to_string()).monospace(),
-                        )
-                        .wrap(),
-                    );
-                    if let Some(sha256) = &app.ai.runtime_sha256 {
-                        ui.small("Pinned SHA-256:");
-                        ui.add(egui::Label::new(egui::RichText::new(sha256).monospace()).wrap());
-                    }
-                } else {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        "No runtime selected. Subject and Not Subject masks cannot run yet.",
-                    );
-                }
-                crate::ui::theme::action_row(ui, |ui| {
-                    if ui
-                        .button("Choose ONNX Runtime…")
-                        .on_hover_text(runtime_help)
-                        .clicked()
-                    {
-                        app.choose_onnx_runtime();
-                    }
-                    if ui
-                        .add_enabled(
-                            app.ai.runtime_path.is_some(),
-                            eframe::egui::Button::new("Clear"),
-                        )
-                        .on_hover_text("Forget the selected runtime. AI tools remain unavailable until another trusted runtime is selected and CalibRaw is restarted.")
-                        .clicked()
-                    {
-                        app.clear_onnx_runtime();
-                    }
+                let previous_mode = app.ai.runtime_mode;
+                let mut runtime_mode = previous_mode;
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut runtime_mode,
+                        OnnxRuntimeMode::Automatic,
+                        "Automatic",
+                    )
+                    .on_hover_text("Recommended. Download and use CalibRaw's verified runtime for this platform when AI is first used.");
+                    ui.selectable_value(
+                        &mut runtime_mode,
+                        OnnxRuntimeMode::Manual,
+                        "Manual",
+                    )
+                    .on_hover_text("Override automatic selection with a trusted local ONNX Runtime shared library.");
                 });
+                if runtime_mode != previous_mode {
+                    app.set_onnx_runtime_mode(runtime_mode);
+                }
+
+                match app.ai.runtime_mode {
+                    OnnxRuntimeMode::Automatic => {
+                        ui.label(format!(
+                            "CalibRaw will select the {} / {} runtime and download it from CalibRaw Artifacts when an AI tool first needs it.",
+                            std::env::consts::OS,
+                            std::env::consts::ARCH
+                        ));
+                        ui.small("The archive and extracted runtime are cached locally and verified with pinned SHA-256 values.");
+                        ui.hyperlink_to(
+                            "View CalibRaw runtime artifacts",
+                            "https://huggingface.co/Duecki/CalibRaw-Artifacts/tree/main/onnxruntime",
+                        );
+                    }
+                    OnnxRuntimeMode::Manual => {
+                        let manual_help = if cfg!(target_os = "windows") {
+                            "Choose a trusted ONNX Runtime 1.18 or newer onnxruntime.dll matching this CalibRaw build's CPU architecture. CalibRaw validates it in an isolated helper process. Provider libraries and dependencies must remain beside it."
+                        } else {
+                            "Choose a trusted ONNX Runtime 1.18 or newer shared library built for this hardware. CalibRaw validates it in an isolated helper process. Provider libraries and dependencies must remain beside it."
+                        };
+                        if let Some(path) = &app.ai.runtime_path {
+                            ui.label("Selected manual runtime:");
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(path.display().to_string()).monospace(),
+                                )
+                                .wrap(),
+                            );
+                            if let Some(sha256) = &app.ai.runtime_sha256 {
+                                ui.small("Pinned SHA-256:");
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(sha256).monospace())
+                                        .wrap(),
+                                );
+                            }
+                        } else {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                "No manual runtime selected. AI tools need a file override or Automatic mode.",
+                            );
+                        }
+                        crate::ui::theme::action_row(ui, |ui| {
+                            if ui
+                                .button("Choose ONNX Runtime…")
+                                .on_hover_text(manual_help)
+                                .clicked()
+                            {
+                                app.choose_onnx_runtime();
+                            }
+                            if ui
+                                .add_enabled(
+                                    app.ai.runtime_path.is_some(),
+                                    eframe::egui::Button::new("Clear"),
+                                )
+                                .on_hover_text("Forget the selected manual runtime.")
+                                .clicked()
+                            {
+                                app.clear_onnx_runtime();
+                            }
+                        });
+                    }
+                }
             });
         }
 

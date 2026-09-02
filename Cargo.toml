@@ -50,6 +50,7 @@ base64 = "0.22"
 bytemuck = { version = "1.16", features = ["derive"] }
 discord-rich-presence = "1.1.0"
 exif = { package = "kamadak-exif", version = "0.6.1" }
+flate2 = "1.1"
 half = "2.7"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
@@ -63,6 +64,7 @@ ring = "0.17.14"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 tempfile = "3.27"
+tar = "0.4"
 toml_edit = "0.25"
 ureq = { version = "3.1", default-features = false, features = ["multipart", "rustls"] }
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }

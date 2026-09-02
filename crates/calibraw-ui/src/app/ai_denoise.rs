@@ -233,7 +233,7 @@ impl CalibRawApp {
             {
                 #[cfg(not(target_os = "android"))]
                 {
-                    self.ai.runtime_path.clone()
+                    self.onnx_runtime_for_ai().0
                 }
                 #[cfg(target_os = "android")]
                 {
@@ -243,7 +243,7 @@ impl CalibRawApp {
             {
                 #[cfg(not(target_os = "android"))]
                 {
-                    self.ai.runtime_sha256.clone()
+                    self.onnx_runtime_for_ai().1
                 }
                 #[cfg(target_os = "android")]
                 {
@@ -449,11 +449,15 @@ impl CalibRawApp {
             .show(ctx, |ui| {
                 ui.label("AI Denoise uses darktable-ai's RawNIND UtNet2 package: joint Bayer denoise/demosaic and a linear Rec.2020 model for X-Trans.");
                 ui.label(format!(
-                    "The first use downloads {:.1} MB from GitHub and stores about 62 MB of verified ONNX models in CalibRaw's cache.",
+                    "The first use downloads {:.1} MB from CalibRaw Artifacts on Hugging Face and stores about 62 MB of verified ONNX models in CalibRaw's cache.",
                     RAWNIND_PACKAGE_BYTES as f64 / 1_000_000.0
                 ));
                 ui.label("Model and integration license: GPL-3.0. Inference is local; no photograph is uploaded.");
-                ui.label("GitHub receives ordinary connection data such as your IP address and request time. CalibRaw sends no account identifier or telemetry.");
+                ui.label("Hugging Face receives ordinary connection data such as your IP address and request time. CalibRaw sends no account identifier or telemetry.");
+                #[cfg(not(target_os = "android"))]
+                if self.ai.runtime_mode == OnnxRuntimeMode::Automatic {
+                    ui.label("Automatic runtime mode also downloads and verifies the ONNX Runtime package for this operating system and CPU when it is not cached yet.");
+                }
                 ui.horizontal_wrapped(|ui| {
                     ui.hyperlink_to(
                         "RawNIND model card",
@@ -461,8 +465,8 @@ impl CalibRawApp {
                     );
                     ui.separator();
                     ui.hyperlink_to(
-                        "GitHub privacy statement",
-                        "https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement",
+                        "Hugging Face privacy policy",
+                        "https://huggingface.co/privacy",
                     );
                     ui.separator();
                     ui.hyperlink_to(

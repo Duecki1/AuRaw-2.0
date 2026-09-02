@@ -143,6 +143,7 @@ impl CalibRawApp {
                 mask_update_subject_pending: false,
                 mask_update_object_queue: VecDeque::new(),
                 mask_update_failed: false,
+                runtime_mode: performance.onnx_runtime_mode,
                 runtime_path: onnx_runtime_path,
                 runtime_sha256: onnx_runtime_sha256,
                 library_mask_refresh: None,

@@ -1,6 +1,29 @@
 use super::*;
 
 impl CalibRawApp {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn set_onnx_runtime_mode(&mut self, mode: OnnxRuntimeMode) {
+        if self.ai.runtime_mode == mode {
+            return;
+        }
+        self.ai.runtime_mode = mode;
+        self.persist_performance_settings();
+        self.ui.notice = Some(
+            "ONNX Runtime mode changed. Restart CalibRaw if an AI runtime was already used in this session."
+                .to_owned(),
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(in crate::app) fn onnx_runtime_for_ai(&self) -> (Option<PathBuf>, Option<String>) {
+        match self.ai.runtime_mode {
+            OnnxRuntimeMode::Automatic => (None, None),
+            OnnxRuntimeMode::Manual => {
+                (self.ai.runtime_path.clone(), self.ai.runtime_sha256.clone())
+            }
+        }
+    }
+
     pub(in crate::app) fn ai_model_root(&self) -> PathBuf {
         #[cfg(not(target_os = "android"))]
         {
@@ -190,7 +213,7 @@ impl CalibRawApp {
                 self.ai.runtime_path = None;
                 self.ai.runtime_sha256 = None;
                 self.ui.notice = Some(
-                    "ONNX Runtime selection cleared. Restart CalibRaw to apply the change."
+                    "Manual ONNX Runtime selection cleared. Choose another library or switch to Automatic. Restart CalibRaw to apply the change."
                         .to_owned(),
                 );
             }

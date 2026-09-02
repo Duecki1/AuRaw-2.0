@@ -103,8 +103,10 @@ native components:
 - [Lensfun 0.3.4](https://github.com/lensfun/lensfun/tree/v0.3.4). The library
   is LGPL-3.0 and its separately packaged profile database is CC BY-SA 3.0.
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime), under the MIT
-  license. Desktop users provide the runtime separately; Android builds obtain
-  the pinned runtime selected by `ort-sys` and package its shared library.
+  license. Desktop Automatic mode downloads a pinned platform archive from
+  [CalibRaw Artifacts](https://huggingface.co/Duecki/CalibRaw-Artifacts); Manual
+  mode uses the runtime selected by the user. Android builds obtain the pinned
+  runtime selected by `ort-sys` and package its shared library.
 - Android native builds also statically link pinned GLib (LGPL-2.1-or-later),
   GNU libiconv (LGPL-2.1), PCRE2 (BSD-3-Clause), libffi (MIT), and zlib
   (Zlib). Their versions and source hashes are pinned in

@@ -355,10 +355,15 @@ pub fn initialize_runtime(
     runtime_path: Option<&Path>,
     expected_sha256: Option<&str>,
 ) -> Result<()> {
-    let selected = runtime_path
-        .context("no ONNX Runtime library is selected; choose one in Settings and try again")?;
-    let expected_sha256 = expected_sha256
-        .context("the selected ONNX Runtime has no pinned SHA-256; select it again in Settings")?;
+    let (selected, expected_sha256) = match (runtime_path, expected_sha256) {
+        (Some(path), Some(sha256)) => (path.to_path_buf(), sha256.to_owned()),
+        (None, None) => {
+            crate::ensure_automatic_onnx_runtime().context("prepare the automatic ONNX Runtime")?
+        }
+        _ => anyhow::bail!(
+            "manual ONNX Runtime selection is incomplete; select the library again in Settings"
+        ),
+    };
     anyhow::ensure!(
         expected_sha256.len() == 64
             && expected_sha256
@@ -366,7 +371,7 @@ pub fn initialize_runtime(
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
         "the selected ONNX Runtime SHA-256 pin is invalid"
     );
-    let runtime_path = fs::canonicalize(selected)
+    let runtime_path = fs::canonicalize(&selected)
         .with_context(|| format!("resolve selected ONNX Runtime {}", selected.display()))?;
     let metadata = fs::metadata(&runtime_path)
         .with_context(|| format!("inspect selected ONNX Runtime {}", runtime_path.display()))?;

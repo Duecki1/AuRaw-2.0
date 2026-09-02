@@ -144,9 +144,7 @@ impl CalibRawApp {
             return false;
         };
         #[cfg(not(target_os = "android"))]
-        let runtime_path = self.ai.runtime_path.clone();
-        #[cfg(not(target_os = "android"))]
-        let runtime_sha256 = self.ai.runtime_sha256.clone();
+        let (runtime_path, runtime_sha256) = self.onnx_runtime_for_ai();
         #[cfg(target_os = "android")]
         let runtime_path = None;
         #[cfg(target_os = "android")]
@@ -281,10 +279,12 @@ impl CalibRawApp {
                 ui.hyperlink_to("Big-LaMa ONNX model card", "https://huggingface.co/Carve/LaMa-ONNX");
             });
             #[cfg(not(target_os = "android"))]
-            if self.ai.runtime_path.is_none() {
+            if self.ai.runtime_mode == OnnxRuntimeMode::Automatic {
+                ui.label("Automatic runtime mode also downloads and verifies the ONNX Runtime package for this operating system and CPU when it is not cached yet.");
+            } else if self.ai.runtime_path.is_none() {
                 ui.colored_label(
                     egui::Color32::YELLOW,
-                    "Select a trusted local ONNX Runtime library in Settings before continuing.",
+                    "Manual runtime mode needs a trusted local ONNX Runtime library. Select one in Settings or switch to Automatic.",
                 );
             }
             ui.add_space(8.0);

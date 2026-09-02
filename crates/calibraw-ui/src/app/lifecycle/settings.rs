@@ -294,6 +294,8 @@ impl CalibRawApp {
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: self.ai.gpu_acceleration,
             #[cfg(not(target_os = "android"))]
+            onnx_runtime_mode: self.ai.runtime_mode,
+            #[cfg(not(target_os = "android"))]
             discord_rich_presence: self.preferences.discord_rich_presence,
             camera_profile_mode: self.preferences.camera_profile_mode,
             camera_profile_folder: self.preferences.camera_profile_folder.clone(),

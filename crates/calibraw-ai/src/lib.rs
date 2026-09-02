@@ -16,12 +16,16 @@ pub mod execution_provider;
 mod model_artifact;
 mod model_install;
 mod model_runtime;
+#[cfg(not(target_os = "android"))]
+mod onnx_runtime_artifact;
 pub mod remove;
 pub use model_install::ModelDownloadProgress;
 pub use model_runtime::{set_active_ai_context, AiRuntimeContext};
 
 #[cfg(not(target_os = "android"))]
 pub use model_artifact::desktop_model_cache_root;
+#[cfg(not(target_os = "android"))]
+pub use onnx_runtime_artifact::ensure_automatic_onnx_runtime;
 
 #[cfg(not(target_os = "android"))]
 pub use execution_provider::set_ai_acceleration_enabled;

@@ -38,6 +38,10 @@ ort = { workspace = true, features = ["load-dynamic", "cuda", "tensorrt", "rocm"
 [target.'cfg(all(not(target_os = "android"), not(any(target_os = "windows", target_os = "macos", target_os = "linux"))))'.dependencies]
 ort = { workspace = true, features = ["load-dynamic"] }
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+flate2.workspace = true
+tar.workspace = true
+
 [target.'cfg(target_os = "android")'.dependencies]
 ort = { workspace = true, features = ["download-binaries", "copy-dylibs", "tls-rustls", "nnapi", "xnnpack"] }
 

@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 19;
+const SETTINGS_VERSION: u32 = 20;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,6 +39,9 @@ pub(crate) struct PerformanceSettings {
     #[cfg(not(target_os = "android"))]
     #[serde(default = "default_true")]
     pub ai_gpu_acceleration: bool,
+    #[cfg(not(target_os = "android"))]
+    #[serde(default)]
+    pub onnx_runtime_mode: crate::app::OnnxRuntimeMode,
     #[cfg(not(target_os = "android"))]
     #[serde(default)]
     pub discord_rich_presence: bool,
@@ -123,6 +126,8 @@ impl Default for PerformanceSettings {
             subject_crop_refinement: true,
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: true,
+            #[cfg(not(target_os = "android"))]
+            onnx_runtime_mode: crate::app::OnnxRuntimeMode::default(),
             #[cfg(not(target_os = "android"))]
             discord_rich_presence: false,
             camera_profile_mode: CameraProfileMode::default(),
@@ -328,6 +333,8 @@ mod tests {
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: false,
             #[cfg(not(target_os = "android"))]
+            onnx_runtime_mode: crate::app::OnnxRuntimeMode::Manual,
+            #[cfg(not(target_os = "android"))]
             discord_rich_presence: true,
             camera_profile_mode: CameraProfileMode::DcpProfiles,
             camera_profile_folder: Some(PathBuf::from("profiles")),
@@ -468,6 +475,10 @@ mod tests {
         {
             assert!(settings.subject_crop_refinement);
             assert!(settings.ai_gpu_acceleration);
+            assert_eq!(
+                settings.onnx_runtime_mode,
+                crate::app::OnnxRuntimeMode::Automatic
+            );
             assert!(!settings.discord_rich_presence);
             assert!(settings.library_folder_sidebar_open);
             assert!(settings.develop_filmstrip_open);
@@ -507,6 +518,7 @@ mod tests {
         {
             settings.subject_crop_refinement = false;
             settings.ai_gpu_acceleration = false;
+            settings.onnx_runtime_mode = crate::app::OnnxRuntimeMode::Manual;
             settings.discord_rich_presence = true;
             settings.last_library_folder = Some(PathBuf::from("photos"));
             settings.last_library_selected_folder = Some(PathBuf::from("photos/2026/trip"));
@@ -541,6 +553,10 @@ mod tests {
         {
             assert!(!restored.subject_crop_refinement);
             assert!(!restored.ai_gpu_acceleration);
+            assert_eq!(
+                restored.onnx_runtime_mode,
+                crate::app::OnnxRuntimeMode::Manual
+            );
             assert!(restored.discord_rich_presence);
             assert_eq!(restored.last_library_folder, Some(PathBuf::from("photos")));
             assert_eq!(

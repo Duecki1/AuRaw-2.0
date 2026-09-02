@@ -1063,6 +1063,15 @@ pub(crate) struct MaskState {
     pub(crate) navigation_dirty_layers: [bool; MAX_LOCAL_MASKS],
 }
 
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OnnxRuntimeMode {
+    #[default]
+    Automatic,
+    Manual,
+}
+
 pub(crate) struct AiState {
     pub(crate) birefnet_quality: BiRefNetQuality,
     #[cfg(not(target_os = "android"))]
@@ -1074,6 +1083,8 @@ pub(crate) struct AiState {
     pub(crate) mask_update_subject_pending: bool,
     pub(crate) mask_update_object_queue: VecDeque<(usize, usize)>,
     pub(crate) mask_update_failed: bool,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) runtime_mode: OnnxRuntimeMode,
     #[cfg(not(target_os = "android"))]
     pub(crate) runtime_path: Option<PathBuf>,
     #[cfg(not(target_os = "android"))]
