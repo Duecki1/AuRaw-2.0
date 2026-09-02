@@ -58,11 +58,11 @@ const LINEAR_MODEL_ARTIFACT: ModelArtifact = ModelArtifact {
     progress_total: LINEAR_MODEL_BYTES,
 };
 const RAWNIND_DOWNLOAD: DownloadOptions = DownloadOptions {
-    connect_timeout: Duration::from_secs(30),
-    response_timeout: Duration::from_secs(30),
+    connect_timeout: Duration::from_secs(45),
+    response_timeout: Duration::from_secs(60),
     body_timeout: Duration::from_secs(30 * 60),
-    attempts: 1,
-    resume: false,
+    attempts: 5,
+    resume: true,
 };
 const TILE_EDGE: usize = 512;
 const OVERLAP: usize = 64;
@@ -541,12 +541,6 @@ fn ensure_models(
     }
     fs::create_dir_all(model_dir)
         .with_context(|| format!("create RawNIND model cache {}", model_dir.display()))?;
-    for path in [&bayer, &linear] {
-        if path.exists() {
-            fs::remove_file(path)
-                .with_context(|| format!("remove invalid RawNIND model {}", path.display()))?;
-        }
-    }
 
     let package = model_dir.join("rawdenoise-nind.dtmodel");
     ensure_artifact(
@@ -1334,8 +1328,10 @@ mod tests {
     use super::{
         bayer_rggb_origin, inverse3, load_result_cache, match_gain_tile, mul3, reflect_index,
         remosaic_bayer_pixels, result_cache_path, run_model_tile, save_result_cache, seam_weight,
-        spawn_rawnind_denoise, AiDenoiseEvent, CORE_EDGE, SRGB_TO_REC2020, TILE_EDGE,
+        spawn_rawnind_denoise, AiDenoiseEvent, CORE_EDGE, RAWNIND_DOWNLOAD, SRGB_TO_REC2020,
+        TILE_EDGE,
     };
+
     use crate::execution_provider::SessionOptions;
     use crate::model_runtime::{acquire_model_session, AiModel, ModelRetention};
     use crate::pipeline::{
@@ -1343,6 +1339,12 @@ mod tests {
         GpuParams, LoadedRaw, MaskStack, NoiseProfile, ProcessingQuality, ProxySpec,
         RawGpuPipeline,
     };
+
+    #[test]
+    fn rawnind_download_retries_and_resumes() {
+        assert!(RAWNIND_DOWNLOAD.attempts > 1);
+        assert!(RAWNIND_DOWNLOAD.resume);
+    }
 
     fn cache_test_raw(width: u32, height: u32) -> LoadedRaw {
         let pixels = (width * height) as usize;

@@ -137,11 +137,11 @@ impl BiRefNetQuality {
     }
 }
 const BIREFNET_DOWNLOAD: DownloadOptions = DownloadOptions {
-    connect_timeout: Duration::from_secs(30),
-    response_timeout: Duration::from_secs(30),
-    body_timeout: Duration::from_secs(10 * 60),
-    attempts: 1,
-    resume: false,
+    connect_timeout: Duration::from_secs(45),
+    response_timeout: Duration::from_secs(60),
+    body_timeout: Duration::from_secs(60 * 60),
+    attempts: 5,
+    resume: true,
 };
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -760,7 +760,7 @@ mod tests {
     use super::{
         normalized_birefnet_input, restore_birefnet_output, sigmoid_probability,
         subject_crop_refinement_enabled, validate_birefnet_output_shape, BiRefNetQuality,
-        IMAGENET_MEAN, IMAGENET_STD,
+        BIREFNET_DOWNLOAD, IMAGENET_MEAN, IMAGENET_STD,
     };
     use image::{ImageBuffer, Rgba};
 
@@ -833,6 +833,29 @@ mod tests {
         assert_ne!(medium.sha256_hex, high.sha256_hex);
         assert_ne!(low.cache_filename, medium.cache_filename);
         assert_ne!(medium.cache_filename, high.cache_filename);
+    }
+
+    #[test]
+    fn birefnet_downloads_retry_and_resume() {
+        assert!(BIREFNET_DOWNLOAD.attempts > 1);
+        assert!(BIREFNET_DOWNLOAD.resume);
+    }
+
+    #[test]
+    #[ignore = "downloads the published 331 MB medium BiRefNet model"]
+    fn medium_birefnet_download_is_published_and_remains_verified() {
+        let temp = tempfile::tempdir().unwrap();
+        let model = BiRefNetQuality::Medium.model();
+        let path = temp.path().join(model.cache_filename);
+        model
+            .install()
+            .ensure_installed(&path, true, |_| {}, || Ok(()))
+            .unwrap();
+        assert!(path.is_file());
+        assert!(super::birefnet_model_is_verified(
+            BiRefNetQuality::Medium,
+            &path
+        ));
     }
 
     #[test]

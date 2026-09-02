@@ -18,22 +18,22 @@ pub const SAM21_MODEL_BYTES_ESTIMATE: u64 = 125_500_000;
 const SAM21_MODEL_SIZE: u32 = 1024;
 const SAM21_MASK_INPUT_SIZE: u32 = 256;
 const SAM21_MAX_PROMPTS: usize = 32;
-pub(super) const SAM21_ENCODER_MAX_BYTES: u64 = 160_000_000;
-pub(super) const SAM21_DECODER_MAX_BYTES: u64 = 32_000_000;
+pub(super) const SAM21_ENCODER_BYTES: u64 = 109_471_931;
+pub(super) const SAM21_DECODER_BYTES: u64 = 16_519_561;
 
 pub(super) const SAM21_ENCODER_ARTIFACT: ModelArtifact = ModelArtifact {
     name: "SAM 2.1 encoder",
     url: Some(SAM21_ENCODER_MODEL_URL),
     sha256: SAM21_ENCODER_SHA256_HEX,
-    size: ArtifactSize::Max(SAM21_ENCODER_MAX_BYTES),
-    progress_total: 109_000_000,
+    size: ArtifactSize::Exact(SAM21_ENCODER_BYTES),
+    progress_total: SAM21_ENCODER_BYTES,
 };
 pub(super) const SAM21_DECODER_ARTIFACT: ModelArtifact = ModelArtifact {
     name: "SAM 2.1 decoder",
     url: Some(SAM21_DECODER_MODEL_URL),
     sha256: SAM21_DECODER_SHA256_HEX,
-    size: ArtifactSize::Max(SAM21_DECODER_MAX_BYTES),
-    progress_total: 16_500_000,
+    size: ArtifactSize::Exact(SAM21_DECODER_BYTES),
+    progress_total: SAM21_DECODER_BYTES,
 };
 const SAM_DOWNLOAD: DownloadOptions = DownloadOptions {
     connect_timeout: Duration::from_secs(45),
@@ -1473,6 +1473,12 @@ mod object_mask_tests {
             assert_eq!(value.len(), 64);
             assert!(value.bytes().all(|byte| byte.is_ascii_hexdigit()));
         }
+    }
+
+    #[test]
+    fn sam_downloads_retry_and_resume() {
+        assert!(SAM_DOWNLOAD.attempts > 1);
+        assert!(SAM_DOWNLOAD.resume);
     }
 
     #[test]

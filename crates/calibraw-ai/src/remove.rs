@@ -1077,6 +1077,12 @@ mod tests {
     use crate::pipeline::{RemoveBrushPoint, RemoveBrushStroke};
 
     #[test]
+    fn big_lama_download_retries_and_resumes() {
+        assert!(BIG_LAMA_DOWNLOAD.attempts > 1);
+        assert!(BIG_LAMA_DOWNLOAD.resume);
+    }
+
+    #[test]
     fn retouch_hardness_keeps_a_soft_outer_ring() {
         assert_eq!(retouch_brush_coverage(0.0, 0.0, 10.0, 0.5), 1.0);
         assert_eq!(retouch_brush_coverage(4.0, 0.0, 10.0, 0.5), 1.0);

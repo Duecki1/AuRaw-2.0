@@ -15,6 +15,7 @@ static NEXT_PARTIAL_ARTIFACT_ID: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ArtifactSize {
     Exact(u64),
+    #[allow(dead_code)]
     Max(u64),
 }
 

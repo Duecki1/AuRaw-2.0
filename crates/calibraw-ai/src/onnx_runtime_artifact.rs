@@ -128,6 +128,16 @@ fn install_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn runtime_download_options() -> DownloadOptions {
+    DownloadOptions {
+        connect_timeout: Duration::from_secs(45),
+        response_timeout: Duration::from_secs(60),
+        body_timeout: Duration::from_secs(30 * 60),
+        attempts: 5,
+        resume: true,
+    }
+}
+
 pub fn ensure_automatic_onnx_runtime() -> Result<(PathBuf, String)> {
     let _guard = install_lock();
     let package = runtime_package()?;
@@ -150,13 +160,7 @@ pub fn ensure_automatic_onnx_runtime() -> Result<(PathBuf, String)> {
     ensure_artifact(
         &archive_path,
         artifact,
-        DownloadOptions {
-            connect_timeout: Duration::from_secs(45),
-            response_timeout: Duration::from_secs(60),
-            body_timeout: Duration::from_secs(30 * 60),
-            attempts: 5,
-            resume: true,
-        },
+        runtime_download_options(),
         |_, _| {},
         || Ok(()),
     )
@@ -327,6 +331,13 @@ mod tests {
             .contains("/91085ce0ec322a4a7cbd20059688690218e52f9a/onnxruntime/"));
         assert_eq!(package.sha256.len(), 64);
         assert!(package.bytes > 1_000_000);
+    }
+
+    #[test]
+    fn automatic_runtime_download_retries_and_resumes() {
+        let options = runtime_download_options();
+        assert!(options.attempts > 1);
+        assert!(options.resume);
     }
 
     #[test]
