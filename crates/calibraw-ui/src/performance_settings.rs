@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 18;
+const SETTINGS_VERSION: u32 = 19;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,6 +33,9 @@ pub(crate) struct PerformanceSettings {
     pub onboarding_completed: bool,
     #[serde(default)]
     pub birefnet_quality: crate::ai_masks::BiRefNetQuality,
+    #[cfg(not(target_os = "android"))]
+    #[serde(default = "default_true")]
+    pub subject_crop_refinement: bool,
     #[cfg(not(target_os = "android"))]
     #[serde(default = "default_true")]
     pub ai_gpu_acceleration: bool,
@@ -116,6 +119,8 @@ impl Default for PerformanceSettings {
             preview_backdrop: crate::ui::theme::PreviewBackdrop::default(),
             onboarding_completed: false,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
+            #[cfg(not(target_os = "android"))]
+            subject_crop_refinement: true,
             #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: true,
             #[cfg(not(target_os = "android"))]
@@ -319,6 +324,8 @@ mod tests {
             onboarding_completed: true,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             #[cfg(not(target_os = "android"))]
+            subject_crop_refinement: false,
+            #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: false,
             #[cfg(not(target_os = "android"))]
             discord_rich_presence: true,
@@ -375,6 +382,7 @@ mod tests {
         );
         #[cfg(not(target_os = "android"))]
         {
+            assert!(!settings.subject_crop_refinement);
             assert!(!settings.ai_gpu_acceleration);
             assert!(settings.discord_rich_presence);
         }
@@ -458,6 +466,7 @@ mod tests {
         );
         #[cfg(not(target_os = "android"))]
         {
+            assert!(settings.subject_crop_refinement);
             assert!(settings.ai_gpu_acceleration);
             assert!(!settings.discord_rich_presence);
             assert!(settings.library_folder_sidebar_open);
@@ -496,6 +505,7 @@ mod tests {
         };
         #[cfg(not(target_os = "android"))]
         {
+            settings.subject_crop_refinement = false;
             settings.ai_gpu_acceleration = false;
             settings.discord_rich_presence = true;
             settings.last_library_folder = Some(PathBuf::from("photos"));
@@ -529,6 +539,7 @@ mod tests {
         assert!(restored.render_edited_thumbnails_during_indexing);
         #[cfg(not(target_os = "android"))]
         {
+            assert!(!restored.subject_crop_refinement);
             assert!(!restored.ai_gpu_acceleration);
             assert!(restored.discord_rich_presence);
             assert_eq!(restored.last_library_folder, Some(PathBuf::from("photos")));

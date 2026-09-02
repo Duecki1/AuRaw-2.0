@@ -136,6 +136,7 @@ impl CalibRawApp {
             },
             ai: AiState {
                 birefnet_quality: performance.birefnet_quality,
+                subject_crop_refinement: performance.subject_crop_refinement,
                 gpu_acceleration: performance.ai_gpu_acceleration,
                 masks_need_update: false,
                 mask_update_active: false,

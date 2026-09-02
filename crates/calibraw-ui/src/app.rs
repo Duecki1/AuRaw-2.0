@@ -1066,6 +1066,8 @@ pub(crate) struct MaskState {
 pub(crate) struct AiState {
     pub(crate) birefnet_quality: BiRefNetQuality,
     #[cfg(not(target_os = "android"))]
+    pub(crate) subject_crop_refinement: bool,
+    #[cfg(not(target_os = "android"))]
     pub(crate) gpu_acceleration: bool,
     pub(crate) masks_need_update: bool,
     pub(crate) mask_update_active: bool,

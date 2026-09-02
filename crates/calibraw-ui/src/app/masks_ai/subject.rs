@@ -11,6 +11,16 @@ impl CalibRawApp {
         self.persist_performance_settings();
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn set_subject_crop_refinement(&mut self, enabled: bool) {
+        if self.ai.subject_crop_refinement == enabled {
+            return;
+        }
+        self.ai.subject_crop_refinement = enabled;
+        self.masks.subject_cache = None;
+        self.persist_performance_settings();
+    }
+
     pub(crate) fn birefnet_quality_change_enabled(&self) -> bool {
         !self.foreground_operation_is(ForegroundOperationKind::SubjectMask)
     }
@@ -66,10 +76,15 @@ impl CalibRawApp {
 
         let model_present =
             crate::ai_masks::birefnet_model_is_verified(self.ai.birefnet_quality, &model_path);
+        #[cfg(not(target_os = "android"))]
+        let crop_refinement = self.ai.subject_crop_refinement;
+        #[cfg(target_os = "android")]
+        let crop_refinement = false;
         let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let receiver = spawn_subject_mask(
             SubjectMaskWorkerRequest {
                 quality: self.ai.birefnet_quality,
+                crop_refinement,
                 model_path,
                 allow_download,
                 runtime_path,

@@ -210,6 +210,7 @@ pub fn object_models_are_verified(encoder: &Path, decoder: &Path) -> bool {
 
 pub struct SubjectMaskWorkerRequest {
     pub quality: BiRefNetQuality,
+    pub crop_refinement: bool,
     pub model_path: PathBuf,
     pub allow_download: bool,
     pub runtime_path: Option<PathBuf>,
@@ -225,6 +226,7 @@ pub fn spawn_subject_mask(
 ) -> mpsc::Receiver<SubjectMaskEvent> {
     let SubjectMaskWorkerRequest {
         quality,
+        crop_refinement,
         model_path,
         allow_download,
         runtime_path,
@@ -255,6 +257,7 @@ pub fn spawn_subject_mask(
                         runtime_path.as_deref(),
                         runtime_sha256.as_deref(),
                         quality,
+                        crop_refinement,
                         width,
                         height,
                         rgba,
@@ -480,6 +483,7 @@ fn infer_subject(
     runtime_path: Option<&Path>,
     runtime_sha256: Option<&str>,
     quality: BiRefNetQuality,
+    crop_refinement: bool,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
@@ -504,7 +508,7 @@ fn infer_subject(
     initialize_runtime(runtime_path, runtime_sha256)?;
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)
         .context("invalid preview image for BiRefNet")?;
-    let mask = subject_mask_two_pass(model_path, quality, &image)?;
+    let mask = subject_mask(model_path, quality, &image, crop_refinement)?;
     Ok(SubjectMaskResult {
         width,
         height,
@@ -512,53 +516,62 @@ fn infer_subject(
     })
 }
 
-/// Full-frame BiRefNet followed by native-resolution crop passes. Keeping this
-/// orchestration in the subject worker means no edge detail is delegated to a
-/// separate trimap model after the coarse pass.
-fn subject_mask_two_pass(
+/// Runs BiRefNet over the full frame and, when enabled on desktop, follows it
+/// with native-resolution crop passes for finer boundary detail.
+fn subject_mask(
     model_path: &Path,
     quality: BiRefNetQuality,
     image: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    crop_refinement: bool,
 ) -> Result<Vec<u8>> {
     let (width, height) = image.dimensions();
     let coarse = infer_birefnet(model_path, quality, image)?;
     let mut mask = coarse.clone();
-    if let Some(crop) = mask_refine::mask_crop_above(&coarse, width, height, 5, 0.15) {
-        let crop_image =
-            image::imageops::crop_imm(image, crop.x, crop.y, crop.width, crop.height).to_image();
-        let crop_alpha = infer_birefnet(model_path, quality, &crop_image)?;
-        mask_refine::merge_crop_pass(&mut mask, width, crop, &crop_alpha, 8);
+    let crop_refinement =
+        subject_crop_refinement_enabled(crop_refinement, cfg!(target_os = "android"));
+    if crop_refinement {
+        if let Some(crop) = mask_refine::mask_crop_above(&coarse, width, height, 5, 0.15) {
+            let crop_image =
+                image::imageops::crop_imm(image, crop.x, crop.y, crop.width, crop.height)
+                    .to_image();
+            let crop_alpha = infer_birefnet(model_path, quality, &crop_image)?;
+            mask_refine::merge_crop_pass(&mut mask, width, crop, &crop_alpha, 8);
 
-        // A small, top-biased third pass gives hair and other wispy upper detail
-        // another full native-resolution crop without changing the global mask.
-        let top_height = (crop.height as f32 * 0.30).ceil() as u32;
-        if top_height >= 16 {
-            let hair_crop = mask_refine::expand_crop(
-                mask_refine::MaskCrop {
-                    x: crop.x,
-                    y: crop.y,
-                    width: crop.width,
-                    height: top_height,
-                },
-                width,
-                height,
-                0.15,
-            );
-            let hair_image = image::imageops::crop_imm(
-                image,
-                hair_crop.x,
-                hair_crop.y,
-                hair_crop.width,
-                hair_crop.height,
-            )
-            .to_image();
-            let hair_alpha = infer_birefnet(model_path, quality, &hair_image)?;
-            mask_refine::merge_crop_pass(&mut mask, width, hair_crop, &hair_alpha, 8);
+            // A small, top-biased third pass gives hair and other wispy upper detail
+            // another full native-resolution crop without changing the global mask.
+            let top_height = (crop.height as f32 * 0.30).ceil() as u32;
+            if top_height >= 16 {
+                let hair_crop = mask_refine::expand_crop(
+                    mask_refine::MaskCrop {
+                        x: crop.x,
+                        y: crop.y,
+                        width: crop.width,
+                        height: top_height,
+                    },
+                    width,
+                    height,
+                    0.15,
+                );
+                let hair_image = image::imageops::crop_imm(
+                    image,
+                    hair_crop.x,
+                    hair_crop.y,
+                    hair_crop.width,
+                    hair_crop.height,
+                )
+                .to_image();
+                let hair_alpha = infer_birefnet(model_path, quality, &hair_image)?;
+                mask_refine::merge_crop_pass(&mut mask, width, hair_crop, &hair_alpha, 8);
+            }
         }
     }
     mask_refine::guided_filter_color(image.as_raw(), &mut mask, width, height, 8, 1e-4)?;
     mask_refine::harden_model_alpha(&mut mask);
     Ok(mask)
+}
+
+const fn subject_crop_refinement_enabled(requested: bool, android: bool) -> bool {
+    requested && !android
 }
 
 pub(super) fn infer_birefnet(
@@ -768,13 +781,21 @@ fn sigmoid_probability(logit: f32) -> f32 {
 mod tests {
     use super::{
         normalized_birefnet_input, restore_birefnet_output, sigmoid_probability,
-        validate_birefnet_output_shape, BiRefNetQuality, IMAGENET_MEAN, IMAGENET_STD,
+        subject_crop_refinement_enabled, validate_birefnet_output_shape, BiRefNetQuality,
+        IMAGENET_MEAN, IMAGENET_STD,
     };
     use image::{ImageBuffer, Rgba};
 
     #[test]
     fn birefnet_defaults_to_the_low_quality_model() {
         assert_eq!(BiRefNetQuality::default(), BiRefNetQuality::Low);
+    }
+
+    #[test]
+    fn android_always_disables_subject_crop_refinement() {
+        assert!(subject_crop_refinement_enabled(true, false));
+        assert!(!subject_crop_refinement_enabled(false, false));
+        assert!(!subject_crop_refinement_enabled(true, true));
     }
 
     #[test]

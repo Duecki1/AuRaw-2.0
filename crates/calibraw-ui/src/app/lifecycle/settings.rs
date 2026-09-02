@@ -290,6 +290,8 @@ impl CalibRawApp {
             onboarding_completed: self.preferences.onboarding_completed,
             birefnet_quality: self.ai.birefnet_quality,
             #[cfg(not(target_os = "android"))]
+            subject_crop_refinement: self.ai.subject_crop_refinement,
+            #[cfg(not(target_os = "android"))]
             ai_gpu_acceleration: self.ai.gpu_acceleration,
             #[cfg(not(target_os = "android"))]
             discord_rich_presence: self.preferences.discord_rich_presence,

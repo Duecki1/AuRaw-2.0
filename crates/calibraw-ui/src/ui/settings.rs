@@ -529,6 +529,20 @@ impl Settings {
                     app.set_birefnet_quality(quality);
                 }
 
+                let mut crop_refinement = app.ai.subject_crop_refinement;
+                ui.add_enabled_ui(app.birefnet_quality_change_enabled(), |ui| {
+                    if crate::ui::theme::checkbox_with_help(
+                        ui,
+                        &mut crop_refinement,
+                        "Refine subject edges with cropped passes",
+                        "Runs additional BiRefNet passes on cropped subject regions. This may improve edge quality, but it can be worse at recognizing the entire subject and takes longer.",
+                    )
+                    .changed()
+                    {
+                        app.set_subject_crop_refinement(crop_refinement);
+                    }
+                });
+
                 ui.separator();
                 let runtime_help = if cfg!(target_os = "windows") {
                     "Choose a trusted ONNX Runtime 1.18 or newer onnxruntime.dll that matches this CalibRaw build's CPU architecture. CalibRaw validates the DLL in an isolated helper process before AI tools use it. GPU provider libraries and their dependencies must remain beside it."
