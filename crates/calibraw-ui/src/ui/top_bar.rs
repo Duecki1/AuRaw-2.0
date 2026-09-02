@@ -4,7 +4,49 @@ use eframe::egui::{self, Ui};
 
 pub(crate) struct TopBar;
 
+#[cfg(not(target_os = "android"))]
+const LIBRARY_SIDEBAR_ALIGNMENT_ID: &str = "library-sidebar-toolbar-alignment-x";
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn load_app_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let image = image::load_from_memory(include_bytes!(
+        "../../../../packaging/icons/calibraw-256.png"
+    ))
+    .expect("embedded toolbar icon must be a valid PNG")
+    .into_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    let pixels = image.into_raw();
+    ctx.load_texture(
+        "calibraw-toolbar-app-icon",
+        egui::ColorImage::from_rgba_unmultiplied(size, &pixels),
+        egui::TextureOptions::LINEAR,
+    )
+}
+
 impl TopBar {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn library_sidebar_default_width(
+        ctx: &egui::Context,
+        viewport_left: f32,
+    ) -> Option<f32> {
+        // A left Panel paints its separator half a stroke-width inside its outer
+        // edge. Include that inset so its painted line, rather than its layout
+        // rect, aligns with the toolbar separator's painted centerline.
+        let panel_separator_inset = ctx
+            .style_of(ctx.theme())
+            .visuals
+            .widgets
+            .noninteractive
+            .bg_stroke
+            .width
+            * 0.5;
+        ctx.data(|data| {
+            data.get_temp::<f32>(egui::Id::new(LIBRARY_SIDEBAR_ALIGNMENT_ID))
+                .map(|separator_x| separator_x - viewport_left + panel_separator_inset)
+                .filter(|width| width.is_finite() && *width > 0.0)
+        })
+    }
+
     pub(crate) fn show(ui: &mut Ui, app: &mut CalibRawApp, frame: &eframe::Frame) {
         #[cfg(target_os = "android")]
         Self::show_android(ui, app, frame);
@@ -132,15 +174,21 @@ impl TopBar {
     fn show_desktop(ui: &mut Ui, app: &mut CalibRawApp, _frame: &eframe::Frame) {
         theme::prepare_toolbar(ui);
         let compact = ui.available_width() < 620.0;
-        let brand_width = if compact { 52.0 } else { 68.0 };
         let tab_width = if compact { 72.0 } else { 82.0 };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             app.show_export_task_indicator(ui);
             Self::show_thumbnail_task_indicator(ui, app);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add_sized(
-                    [brand_width, theme::CONTROL_HEIGHT],
-                    egui::Label::new(egui::RichText::new("CalibRaw").strong()),
+                ui.allocate_ui_with_layout(
+                    egui::Vec2::splat(theme::CONTROL_HEIGHT),
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                    |ui| {
+                        ui.add(
+                            egui::Image::new(&app.app_icon_texture)
+                                .fit_to_exact_size(egui::Vec2::splat(28.0)),
+                        )
+                        .on_hover_text("CalibRaw");
+                    },
                 );
                 ui.separator();
                 for (tab, label) in [
@@ -153,7 +201,13 @@ impl TopBar {
                     }
                 }
 
-                ui.separator();
+                let library_search_separator = ui.separator();
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(
+                        egui::Id::new(LIBRARY_SIDEBAR_ALIGNMENT_ID),
+                        library_search_separator.rect.center().x,
+                    );
+                });
                 if app.ui.active_tab == AppTab::Library {
                     let search_width = if compact { 142.0 } else { 210.0 };
                     let focus_search = ui.input(|input| {
@@ -274,5 +328,27 @@ impl TopBar {
                 }
             });
         });
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_sidebar_width_aligns_the_painted_panel_separator() {
+        let ctx = egui::Context::default();
+        let theme = ctx.theme();
+        let mut style = (*ctx.style_of(theme)).clone();
+        style.visuals.widgets.noninteractive.bg_stroke.width = 2.0;
+        ctx.set_style_of(theme, style);
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new(LIBRARY_SIDEBAR_ALIGNMENT_ID), 410.0_f32);
+        });
+
+        assert_eq!(
+            TopBar::library_sidebar_default_width(&ctx, 70.0),
+            Some(341.0)
+        );
     }
 }

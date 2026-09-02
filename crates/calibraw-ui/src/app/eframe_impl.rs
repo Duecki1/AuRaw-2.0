@@ -348,15 +348,20 @@ impl eframe::App for CalibRawApp {
         if self.ui.active_tab == AppTab::Library && self.library.folder_sidebar_open() {
             #[cfg(not(target_os = "android"))]
             {
-                let panel_max = (viewport_size.x * 0.48).clamp(
+                const LIBRARY_MIN_SIDEBAR_WIDTH: f32 = 300.0;
+                let aligned_width =
+                    TopBar::library_sidebar_default_width(ui.ctx(), ui.max_rect().left())
+                        .unwrap_or(sidebar_size);
+                let panel_max = (viewport_size.x * 0.48).max(aligned_width).clamp(
                     ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH,
                     ScreenLayout::MAX_HORIZONTAL_SIDEBAR_WIDTH,
                 );
+                let default_width = aligned_width.clamp(LIBRARY_MIN_SIDEBAR_WIDTH, panel_max);
                 egui::Panel::left("library_folder_sidebar")
                     .resizable(true)
-                    .min_size(ScreenLayout::MIN_HORIZONTAL_SIDEBAR_WIDTH)
+                    .min_size(LIBRARY_MIN_SIDEBAR_WIDTH)
                     .max_size(panel_max)
-                    .default_size(sidebar_size.min(panel_max))
+                    .default_size(default_width)
                     .frame(crate::ui::theme::panel_frame(ui))
                     .show(ui, |ui| Library::show_folder_sidebar(ui, self));
             }

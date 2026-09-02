@@ -241,6 +241,7 @@ impl CalibRawApp {
                 performance.render_edited_thumbnails_during_indexing,
             ),
             discord_presence,
+            app_icon_texture: crate::ui::top_bar::load_app_icon_texture(ctx),
             egui_ctx: ctx.clone(),
             foreground_operation: None,
         };

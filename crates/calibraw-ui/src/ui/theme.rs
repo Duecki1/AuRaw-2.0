@@ -409,7 +409,7 @@ pub(crate) fn toolbar_frame(ui: &Ui) -> Frame {
 pub(crate) fn panel_frame(ui: &Ui) -> Frame {
     Frame::new()
         .fill(ui.visuals().panel_fill)
-        .inner_margin(Margin::same(if is_compact_portrait(ui) { 6 } else { 10 }))
+        .inner_margin(Margin::same(content_margin(ui)))
         .stroke(Stroke::NONE)
 }
 
@@ -1007,6 +1007,16 @@ mod tests {
 
             assert!((label.center().y - action.center().y).abs() < 0.001);
             assert_eq!(action.size(), super::toolbar_icon_size());
+        });
+    }
+
+    #[test]
+    fn panel_and_workspace_content_share_the_same_inset() {
+        eframe::egui::__run_test_ui(|ui| {
+            assert_eq!(
+                super::panel_frame(ui).inner_margin,
+                super::workspace_frame(ui).inner_margin
+            );
         });
     }
 
