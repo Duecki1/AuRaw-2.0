@@ -43,7 +43,7 @@ impl Sidebar {
             MaskCombineMode::Subtract,
             MaskCombineMode::Intersect,
         ] {
-            ui.menu_button(combine.label(), |ui| {
+            crate::ui::theme::dropdown_submenu(ui, combine.label(), |ui| {
                 if let Some(kind) = Self::mask_kind_menu(ui, unavailable_message) {
                     selected = Some((kind, combine));
                 }

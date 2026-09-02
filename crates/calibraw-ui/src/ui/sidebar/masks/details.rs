@@ -30,7 +30,7 @@ fn mask_creation_menu_button<R>(
         })
         .inner
         .on_hover_text(tooltip);
-    egui::Popup::menu(&response).show(add_contents);
+    crate::ui::theme::dropdown_menu(&response, add_contents);
     response
 }
 
