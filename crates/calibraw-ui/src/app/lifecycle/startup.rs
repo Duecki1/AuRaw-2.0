@@ -209,6 +209,8 @@ impl CalibRawApp {
                 ui_design: performance.ui_design,
                 preview_backdrop: performance.preview_backdrop,
                 onboarding_completed: performance.onboarding_completed,
+                auto_check_updates: performance.auto_check_updates,
+                ignored_update_version: performance.ignored_update_version.clone(),
                 adjustment_copy_settings: performance.adjustment_copy_settings,
                 performance_settings_path,
                 camera_profile_mode: performance.camera_profile_mode,
@@ -229,6 +231,7 @@ impl CalibRawApp {
                 notice: None,
                 onboarding_step: (!performance.onboarding_completed)
                     .then_some(OnboardingStep::Appearance),
+                version_check: Default::default(),
             },
             library: LibraryState::new_desktop_with_preferences(
                 performance.thumbnail_workers,
@@ -265,6 +268,9 @@ impl CalibRawApp {
         crate::ui::theme::apply(&cc.egui_ctx, app.preferences.ui_design);
         app.preview.gpu_prewarm_receiver = gpu_preview_prewarm_receiver;
         app.export.gpu_prewarm = Some(gpu_export_prewarm);
+        if app.preferences.auto_check_updates {
+            app.check_for_updates(false);
+        }
         app
     }
 
@@ -472,6 +478,8 @@ impl CalibRawApp {
                 ui_design: performance.ui_design,
                 preview_backdrop: performance.preview_backdrop,
                 onboarding_completed: performance.onboarding_completed,
+                auto_check_updates: performance.auto_check_updates,
+                ignored_update_version: performance.ignored_update_version.clone(),
                 adjustment_copy_settings: performance.adjustment_copy_settings,
                 performance_settings_path,
                 camera_profile_mode: performance.camera_profile_mode,
@@ -490,6 +498,7 @@ impl CalibRawApp {
                 notice: None,
                 onboarding_step: (!performance.onboarding_completed)
                     .then_some(OnboardingStep::Appearance),
+                version_check: Default::default(),
             },
             library: LibraryState::new_android_with_workers(
                 android_app.clone(),
@@ -516,6 +525,9 @@ impl CalibRawApp {
             !app.preferences.ui_design.is_dark(),
         ) {
             log::warn!("{error}");
+        }
+        if app.preferences.auto_check_updates {
+            app.check_for_updates(false);
         }
         app
     }

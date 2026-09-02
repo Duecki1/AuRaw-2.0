@@ -636,6 +636,43 @@ impl Settings {
         Self::group(ui, content_width, |ui| {
             crate::ui::theme::heading_with_help(
                 ui,
+                "Updates",
+                "View the installed version and optionally ask GitHub for CalibRaw's latest stable release.",
+            );
+            ui.strong(format!("CalibRaw {}", env!("CARGO_PKG_VERSION")));
+
+            ui.separator();
+            let mut auto_check = app.preferences.auto_check_updates;
+            if crate::ui::theme::checkbox_with_help(
+                ui,
+                &mut auto_check,
+                "Automatically check for updates via GitHub",
+                "Checks GitHub once when CalibRaw starts. GitHub receives standard connection information such as your IP address. No photo, path, account identifier, or telemetry is sent.",
+            )
+            .changed()
+            {
+                app.set_auto_check_updates(auto_check);
+            }
+
+            let checking = app.version_check_in_progress();
+            let status = app.version_check_status_text();
+            crate::ui::theme::action_row(ui, |ui| {
+                if ui
+                    .add_enabled(!checking, egui::Button::new("Check now"))
+                    .on_hover_text("Check GitHub for the latest stable CalibRaw release.")
+                    .clicked()
+                {
+                    app.check_for_updates(true);
+                }
+                ui.hyperlink_to("View releases", format!("{PROJECT_REPOSITORY}/releases"));
+            });
+            ui.small(status);
+        });
+
+        crate::ui::theme::card_gap(ui);
+        Self::group(ui, content_width, |ui| {
+            crate::ui::theme::heading_with_help(
+                ui,
                 "Legal & attributions",
                 "Adapted code, bundled data, native libraries, optional AI models, Rust crates, fonts, and icons retain their listed upstream terms and notices.",
             );

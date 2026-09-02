@@ -29,7 +29,7 @@ lensfun_revision = "0.3.4"
 android_use_legacy_packaging = false
 
 [workspace.package]
-version = "2.0.0"
+version = "0.0.1"
 edition = "2021"
 rust-version = "1.92.0"
 authors = ["Duecki <dueckis@dueckis.de>"]
@@ -38,12 +38,12 @@ repository = "https://github.com/Duecki1/CalibRaw"
 readme = "README.md"
 
 [workspace.dependencies]
-calibraw-core = { version = "2.0.0", path = "crates/calibraw-core" }
-calibraw-gpu = { version = "2.0.0", path = "crates/calibraw-gpu" }
-calibraw-ai = { version = "2.0.0", path = "crates/calibraw-ai" }
-calibraw-ui = { version = "2.0.0", path = "crates/calibraw-ui" }
-calibraw-ffi = { version = "2.0.0", path = "crates/calibraw-ffi" }
-calibraw-cli = { version = "2.0.0", path = "crates/calibraw-cli" }
+calibraw-core = { version = "0.0.1", path = "crates/calibraw-core" }
+calibraw-gpu = { version = "0.0.1", path = "crates/calibraw-gpu" }
+calibraw-ai = { version = "0.0.1", path = "crates/calibraw-ai" }
+calibraw-ui = { version = "0.0.1", path = "crates/calibraw-ui" }
+calibraw-ffi = { version = "0.0.1", path = "crates/calibraw-ffi" }
+calibraw-cli = { version = "0.0.1", path = "crates/calibraw-cli" }
 
 anyhow = "1.0"
 base64 = "0.22"
@@ -63,6 +63,7 @@ rayon = "1.10"
 ring = "0.17.14"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
+semver = "1.0"
 tempfile = "3.27"
 tar = "0.4"
 toml_edit = "0.25"

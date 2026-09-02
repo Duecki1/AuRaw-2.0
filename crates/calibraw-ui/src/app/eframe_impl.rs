@@ -118,6 +118,7 @@ impl eframe::App for CalibRawApp {
             );
         }
         self.release_retired_egui_textures(frame);
+        self.poll_version_check();
         #[cfg(not(target_os = "android"))]
         let raw_drop_hovered = ui.ctx().input(|input| !input.raw.hovered_files.is_empty());
         #[cfg(not(target_os = "android"))]
@@ -445,6 +446,7 @@ impl eframe::App for CalibRawApp {
             show_raw_drop_overlay(ui, self.library.folder());
         }
         crate::ui::onboarding::show(ui.ctx(), self);
+        self.show_version_update_dialog(ui.ctx());
         self.show_subject_dialogs(ui.ctx());
         self.show_remove_model_dialog(ui.ctx(), frame);
         self.show_ai_denoise_dialogs(ui.ctx(), frame);

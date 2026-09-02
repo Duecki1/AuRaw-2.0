@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 20;
+const SETTINGS_VERSION: u32 = 21;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -31,6 +31,10 @@ pub(crate) struct PerformanceSettings {
     pub preview_backdrop: crate::ui::theme::PreviewBackdrop,
     #[serde(default)]
     pub onboarding_completed: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignored_update_version: Option<String>,
     #[serde(default)]
     pub birefnet_quality: crate::ai_masks::BiRefNetQuality,
     #[cfg(not(target_os = "android"))]
@@ -101,7 +105,6 @@ const fn subject_quality_for_platform(
     }
 }
 
-#[cfg(not(target_os = "android"))]
 const fn default_true() -> bool {
     true
 }
@@ -121,6 +124,8 @@ impl Default for PerformanceSettings {
             ui_design: crate::ui::theme::UiDesign::default(),
             preview_backdrop: crate::ui::theme::PreviewBackdrop::default(),
             onboarding_completed: false,
+            auto_check_updates: true,
+            ignored_update_version: None,
             birefnet_quality: crate::ai_masks::BiRefNetQuality::default(),
             #[cfg(not(target_os = "android"))]
             subject_crop_refinement: true,
@@ -327,6 +332,8 @@ mod tests {
             ui_design: crate::ui::theme::UiDesign::DaylightBlue,
             preview_backdrop: crate::ui::theme::PreviewBackdrop::White,
             onboarding_completed: true,
+            auto_check_updates: false,
+            ignored_update_version: Some("v98.0.0".to_owned()),
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             #[cfg(not(target_os = "android"))]
             subject_crop_refinement: false,
@@ -383,6 +390,8 @@ mod tests {
             crate::ui::theme::PreviewBackdrop::White
         );
         assert!(settings.onboarding_completed);
+        assert!(!settings.auto_check_updates);
+        assert_eq!(settings.ignored_update_version.as_deref(), Some("v98.0.0"));
         assert_eq!(
             settings.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::High
@@ -459,6 +468,8 @@ mod tests {
             crate::ui::theme::PreviewBackdrop::DarkGrey
         );
         assert!(!settings.render_edited_thumbnails_during_indexing);
+        assert!(settings.auto_check_updates);
+        assert!(settings.ignored_update_version.is_none());
         assert_eq!(
             settings.birefnet_quality,
             crate::ai_masks::BiRefNetQuality::Low

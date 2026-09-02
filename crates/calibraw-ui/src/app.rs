@@ -46,6 +46,7 @@ mod discord_presence;
 use discord_presence::DiscordPresence;
 mod edit_history;
 use edit_history::EditHistory;
+mod version_update;
 mod worker;
 use worker::drain_worker_events;
 #[cfg(not(target_os = "android"))]
@@ -1004,6 +1005,8 @@ pub(crate) struct PreferencesState {
     pub(crate) ui_design: UiDesign,
     pub(crate) preview_backdrop: PreviewBackdrop,
     pub(crate) onboarding_completed: bool,
+    pub(crate) auto_check_updates: bool,
+    pub(crate) ignored_update_version: Option<String>,
     pub(crate) adjustment_copy_settings: AdjustmentCopySettings,
     pub(crate) performance_settings_path: Option<PathBuf>,
     pub(crate) camera_profile_mode: CameraProfileMode,
@@ -1031,6 +1034,7 @@ pub(crate) struct UiState {
     pub(crate) adaptive_preview_backdrop: egui::Color32,
     pub(crate) notice: Option<String>,
     pub(crate) onboarding_step: Option<OnboardingStep>,
+    pub(in crate::app) version_check: version_update::VersionCheckState,
     pub(crate) thumbnail_cache_size: Option<Result<u64, String>>,
     pub(crate) thumbnail_cache_size_receiver: Option<mpsc::Receiver<Result<u64, String>>>,
     #[cfg(not(target_os = "android"))]

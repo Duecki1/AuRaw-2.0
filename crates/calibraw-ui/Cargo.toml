@@ -29,6 +29,8 @@ image.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+semver.workspace = true
+ureq.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 discord-rich-presence.workspace = true

@@ -557,7 +557,7 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
 name = "calibraw-ai"
-version = "2.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "calibraw-cli"
-version = "2.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "calibraw-core",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "calibraw-core"
-version = "2.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "calibraw-ffi"
-version = "2.0.0"
+version = "0.0.1"
 dependencies = [
  "android-activity",
  "calibraw-core",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "calibraw-gpu"
-version = "2.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "calibraw-ui"
-version = "2.0.0"
+version = "0.0.1"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -661,8 +661,10 @@ dependencies = [
  "log",
  "pollster",
  "rfd",
+ "semver",
  "serde",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]
@@ -4847,7 +4849,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "2.0.0"
+version = "0.0.1"
 dependencies = [
  "image",
  "serde_json",

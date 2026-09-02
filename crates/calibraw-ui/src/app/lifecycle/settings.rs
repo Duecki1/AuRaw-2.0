@@ -288,6 +288,8 @@ impl CalibRawApp {
             ui_design: self.preferences.ui_design,
             preview_backdrop: self.preferences.preview_backdrop,
             onboarding_completed: self.preferences.onboarding_completed,
+            auto_check_updates: self.preferences.auto_check_updates,
+            ignored_update_version: self.preferences.ignored_update_version.clone(),
             birefnet_quality: self.ai.birefnet_quality,
             #[cfg(not(target_os = "android"))]
             subject_crop_refinement: self.ai.subject_crop_refinement,
