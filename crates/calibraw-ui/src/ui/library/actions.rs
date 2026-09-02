@@ -7,6 +7,7 @@ pub(crate) enum LibraryAction {
     PasteAdjustments(Vec<LibraryAsset>),
     Copy(Vec<LibraryAsset>),
     Cut(Vec<LibraryAsset>),
+    PasteIntoAssetFolder(LibraryAsset),
     Duplicate(Vec<LibraryAsset>),
     Rename(LibraryAsset),
     ResetAdjustments(Vec<LibraryAsset>),
@@ -76,6 +77,22 @@ pub(crate) fn library_image_context_menu(
     }
     if crate::ui::theme::context_menu_item(ui, action_enabled, "Cut").clicked() {
         action = Some(LibraryAction::Cut(context_assets.to_vec()));
+        ui.close();
+    }
+    let paste_label = app
+        .library
+        .image_clipboard
+        .as_ref()
+        .map_or_else(|| "Paste here".to_owned(), ImageClipboard::paste_label);
+    if crate::ui::theme::context_menu_item(
+        ui,
+        action_enabled && app.library.image_clipboard.is_some(),
+        paste_label,
+    )
+    .on_disabled_hover_text("Copy or cut RAWs first")
+    .clicked()
+    {
+        action = Some(LibraryAction::PasteIntoAssetFolder(context_asset.clone()));
         ui.close();
     }
     if crate::ui::theme::context_menu_item(
@@ -184,6 +201,10 @@ pub(crate) fn apply_library_action(
         LibraryAction::Cut(assets) => {
             set_library_clipboard(app, ImageClipboardMode::Cut, assets);
         }
+        LibraryAction::PasteIntoAssetFolder(asset) => match duplicate_destination(&asset) {
+            Ok(destination) => start_image_clipboard_paste(app, destination, ui.ctx()),
+            Err(error) => app.library.status = format!("Could not determine paste folder: {error}"),
+        },
         LibraryAction::Duplicate(assets) => {
             app.library.clear_selection();
             #[cfg(target_os = "android")]
