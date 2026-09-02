@@ -193,9 +193,13 @@ impl Library {
                     }
 
                     if compact_header {
-                        ui.menu_button(
+                        crate::ui::theme::responsive_combo_box(
+                            ui,
+                            "library-view-options",
                             egui::RichText::new(egui_phosphor::regular::SLIDERS_HORIZONTAL)
                                 .size(17.0),
+                            64.0,
+                            LibraryThumbnailSize::ALL.len() + LibrarySortOrder::ALL.len() + 2,
                             |ui| {
                                 ui.set_min_width(220.0);
                                 ui.strong("Thumbnail size");
