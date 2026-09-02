@@ -261,7 +261,7 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut CalibRawApp, frame: &eframe::F
                     open_path = Some(item.path.clone());
                 }
 
-                response.context_menu(|ui| {
+                crate::ui::theme::context_menu(&response, |ui| {
                     let context_assets = [item.asset.clone()];
                     if let Some(action) =
                         library_image_context_menu(ui, app, &item.asset, &context_assets)
@@ -270,11 +270,19 @@ fn show_filmstrip_contents(ui: &mut Ui, app: &mut CalibRawApp, frame: &eframe::F
                     }
                     ui.separator();
                     if reference {
-                        if ui.button("Clear Reference Image").clicked() {
+                        if crate::ui::theme::context_menu_item(ui, true, "Clear Reference Image")
+                            .clicked()
+                        {
                             app.develop_ui.reference.clear();
                             ui.close();
                         }
-                    } else if ui.button("Set as Reference Image").clicked() {
+                    } else if crate::ui::theme::context_menu_item(
+                        ui,
+                        true,
+                        "Set as Reference Image",
+                    )
+                    .clicked()
+                    {
                         set_reference_image(app, &item, ui.ctx());
                         ui.close();
                     }

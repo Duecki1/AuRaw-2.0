@@ -81,12 +81,9 @@ pub(super) fn show_library_folder_node(
             }
 
             let is_root = node.path == root_folder;
-            response.context_menu(|ui| {
+            crate::ui::theme::context_menu(&response, |ui| {
                 let enabled = !action_in_progress;
-                if ui
-                    .add_enabled(enabled, egui::Button::new("New Folder…"))
-                    .clicked()
-                {
+                if crate::ui::theme::context_menu_item(ui, enabled, "New Folder…").clicked() {
                     *requested_action = Some(LibraryFolderUiAction::New(node.path.clone()));
                     ui.close();
                 }
@@ -100,12 +97,12 @@ pub(super) fn show_library_folder_node(
                     },
                     ImageClipboard::paste_label,
                 );
-                if ui
-                    .add_enabled(
-                        enabled && (clipboard.is_some() || image_clipboard.is_some()),
-                        egui::Button::new(paste_label),
-                    )
-                    .clicked()
+                if crate::ui::theme::context_menu_item(
+                    ui,
+                    enabled && (clipboard.is_some() || image_clipboard.is_some()),
+                    paste_label,
+                )
+                .clicked()
                 {
                     *requested_action = Some(if image_clipboard.is_some() {
                         LibraryFolderUiAction::PasteImages(node.path.clone())
@@ -115,39 +112,32 @@ pub(super) fn show_library_folder_node(
                     ui.close();
                 }
                 ui.separator();
-                if ui
-                    .add_enabled(enabled && !is_root, egui::Button::new("Copy Folder"))
+                if crate::ui::theme::context_menu_item(ui, enabled && !is_root, "Copy Folder")
                     .clicked()
                 {
                     *requested_action = Some(LibraryFolderUiAction::Copy(node.path.clone()));
                     ui.close();
                 }
-                if ui
-                    .add_enabled(enabled && !is_root, egui::Button::new("Cut Folder"))
+                if crate::ui::theme::context_menu_item(ui, enabled && !is_root, "Cut Folder")
                     .clicked()
                 {
                     *requested_action = Some(LibraryFolderUiAction::Cut(node.path.clone()));
                     ui.close();
                 }
-                if ui
-                    .add_enabled(enabled && !is_root, egui::Button::new("Rename Folder…"))
+                if crate::ui::theme::context_menu_item(ui, enabled && !is_root, "Rename Folder…")
                     .clicked()
                 {
                     *requested_action = Some(LibraryFolderUiAction::Rename(node.path.clone()));
                     ui.close();
                 }
                 ui.separator();
-                if ui
-                    .add_enabled(enabled && !is_root, egui::Button::new("Delete Folder…"))
+                if crate::ui::theme::context_menu_item(ui, enabled && !is_root, "Delete Folder…")
                     .clicked()
                 {
                     *requested_action = Some(LibraryFolderUiAction::Delete(node.path.clone()));
                     ui.close();
                 }
-                if ui
-                    .add_enabled(enabled, egui::Button::new("Refresh Folders"))
-                    .clicked()
-                {
+                if crate::ui::theme::context_menu_item(ui, enabled, "Refresh Folders").clicked() {
                     *requested_action = Some(LibraryFolderUiAction::Refresh);
                     ui.close();
                 }

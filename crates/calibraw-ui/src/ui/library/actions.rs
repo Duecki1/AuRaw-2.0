@@ -27,116 +27,106 @@ pub(crate) fn library_image_context_menu(
         && !context_assets.is_empty();
     let mut action = None;
 
-    if ui
-        .add_enabled(
-            action_enabled,
-            egui::Button::new(if selected_count > 1 {
-                "Export selected…"
-            } else {
-                "Export…"
-            }),
-        )
-        .clicked()
+    if crate::ui::theme::context_menu_item(
+        ui,
+        action_enabled,
+        if selected_count > 1 {
+            "Export selected…"
+        } else {
+            "Export…"
+        },
+    )
+    .clicked()
     {
         action = Some(LibraryAction::Export(context_assets.to_vec()));
         ui.close();
     }
 
     ui.separator();
-    if ui
-        .add_enabled(
-            action_enabled && selected_count == 1,
-            egui::Button::new("Copy adjustments"),
-        )
-        .clicked()
+    if crate::ui::theme::context_menu_item(
+        ui,
+        action_enabled && selected_count == 1,
+        "Copy adjustments",
+    )
+    .clicked()
     {
         action = Some(LibraryAction::CopyAdjustments(context_asset.clone()));
         ui.close();
     }
-    if ui
-        .add_enabled(
-            action_enabled && app.library.has_copied_adjustments(),
-            egui::Button::new(if selected_count > 1 {
-                "Paste adjustments to selected"
-            } else {
-                "Paste adjustments"
-            }),
-        )
-        .on_disabled_hover_text("Copy adjustments from an image first")
-        .clicked()
+    if crate::ui::theme::context_menu_item(
+        ui,
+        action_enabled && app.library.has_copied_adjustments(),
+        if selected_count > 1 {
+            "Paste adjustments to selected"
+        } else {
+            "Paste adjustments"
+        },
+    )
+    .on_disabled_hover_text("Copy adjustments from an image first")
+    .clicked()
     {
         action = Some(LibraryAction::PasteAdjustments(context_assets.to_vec()));
         ui.close();
     }
 
     ui.separator();
-    if ui
-        .add_enabled(action_enabled, egui::Button::new("Copy"))
-        .clicked()
-    {
+    if crate::ui::theme::context_menu_item(ui, action_enabled, "Copy").clicked() {
         action = Some(LibraryAction::Copy(context_assets.to_vec()));
         ui.close();
     }
-    if ui
-        .add_enabled(action_enabled, egui::Button::new("Cut"))
-        .clicked()
-    {
+    if crate::ui::theme::context_menu_item(ui, action_enabled, "Cut").clicked() {
         action = Some(LibraryAction::Cut(context_assets.to_vec()));
         ui.close();
     }
-    if ui
-        .add_enabled(
-            action_enabled,
-            egui::Button::new(if selected_count > 1 {
-                "Duplicate selected (RAW + sidecars)"
-            } else {
-                "Duplicate (RAW + sidecar)"
-            }),
-        )
-        .clicked()
+    if crate::ui::theme::context_menu_item(
+        ui,
+        action_enabled,
+        if selected_count > 1 {
+            "Duplicate selected (RAW + sidecars)"
+        } else {
+            "Duplicate (RAW + sidecar)"
+        },
+    )
+    .clicked()
     {
         action = Some(LibraryAction::Duplicate(context_assets.to_vec()));
         ui.close();
     }
-    if ui
-        .add_enabled(
-            action_enabled && selected_count == 1,
-            egui::Button::new("Rename…"),
-        )
+    if crate::ui::theme::context_menu_item(ui, action_enabled && selected_count == 1, "Rename…")
         .clicked()
     {
         action = Some(LibraryAction::Rename(context_asset.clone()));
         ui.close();
     }
-    if ui
-        .add_enabled(
-            action_enabled,
-            egui::Button::new(format!(
-                "{}  {}",
-                egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
-                if selected_count > 1 {
-                    "Reset adjustments for selected"
-                } else {
-                    "Reset all adjustments"
-                }
-            )),
-        )
-        .clicked()
+    if crate::ui::theme::context_menu_item(
+        ui,
+        action_enabled,
+        format!(
+            "{}  {}",
+            egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+            if selected_count > 1 {
+                "Reset adjustments for selected"
+            } else {
+                "Reset all adjustments"
+            }
+        ),
+    )
+    .clicked()
     {
         action = Some(LibraryAction::ResetAdjustments(context_assets.to_vec()));
         ui.close();
     }
     ui.separator();
-    if ui
-        .add_enabled(
-            action_enabled,
-            egui::Button::new(if selected_count > 1 {
-                "Delete selected"
-            } else {
-                "Delete"
-            }),
-        )
-        .clicked()
+    if crate::ui::theme::context_menu_item(
+        ui,
+        action_enabled,
+        if selected_count > 1 {
+            "Delete selected"
+        } else {
+            "Delete"
+        },
+    )
+    .clicked()
     {
         action = Some(LibraryAction::Delete(context_assets.to_vec()));
         ui.close();

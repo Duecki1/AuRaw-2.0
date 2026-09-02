@@ -631,15 +631,8 @@ pub fn thumbnail_cache_size_bytes(app: &AndroidApp) -> Result<u64, String> {
 }
 
 pub fn load_library_display_dimensions(app: &AndroidApp, uri: &str) -> Result<[u32; 2], String> {
-    load_library_display_metadata(app, uri).map(|metadata| metadata.dimensions)
-}
-
-pub fn load_library_display_metadata(
-    app: &AndroidApp,
-    uri: &str,
-) -> Result<crate::pipeline::RawDisplayMetadata, String> {
     let descriptor = open_library_descriptor(app, uri)?;
-    crate::pipeline::load_raw_display_metadata(&descriptor.proc_path())
+    crate::pipeline::load_raw_display_dimensions(&descriptor.proc_path())
         .map_err(|error| format!("{error:#}"))
 }
 

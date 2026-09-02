@@ -39,20 +39,6 @@ pub(crate) const FLOATING_ACTION_EDGE: f32 =
 #[cfg(any(target_os = "android", test))]
 pub(crate) const FLOATING_ACTION_MARGIN: f32 = 12.0;
 
-pub(crate) const ACCENT: Color32 = Color32::from_rgb(79, 132, 185);
-pub(crate) const ACCENT_BRIGHT: Color32 = Color32::from_rgb(126, 170, 213);
-pub(crate) const HYPERLINK: Color32 = Color32::from_rgb(111, 162, 210);
-pub(crate) const BORDER: Color32 = Color32::from_rgb(48, 52, 60);
-pub(crate) const SURFACE_PANEL: Color32 = Color32::from_rgb(24, 26, 31);
-pub(crate) const SURFACE_WINDOW: Color32 = Color32::from_rgb(18, 20, 24);
-pub(crate) const SURFACE_FAINT: Color32 = Color32::from_rgb(31, 34, 40);
-pub(crate) const SURFACE_EXTREME: Color32 = Color32::from_rgb(12, 14, 17);
-pub(crate) const SURFACE_WIDGET_INACTIVE: Color32 = Color32::from_rgb(34, 37, 43);
-pub(crate) const WIDGET_INACTIVE_STROKE: Color32 = Color32::from_rgb(58, 63, 72);
-pub(crate) const SURFACE_WIDGET_HOVERED: Color32 = Color32::from_rgb(43, 47, 55);
-pub(crate) const WIDGET_HOVERED_STROKE: Color32 = Color32::from_rgb(79, 86, 98);
-pub(crate) const SURFACE_WIDGET_OPEN: Color32 = Color32::from_rgb(39, 43, 50);
-pub(crate) const WIDGET_OPEN_STROKE: Color32 = Color32::from_rgb(69, 76, 88);
 pub(crate) const CANVAS_BACKDROP: Color32 = Color32::from_rgb(13, 15, 18);
 pub(crate) const STATUS_WARNING: Color32 = Color32::from_rgb(244, 142, 48);
 pub(crate) const MASK_ADD: Color32 = Color32::from_rgb(78, 163, 255);
@@ -109,24 +95,26 @@ pub(crate) const LUMINANCE_WHITE: Color32 = Color32::from_rgb(246, 246, 246);
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UiDesign {
     #[default]
-    MidnightPink,
-    GraphiteMint,
+    #[serde(rename = "midnight_pink")]
+    ObsidianBlue,
+    #[serde(rename = "graphite_mint")]
+    ObsidianRed,
     Porcelain,
     DaylightBlue,
 }
 
 impl UiDesign {
     pub(crate) const ALL: [Self; 4] = [
-        Self::MidnightPink,
-        Self::GraphiteMint,
+        Self::ObsidianBlue,
+        Self::ObsidianRed,
         Self::Porcelain,
         Self::DaylightBlue,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::MidnightPink => "Obsidian Blue · Dark",
-            Self::GraphiteMint => "Obsidian Red · Dark",
+            Self::ObsidianBlue => "Obsidian Blue · Dark",
+            Self::ObsidianRed => "Obsidian Red · Dark",
             Self::Porcelain => "Porcelain · Light",
             Self::DaylightBlue => "Daylight · Light",
         }
@@ -134,36 +122,36 @@ impl UiDesign {
 
     pub(crate) const fn description(self) -> &'static str {
         match self {
-            Self::MidnightPink => "Deep neutral surfaces with a restrained blue accent.",
-            Self::GraphiteMint => "Warm near-black surfaces with a restrained ruby accent.",
+            Self::ObsidianBlue => "Deep neutral surfaces with a restrained blue accent.",
+            Self::ObsidianRed => "Warm near-black surfaces with a restrained ruby accent.",
             Self::Porcelain => "Warm paper-like surfaces with a restrained coral accent.",
             Self::DaylightBlue => "Clean cool surfaces with a focused blue accent.",
         }
     }
 
     pub(crate) const fn is_dark(self) -> bool {
-        matches!(self, Self::MidnightPink | Self::GraphiteMint)
+        matches!(self, Self::ObsidianBlue | Self::ObsidianRed)
     }
 
     const fn palette(self) -> ThemePalette {
         match self {
-            Self::MidnightPink => ThemePalette {
-                accent: ACCENT,
-                accent_bright: ACCENT_BRIGHT,
-                hyperlink: HYPERLINK,
-                border: BORDER,
-                panel: SURFACE_PANEL,
-                window: SURFACE_WINDOW,
-                faint: SURFACE_FAINT,
-                extreme: SURFACE_EXTREME,
-                inactive: SURFACE_WIDGET_INACTIVE,
-                inactive_stroke: WIDGET_INACTIVE_STROKE,
-                hovered: SURFACE_WIDGET_HOVERED,
-                hovered_stroke: WIDGET_HOVERED_STROKE,
-                open: SURFACE_WIDGET_OPEN,
-                open_stroke: WIDGET_OPEN_STROKE,
+            Self::ObsidianBlue => ThemePalette {
+                accent: Color32::from_rgb(79, 132, 185),
+                accent_bright: Color32::from_rgb(126, 170, 213),
+                hyperlink: Color32::from_rgb(111, 162, 210),
+                border: Color32::from_rgb(48, 52, 60),
+                panel: Color32::from_rgb(24, 26, 31),
+                window: Color32::from_rgb(18, 20, 24),
+                faint: Color32::from_rgb(31, 34, 40),
+                extreme: Color32::from_rgb(12, 14, 17),
+                inactive: Color32::from_rgb(34, 37, 43),
+                inactive_stroke: Color32::from_rgb(58, 63, 72),
+                hovered: Color32::from_rgb(43, 47, 55),
+                hovered_stroke: Color32::from_rgb(79, 86, 98),
+                open: Color32::from_rgb(39, 43, 50),
+                open_stroke: Color32::from_rgb(69, 76, 88),
             },
-            Self::GraphiteMint => ThemePalette {
+            Self::ObsidianRed => ThemePalette {
                 accent: Color32::from_rgb(166, 70, 86),
                 accent_bright: Color32::from_rgb(211, 111, 125),
                 hyperlink: Color32::from_rgb(222, 125, 137),
@@ -731,6 +719,25 @@ pub(crate) fn responsive_combo_box<R>(
     response
 }
 
+/// A right-click menu that retains the regular popup/widget styling used by
+/// combo boxes instead of egui's compact frameless menu override.
+pub(crate) fn context_menu<R>(
+    response: &Response,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> Option<InnerResponse<R>> {
+    egui::Popup::context_menu(response)
+        .style(egui::style::StyleModifier::default())
+        .show(add_contents)
+}
+
+pub(crate) fn context_menu_item<'a>(
+    ui: &mut Ui,
+    enabled: bool,
+    label: impl egui::IntoAtoms<'a>,
+) -> Response {
+    ui.add_enabled(enabled, egui::Button::selectable(false, label))
+}
+
 pub(crate) fn form_combo_with_help(
     ui: &mut Ui,
     label: &str,
@@ -887,10 +894,18 @@ mod tests {
 
     #[test]
     fn obsidian_blue_is_the_default_and_dark_accents_are_distinct() {
-        assert_eq!(UiDesign::default(), UiDesign::MidnightPink);
+        assert_eq!(UiDesign::default(), UiDesign::ObsidianBlue);
+        assert_eq!(
+            serde_json::from_str::<UiDesign>(r#""midnight_pink""#).unwrap(),
+            UiDesign::ObsidianBlue
+        );
+        assert_eq!(
+            serde_json::from_str::<UiDesign>(r#""graphite_mint""#).unwrap(),
+            UiDesign::ObsidianRed
+        );
 
-        let blue = UiDesign::MidnightPink.palette().accent;
-        let red = UiDesign::GraphiteMint.palette().accent;
+        let blue = UiDesign::ObsidianBlue.palette().accent;
+        let red = UiDesign::ObsidianRed.palette().accent;
         assert!(blue.b() > blue.r() && blue.b() > blue.g());
         assert!(red.r() > red.g() && red.r() > red.b());
         assert_ne!(blue, red);

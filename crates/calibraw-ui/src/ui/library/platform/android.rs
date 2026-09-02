@@ -70,12 +70,12 @@ pub(super) fn show_android_library_folder_node(
             if response.inner.clicked() {
                 *requested_action = Some(AndroidLibraryFolderUiAction::Select(path.to_owned()));
             }
-            response.inner.context_menu(|ui| {
-                if ui.button("New folder here…").clicked() {
+            crate::ui::theme::context_menu(&response.inner, |ui| {
+                if crate::ui::theme::context_menu_item(ui, true, "New folder here…").clicked() {
                     *requested_action = Some(AndroidLibraryFolderUiAction::New(path.to_owned()));
                     ui.close();
                 }
-                if ui.button("Refresh folders").clicked() {
+                if crate::ui::theme::context_menu_item(ui, true, "Refresh folders").clicked() {
                     *requested_action = Some(AndroidLibraryFolderUiAction::Refresh);
                     ui.close();
                 }

@@ -377,9 +377,11 @@ impl Library {
                                 vec![asset.clone()]
                             };
                             let mut select_from_context_menu = false;
-                            response.context_menu(|ui| {
+                            crate::ui::theme::context_menu(&response, |ui| {
                                 if !app.library.selection_mode() {
-                                    if ui.button("Select").clicked() {
+                                    if crate::ui::theme::context_menu_item(ui, true, "Select")
+                                        .clicked()
+                                    {
                                         select_from_context_menu = true;
                                         ui.close();
                                     }

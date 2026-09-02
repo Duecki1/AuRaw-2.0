@@ -171,8 +171,11 @@ pub(crate) enum LibraryLocator {
 pub(crate) struct LibraryAssetMetadata {
     pub(crate) bytes: u64,
     pub(crate) dimensions_hint: Option<[u32; 2]>,
+    #[cfg(any(not(target_os = "android"), test))]
     pub(crate) iso_speed: f32,
+    #[cfg(any(not(target_os = "android"), test))]
     pub(crate) shutter_seconds: f32,
+    #[cfg(any(not(target_os = "android"), test))]
     pub(crate) focal_length: f32,
     pub(crate) modified_seconds: u64,
 }
@@ -224,8 +227,11 @@ impl LibraryAsset {
             metadata: LibraryAssetMetadata {
                 bytes: document.bytes,
                 dimensions_hint: None,
+                #[cfg(test)]
                 iso_speed: 0.0,
+                #[cfg(test)]
                 shutter_seconds: 0.0,
+                #[cfg(test)]
                 focal_length: 0.0,
                 modified_seconds: document.modified_seconds,
             },

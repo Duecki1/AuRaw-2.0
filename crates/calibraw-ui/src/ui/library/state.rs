@@ -499,14 +499,9 @@ impl LibraryState {
                         .collect::<Vec<_>>();
                     for asset in &mut assets {
                         if let Some(uri) = asset.android_uri() {
-                            if let Ok(metadata) =
-                                crate::android::load_library_display_metadata(&android_app, uri)
-                            {
-                                asset.metadata.dimensions_hint = Some(metadata.dimensions);
-                                asset.metadata.iso_speed = metadata.iso_speed;
-                                asset.metadata.shutter_seconds = metadata.shutter_seconds;
-                                asset.metadata.focal_length = metadata.focal_length;
-                            }
+                            asset.metadata.dimensions_hint =
+                                crate::android::load_library_display_dimensions(&android_app, uri)
+                                    .ok();
                         }
                     }
                     let thumbnail_app = android_app.clone();
