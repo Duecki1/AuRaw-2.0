@@ -94,15 +94,11 @@ impl Library {
         let mut library_action = None;
         let search_active = app.library.search_active();
         let visible_indices = search_active.then(|| app.library.filtered_entry_indices());
-        let visible_count = visible_indices
-            .as_ref()
-            .map_or(app.library.entries.len(), Vec::len);
 
         let compact_header = ui.available_width() < 520.0;
         let mut selected_sort = app.library.sort_order();
         let mut selected_size = app.library.thumbnail_size();
         let header_title = library_header_title(app);
-        let header_summary = library_header_summary(app, visible_count, search_active);
         crate::ui::theme::card_header(ui, |ui| {
             crate::ui::theme::toolbar_row(ui, |ui| {
                 if compact_header {
@@ -123,18 +119,7 @@ impl Library {
                 if compact_header {
                     crate::ui::theme::toolbar_title(ui, "Library");
                 } else {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        crate::ui::theme::toolbar_title(ui, &header_title);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&header_summary)
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            )
-                            .truncate(),
-                        );
-                    });
+                    crate::ui::theme::toolbar_title(ui, &header_title);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     #[cfg(target_os = "android")]
@@ -208,16 +193,6 @@ impl Library {
         app.set_library_sort_order(selected_sort);
         app.set_library_thumbnail_size(selected_size);
         crate::ui::theme::card_gap(ui);
-
-        if show_local_image_paste_bar(ui, app) {
-            crate::ui::theme::card_gap(ui);
-        }
-        let show_status = !app.library.status.is_empty()
-            && (app.library.location.is_some() || !app.library.status.starts_with("Open a folder"));
-        if show_status {
-            show_library_status(ui, &app.library.status);
-            crate::ui::theme::card_gap(ui);
-        }
 
         if app.library.location.is_none() {
             #[cfg(not(target_os = "android"))]
@@ -460,28 +435,6 @@ fn library_header_title(app: &CalibRawApp) -> String {
     selected_library_folder_name(app).unwrap_or_else(|| "Library".to_owned())
 }
 
-fn library_header_summary(app: &CalibRawApp, visible_count: usize, search_active: bool) -> String {
-    if app.library.scanning {
-        return "Scanning photos…".to_owned();
-    }
-
-    let noun_count = if search_active {
-        app.library.entries.len()
-    } else {
-        visible_count
-    };
-    let photo_label = if noun_count == 1 { "photo" } else { "photos" };
-    let count = if search_active {
-        format!(
-            "{visible_count} of {} {photo_label}",
-            app.library.entries.len()
-        )
-    } else {
-        format!("{visible_count} {photo_label}")
-    };
-    count
-}
-
 #[cfg(not(target_os = "android"))]
 fn selected_library_folder_name(app: &CalibRawApp) -> Option<String> {
     app.library.folder.as_deref().map(|path| {
@@ -501,26 +454,6 @@ fn selected_library_folder_name(app: &CalibRawApp) -> Option<String> {
     } else {
         folder.rsplit('/').next().unwrap_or(folder).to_owned()
     })
-}
-
-fn show_library_status(ui: &mut Ui, status: &str) {
-    crate::ui::theme::content_card(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(egui_phosphor::regular::INFO)
-                    .size(17.0)
-                    .color(ui.visuals().selection.bg_fill),
-            );
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(status)
-                        .small()
-                        .color(ui.visuals().weak_text_color()),
-                )
-                .wrap(),
-            );
-        });
-    });
 }
 
 fn show_library_empty_state(
@@ -596,66 +529,4 @@ fn show_library_view_combos(
             }
         },
     );
-}
-
-fn show_local_image_paste_bar(ui: &mut Ui, app: &mut CalibRawApp) -> bool {
-    let Some(clipboard) = app.library.image_clipboard.as_ref() else {
-        return false;
-    };
-    let label = clipboard.paste_label();
-    let in_progress = app.library.asset_transfer_in_progress();
-    let mut paste = false;
-    let mut clear = false;
-    #[cfg(not(target_os = "android"))]
-    let destination_available = app.library.folder.is_some();
-    #[cfg(target_os = "android")]
-    let destination_available = true;
-    crate::ui::theme::content_card(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(egui_phosphor::regular::CLIPBOARD)
-                    .size(17.0)
-                    .color(ui.visuals().selection.bg_fill),
-            );
-            ui.label(egui::RichText::new(&label).small());
-            if ui
-                .add_enabled(
-                    !in_progress && destination_available,
-                    egui::Button::new("Paste here"),
-                )
-                .clicked()
-            {
-                paste = true;
-            }
-            if ui
-                .add_enabled(!in_progress, egui::Button::new("Clear"))
-                .clicked()
-            {
-                clear = true;
-            }
-        });
-    });
-    if clear {
-        app.library.image_clipboard = None;
-    }
-    if paste {
-        #[cfg(not(target_os = "android"))]
-        if let Some(folder) = app.library.folder.clone() {
-            start_image_clipboard_paste(
-                app,
-                LibraryTransferDestination::LocalFolder(folder),
-                ui.ctx(),
-            );
-        }
-        #[cfg(target_os = "android")]
-        {
-            let path = app.library.location.clone().unwrap_or_default();
-            start_image_clipboard_paste(
-                app,
-                LibraryTransferDestination::LocalLibrary { path },
-                ui.ctx(),
-            );
-        }
-    }
-    true
 }
