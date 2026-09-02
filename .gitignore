@@ -26,6 +26,10 @@ android.iml
 .cargo/*
 !.cargo/config.toml
 
+# Local Android signing credentials
+*.keystore
+*.keystore.base64
+
 # Generated
 dist/
 .pytest_cache/

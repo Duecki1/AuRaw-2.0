@@ -238,8 +238,8 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  android-debug-apk:
-    name: Android debug APK
+  android-apk:
+    name: Android APK
     runs-on: ubuntu-latest
 
     steps:
@@ -311,7 +311,37 @@ jobs:
             unzip \
             zip
 
-      - name: Build arm64 debug APK
+      - name: Prepare release signing keystore
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.CALIBRAW_ANDROID_KEYSTORE_BASE64 }}
+          CALIBRAW_ANDROID_STORE_PASSWORD: ${{ secrets.CALIBRAW_ANDROID_STORE_PASSWORD }}
+          CALIBRAW_ANDROID_KEY_ALIAS: ${{ secrets.CALIBRAW_ANDROID_KEY_ALIAS }}
+          CALIBRAW_ANDROID_KEY_PASSWORD: ${{ secrets.CALIBRAW_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          : "${KEYSTORE_BASE64:?Missing CALIBRAW_ANDROID_KEYSTORE_BASE64 repository secret}"
+          : "${CALIBRAW_ANDROID_STORE_PASSWORD:?Missing CALIBRAW_ANDROID_STORE_PASSWORD repository secret}"
+          : "${CALIBRAW_ANDROID_KEY_ALIAS:?Missing CALIBRAW_ANDROID_KEY_ALIAS repository secret}"
+          : "${CALIBRAW_ANDROID_KEY_PASSWORD:?Missing CALIBRAW_ANDROID_KEY_PASSWORD repository secret}"
+
+          keystore_path="$RUNNER_TEMP/calibraw-release.keystore"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+          keytool -list \
+            -keystore "$keystore_path" \
+            -storepass:env CALIBRAW_ANDROID_STORE_PASSWORD \
+            -alias "$CALIBRAW_ANDROID_KEY_ALIAS" >/dev/null
+          echo "CALIBRAW_ANDROID_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+
+      - name: Build arm64 Android APK
+        id: build_android_apk
+        env:
+          CALIBRAW_ANDROID_STORE_PASSWORD: ${{ secrets.CALIBRAW_ANDROID_STORE_PASSWORD }}
+          CALIBRAW_ANDROID_KEY_ALIAS: ${{ secrets.CALIBRAW_ANDROID_KEY_ALIAS }}
+          CALIBRAW_ANDROID_KEY_PASSWORD: ${{ secrets.CALIBRAW_ANDROID_KEY_PASSWORD }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -398,25 +428,49 @@ jobs:
           CALIBRAW_ALLOW_NO_LIBRAW=1 cargo check --locked --workspace
           ./gradlew --version
 
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            gradle_task=assembleDebug
+            apk_path="android/app/build/outputs/apk/debug/app-debug.apk"
+            output_name="CalibRaw-debug-arm64-v8a.apk"
+            artifact_name="calibraw-android-debug-arm64-v8a"
+            signing_args=()
+          else
+            gradle_task=assembleRelease
+            apk_path="android/app/build/outputs/apk/release/app-release.apk"
+            output_name="CalibRaw-release-arm64-v8a.apk"
+            artifact_name="calibraw-android-release-arm64-v8a"
+            signing_args=(-PcalibrawRequireReleaseSigning=true)
+          fi
+
           ./gradlew \
             --no-daemon \
             --stacktrace \
             -p android \
-            assembleDebug \
+            "$gradle_task" \
             -PcalibrawAbis=arm64-v8a \
-            -PcalibrawVersionCode="$GITHUB_RUN_NUMBER"
+            -PcalibrawVersionCode="$GITHUB_RUN_NUMBER" \
+            "${signing_args[@]}"
 
-          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          APK="$apk_path"
           test -f "$APK"
           cargo xtask verify-android-16kb "$APK"
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            "$ANDROID_HOME/build-tools/$CALIBRAW_ANDROID_BUILD_TOOLS_VERSION/apksigner" \
+              verify --verbose --print-certs "$APK"
+          fi
           mkdir -p dist
-          cp "$APK" dist/CalibRaw-debug-arm64-v8a.apk
-          sha256sum dist/CalibRaw-debug-arm64-v8a.apk \
-            > dist/CalibRaw-debug-arm64-v8a.apk.sha256
+          cp "$APK" "dist/$output_name"
+          sha256sum "dist/$output_name" > "dist/$output_name.sha256"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
 
-      - name: Upload debug APK
+      - name: Remove release signing keystore
+        if: always() && github.event_name != 'pull_request'
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/calibraw-release.keystore"
+
+      - name: Upload Android APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: calibraw-android-debug-arm64-v8a
+          name: ${{ steps.build_android_apk.outputs.artifact_name }}
           path: dist/*
           if-no-files-found: error

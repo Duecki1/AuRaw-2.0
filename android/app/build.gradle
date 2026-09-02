@@ -70,6 +70,38 @@ def calibrawVersionCode = providers.gradleProperty("calibrawVersionCode")
     .getOrElse("1")
     .toInteger()
 
+def releaseSigningValues = [
+    keystorePath: System.getenv("CALIBRAW_ANDROID_KEYSTORE_PATH"),
+    storePassword: System.getenv("CALIBRAW_ANDROID_STORE_PASSWORD"),
+    keyAlias: System.getenv("CALIBRAW_ANDROID_KEY_ALIAS"),
+    keyPassword: System.getenv("CALIBRAW_ANDROID_KEY_PASSWORD")
+]
+def releaseSigningConfigured = releaseSigningValues.values().every {
+    it != null && !it.trim().isEmpty()
+}
+def releaseSigningPartiallyConfigured = releaseSigningValues.values().any {
+    it != null && !it.trim().isEmpty()
+}
+def requireReleaseSigning = providers.gradleProperty("calibrawRequireReleaseSigning")
+    .map { it.toBoolean() }
+    .getOrElse(false)
+
+if (releaseSigningPartiallyConfigured && !releaseSigningConfigured) {
+    throw new GradleException(
+        "Android release signing is only partially configured; set all CALIBRAW_ANDROID_* signing variables."
+    )
+}
+if (requireReleaseSigning && !releaseSigningConfigured) {
+    throw new GradleException(
+        "Android release signing is required but the CALIBRAW_ANDROID_* signing variables are not set."
+    )
+}
+if (releaseSigningConfigured && !new File(releaseSigningValues.keystorePath).isFile()) {
+    throw new GradleException(
+        "Android release keystore not found: ${releaseSigningValues.keystorePath}"
+    )
+}
+
 def requestedAbis = providers.gradleProperty("calibrawAbis")
     .orElse(providers.gradleProperty("calibrawAbi"))
     .getOrElse("arm64-v8a")
@@ -142,10 +174,24 @@ android {
         }
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile file(releaseSigningValues.keystorePath)
+                storePassword releaseSigningValues.storePassword
+                keyAlias releaseSigningValues.keyAlias
+                keyPassword releaseSigningValues.keyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

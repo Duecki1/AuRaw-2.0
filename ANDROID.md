@@ -32,6 +32,40 @@ The app supports 16 KB pages. Verify a built APK with:
 cargo xtask verify-android-16kb android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## GitHub release signing
+
+Pushes to `main` and manual runs of the **Build Linux and Android** workflow
+build a signed release APK. Pull requests build a debug APK because repository
+secrets are not available to untrusted forks.
+
+Create the upload keystore once and keep it backed up securely. Losing it means
+future APK updates cannot be signed with the same identity.
+
+```sh
+keytool -genkeypair \
+  -keystore calibraw-release.keystore \
+  -storetype PKCS12 \
+  -alias calibraw \
+  -keyalg RSA \
+  -keysize 4096 \
+  -validity 10000
+openssl base64 -A -in calibraw-release.keystore > calibraw-release.keystore.base64
+```
+
+In the GitHub repository, open **Settings > Secrets and variables > Actions**,
+choose **New repository secret**, and add:
+
+- `CALIBRAW_ANDROID_KEYSTORE_BASE64`: contents of
+  `calibraw-release.keystore.base64`
+- `CALIBRAW_ANDROID_STORE_PASSWORD`: the keystore password
+- `CALIBRAW_ANDROID_KEY_ALIAS`: the alias passed to `keytool` (`calibraw` above)
+- `CALIBRAW_ANDROID_KEY_PASSWORD`: the key password (use the keystore password
+  for the PKCS12 keystore generated above)
+
+The release job fails instead of creating an unsigned release when any secret
+is absent or invalid. Its artifact is named
+`calibraw-android-release-arm64-v8a` and contains the APK plus its SHA-256 file.
+
 ## Storage
 
 Imports use Android's document picker and are copied to
