@@ -103,6 +103,8 @@ fn show_step_body(ui: &mut egui::Ui, app: &mut CalibRawApp, step: OnboardingStep
         OnboardingStep::CopyPaste => show_copy_paste(ui, app),
         #[cfg(not(target_os = "android"))]
         OnboardingStep::Ai => show_ai(ui, app),
+        #[cfg(not(target_os = "android"))]
+        OnboardingStep::Discord => show_discord(ui, app),
     }
 }
 
@@ -293,6 +295,31 @@ fn show_ai(ui: &mut egui::Ui, app: &mut CalibRawApp) {
     ui.small("AI models are downloaded only when you first use the corresponding tool.");
 }
 
+#[cfg(not(target_os = "android"))]
+fn show_discord(ui: &mut egui::Ui, app: &mut CalibRawApp) {
+    let mut enabled = app.preferences.discord_rich_presence;
+    if crate::ui::theme::checkbox_with_help(
+        ui,
+        &mut enabled,
+        "Enable Discord Rich Presence",
+        "Shares only whether you are browsing the Library or editing, plus the elapsed edit time. Photo names and paths are never sent. Discord's desktop client must be running.",
+    )
+    .changed()
+    {
+        app.set_discord_rich_presence(enabled);
+    }
+
+    ui.add_space(8.0);
+    ui.small("This is optional and disabled by default. You can change it later in Settings.");
+    if !app.discord_rich_presence_configured() {
+        ui.add_space(8.0);
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            "Unavailable in this build: CALIBRAW_DISCORD_APPLICATION_ID is not configured.",
+        );
+    }
+}
+
 fn show_navigation(ui: &mut egui::Ui, step: OnboardingStep, action: &mut Option<OnboardingAction>) {
     ui.horizontal(|ui| {
         if ui
@@ -327,6 +354,8 @@ fn previous_step(step: OnboardingStep) -> Option<OnboardingStep> {
         OnboardingStep::CopyPaste => OnboardingStep::Preview,
         #[cfg(not(target_os = "android"))]
         OnboardingStep::Ai => OnboardingStep::CopyPaste,
+        #[cfg(not(target_os = "android"))]
+        OnboardingStep::Discord => OnboardingStep::Ai,
     })
 }
 
@@ -345,14 +374,16 @@ fn next_step(step: OnboardingStep) -> Option<OnboardingStep> {
             }
         }
         #[cfg(not(target_os = "android"))]
-        OnboardingStep::Ai => None,
+        OnboardingStep::Ai => Some(OnboardingStep::Discord),
+        #[cfg(not(target_os = "android"))]
+        OnboardingStep::Discord => None,
     }
 }
 
 const fn is_final_step(step: OnboardingStep) -> bool {
     #[cfg(not(target_os = "android"))]
     {
-        matches!(step, OnboardingStep::Ai)
+        matches!(step, OnboardingStep::Discord)
     }
     #[cfg(target_os = "android")]
     {
@@ -368,6 +399,8 @@ impl OnboardingStep {
             Self::CopyPaste => "Copy & paste setup",
             #[cfg(not(target_os = "android"))]
             Self::Ai => "AI model setup",
+            #[cfg(not(target_os = "android"))]
+            Self::Discord => "Discord Rich Presence",
         }
     }
 
@@ -386,6 +419,10 @@ impl OnboardingStep {
             Self::Ai => {
                 "Choose how local AI models use your hardware and the quality of new Subject masks."
             }
+            #[cfg(not(target_os = "android"))]
+            Self::Discord => {
+                "Choose whether Discord may show that you are browsing or editing in CalibRaw."
+            }
         }
     }
 
@@ -396,6 +433,8 @@ impl OnboardingStep {
             Self::CopyPaste => 3,
             #[cfg(not(target_os = "android"))]
             Self::Ai => 4,
+            #[cfg(not(target_os = "android"))]
+            Self::Discord => 5,
         }
     }
 
@@ -404,7 +443,7 @@ impl OnboardingStep {
         if cfg!(target_os = "android") {
             3
         } else {
-            4
+            5
         }
     }
 }
@@ -431,12 +470,20 @@ mod tests {
             previous_step(OnboardingStep::CopyPaste),
             Some(OnboardingStep::Preview)
         );
+        #[cfg(not(target_os = "android"))]
+        {
+            assert_eq!(next_step(OnboardingStep::Ai), Some(OnboardingStep::Discord));
+            assert_eq!(
+                previous_step(OnboardingStep::Discord),
+                Some(OnboardingStep::Ai)
+            );
+        }
     }
 
     #[test]
     fn final_step_ends_the_sequence() {
         #[cfg(not(target_os = "android"))]
-        let final_step = OnboardingStep::Ai;
+        let final_step = OnboardingStep::Discord;
         #[cfg(target_os = "android")]
         let final_step = OnboardingStep::CopyPaste;
 

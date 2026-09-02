@@ -1020,6 +1020,8 @@ pub(crate) enum OnboardingStep {
     CopyPaste,
     #[cfg(not(target_os = "android"))]
     Ai,
+    #[cfg(not(target_os = "android"))]
+    Discord,
 }
 
 pub(crate) struct UiState {
