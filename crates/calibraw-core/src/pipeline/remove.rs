@@ -56,10 +56,6 @@ pub struct RetouchStroke {
     /// GIMP-style hard-center fraction. The remaining radius is feathered.
     pub hardness: f32,
     pub opacity: f32,
-    /// Opacity that was already baked into patches written before sidecar schema 16.
-    /// New patches keep opacity live and leave this unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baked_opacity: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -125,12 +121,6 @@ pub struct RemovePatch {
     pub rgb_scene16f: Arc<[u16]>,
     #[serde(
         default,
-        with = "arc_u16_le_base64",
-        skip_serializing_if = "arc_u16_is_empty"
-    )]
-    pub rgb_srgb16: Arc<[u16]>,
-    #[serde(
-        default,
         with = "arc_u8_base64",
         skip_serializing_if = "arc_u8_is_empty"
     )]
@@ -151,7 +141,6 @@ impl PartialEq for RemovePatch {
     fn eq(&self, other: &Self) -> bool {
         self.bounds == other.bounds
             && self.rgb_scene16f == other.rgb_scene16f
-            && self.rgb_srgb16 == other.rgb_srgb16
             && self.alpha == other.alpha
     }
 }
@@ -177,33 +166,6 @@ impl RemovePatch {
         Ok(Self {
             bounds,
             rgb_scene16f: Arc::from(rgb_scene16f),
-            rgb_srgb16: Arc::from([]),
-            alpha: Arc::from(alpha),
-            sidecar_cache: Arc::default(),
-        })
-    }
-
-    pub fn new(
-        bounds: NativeRect,
-        rgb_srgb16: Vec<u16>,
-        alpha: Vec<u8>,
-    ) -> Result<Self, &'static str> {
-        let pixels = (bounds.width as usize)
-            .checked_mul(bounds.height as usize)
-            .ok_or("remove patch pixel count overflows")?;
-        if pixels == 0 {
-            return Err("remove patch is empty");
-        }
-        if rgb_srgb16.len() != pixels.saturating_mul(3) {
-            return Err("remove patch RGB length does not match bounds");
-        }
-        if alpha.len() != pixels {
-            return Err("remove patch alpha length does not match bounds");
-        }
-        Ok(Self {
-            bounds,
-            rgb_scene16f: Arc::from([]),
-            rgb_srgb16: Arc::from(rgb_srgb16),
             alpha: Arc::from(alpha),
             sidecar_cache: Arc::default(),
         })
@@ -241,15 +203,8 @@ const fn default_remove_stroke_opacity() -> f32 {
 }
 
 impl RemoveStroke {
-    /// Live blend factor for this cached stroke. Retouch patches written before
-    /// schema 16 already contain their creation opacity, so they use a ratio.
     pub fn composite_opacity(&self) -> f32 {
-        let opacity = self.opacity.clamp(0.0, 1.0);
-        match self.retouch.and_then(|retouch| retouch.baked_opacity) {
-            Some(baked) if baked > f32::EPSILON => opacity / baked,
-            Some(_) => 0.0,
-            None => opacity,
-        }
+        self.opacity.clamp(0.0, 1.0)
     }
 }
 
@@ -620,9 +575,9 @@ fn composite_patch_into_linear_region_with_opacity(
     region: NativeRect,
     rgb: &mut [f32],
     opacity: f32,
-    baked_retouch_coverage: bool,
+    retouch_coverage: bool,
 ) {
-    if patch.has_scene_pixels() {
+    if !patch.has_scene_pixels() {
         return;
     }
     let Some(intersection) = patch.bounds.intersect(region) else {
@@ -636,7 +591,7 @@ fn composite_patch_into_linear_region_with_opacity(
             let region_x = (x - region.x) as usize;
             let patch_index = patch_y * patch.bounds.width as usize + patch_x;
             let coverage = patch.alpha[patch_index] as f32 / 255.0;
-            let alpha = if baked_retouch_coverage {
+            let alpha = if retouch_coverage {
                 if coverage > 0.0 {
                     opacity
                 } else {
@@ -649,11 +604,11 @@ fn composite_patch_into_linear_region_with_opacity(
                 continue;
             }
             let rgb_index = patch_index * 3;
-            let repaired = model_srgb_to_display_linear_rec2020([
-                patch.rgb_srgb16[rgb_index] as f32 / 65535.0,
-                patch.rgb_srgb16[rgb_index + 1] as f32 / 65535.0,
-                patch.rgb_srgb16[rgb_index + 2] as f32 / 65535.0,
-            ]);
+            let repaired = [
+                half::f16::from_bits(patch.rgb_scene16f[rgb_index]).to_f32(),
+                half::f16::from_bits(patch.rgb_scene16f[rgb_index + 1]).to_f32(),
+                half::f16::from_bits(patch.rgb_scene16f[rgb_index + 2]).to_f32(),
+            ];
             let out_index = (region_y * region.width as usize + region_x) * 3;
             for channel in 0..3 {
                 rgb[out_index + channel] =
@@ -891,14 +846,18 @@ mod tests {
 
     #[test]
     fn compositing_does_not_touch_outside_patch() {
-        let patch = RemovePatch::new(
+        let patch = RemovePatch::new_scene(
             NativeRect {
                 x: 1,
                 y: 1,
                 width: 1,
                 height: 1,
             },
-            vec![65535, 0, 0],
+            vec![
+                half::f16::from_f32(1.0).to_bits(),
+                half::f16::from_f32(0.0).to_bits(),
+                half::f16::from_f32(0.0).to_bits(),
+            ],
             vec![255],
         )
         .unwrap();
@@ -942,28 +901,9 @@ mod tests {
                 destination: [0.0; 2],
                 hardness: 0.5,
                 opacity: 0.8,
-                baked_opacity: None,
             }),
             ..RemoveStroke::default()
         };
         assert_eq!(retouch.composite_opacity(), 0.4);
-    }
-
-    #[test]
-    fn legacy_retouch_uses_opacity_ratio_to_preserve_its_baked_patch() {
-        let stroke = RemoveStroke {
-            opacity: 0.4,
-            retouch: Some(RetouchStroke {
-                tool: RetouchTool::Heal,
-                alignment: RetouchAlignment::Aligned,
-                source: [0.0; 2],
-                destination: [0.0; 2],
-                hardness: 0.5,
-                opacity: 0.8,
-                baked_opacity: Some(0.8),
-            }),
-            ..RemoveStroke::default()
-        };
-        assert!((stroke.composite_opacity() - 0.5).abs() < f32::EPSILON);
     }
 }

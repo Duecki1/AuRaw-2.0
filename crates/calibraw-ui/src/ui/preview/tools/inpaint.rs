@@ -160,7 +160,6 @@ impl Preview {
                         destination,
                         hardness: app.inpaint.brush_hardness,
                         opacity: app.inpaint.brush_opacity,
-                        baked_opacity: None,
                     },
                 );
             } else {

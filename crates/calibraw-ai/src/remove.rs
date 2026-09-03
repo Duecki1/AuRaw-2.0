@@ -1139,7 +1139,6 @@ mod tests {
                 destination: [5.5, 1.5],
                 hardness: 1.0,
                 opacity,
-                baked_opacity: None,
             },
             &AtomicBool::new(false),
         )

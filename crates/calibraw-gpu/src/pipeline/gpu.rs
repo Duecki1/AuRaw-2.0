@@ -3,8 +3,7 @@ use super::gpu_cache::PersistentGpuPipelineCache;
 use super::sigmoid::coefficients as sigmoid_coefficients;
 use crate::pipeline::{
     canonical_remove_scene_to_pipeline_scene, effect_params, export_mask_atlas_edge_limit,
-    mask_atlas_edge, model_srgb_to_display_linear_rec2020, pipeline_scene_to_working_rec2020,
-    working_rec2020_to_canonical_remove_scene, AiDenoisedImage, CfaKind, ExposureParams,
+    mask_atlas_edge, pipeline_scene_to_working_rec2020, AiDenoisedImage, CfaKind, ExposureParams,
     GeometryTransform, HighlightReconstructionMethod, LoadedRaw, LocalMask, MaskEffect, MaskStack,
     PointCurve, ProcessingStage, RawThumbnail, RemoveEditState, RemovePatch, SigmoidParams,
     SrgbOutputLut, GLOBAL_TEMPERATURE_LIMIT, GLOBAL_TINT_OFFSET_LIMIT, MAX_LOCAL_MASKS,
@@ -89,13 +88,7 @@ fn remove_patch_coverage(patch: &RemovePatch, x: f32, y: f32) -> u8 {
     patch.alpha[py * patch.bounds.width as usize + px]
 }
 
-fn sample_remove_patch_scene(
-    patch: &RemovePatch,
-    x: f32,
-    y: f32,
-    raw: &LoadedRaw,
-    exposure: &ExposureParams,
-) -> [f32; 3] {
+fn sample_remove_patch_scene(patch: &RemovePatch, x: f32, y: f32) -> [f32; 3] {
     let width = patch.bounds.width as usize;
     let height = patch.bounds.height as usize;
     if width == 0 || height == 0 {
@@ -116,13 +109,6 @@ fn sample_remove_patch_scene(
                 half::f16::from_bits(patch.rgb_scene16f[index * 3 + 1]).to_f32(),
                 half::f16::from_bits(patch.rgb_scene16f[index * 3 + 2]).to_f32(),
             ]
-        } else if patch.rgb_srgb16.len() == width * height * 3 {
-            let working = model_srgb_to_display_linear_rec2020([
-                patch.rgb_srgb16[index * 3] as f32 / 65_535.0,
-                patch.rgb_srgb16[index * 3 + 1] as f32 / 65_535.0,
-                patch.rgb_srgb16[index * 3 + 2] as f32 / 65_535.0,
-            ]);
-            working_rec2020_to_canonical_remove_scene(raw, exposure, working)
         } else {
             [0.0; 3]
         }
@@ -2691,8 +2677,7 @@ impl RawGpuPipeline {
                     if remove_patch_coverage(patch, local_x, local_y) == 0 {
                         return [0.0; 4];
                     }
-                    let canonical =
-                        sample_remove_patch_scene(patch, local_x, local_y, source_raw, exposure);
+                    let canonical = sample_remove_patch_scene(patch, local_x, local_y);
                     let source_scene =
                         canonical_remove_scene_to_pipeline_scene(source_raw, exposure, canonical);
                     let scene = if self.has_raster_scene {

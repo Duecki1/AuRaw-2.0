@@ -32,7 +32,6 @@ pub enum HighlightReconstructionMethod {
     Off,
     Lch,
     #[default]
-    #[serde(other)]
     InpaintOpposed,
 }
 
@@ -498,13 +497,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_highlight_methods_decode_as_inpaint_opposed() {
-        let decoded: HighlightReconstructionMethod =
-            serde_json::from_str("\"RetiredMethod\"").expect("decode retired method");
-        assert_eq!(decoded, HighlightReconstructionMethod::InpaintOpposed);
-    }
-
-    #[test]
     fn contrast_percent_endpoints_map_to_photographic_darktable_slopes() {
         for (percent, expected) in [(-100.0, 0.7), (0.0, 1.5), (100.0, 3.0)] {
             assert!((sigmoid_contrast_from_percent(percent) - expected).abs() < 1e-5);
@@ -531,7 +523,7 @@ mod tests {
             .expect("exposure is a JSON object")
             .remove("hue");
         let decoded: ExposureParams =
-            serde_json::from_value(serialized).expect("deserialize legacy exposure");
+            serde_json::from_value(serialized).expect("deserialize exposure");
         assert_eq!(decoded.hue, 0.0);
     }
 }

@@ -146,9 +146,7 @@ impl DevelopLoadingThumbnailState {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PreviewQuality {
-    #[serde(alias = "fast")]
     Low,
-    #[serde(alias = "balanced")]
     #[default]
     Medium,
     High,

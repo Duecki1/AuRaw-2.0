@@ -1,8 +1,5 @@
 #[cfg(not(target_os = "android"))]
-use super::desktop::{
-    developed_thumbnail_fingerprint_path_for_raw,
-    legacy_developed_thumbnail_fingerprint_path_for_raw, legacy_developed_thumbnail_path_for_raw,
-};
+use super::desktop::developed_thumbnail_fingerprint_path_for_raw;
 use super::*;
 #[cfg(not(target_os = "android"))]
 use crate::pipeline::RawThumbnail;
@@ -277,7 +274,7 @@ fn stale_ai_mask_metadata_alone_is_not_an_edit_conflict() {
 }
 
 #[test]
-fn legacy_copy_settings_use_safe_category_defaults() {
+fn omitted_copy_settings_use_safe_category_defaults() {
     let settings: AdjustmentCopySettings = serde_json::from_str("{}").unwrap();
     assert_eq!(settings, AdjustmentCopySettings::default());
 }
@@ -334,11 +331,13 @@ fn sidecar_round_trip_preserves_edit_state() {
             destination: [1234.0, 987.0],
             hardness: 0.5,
             opacity: 0.8,
-            baked_opacity: None,
         }),
         opacity: 0.8,
     });
     let encoded = encode(edits.clone()).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(SIDECAR_SCHEMA_VERSION, 1);
+    assert_eq!(document["schema_version"], 1);
     let loaded = decode(&encoded).unwrap();
     assert_eq!(loaded.edits, edits);
     assert!(!loaded.migrated);
@@ -383,7 +382,6 @@ fn retouch_patches_are_deduplicated_and_png_compressed() {
             destination: [40.0, 80.0],
             hardness: 0.5,
             opacity: 1.0,
-            baked_opacity: None,
         }),
         opacity: 1.0,
     });
@@ -398,6 +396,12 @@ fn retouch_patches_are_deduplicated_and_png_compressed() {
         .is_none());
     assert!(document
         .pointer("/edits/remove/strokes/0/patches/0/alpha")
+        .is_none());
+    assert!(document
+        .pointer("/edits/remove/strokes/0/patches/0/rgb_srgb16")
+        .is_none());
+    assert!(document
+        .pointer("/edits/remove/strokes/0/retouch/baked_opacity")
         .is_none());
     let compressed_base64_bytes = document["remove_assets"][0]["rgb_png"]
         .as_str()
@@ -426,106 +430,11 @@ fn retouch_patches_are_deduplicated_and_png_compressed() {
 }
 
 #[test]
-fn schema_fifteen_retouch_opacity_migrates_to_live_stroke_metadata() {
-    let mut edits = sample_edits();
-    Arc::make_mut(&mut edits.remove).strokes.push(RemoveStroke {
-        brush: RemoveBrushStroke::default(),
-        patches: vec![RemovePatch::new_scene(
-            NativeRect {
-                x: 4,
-                y: 8,
-                width: 1,
-                height: 1,
-            },
-            vec![
-                half::f16::from_f32(0.2).to_bits(),
-                half::f16::from_f32(0.3).to_bits(),
-                half::f16::from_f32(0.4).to_bits(),
-            ],
-            vec![255],
-        )
-        .unwrap()],
-        retouch: Some(RetouchStroke {
-            tool: RetouchTool::Heal,
-            alignment: RetouchAlignment::Aligned,
-            source: [2.0, 3.0],
-            destination: [4.0, 8.0],
-            hardness: 0.25,
-            opacity: 0.6,
-            baked_opacity: None,
-        }),
-        opacity: 0.6,
-    });
-    let encoded = encode(edits).unwrap();
-    let mut legacy: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    legacy["schema_version"] = serde_json::json!(15);
-    legacy
-        .pointer_mut("/edits/remove/strokes/0")
-        .unwrap()
-        .as_object_mut()
-        .unwrap()
-        .remove("opacity");
-
-    let loaded = decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
-    let stroke = &loaded.edits.remove.strokes[0];
-    assert!(loaded.migrated);
-    assert_eq!(stroke.opacity, 0.6);
-    assert_eq!(stroke.retouch.unwrap().baked_opacity, Some(0.6));
-    assert!((stroke.composite_opacity() - 1.0).abs() < f32::EPSILON);
-}
-
-#[test]
-fn schema_fourteen_inline_retouch_patch_is_still_supported() {
-    let patch = RemovePatch::new(
-        NativeRect {
-            x: 3,
-            y: 7,
-            width: 2,
-            height: 1,
-        },
-        vec![100, 200, 300, 400, 500, 600],
-        vec![255, 127],
-    )
-    .unwrap();
-    let mut edits = sample_edits();
-    Arc::make_mut(&mut edits.remove).strokes.push(RemoveStroke {
-        brush: RemoveBrushStroke::default(),
-        patches: vec![patch],
-        retouch: None,
-        opacity: 1.0,
-    });
-    let legacy = SidecarDocument {
-        format: SIDECAR_FORMAT.to_owned(),
-        schema_version: 14,
-        edits: edits.clone(),
-        mask_assets: Vec::new(),
-        mask_asset_refs: Vec::new(),
-        remove_assets: Vec::new(),
-        remove_asset_refs: Vec::new(),
-    };
-    let bytes = serde_json::to_vec(&legacy).unwrap();
-    let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(document
-        .pointer("/edits/remove/strokes/0/patches/0/rgb_srgb16")
-        .is_some());
-    assert!(document.get("remove_assets").is_none());
-
-    let loaded = decode(&bytes).unwrap();
-    assert!(loaded.migrated);
-    assert_eq!(loaded.edits, edits);
-
-    let rewritten = encode(loaded.edits).unwrap();
-    let current: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
-    assert_eq!(current["remove_assets"][0]["encoding"], "srgb16");
-    assert_eq!(decode(&rewritten).unwrap().edits, edits);
-}
-
-#[test]
-fn legacy_inpainting_field_is_ignored() {
+fn unknown_sidecar_fields_are_ignored() {
     let edits = sample_edits();
     let encoded = encode(edits.clone()).unwrap();
     let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    document["edits"]["inpainting"] = serde_json::json!([{ "legacy": true }]);
+    document["edits"]["unknown_extension"] = serde_json::json!([{ "value": true }]);
     let encoded = serde_json::to_vec(&document).unwrap();
 
     let loaded = decode(&encoded).unwrap();
@@ -738,97 +647,6 @@ fn sidecar_round_trip_preserves_shared_subject_refinement() {
 }
 
 #[test]
-fn schema_six_sidecar_without_subject_refinement_loads_empty_layer() {
-    let edits = sample_edits();
-    let encoded = encode(edits).unwrap();
-    let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    document["schema_version"] = 6.into();
-    document
-        .pointer_mut("/edits")
-        .and_then(serde_json::Value::as_object_mut)
-        .unwrap()
-        .remove("subject_refinement");
-
-    let legacy = serde_json::to_vec(&document).unwrap();
-    let loaded = decode(&legacy).unwrap();
-    assert!(loaded.migrated);
-    assert!(loaded.edits.masks.subject_refinement.is_empty());
-}
-
-#[test]
-fn schema_seven_mask_defaults_to_adjustment_effect() {
-    let edits = sample_edits();
-    let encoded = encode(edits).unwrap();
-    let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    document["schema_version"] = 7.into();
-    document
-        .pointer_mut("/edits/masks/masks/0")
-        .and_then(serde_json::Value::as_object_mut)
-        .unwrap()
-        .remove("effect");
-
-    let legacy = serde_json::to_vec(&document).unwrap();
-    let loaded = decode(&legacy).unwrap();
-    assert!(loaded.migrated);
-    assert_eq!(
-        loaded.edits.masks.masks[0].effect,
-        crate::pipeline::MaskEffect::Adjustment
-    );
-}
-
-#[test]
-fn schema_eleven_landscape_mask_migrates_to_object_mask() {
-    let mut edits = sample_edits();
-    let mut masks = MaskStack::default();
-    masks.add_mask(MaskKind::Object);
-    masks.masks[0].name = "Select Landscape".to_owned();
-    masks.masks[0].adjustments.exposure = 1.25;
-    if let MaskGeometry::Object {
-        mask,
-        grow,
-        feather,
-        ..
-    } = &mut masks.masks[0].components[0].geometry
-    {
-        *mask = MaskImage::new(2, 2, vec![0, 64, 192, 255]);
-        *grow = 0.2;
-        *feather = 0.35;
-    }
-    edits.masks = Arc::new(masks);
-
-    let encoded = encode(edits).unwrap();
-    let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    document["schema_version"] = 11.into();
-    let component = document
-        .pointer_mut("/edits/masks/masks/0/components/0")
-        .unwrap();
-    component["kind"] = "Landscape".into();
-    let geometry = component["geometry"].as_object_mut().unwrap();
-    let mut landscape = geometry.remove("Object").unwrap();
-    landscape["category"] = "Sky".into();
-    geometry.insert("Landscape".to_owned(), landscape);
-
-    let loaded = decode(&serde_json::to_vec(&document).unwrap()).unwrap();
-    assert!(loaded.migrated);
-    let mask = &loaded.edits.masks.masks[0];
-    assert_eq!(mask.name, "Select Landscape");
-    assert_eq!(mask.adjustments.exposure, 1.25);
-    assert_eq!(mask.components[0].kind, MaskKind::Object);
-    let MaskGeometry::Object {
-        mask: Some(image),
-        grow,
-        feather,
-        ..
-    } = &mask.components[0].geometry
-    else {
-        panic!("legacy landscape mask did not migrate to a raster object mask");
-    };
-    assert_eq!(image.pixels.as_ref(), &[0, 64, 192, 255]);
-    assert_eq!(*grow, 0.2);
-    assert_eq!(*feather, 0.35);
-}
-
-#[test]
 fn generated_masks_are_deduplicated_compressed_and_copy_on_write_after_loading() {
     let mut edits = sample_edits();
     let mut masks = MaskStack::default();
@@ -881,39 +699,6 @@ fn generated_masks_are_deduplicated_compressed_and_copy_on_write_after_loading()
 }
 
 #[test]
-fn beta_inline_mask_sidecar_migrates_to_asset_layout_without_losing_masks() {
-    let mut edits = sample_edits();
-    let masks = Arc::make_mut(&mut edits.masks);
-    masks.add_mask(MaskKind::Subject);
-    if let MaskGeometry::Ai { mask, .. } = &mut masks.masks[1].components[0].geometry {
-        *mask = MaskImage::new(8, 8, vec![127; 8 * 8]);
-    }
-    let legacy = SidecarDocument {
-        format: SIDECAR_FORMAT.to_owned(),
-        schema_version: 4,
-        edits: edits.clone(),
-        mask_assets: Vec::new(),
-        mask_asset_refs: Vec::new(),
-        remove_assets: Vec::new(),
-        remove_asset_refs: Vec::new(),
-    };
-    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
-    assert!(legacy_bytes
-        .windows(b"\"pixels\"".len())
-        .any(|part| part == b"\"pixels\""));
-
-    let loaded = decode(&legacy_bytes).unwrap();
-    assert!(loaded.migrated);
-    assert_eq!(loaded.edits, edits);
-
-    let rewritten = encode(loaded.edits).unwrap();
-    let current: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
-    assert_eq!(current["schema_version"], SIDECAR_SCHEMA_VERSION);
-    assert_eq!(current["mask_assets"].as_array().unwrap().len(), 1);
-    assert_eq!(current["mask_asset_refs"].as_array().unwrap().len(), 1);
-}
-
-#[test]
 fn malformed_current_mask_assets_are_rejected() {
     let mut edits = sample_edits();
     let masks = Arc::make_mut(&mut edits.masks);
@@ -954,8 +739,6 @@ fn reset_all_adjustments_removes_sidecar_masks_and_thumbnail_caches() {
     let cache_paths = [
         developed_thumbnail_path_for_raw(&raw),
         developed_thumbnail_fingerprint_path_for_raw(&raw),
-        legacy_developed_thumbnail_path_for_raw(&raw),
-        legacy_developed_thumbnail_fingerprint_path_for_raw(&raw),
     ];
     for path in &cache_paths {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -990,6 +773,21 @@ fn corrupt_and_future_sidecars_are_rejected() {
     assert!(matches!(
         decode(&serde_json::to_vec(&future).unwrap()),
         Err(SidecarError::Unsupported(_))
+    ));
+
+    let encoded = encode(sample_edits()).unwrap();
+    let mut unpublished: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    unpublished["schema_version"] = 16.into();
+    assert!(matches!(
+        decode(&serde_json::to_vec(&unpublished).unwrap()),
+        Err(SidecarError::Unsupported(_))
+    ));
+
+    let mut old_format: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    old_format["format"] = "AuRaw edit sidecar".into();
+    assert!(matches!(
+        decode(&serde_json::to_vec(&old_format).unwrap()),
+        Err(SidecarError::Invalid(_))
     ));
 
     let mut non_finite = sample_edits();

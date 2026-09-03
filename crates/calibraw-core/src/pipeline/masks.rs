@@ -53,7 +53,6 @@ pub enum MaskKind {
     Linear,
     Subject,
     Background,
-    #[serde(alias = "Landscape")]
     Object,
     LuminanceRange,
     ColorRange,
@@ -343,7 +342,6 @@ pub enum MaskGeometry {
         grow: f32,
         feather: f32,
     },
-    #[serde(alias = "Landscape")]
     Object {
         mask: Option<MaskImage>,
         #[serde(default)]
@@ -1951,7 +1949,7 @@ fn recorded_brush_groups(
         .collect::<Vec<_>>();
     starts.sort_unstable();
     starts.dedup();
-    let Some(&legacy_end) = starts.first() else {
+    let Some(&ungrouped_end) = starts.first() else {
         return (dabs.len(), Vec::new());
     };
 
@@ -1965,8 +1963,8 @@ fn recorded_brush_groups(
             let next_positive = dab.opacity >= 0.0;
             if next_positive != positive {
                 groups.push(BrushStrokeGroup {
-                    start: group_start - legacy_end,
-                    end: dab_index - legacy_end,
+                    start: group_start - ungrouped_end,
+                    end: dab_index - ungrouped_end,
                     positive,
                 });
                 group_start = dab_index;
@@ -1974,12 +1972,12 @@ fn recorded_brush_groups(
             }
         }
         groups.push(BrushStrokeGroup {
-            start: group_start - legacy_end,
-            end: stroke_end - legacy_end,
+            start: group_start - ungrouped_end,
+            end: stroke_end - ungrouped_end,
             positive,
         });
     }
-    (legacy_end, groups)
+    (ungrouped_end, groups)
 }
 
 fn rasterize_recorded_brush(
@@ -1993,13 +1991,13 @@ fn rasterize_recorded_brush(
         return vec![0.0; width as usize * height as usize];
     }
 
-    let (legacy_end, groups) = recorded_brush_groups(dabs, stroke_starts);
+    let (ungrouped_end, groups) = recorded_brush_groups(dabs, stroke_starts);
     if groups.is_empty() {
         return rasterize_brush(space, dabs);
     }
 
-    let mut out = rasterize_brush(space, &dabs[..legacy_end]);
-    let specs = brush_raster_specs(space, &dabs[legacy_end..]);
+    let mut out = rasterize_brush(space, &dabs[..ungrouped_end]);
+    let specs = brush_raster_specs(space, &dabs[ungrouped_end..]);
 
     const ROW_BAND_HEIGHT: usize = 64;
     let row_stride = width as usize;
@@ -2069,7 +2067,8 @@ fn rasterize_subject_refinement_delta(
         return vec![0.0; width as usize * height as usize];
     }
 
-    let (legacy_end, groups) = recorded_brush_groups(&refinement.dabs, &refinement.stroke_starts);
+    let (ungrouped_end, groups) =
+        recorded_brush_groups(&refinement.dabs, &refinement.stroke_starts);
     let specs = brush_raster_specs(space, &refinement.dabs);
     const ROW_BAND_HEIGHT: usize = 64;
     let row_stride = width as usize;
@@ -2105,11 +2104,11 @@ fn rasterize_subject_refinement_delta(
                 }
             };
 
-            for spec in &specs[..legacy_end] {
+            for spec in &specs[..ungrouped_end] {
                 apply_spec(band, spec);
             }
 
-            let grouped_specs = &specs[legacy_end..];
+            let grouped_specs = &specs[ungrouped_end..];
             let mut stroke_coverage = vec![0.0f32; band.len()];
             let mut touched = Vec::new();
             for group in &groups {
