@@ -204,6 +204,7 @@ impl CalibRawApp {
             preferences: PreferencesState {
                 image_relative_brush_size: performance.image_relative_brush_size,
                 show_develop_navigation_labels: performance.show_develop_navigation_labels,
+                export_name_template: performance.export_name_template.clone(),
                 discord_rich_presence: performance.discord_rich_presence,
                 ui_design: performance.ui_design,
                 preview_backdrop: performance.preview_backdrop,
@@ -475,6 +476,7 @@ impl CalibRawApp {
             preferences: PreferencesState {
                 image_relative_brush_size: performance.image_relative_brush_size,
                 show_develop_navigation_labels: performance.show_develop_navigation_labels,
+                export_name_template: performance.export_name_template.clone(),
                 ui_design: performance.ui_design,
                 preview_backdrop: performance.preview_backdrop,
                 onboarding_completed: performance.onboarding_completed,

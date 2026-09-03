@@ -2,7 +2,7 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 21;
+const SETTINGS_VERSION: u32 = 22;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,6 +25,8 @@ pub(crate) struct PerformanceSettings {
     pub image_relative_brush_size: bool,
     #[serde(default)]
     pub show_develop_navigation_labels: bool,
+    #[serde(default = "default_export_name_template")]
+    pub export_name_template: String,
     #[serde(default)]
     pub ui_design: crate::ui::theme::UiDesign,
     #[serde(default)]
@@ -90,6 +92,10 @@ fn default_thumbnail_workers() -> usize {
     crate::ui::library::default_thumbnail_worker_count()
 }
 
+fn default_export_name_template() -> String {
+    crate::export_naming::DEFAULT_EXPORT_NAME_TEMPLATE.to_owned()
+}
+
 const fn default_camera_profile_auto_detect() -> bool {
     !cfg!(target_os = "android")
 }
@@ -121,6 +127,7 @@ impl Default for PerformanceSettings {
             preview_quality: crate::app::PreviewQuality::default(),
             image_relative_brush_size: false,
             show_develop_navigation_labels: false,
+            export_name_template: default_export_name_template(),
             ui_design: crate::ui::theme::UiDesign::default(),
             preview_backdrop: crate::ui::theme::PreviewBackdrop::default(),
             onboarding_completed: false,
@@ -180,6 +187,8 @@ impl PerformanceSettings {
             .clamp(1, crate::ui::library::maximum_thumbnail_worker_count());
         self.birefnet_quality =
             subject_quality_for_platform(self.birefnet_quality, cfg!(target_os = "android"));
+        self.export_name_template =
+            crate::export_naming::sanitize_template_setting(&self.export_name_template);
         self
     }
 }
@@ -336,6 +345,7 @@ mod tests {
             preview_quality: crate::app::PreviewQuality::High,
             image_relative_brush_size: true,
             show_develop_navigation_labels: true,
+            export_name_template: "{OriginalName}-{ISO}".to_owned(),
             ui_design: crate::ui::theme::UiDesign::DaylightBlue,
             preview_backdrop: crate::ui::theme::PreviewBackdrop::White,
             onboarding_completed: true,
@@ -391,6 +401,7 @@ mod tests {
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::High);
         assert!(settings.image_relative_brush_size);
         assert!(settings.show_develop_navigation_labels);
+        assert_eq!(settings.export_name_template, "{OriginalName}-{ISO}");
         assert_eq!(settings.ui_design, crate::ui::theme::UiDesign::DaylightBlue);
         assert_eq!(
             settings.preview_backdrop,
@@ -469,6 +480,10 @@ mod tests {
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
         assert!(!settings.image_relative_brush_size);
         assert!(!settings.show_develop_navigation_labels);
+        assert_eq!(
+            settings.export_name_template,
+            crate::export_naming::DEFAULT_EXPORT_NAME_TEMPLATE
+        );
         assert_eq!(settings.ui_design, crate::ui::theme::UiDesign::ObsidianBlue);
         assert_eq!(
             settings.preview_backdrop,
@@ -527,6 +542,7 @@ mod tests {
             birefnet_quality: crate::ai_masks::BiRefNetQuality::High,
             image_relative_brush_size: true,
             show_develop_navigation_labels: true,
+            export_name_template: "{OriginalName}-{CurrentDate}".to_owned(),
             ui_design: crate::ui::theme::UiDesign::Porcelain,
             preview_backdrop: crate::ui::theme::PreviewBackdrop::MatchPhoto,
             render_edited_thumbnails_during_indexing: true,
@@ -561,6 +577,10 @@ mod tests {
         );
         assert!(restored.image_relative_brush_size);
         assert!(restored.show_develop_navigation_labels);
+        assert_eq!(
+            restored.export_name_template,
+            "{OriginalName}-{CurrentDate}"
+        );
         assert_eq!(restored.ui_design, crate::ui::theme::UiDesign::Porcelain);
         assert_eq!(
             restored.preview_backdrop,

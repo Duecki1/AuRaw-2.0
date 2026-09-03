@@ -6,6 +6,7 @@ pub mod file_ops {
     pub use calibraw_core::file_ops::*;
 }
 
+pub(crate) mod export_naming;
 pub(crate) mod performance_settings;
 
 pub mod thumbnail_cache {

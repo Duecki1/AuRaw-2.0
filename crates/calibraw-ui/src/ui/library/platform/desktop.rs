@@ -354,7 +354,11 @@ pub(in crate::ui::library) fn start_local_library_export(
     format: ExportFormat,
     frame: &eframe::Frame,
 ) -> bool {
-    let Some(jobs) = library_export_jobs(&desktop_paths(assets), format) else {
+    let Some(jobs) = library_export_jobs(
+        &desktop_paths(assets),
+        format,
+        &app.preferences.export_name_template,
+    ) else {
         return false;
     };
     app.start_library_exports(jobs, settings, format, frame);

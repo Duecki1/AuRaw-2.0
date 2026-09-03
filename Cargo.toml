@@ -55,6 +55,7 @@ half = "2.7"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 jpeg-encoder = { version = "0.7.1", features = ["simd"] }
+jiff = "0.2.31"
 log = "0.4"
 memmap2 = "0.9"
 png = "0.18"

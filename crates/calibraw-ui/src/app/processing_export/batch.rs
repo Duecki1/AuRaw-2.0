@@ -367,6 +367,7 @@ impl CalibRawApp {
             cancel_requested: false,
             format,
             settings,
+            reserved_names: std::collections::HashSet::new(),
         });
         self.export.task = Some(ExportTask::new(
             ExportTaskKind::LibraryBatch,
@@ -481,17 +482,41 @@ impl CalibRawApp {
         let settings = batch.settings.clone();
         let display_name = current.target.display_name().to_owned();
         self.export.settings = settings;
-        let stem = std::path::Path::new(&display_name)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .filter(|stem| !stem.is_empty())
-            .unwrap_or("CalibRaw-export");
+        let original_name = super::export::export_source_stem(None, Some(&display_name));
+        let Some(raw) = self.develop.loaded_raw.as_deref() else {
+            self.complete_android_library_batch_export_item(Err(format!(
+                "{display_name}: loaded RAW data is unavailable"
+            )));
+            return;
+        };
+        let name_context =
+            crate::export_naming::ExportNameContext::from_raw(original_name, raw, None);
+        let stem = crate::export_naming::render_export_stem_or_default(
+            &self.preferences.export_name_template,
+            &name_context,
+        );
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let cache_file_name = format!("{stem}-calibraw-{timestamp}.{}", format.extension());
-        let gallery_name = format!("{stem}-calibraw.{}", format.extension());
+        let gallery_name = {
+            let Some(batch) = self.export.batch.as_mut() else {
+                return;
+            };
+            let mut index = 1usize;
+            loop {
+                let name = if index == 1 {
+                    format!("{stem}.{}", format.extension())
+                } else {
+                    format!("{stem}-{index}.{}", format.extension())
+                };
+                if batch.reserved_names.insert(name.clone()) {
+                    break name;
+                }
+                index += 1;
+            }
+        };
+        let cache_file_name = format!("{stem}-{timestamp}.{}", format.extension());
         let destination =
             match self.prepare_android_export_destination(gallery_name, cache_file_name, format) {
                 Ok(destination) => destination,

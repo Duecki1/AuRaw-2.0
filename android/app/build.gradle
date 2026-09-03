@@ -118,13 +118,6 @@ if (calibrawAbis.isEmpty() || !supportedAbis.containsAll(calibrawAbis)) {
 }
 
 def nativeStageRoot = new File(repositoryRoot, "android/native")
-def stagedLegalAssets = layout.buildDirectory.dir("generated/calibraw-legal-assets/main")
-def stageLegalAssets = tasks.register("stageLegalAssets", Sync) {
-    from(repositoryRoot) {
-        include("COPYING", "NOTICE.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES.md")
-    }
-    into(stagedLegalAssets.get().asFile)
-}
 // Lensfun's XML database is architecture-independent. All ABI builds install
 // the same pinned database, so package the copy staged by the first requested ABI.
 def lensfunAssets = new File(
@@ -208,26 +201,12 @@ android {
     }
 }
 
-androidComponents {
-    onVariants(selector().all()) { variant ->
-        variant.sources.assets.addGeneratedSourceDirectory(stageLegalAssets) { task ->
-            objects.directoryProperty().fileValue(task.destinationDir)
-        }
-    }
-}
-
 dependencies {
     testImplementation "junit:junit:4.13.2"
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.compilerArgs += ["-Xlint:deprecation"]
-}
-
-tasks.matching {
-    it.name == "mergeDebugAssets" || it.name == "mergeReleaseAssets"
-}.configureEach {
-    dependsOn(stageLegalAssets)
 }
 
 def buildRustEnabled = providers.gradleProperty("calibrawBuildRust")

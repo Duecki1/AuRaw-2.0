@@ -101,6 +101,7 @@ fn show_step_body(ui: &mut egui::Ui, app: &mut CalibRawApp, step: OnboardingStep
         OnboardingStep::Appearance => show_appearance(ui, app),
         OnboardingStep::Preview => show_preview(ui, app),
         OnboardingStep::CopyPaste => show_copy_paste(ui, app),
+        OnboardingStep::ExportNames => show_export_names(ui, app),
         #[cfg(not(target_os = "android"))]
         OnboardingStep::Ai => show_ai(ui, app),
         #[cfg(not(target_os = "android"))]
@@ -256,6 +257,10 @@ fn show_copy_paste(ui: &mut egui::Ui, app: &mut CalibRawApp) {
     }
 }
 
+fn show_export_names(ui: &mut egui::Ui, app: &mut CalibRawApp) {
+    crate::ui::settings::export_name_template_controls(ui, app, "onboarding-export-name-template");
+}
+
 #[cfg(not(target_os = "android"))]
 fn show_ai(ui: &mut egui::Ui, app: &mut CalibRawApp) {
     let mut acceleration = app.ai.gpu_acceleration;
@@ -352,8 +357,9 @@ fn previous_step(step: OnboardingStep) -> Option<OnboardingStep> {
         OnboardingStep::Appearance => return Some(OnboardingStep::Appearance),
         OnboardingStep::Preview => OnboardingStep::Appearance,
         OnboardingStep::CopyPaste => OnboardingStep::Preview,
+        OnboardingStep::ExportNames => OnboardingStep::CopyPaste,
         #[cfg(not(target_os = "android"))]
-        OnboardingStep::Ai => OnboardingStep::CopyPaste,
+        OnboardingStep::Ai => OnboardingStep::ExportNames,
         #[cfg(not(target_os = "android"))]
         OnboardingStep::Discord => OnboardingStep::Ai,
     })
@@ -363,7 +369,8 @@ fn next_step(step: OnboardingStep) -> Option<OnboardingStep> {
     match step {
         OnboardingStep::Appearance => Some(OnboardingStep::Preview),
         OnboardingStep::Preview => Some(OnboardingStep::CopyPaste),
-        OnboardingStep::CopyPaste => {
+        OnboardingStep::CopyPaste => Some(OnboardingStep::ExportNames),
+        OnboardingStep::ExportNames => {
             #[cfg(not(target_os = "android"))]
             {
                 Some(OnboardingStep::Ai)
@@ -387,7 +394,7 @@ const fn is_final_step(step: OnboardingStep) -> bool {
     }
     #[cfg(target_os = "android")]
     {
-        matches!(step, OnboardingStep::CopyPaste)
+        matches!(step, OnboardingStep::ExportNames)
     }
 }
 
@@ -397,6 +404,7 @@ impl OnboardingStep {
             Self::Appearance => "Welcome to CalibRaw",
             Self::Preview => "Preview setup",
             Self::CopyPaste => "Copy & paste setup",
+            Self::ExportNames => "Export file names",
             #[cfg(not(target_os = "android"))]
             Self::Ai => "AI model setup",
             #[cfg(not(target_os = "android"))]
@@ -415,6 +423,9 @@ impl OnboardingStep {
             Self::CopyPaste => {
                 "Choose which edit categories are included when copying and pasting adjustments."
             }
+            Self::ExportNames => {
+                "Choose how CalibRaw names exported files. You can combine source details with your own text."
+            }
             #[cfg(not(target_os = "android"))]
             Self::Ai => {
                 "Choose how local AI models use your hardware and the quality of new Subject masks."
@@ -431,19 +442,20 @@ impl OnboardingStep {
             Self::Appearance => 1,
             Self::Preview => 2,
             Self::CopyPaste => 3,
+            Self::ExportNames => 4,
             #[cfg(not(target_os = "android"))]
-            Self::Ai => 4,
+            Self::Ai => 5,
             #[cfg(not(target_os = "android"))]
-            Self::Discord => 5,
+            Self::Discord => 6,
         }
     }
 
     const fn total(self) -> usize {
         let _ = self;
         if cfg!(target_os = "android") {
-            3
+            4
         } else {
-            5
+            6
         }
     }
 }
@@ -470,8 +482,24 @@ mod tests {
             previous_step(OnboardingStep::CopyPaste),
             Some(OnboardingStep::Preview)
         );
+        assert_eq!(
+            next_step(OnboardingStep::CopyPaste),
+            Some(OnboardingStep::ExportNames)
+        );
+        assert_eq!(
+            previous_step(OnboardingStep::ExportNames),
+            Some(OnboardingStep::CopyPaste)
+        );
         #[cfg(not(target_os = "android"))]
         {
+            assert_eq!(
+                next_step(OnboardingStep::ExportNames),
+                Some(OnboardingStep::Ai)
+            );
+            assert_eq!(
+                previous_step(OnboardingStep::Ai),
+                Some(OnboardingStep::ExportNames)
+            );
             assert_eq!(next_step(OnboardingStep::Ai), Some(OnboardingStep::Discord));
             assert_eq!(
                 previous_step(OnboardingStep::Discord),
@@ -485,7 +513,7 @@ mod tests {
         #[cfg(not(target_os = "android"))]
         let final_step = OnboardingStep::Discord;
         #[cfg(target_os = "android")]
-        let final_step = OnboardingStep::CopyPaste;
+        let final_step = OnboardingStep::ExportNames;
 
         assert!(is_final_step(final_step));
         assert_eq!(next_step(final_step), None);

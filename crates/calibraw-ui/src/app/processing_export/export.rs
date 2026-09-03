@@ -67,7 +67,6 @@ pub(super) fn clear_export_task(slot: &mut Option<ExportTask>) {
     *slot = None;
 }
 
-#[cfg(not(target_os = "android"))]
 pub(in crate::app) fn export_source_stem(
     current_path: Option<&std::path::Path>,
     current_label: Option<&str>,
@@ -160,20 +159,38 @@ impl CalibRawApp {
             && self.develop.load_receiver.is_none()
     }
 
+    fn templated_export_stem(&self) -> Option<String> {
+        let raw = self.develop.loaded_raw.as_deref()?;
+        let original_name = export_source_stem(
+            self.develop.current_path.as_deref(),
+            self.develop.current_label.as_deref(),
+        );
+        #[cfg(not(target_os = "android"))]
+        let edited_at = self
+            .develop
+            .current_path
+            .as_deref()
+            .and_then(crate::export_naming::edited_time_for_path);
+        #[cfg(target_os = "android")]
+        let edited_at = None;
+        let context =
+            crate::export_naming::ExportNameContext::from_raw(original_name, raw, edited_at);
+        Some(crate::export_naming::render_export_stem_or_default(
+            &self.preferences.export_name_template,
+            &context,
+        ))
+    }
+
     #[cfg(not(target_os = "android"))]
     fn export_desktop(&mut self, frame: &eframe::Frame, format: ExportFormat) {
         if !self.can_export() {
             return;
         }
 
-        let default_name = format!(
-            "{}-calibraw.{}",
-            export_source_stem(
-                self.develop.current_path.as_deref(),
-                self.develop.current_label.as_deref(),
-            ),
-            format.extension(),
-        );
+        let Some(stem) = self.templated_export_stem() else {
+            return;
+        };
+        let default_name = format!("{stem}.{}", format.extension());
         let initial_directory = self
             .develop
             .current_path
@@ -223,14 +240,18 @@ impl CalibRawApp {
             return;
         }
 
+        let Some(stem) = self.templated_export_stem() else {
+            return;
+        };
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let display_name = format!("CalibRaw-{timestamp}.{}", format.extension());
+        let display_name = format!("{stem}.{}", format.extension());
+        let cache_file_name = format!("{stem}-{timestamp}.{}", format.extension());
         let destination = match self.prepare_android_export_destination(
             display_name.clone(),
-            display_name,
+            cache_file_name,
             format,
         ) {
             Ok(destination) => destination,

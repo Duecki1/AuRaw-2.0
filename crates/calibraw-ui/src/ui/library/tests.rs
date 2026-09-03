@@ -22,7 +22,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 fn library_export_naming_preserves_format_and_avoids_collisions() {
     let root = unique_temp_dir("library-export-name-test");
     let source = root.join("photo.CR3");
-    let existing = root.join("photo-calibraw.jpg");
+    let existing = root.join("photo-CalibRaw.jpg");
     fs::write(&source, b"raw").unwrap();
     fs::write(&existing, b"existing").unwrap();
     let mut reserved = HashSet::new();
@@ -31,10 +31,11 @@ fn library_export_naming_preserves_format_and_avoids_collisions() {
         &root,
         &source,
         ExportFormat::Jpeg,
+        crate::export_naming::DEFAULT_EXPORT_NAME_TEMPLATE,
         &mut reserved,
     );
 
-    assert_eq!(destination, root.join("photo-calibraw-2.jpg"));
+    assert_eq!(destination, root.join("photo-CalibRaw-2.jpg"));
     assert!(reserved.contains(&destination));
     fs::remove_dir_all(root).unwrap();
 }

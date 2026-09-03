@@ -40,6 +40,85 @@ fn diagnostics_snapshot_with_ai_backends() -> String {
     diagnostic_log
 }
 
+pub(crate) fn export_name_template_controls(
+    ui: &mut Ui,
+    app: &mut CalibRawApp,
+    id_salt: &'static str,
+) {
+    ui.label("Name template");
+    let changed = ui
+        .add(
+            egui::TextEdit::singleline(&mut app.preferences.export_name_template)
+                .id_salt(id_salt)
+                .char_limit(crate::export_naming::MAX_EXPORT_NAME_TEMPLATE_CHARS)
+                .desired_width(f32::INFINITY)
+                .hint_text(crate::export_naming::DEFAULT_EXPORT_NAME_TEMPLATE),
+        )
+        .on_hover_text("Enter literal text and any of the placeholders listed below.")
+        .changed();
+    if changed {
+        app.persist_performance_settings();
+    }
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new(
+                "{OriginalName}  {CurrentDate}  {EditedDate}  {ISO}  {ShutterSpeed}  {FocalLength}",
+            )
+            .monospace()
+            .color(ui.visuals().weak_text_color()),
+        );
+    });
+    ui.small(
+        "Dates use YYYY-MM-DD. EditedDate uses the last saved edit or closest available file date, then today as a fallback. Missing capture metadata becomes “unknown”.",
+    );
+
+    let original_name = app
+        .develop
+        .current_label
+        .as_deref()
+        .and_then(|label| std::path::Path::new(label).file_stem())
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("IMG_1234");
+    #[cfg(not(target_os = "android"))]
+    let edited_at = app
+        .develop
+        .current_path
+        .as_deref()
+        .and_then(crate::export_naming::edited_time_for_path);
+    #[cfg(target_os = "android")]
+    let edited_at = None;
+    let context = if let Some(raw) = app.develop.loaded_raw.as_deref() {
+        crate::export_naming::ExportNameContext::from_raw(original_name, raw, edited_at)
+    } else {
+        crate::export_naming::ExportNameContext::from_display_metadata(
+            original_name,
+            None,
+            edited_at,
+        )
+    };
+    match crate::export_naming::render_export_stem(&app.preferences.export_name_template, &context)
+    {
+        Ok(preview) => {
+            ui.label(
+                egui::RichText::new(format!("Example: {preview}.jpg"))
+                    .color(ui.visuals().weak_text_color()),
+            );
+        }
+        Err(error) => {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+    }
+    if app.preferences.export_name_template != crate::export_naming::DEFAULT_EXPORT_NAME_TEMPLATE
+        && ui.button("Reset to default").clicked()
+    {
+        app.preferences.export_name_template =
+            crate::export_naming::DEFAULT_EXPORT_NAME_TEMPLATE.to_owned();
+        app.persist_performance_settings();
+    }
+}
+
 impl Settings {
     pub(crate) fn show(ui: &mut Ui, app: &mut CalibRawApp, layout: ScreenLayout) {
         let available_width = ui.available_width().max(1.0);
@@ -340,6 +419,17 @@ impl Settings {
             if changed {
                 app.set_adjustment_copy_settings(settings);
             }
+        });
+
+        crate::ui::theme::card_gap(ui);
+        Self::group(ui, content_width, |ui| {
+            crate::ui::theme::heading_with_help(
+                ui,
+                "Export file names",
+                "Build export file names from the original name, dates, and capture metadata. The selected image format adds its extension automatically.",
+            );
+            ui.separator();
+            export_name_template_controls(ui, app, "settings-export-name-template");
         });
 
         crate::ui::theme::card_gap(ui);

@@ -8027,6 +8027,8 @@ Used by:
 - `aho-corasick 1.1.4` — https://github.com/BurntSushi/aho-corasick
 - `byteorder-lite 0.1.0` — https://github.com/image-rs/byteorder-lite
 - `byteorder 1.5.0` — https://github.com/BurntSushi/byteorder
+- `jiff-tzdb-platform 0.1.3` — https://github.com/BurntSushi/jiff
+- `jiff-tzdb 0.1.8` — https://github.com/BurntSushi/jiff
 - `jiff 0.2.31` — https://github.com/BurntSushi/jiff
 - `memchr 2.8.2` — https://github.com/BurntSushi/memchr
 - `termcolor 1.4.1` — https://github.com/BurntSushi/termcolor

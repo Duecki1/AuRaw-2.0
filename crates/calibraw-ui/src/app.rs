@@ -726,6 +726,8 @@ pub(crate) struct LibraryBatchExportState {
     format: ExportFormat,
     #[cfg(target_os = "android")]
     settings: ExportSettings,
+    #[cfg(target_os = "android")]
+    reserved_names: std::collections::HashSet<String>,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1000,6 +1002,7 @@ pub(crate) struct DevelopUiState {
 pub(crate) struct PreferencesState {
     pub(crate) image_relative_brush_size: bool,
     pub(crate) show_develop_navigation_labels: bool,
+    pub(crate) export_name_template: String,
     #[cfg(not(target_os = "android"))]
     pub(crate) discord_rich_presence: bool,
     pub(crate) ui_design: UiDesign,
@@ -1021,6 +1024,7 @@ pub(crate) enum OnboardingStep {
     Appearance,
     Preview,
     CopyPaste,
+    ExportNames,
     #[cfg(not(target_os = "android"))]
     Ai,
     #[cfg(not(target_os = "android"))]
