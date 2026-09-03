@@ -221,20 +221,28 @@ pub(super) fn append_notice(notice: &mut Option<String>, message: &str) {
     }
 }
 
-pub(super) fn needs_canonical_mask_source(masks: &MaskStack) -> bool {
+pub(crate) fn masks_have_missing_range_sources(masks: &MaskStack) -> bool {
     masks.masks.iter().any(|mask| {
         mask.components.iter().any(|component| {
             matches!(
                 &component.geometry,
                 MaskGeometry::LuminanceRange { source: None, .. }
                     | MaskGeometry::ColorRange { source: None, .. }
-                    | MaskGeometry::Object { .. }
             )
         })
     })
 }
 
-pub(super) fn install_missing_range_sources(masks: &mut MaskStack, source: &MaskRgbImage) {
+pub(super) fn needs_canonical_mask_source(masks: &MaskStack) -> bool {
+    masks_have_missing_range_sources(masks)
+        || masks.masks.iter().any(|mask| {
+            mask.components
+                .iter()
+                .any(|component| matches!(&component.geometry, MaskGeometry::Object { .. }))
+        })
+}
+
+pub(crate) fn install_missing_range_sources(masks: &mut MaskStack, source: &MaskRgbImage) {
     for mask in &mut masks.masks {
         for component in &mut mask.components {
             match &mut component.geometry {

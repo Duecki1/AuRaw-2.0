@@ -870,9 +870,10 @@ impl CalibRawApp {
                 break;
             }
             let Some(receiver) = self.persistence.sidecar_receiver.as_ref() else {
-                if Instant::now() >= deadline {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                     break;
-                }
+                };
+                std::thread::sleep(remaining.min(Duration::from_millis(10)));
                 continue;
             };
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {

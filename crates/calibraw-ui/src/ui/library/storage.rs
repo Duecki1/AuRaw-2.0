@@ -1,6 +1,15 @@
 use super::*;
 
 #[cfg(not(target_os = "android"))]
+pub(super) const fn system_trash_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Recycle Bin"
+    } else {
+        "Trash"
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 pub(super) fn desktop_paths(assets: &[LibraryAsset]) -> Vec<PathBuf> {
     assets
         .iter()
@@ -97,7 +106,7 @@ pub(super) fn delete_library_asset(
         if was_current {
             app.detach_current_file_for_library_action(path);
         }
-        remove_local_raw_bundle(path)?;
+        recycle_local_raw_bundle(path)?;
         if was_current {
             app.develop.current_path = None;
         }
@@ -110,6 +119,33 @@ pub(super) fn delete_library_asset(
             .ok_or_else(|| "Library asset is not available from Android storage".to_owned())?;
         app.delete_android_library_item(uri, &asset.display_name)
     }
+}
+
+#[cfg(not(target_os = "android"))]
+fn recycle_local_raw_bundle(raw_path: &Path) -> Result<(), String> {
+    trash::delete(raw_path).map_err(|error| {
+        format!(
+            "Could not move {} to the system {}: {error}",
+            raw_path.display(),
+            system_trash_name()
+        )
+    })?;
+
+    let sidecar = crate::sidecar::sidecar_path_for_raw(raw_path);
+    if sidecar.is_file() {
+        if let Err(error) = trash::delete(&sidecar) {
+            log::warn!(
+                "moved RAW {} to the system {} but could not move its sidecar {}: {error}",
+                raw_path.display(),
+                system_trash_name(),
+                sidecar.display()
+            );
+        }
+    }
+    if let Err(error) = crate::sidecar::invalidate_developed_thumbnail_cache(raw_path) {
+        log::warn!("could not remove the developed thumbnail after recycling a RAW: {error}");
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

@@ -2,7 +2,8 @@ use crate::pipeline::CameraProfileMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const SETTINGS_VERSION: u32 = 22;
+// First public settings layout. Bump when a public settings change needs migration.
+const SETTINGS_VERSION: u32 = 1;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,21 +165,9 @@ impl Default for PerformanceSettings {
 
 impl PerformanceSettings {
     pub(crate) fn sanitized(mut self) -> Self {
-        let loaded_version = self.version;
+        // Version 1 is the public baseline. Apply future public-version migrations here before
+        // updating the stored version, then keep the value sanitization below version-agnostic.
         self.version = SETTINGS_VERSION;
-        if loaded_version < 4 {
-            self.adjustment_copy_settings.lens_correction = false;
-        }
-        if loaded_version < 6 {
-            self.adjustment_copy_settings.geometry = false;
-            self.adjustment_copy_settings.camera_profile = true;
-            self.adjustment_copy_settings.ai_masks = self.adjustment_copy_settings.masks;
-        }
-        if loaded_version < 18 {
-            // Existing installations already have these preferences configured. Only a genuinely
-            // new settings file should open the first-run setup assistant.
-            self.onboarding_completed = true;
-        }
         self.raw_cache_files = self
             .raw_cache_files
             .min(crate::app::maximum_raw_cache_limit());
@@ -442,41 +431,12 @@ mod tests {
     }
 
     #[test]
-    fn version_three_copy_settings_migrate_geometry_dependent_categories_to_opt_in() {
-        let settings = serde_json::from_str::<PerformanceSettings>(
-            r#"{"version":3,"raw_cache_files":1,"thumbnail_workers":1,"adjustment_copy_settings":{"adjustments":true,"masks":true,"inpainting":true,"lens_correction":true}}"#,
-        )
-        .expect("version 3 settings should remain readable")
-        .sanitized();
-
-        assert!(settings.adjustment_copy_settings.adjustments);
-        assert!(!settings.adjustment_copy_settings.geometry);
-        assert!(settings.adjustment_copy_settings.camera_profile);
-        assert!(settings.adjustment_copy_settings.masks);
-        assert!(settings.adjustment_copy_settings.ai_masks);
-        assert!(!settings.adjustment_copy_settings.lens_correction);
-    }
-
-    #[test]
-    fn version_five_masks_choice_is_reused_for_ai_masks() {
-        let settings = serde_json::from_str::<PerformanceSettings>(
-            r#"{"version":5,"raw_cache_files":1,"thumbnail_workers":1,"adjustment_copy_settings":{"adjustments":true,"masks":false,"inpainting":false,"lens_correction":false}}"#,
-        )
-        .expect("version 5 settings should remain readable")
-        .sanitized();
-
-        assert!(!settings.adjustment_copy_settings.geometry);
-        assert!(settings.adjustment_copy_settings.camera_profile);
-        assert!(!settings.adjustment_copy_settings.masks);
-        assert!(!settings.adjustment_copy_settings.ai_masks);
-    }
-
-    #[test]
-    fn older_settings_default_preview_quality_to_medium() {
+    fn omitted_settings_fields_use_current_defaults() {
         let settings: PerformanceSettings =
-            serde_json::from_str(r#"{"version":2,"raw_cache_files":1,"thumbnail_workers":1}"#)
-                .expect("legacy settings should remain readable");
+            serde_json::from_str(r#"{"version":1,"raw_cache_files":1,"thumbnail_workers":1}"#)
+                .expect("baseline settings should remain readable");
 
+        assert_eq!(SETTINGS_VERSION, 1);
         assert_eq!(settings.preview_quality, crate::app::PreviewQuality::Medium);
         assert!(!settings.image_relative_brush_size);
         assert!(!settings.show_develop_navigation_labels);
@@ -521,17 +481,6 @@ mod tests {
             crate::sidecar::AdjustmentCopySettings::default()
         );
         assert!(!settings.onboarding_completed);
-    }
-
-    #[test]
-    fn legacy_settings_do_not_reopen_first_run_onboarding() {
-        let settings = serde_json::from_str::<PerformanceSettings>(
-            r#"{"version":17,"raw_cache_files":1,"thumbnail_workers":1}"#,
-        )
-        .expect("version 17 settings should remain readable")
-        .sanitized();
-
-        assert!(settings.onboarding_completed);
     }
 
     #[test]
@@ -616,20 +565,5 @@ mod tests {
             subject_quality_for_platform(crate::ai_masks::BiRefNetQuality::High, false),
             crate::ai_masks::BiRefNetQuality::High
         );
-    }
-
-    #[test]
-    fn legacy_preview_quality_names_migrate_without_resetting_settings() {
-        for (legacy, expected) in [
-            ("fast", crate::app::PreviewQuality::Low),
-            ("balanced", crate::app::PreviewQuality::Medium),
-            ("high", crate::app::PreviewQuality::High),
-        ] {
-            let json = format!(
-                r#"{{"version":6,"raw_cache_files":1,"thumbnail_workers":1,"preview_quality":"{legacy}"}}"#
-            );
-            let settings: PerformanceSettings = serde_json::from_str(&json).unwrap();
-            assert_eq!(settings.preview_quality, expected);
-        }
     }
 }

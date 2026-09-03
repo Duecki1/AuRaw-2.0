@@ -146,9 +146,7 @@ impl DevelopLoadingThumbnailState {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PreviewQuality {
-    #[serde(alias = "fast")]
     Low,
-    #[serde(alias = "balanced")]
     #[default]
     Medium,
     High,
@@ -1342,9 +1340,9 @@ mod masks_ai;
 mod processing_export;
 mod sidecar_persistence;
 
-#[cfg(not(target_os = "android"))]
-use lifecycle::install_missing_range_sources;
 use lifecycle::needs_canonical_mask_source;
+#[cfg(not(target_os = "android"))]
+pub(crate) use lifecycle::{install_missing_range_sources, masks_have_missing_range_sources};
 use sidecar_persistence::sidecar_interaction_active;
 
 #[cfg(test)]

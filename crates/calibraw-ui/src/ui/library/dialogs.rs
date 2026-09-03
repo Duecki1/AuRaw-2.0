@@ -10,6 +10,73 @@ fn show_dialog_error(ui: &mut Ui, error: Option<&str>) {
     }
 }
 
+pub(super) fn show_delete_originals_confirmation(
+    ui: &mut Ui,
+    assets: &[LibraryAsset],
+) -> Option<bool> {
+    if assets.is_empty() {
+        return Some(false);
+    }
+    let count = assets.len();
+    let title = if count == 1 {
+        "Delete original?".to_owned()
+    } else {
+        format!("Delete {count} originals?")
+    };
+    let mut choice = None;
+    crate::ui::responsive_popup(egui::Window::new(title), ui.ctx(), 440.0)
+        .id(egui::Id::new("library-delete-originals-confirmation"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ui.ctx(), |ui| {
+            if count == 1 {
+                ui.label(format!(
+                    "Remove {} from the Library?",
+                    assets[0].display_name
+                ));
+            } else {
+                ui.label(format!(
+                    "Remove the {count} selected RAW originals from the Library?"
+                ));
+            }
+            #[cfg(not(target_os = "android"))]
+            ui.label(if count == 1 {
+                format!(
+                    "The original RAW and its saved adjustments will be moved to the system {}.",
+                    system_trash_name()
+                )
+            } else {
+                format!(
+                    "The selected RAW originals and their saved adjustments will be moved to the system {}.",
+                    system_trash_name()
+                )
+            });
+            #[cfg(target_os = "android")]
+            ui.label(
+                egui::RichText::new(
+                    "CalibRaw's Android library does not support recycling. This cannot be undone.",
+                )
+                .strong()
+                .color(ui.visuals().warn_fg_color),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    choice = Some(false);
+                }
+                #[cfg(not(target_os = "android"))]
+                let confirm_label = format!("Move to {}", system_trash_name());
+                #[cfg(target_os = "android")]
+                let confirm_label = "Delete permanently".to_owned();
+                if ui.button(confirm_label).clicked() {
+                    choice = Some(true);
+                }
+            });
+        });
+    choice
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AdjustmentPasteChoice {
     Cancel,

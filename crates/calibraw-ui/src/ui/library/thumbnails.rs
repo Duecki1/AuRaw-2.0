@@ -456,36 +456,6 @@ pub(super) fn developed_thumbnail_gpu() -> Result<&'static Mutex<DevelopedThumbn
 }
 
 #[cfg(not(target_os = "android"))]
-pub(super) fn masks_need_canonical_source(masks: &MaskStack) -> bool {
-    masks.masks.iter().any(|mask| {
-        mask.components.iter().any(|component| {
-            matches!(
-                &component.geometry,
-                MaskGeometry::LuminanceRange { source: None, .. }
-                    | MaskGeometry::ColorRange { source: None, .. }
-            )
-        })
-    })
-}
-
-#[cfg(not(target_os = "android"))]
-pub(super) fn install_missing_range_sources(masks: &mut MaskStack, source: &MaskRgbImage) {
-    for mask in &mut masks.masks {
-        for component in &mut mask.components {
-            match &mut component.geometry {
-                MaskGeometry::LuminanceRange { source: target, .. }
-                | MaskGeometry::ColorRange { source: target, .. }
-                    if target.is_none() =>
-                {
-                    *target = Some(source.clone());
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-#[cfg(not(target_os = "android"))]
 pub(super) fn render_uncached_developed_thumbnail(
     path: &Path,
     maximum_edge: u32,
@@ -606,7 +576,7 @@ pub(super) fn render_uncached_developed_thumbnail(
         ProcessingQuality::Preview,
     )
     .map_err(|error| format!("could not prepare edited thumbnail rendering: {error:#}"))?;
-    if masks_need_canonical_source(&masks) {
+    if crate::app::masks_have_missing_range_sources(&masks) {
         let neutral_exposure = crate::pipeline::ExposureParams::scene_referred_default();
         let neutral_masks = MaskStack::default();
         let neutral_params = GpuParams::new(&neutral_exposure, &neutral_masks, &preview_raw);
@@ -623,7 +593,7 @@ pub(super) fn render_uncached_developed_thumbnail(
             .map_err(|error| format!("could not build range-mask thumbnail source: {error:#}"))?;
         let source = MaskRgbImage::new(preview_raw.width, preview_raw.height, rgba)
             .ok_or_else(|| "range-mask thumbnail source has invalid dimensions".to_owned())?;
-        install_missing_range_sources(&mut masks, &source);
+        crate::app::install_missing_range_sources(&mut masks, &source);
     }
 
     for layer in 0..masks.masks.len().min(MAX_LOCAL_MASKS) {

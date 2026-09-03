@@ -38,12 +38,18 @@ fn raw_camera_at(pos: vec2<i32>) -> f32 {
     return raw_sensor_at(p) * wb_for_cfa_channel(cfa_channel_at(p));
 }
 
+// Keep normal WB-domain clipping slightly below the calibrated white point.
+// LCh reconstruction and RCD clip flags share this exact threshold.
+const SHARED_HIGHLIGHT_CLIP_SAFETY: f32 = 0.995;
+
 fn shared_highlight_clip() -> f32 {
     let min_wb = min(
         min(Common::camera_uniforms.wb.r, Common::camera_uniforms.wb.g),
         min(Common::camera_uniforms.wb.b, Common::camera_uniforms.wb.a),
     );
-    return 0.995 * max(Common::camera_uniforms.highlight_clip, 0.01) * max(min_wb, 1e-6);
+    return SHARED_HIGHLIGHT_CLIP_SAFETY
+        * max(Common::camera_uniforms.highlight_clip, 0.01)
+        * max(min_wb, 1e-6);
 }
 
 fn is_raw_clipped(pos: vec2<i32>) -> bool {

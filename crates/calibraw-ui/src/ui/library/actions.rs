@@ -7,6 +7,7 @@ pub(crate) enum LibraryAction {
     PasteAdjustments(Vec<LibraryAsset>),
     Copy(Vec<LibraryAsset>),
     Cut(Vec<LibraryAsset>),
+    #[cfg(not(target_os = "android"))]
     PasteIntoAssetFolder(LibraryAsset),
     Duplicate(Vec<LibraryAsset>),
     Rename(LibraryAsset),
@@ -138,9 +139,9 @@ pub(crate) fn library_image_context_menu(
         ui,
         action_enabled,
         if selected_count > 1 {
-            "Delete selected"
+            "Delete selected…"
         } else {
-            "Delete"
+            "Delete…"
         },
     )
     .clicked()
@@ -201,6 +202,7 @@ pub(crate) fn apply_library_action(
         LibraryAction::Cut(assets) => {
             set_library_clipboard(app, ImageClipboardMode::Cut, assets);
         }
+        #[cfg(not(target_os = "android"))]
         LibraryAction::PasteIntoAssetFolder(asset) => match duplicate_destination(&asset) {
             Ok(destination) => start_image_clipboard_paste(app, destination, ui.ctx()),
             Err(error) => app.library.status = format!("Could not determine paste folder: {error}"),
@@ -266,32 +268,57 @@ pub(crate) fn apply_library_action(
             }
         }
         LibraryAction::Delete(assets) => {
-            let total = assets.len();
-            let mut deleted = 0usize;
-            let mut failures = Vec::new();
-            for asset in &assets {
-                match delete_library_asset(app, asset) {
-                    Ok(()) => deleted += 1,
-                    Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
-                }
+            if !assets.is_empty() {
+                app.library.delete_originals_confirmation = Some(assets);
             }
-            app.library.clear_selection();
-            #[cfg(target_os = "android")]
-            crate::android::set_back_navigation_active(false);
-            app.library.refresh(ui.ctx());
-            app.library.status = if failures.is_empty() {
-                format!(
-                    "Deleted {deleted} selected {}",
-                    if deleted == 1 { "image" } else { "images" }
-                )
-            } else {
-                format!(
-                    "Deleted {deleted} of {total} selected images. {}",
-                    failures.join(" · ")
-                )
-            };
         }
     }
+}
+
+fn delete_confirmed_library_assets(ui: &Ui, app: &mut CalibRawApp, assets: Vec<LibraryAsset>) {
+    let total = assets.len();
+    let mut deleted = 0usize;
+    let mut failures = Vec::new();
+    for asset in &assets {
+        match delete_library_asset(app, asset) {
+            Ok(()) => deleted += 1,
+            Err(error) => failures.push(format!("{}: {error}", asset.display_name)),
+        }
+    }
+    app.library.clear_selection();
+    #[cfg(target_os = "android")]
+    crate::android::set_back_navigation_active(false);
+    app.library.refresh(ui.ctx());
+    app.library.status = if failures.is_empty() {
+        #[cfg(not(target_os = "android"))]
+        {
+            format!(
+                "Moved {deleted} selected {} to the {}",
+                if deleted == 1 {
+                    "original"
+                } else {
+                    "originals"
+                },
+                system_trash_name()
+            )
+        }
+        #[cfg(target_os = "android")]
+        {
+            format!(
+                "Deleted {deleted} selected {}",
+                if deleted == 1 {
+                    "original"
+                } else {
+                    "originals"
+                }
+            )
+        }
+    } else {
+        format!(
+            "Removed {deleted} of {total} selected originals. {}",
+            failures.join(" · ")
+        )
+    };
 }
 
 fn set_library_clipboard(
@@ -461,9 +488,9 @@ pub(super) fn selection_bar_actions(
         ui.separator();
         if ui
             .button(if selected_count > 1 {
-                "Delete selected"
+                "Delete selected…"
             } else {
-                "Delete"
+                "Delete…"
             })
             .clicked()
         {
@@ -579,6 +606,19 @@ pub(crate) fn show_library_action_overlays(
     app: &mut CalibRawApp,
     frame: &eframe::Frame,
 ) {
+    let delete_choice = app
+        .library
+        .delete_originals_confirmation
+        .as_ref()
+        .and_then(|assets| show_delete_originals_confirmation(ui, assets));
+    if let Some(confirmed) = delete_choice {
+        if let Some(assets) = app.library.delete_originals_confirmation.take() {
+            if confirmed {
+                delete_confirmed_library_assets(ui, app, assets);
+            }
+        }
+    }
+
     show_library_raw_name_dialog(ui, app, frame);
 
     let paste_choice = app

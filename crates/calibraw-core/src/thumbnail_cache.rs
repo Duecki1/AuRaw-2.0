@@ -19,8 +19,6 @@ const RAW_THUMBNAIL_SUFFIX: &str = ".calibraw-raw-thumb.jpg";
 const RAW_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".calibraw-raw-thumb.fingerprint";
 #[cfg(any(not(target_os = "android"), test))]
 pub const DESKTOP_THUMBNAIL_CACHE_DIR: &str = "library-thumbnails";
-#[cfg(any(not(target_os = "android"), test))]
-const LEGACY_THUMBNAIL_CACHE_DIR: &str = ".calibraw-cache";
 pub const THUMBNAIL_JPEG_QUALITY: u8 = 88;
 const MAX_CACHED_THUMBNAIL_EDGE: u32 = 8192;
 const MAX_CACHED_THUMBNAIL_BYTES: u64 = 128 * 1024 * 1024;
@@ -323,9 +321,6 @@ pub fn load_desktop_raw_thumbnail(
     let cache_path = desktop_raw_thumbnail_path(raw_path);
     let fingerprint_path = desktop_raw_thumbnail_fingerprint_path(raw_path);
     if !cache_path.is_file() || !fingerprint_path.is_file() {
-        migrate_legacy_desktop_raw_thumbnail(raw_path)?;
-    }
-    if !cache_path.is_file() || !fingerprint_path.is_file() {
         return Ok(None);
     }
     let expected = desktop_raw_stamp(raw_path)?;
@@ -338,12 +333,8 @@ pub fn load_desktop_raw_thumbnail(
     if cached.trim() != expected {
         let _ = fs::remove_file(&cache_path);
         let _ = fs::remove_file(&fingerprint_path);
-        migrate_legacy_desktop_raw_thumbnail(raw_path)?;
-        if !cache_path.is_file() || !fingerprint_path.is_file() {
-            return Ok(None);
-        }
+        return Ok(None);
     }
-    remove_legacy_raw_thumbnail_cache(raw_path);
     load_jpeg(&cache_path, maximum_edge)
 }
 
@@ -364,52 +355,7 @@ pub fn save_desktop_raw_thumbnail(raw_path: &Path, thumbnail: &RawThumbnail) -> 
         let _ = fs::remove_file(&fingerprint_path);
         return Err("RAW changed while its thumbnail was being cached".to_owned());
     }
-    remove_legacy_raw_thumbnail_cache(raw_path);
     Ok(())
-}
-
-#[cfg(not(target_os = "android"))]
-fn migrate_legacy_desktop_raw_thumbnail(raw_path: &Path) -> Result<(), String> {
-    let legacy_cache = legacy_sibling_cache_path_for_raw(raw_path, RAW_THUMBNAIL_SUFFIX);
-    let legacy_fingerprint =
-        legacy_sibling_cache_path_for_raw(raw_path, RAW_THUMBNAIL_FINGERPRINT_SUFFIX);
-    if !legacy_cache.is_file() || !legacy_fingerprint.is_file() {
-        return Ok(());
-    }
-
-    let expected = desktop_raw_stamp(raw_path)?;
-    let cached = match fs::read_to_string(&legacy_fingerprint) {
-        Ok(cached) => cached,
-        Err(_) => {
-            remove_legacy_raw_thumbnail_cache(raw_path);
-            return Ok(());
-        }
-    };
-    if cached.trim() != expected {
-        remove_legacy_raw_thumbnail_cache(raw_path);
-        return Ok(());
-    }
-
-    let thumbnail = match load_jpeg(&legacy_cache, MAX_CACHED_THUMBNAIL_EDGE) {
-        Ok(Some(thumbnail)) => thumbnail,
-        Ok(None) | Err(_) => {
-            remove_legacy_raw_thumbnail_cache(raw_path);
-            return Ok(());
-        }
-    };
-    save_desktop_raw_thumbnail(raw_path, &thumbnail)
-}
-
-#[cfg(not(target_os = "android"))]
-fn remove_legacy_raw_thumbnail_cache(raw_path: &Path) {
-    remove_legacy_cache_file(&legacy_sibling_cache_path_for_raw(
-        raw_path,
-        RAW_THUMBNAIL_SUFFIX,
-    ));
-    remove_legacy_cache_file(&legacy_sibling_cache_path_for_raw(
-        raw_path,
-        RAW_THUMBNAIL_FINGERPRINT_SUFFIX,
-    ));
 }
 
 #[cfg(not(target_os = "android"))]
@@ -573,26 +519,6 @@ fn desktop_path_fingerprint(path: &Path) -> u64 {
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn legacy_sibling_cache_path_for_raw(raw_path: &Path, suffix: &str) -> PathBuf {
-    let parent = raw_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut file_name = raw_path
-        .file_name()
-        .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("raw"));
-    file_name.push(suffix);
-    parent.join(LEGACY_THUMBNAIL_CACHE_DIR).join(file_name)
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn remove_legacy_cache_file(path: &Path) {
-    let parent = path.parent().map(Path::to_path_buf);
-    let _ = fs::remove_file(path);
-    if let Some(parent) = parent {
-        let _ = fs::remove_dir(parent);
-    }
-}
-
-#[cfg(not(target_os = "android"))]
 fn desktop_raw_stamp(raw_path: &Path) -> Result<String, String> {
     let metadata = fs::metadata(raw_path)
         .map_err(|error| format!("could not inspect RAW {}: {error}", raw_path.display()))?;
@@ -703,7 +629,7 @@ mod tests {
 
     #[test]
     fn png_cache_entry_is_not_loaded_as_jpeg() {
-        let path = temporary_test_path("legacy-png.jpg");
+        let path = temporary_test_path("disguised-png.jpg");
         let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]));
         image
             .save_with_format(&path, ImageFormat::Png)
@@ -739,26 +665,6 @@ mod tests {
             assert_eq!(actual[3], 255);
         }
         let _ = fs::remove_file(path);
-    }
-
-    #[cfg(not(target_os = "android"))]
-    #[test]
-    fn invalid_legacy_cache_is_removed_and_ignored() {
-        let root = temporary_test_path("legacy-root");
-        fs::create_dir_all(&root).unwrap();
-        let raw = root.join("sample.raw");
-        fs::write(&raw, b"raw").unwrap();
-        let legacy_cache = legacy_sibling_cache_path_for_raw(&raw, RAW_THUMBNAIL_SUFFIX);
-        let legacy_fingerprint =
-            legacy_sibling_cache_path_for_raw(&raw, RAW_THUMBNAIL_FINGERPRINT_SUFFIX);
-        fs::create_dir_all(legacy_cache.parent().unwrap()).unwrap();
-        fs::write(&legacy_cache, b"malformed jpeg").unwrap();
-        fs::write(&legacy_fingerprint, desktop_raw_stamp(&raw).unwrap()).unwrap();
-
-        assert!(load_desktop_raw_thumbnail(&raw, 512).unwrap().is_none());
-        assert!(!legacy_cache.exists());
-        assert!(!legacy_fingerprint.exists());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(not(target_os = "android"))]

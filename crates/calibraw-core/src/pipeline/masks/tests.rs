@@ -84,7 +84,7 @@ fn duplicate_delete_and_selection_use_shared_stack_rules() {
 }
 
 #[test]
-fn shared_common_state_keeps_legacy_flat_serialization() {
+fn shared_common_state_keeps_stable_flat_serialization() {
     let mut stack = MaskStack::default();
     stack.add_mask(MaskKind::Radial);
     stack.masks[0].common.rename("Flat group");
@@ -184,7 +184,7 @@ fn mask_effect_picker_catalog_is_grouped_and_alphabetized() {
 }
 
 #[test]
-fn legacy_local_mask_defaults_to_adjustment_effect() {
+fn omitted_local_mask_fields_use_safe_defaults() {
     let mask = LocalMask::new(MaskKind::Brush, 1);
     let mut serialized = serde_json::to_value(mask).expect("serialize local mask");
     let object = serialized
@@ -192,8 +192,7 @@ fn legacy_local_mask_defaults_to_adjustment_effect() {
         .expect("local mask is a JSON object");
     object.remove("effect");
     object.remove("invert");
-    let decoded: LocalMask =
-        serde_json::from_value(serialized).expect("deserialize legacy local mask");
+    let decoded: LocalMask = serde_json::from_value(serialized).expect("deserialize local mask");
     assert_eq!(decoded.effect, MaskEffect::Adjustment);
     assert!(!decoded.invert);
     assert_eq!(decoded.effect_settings, MaskEffectSettings::default());
@@ -352,7 +351,7 @@ fn brush_opacity_is_captured_only_when_enabled_for_paint_and_erase() {
 }
 
 #[test]
-fn legacy_brush_geometry_defaults_to_full_strength_opacity() {
+fn omitted_brush_geometry_fields_use_full_strength_defaults() {
     let geometry: MaskGeometry =
         serde_json::from_str(r#"{"Brush":{"size":0.055,"feather":0.55,"dabs":[]}}"#).unwrap();
     let MaskGeometry::Brush {
@@ -363,7 +362,7 @@ fn legacy_brush_geometry_defaults_to_full_strength_opacity() {
         ..
     } = geometry
     else {
-        panic!("legacy brush JSON must decode as brush geometry");
+        panic!("brush JSON must decode as brush geometry");
     };
     assert!(!opacity_enabled);
     assert_eq!(opacity, 1.0);
@@ -754,7 +753,7 @@ fn subject_refinement_composite_applies_signed_delta_to_raw_probability() {
 }
 
 #[test]
-fn legacy_mask_stack_without_subject_refinement_deserializes_empty_layer() {
+fn mask_stack_without_embedded_subject_refinement_deserializes_empty_layer() {
     let stack: MaskStack =
         serde_json::from_str(r#"{"masks":[],"selected_mask":null,"selected_component":null}"#)
             .unwrap();
@@ -771,7 +770,7 @@ fn local_adjustments_without_hue_deserialize_to_a_neutral_rotation() {
         .expect("local adjustments are a JSON object")
         .remove("hue");
     let decoded: LocalAdjustments =
-        serde_json::from_value(serialized).expect("deserialize legacy adjustments");
+        serde_json::from_value(serialized).expect("deserialize adjustments");
     assert_eq!(decoded.hue, 0.0);
     assert!(decoded.is_neutral());
 }

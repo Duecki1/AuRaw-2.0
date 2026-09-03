@@ -61,10 +61,6 @@ pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError>
                     retouch.opacity,
                 ],
             )?;
-            if let Some(baked_opacity) = retouch.baked_opacity {
-                finite("legacy retouch opacity", &[baked_opacity])?;
-                bounded("legacy retouch opacity", baked_opacity, 0.0, 1.0)?;
-            }
             for value in retouch.source.into_iter().chain(retouch.destination) {
                 bounded("retouch source or destination", value, -1.0, 1_000_000.0)?;
             }
@@ -96,9 +92,7 @@ pub(super) fn validate_edit_state(edits: &EditState) -> Result<(), SidecarError>
                     SidecarError::Invalid("Remove patch dimensions overflow".to_owned())
                 })?;
             let rgb_values = pixels.saturating_mul(3);
-            let has_scene = patch.rgb_scene16f.len() == rgb_values;
-            let has_legacy = patch.rgb_srgb16.len() == rgb_values;
-            if has_scene == has_legacy || patch.alpha.len() != pixels {
+            if patch.rgb_scene16f.len() != rgb_values || patch.alpha.len() != pixels {
                 return invalid("Remove patch payload does not match its dimensions");
             }
         }

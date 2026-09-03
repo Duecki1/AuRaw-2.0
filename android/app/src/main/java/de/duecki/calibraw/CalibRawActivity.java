@@ -76,7 +76,6 @@ public final class CalibRawActivity extends NativeActivity {
 
         configureSystemBarsAndInsets();
         storageManager.scavengeTemporaryRawFiles();
-        storageManager.startLegacyRawStorageMigration();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT,

@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SIDECAR_SCHEMA_VERSION: u32 = 16;
+// First public schema for the "CalibRaw edit sidecar" format. Bump this for every incompatible
+// serialized layout change; pre-release AuRaw sidecars use a different format discriminator.
+pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
 pub const DEVELOPED_THUMBNAIL_CACHE_VERSION_SALT: u64 = 0x4155_5241_5700_0007;
 pub const SIDECAR_SUFFIX: &str = ".calibraw";
 #[cfg(not(target_os = "android"))]
@@ -24,7 +26,7 @@ pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".calibraw-thumb.jpg";
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".calibraw-thumb.fingerprint";
 pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {
-    128 * 1024 * 1024
+    32 * 1024 * 1024
 } else {
     256 * 1024 * 1024
 };
@@ -302,16 +304,6 @@ fn synchronize_subject_refinement(edits: &mut EditState) {
     edits.subject_refinement = refinement;
 }
 
-fn migrate_legacy_retouch_opacity(edits: &mut EditState) {
-    for stroke in &mut Arc::make_mut(&mut edits.remove).strokes {
-        if let Some(retouch) = &mut stroke.retouch {
-            let opacity = retouch.opacity.clamp(0.0, 1.0);
-            stroke.opacity = opacity;
-            retouch.baked_opacity = Some(opacity);
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 struct SidecarDocument {
     format: String,
@@ -325,6 +317,12 @@ struct SidecarDocument {
     remove_assets: Vec<SidecarRemoveAsset>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     remove_asset_refs: Vec<SidecarRemoveAssetRef>,
+}
+
+#[derive(Deserialize)]
+struct SidecarHeader {
+    format: String,
+    schema_version: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -346,7 +344,6 @@ struct SidecarMaskAssetRef {
 #[serde(rename_all = "snake_case")]
 enum SidecarRemoveEncoding {
     Scene16f,
-    Srgb16,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -559,7 +556,7 @@ fn restore_mask_assets(
     for mask in &edits.masks.masks {
         for component in &mask.components {
             if generated_mask(&component.geometry).is_some_and(Option::is_some) {
-                return invalid("current sidecar schema contains a legacy inline generated mask");
+                return invalid("sidecar schema contains an inline generated mask");
             }
         }
     }
@@ -735,19 +732,11 @@ fn extract_remove_assets(
         .enumerate()
     {
         for (patch_index, patch) in stroke.patches.iter_mut().enumerate() {
-            let (encoding, rgb) = if !patch.rgb_scene16f.is_empty() {
-                (
-                    SidecarRemoveEncoding::Scene16f,
-                    Arc::clone(&patch.rgb_scene16f),
-                )
-            } else {
-                (SidecarRemoveEncoding::Srgb16, Arc::clone(&patch.rgb_srgb16))
-            };
             let payload = RemoveAssetPayload {
                 width: patch.bounds.width,
                 height: patch.bounds.height,
-                encoding,
-                rgb,
+                encoding: SidecarRemoveEncoding::Scene16f,
+                rgb: Arc::clone(&patch.rgb_scene16f),
                 alpha: Arc::clone(&patch.alpha),
             };
             let fingerprint = remove_payload_fingerprint(&payload);
@@ -810,7 +799,6 @@ fn extract_remove_assets(
                 return invalid("edit contains too many retouch patch references");
             }
             patch.rgb_scene16f = Arc::from([]);
-            patch.rgb_srgb16 = Arc::from([]);
             patch.alpha = Arc::from([]);
         }
     }
@@ -908,11 +896,8 @@ fn restore_remove_assets(
             .checked_add(stroke.patches.len())
             .ok_or(SidecarError::TooLarge(u64::MAX))?;
         for patch in &stroke.patches {
-            if !patch.rgb_scene16f.is_empty()
-                || !patch.rgb_srgb16.is_empty()
-                || !patch.alpha.is_empty()
-            {
-                return invalid("current sidecar schema contains a legacy inline retouch patch");
+            if !patch.rgb_scene16f.is_empty() || !patch.alpha.is_empty() {
+                return invalid("sidecar schema contains an inline retouch patch");
             }
         }
     }
@@ -994,11 +979,6 @@ fn restore_remove_assets(
         match decoded.encoding {
             SidecarRemoveEncoding::Scene16f => {
                 patch.rgb_scene16f = Arc::clone(&decoded.rgb);
-                patch.rgb_srgb16 = Arc::from([]);
-            }
-            SidecarRemoveEncoding::Srgb16 => {
-                patch.rgb_scene16f = Arc::from([]);
-                patch.rgb_srgb16 = Arc::clone(&decoded.rgb);
             }
         }
         patch.alpha = Arc::clone(&decoded.alpha);
@@ -1092,45 +1072,48 @@ pub fn encode(mut edits: EditState) -> Result<Vec<u8>, SidecarError> {
     Ok(writer.bytes)
 }
 
+fn decode_versioned_document(
+    bytes: &[u8],
+    schema_version: u32,
+) -> Result<(SidecarDocument, bool), SidecarError> {
+    // Keep each future public schema's decoder and migration in its own match arm so an older
+    // layout can never be deserialized as the current schema by accident.
+    match schema_version {
+        SIDECAR_SCHEMA_VERSION => serde_json::from_slice::<SidecarDocument>(bytes)
+            .map(|document| (document, false))
+            .map_err(|error| SidecarError::Invalid(format!("invalid sidecar JSON: {error}"))),
+        version if version > SIDECAR_SCHEMA_VERSION => Err(SidecarError::Unsupported(format!(
+            "sidecar schema {version} is newer than supported schema {SIDECAR_SCHEMA_VERSION}"
+        ))),
+        version => Err(SidecarError::Unsupported(format!(
+            "sidecar schema {version} has no migration path to supported schema {SIDECAR_SCHEMA_VERSION}"
+        ))),
+    }
+}
+
 pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
     if bytes.len() as u64 > MAX_SIDECAR_BYTES {
         return Err(SidecarError::TooLarge(bytes.len() as u64));
     }
-    let mut document: SidecarDocument = serde_json::from_slice(bytes)
+    let header: SidecarHeader = serde_json::from_slice(bytes)
         .map_err(|error| SidecarError::Invalid(format!("invalid sidecar JSON: {error}")))?;
-    if document.format != SIDECAR_FORMAT {
+    if header.format != SIDECAR_FORMAT {
         return Err(SidecarError::Invalid(
-            "not an CalibRaw edit sidecar".to_owned(),
+            "not a CalibRaw edit sidecar".to_owned(),
         ));
     }
-    if document.schema_version > SIDECAR_SCHEMA_VERSION {
-        return Err(SidecarError::Unsupported(format!(
-            "sidecar schema {} is newer than supported schema {}",
-            document.schema_version, SIDECAR_SCHEMA_VERSION
-        )));
-    }
-    let original_schema = document.schema_version;
-    if original_schema >= 5 {
-        restore_mask_assets(
-            &mut document.edits,
-            &document.mask_assets,
-            &document.mask_asset_refs,
-        )?;
-    } else if !document.mask_assets.is_empty() || !document.mask_asset_refs.is_empty() {
-        return invalid("legacy sidecar unexpectedly contains current mask assets");
-    }
-    if original_schema >= 15 {
-        restore_remove_assets(
-            &mut document.edits,
-            &document.remove_assets,
-            &document.remove_asset_refs,
-        )?;
-    } else if !document.remove_assets.is_empty() || !document.remove_asset_refs.is_empty() {
-        return invalid("legacy sidecar unexpectedly contains current retouch assets");
-    }
-    if original_schema < 16 {
-        migrate_legacy_retouch_opacity(&mut document.edits);
-    }
+
+    let (mut document, migrated) = decode_versioned_document(bytes, header.schema_version)?;
+    restore_mask_assets(
+        &mut document.edits,
+        &document.mask_assets,
+        &document.mask_asset_refs,
+    )?;
+    restore_remove_assets(
+        &mut document.edits,
+        &document.remove_assets,
+        &document.remove_asset_refs,
+    )?;
 
     synchronize_subject_refinement(&mut document.edits);
 
@@ -1143,7 +1126,7 @@ pub fn decode(bytes: &[u8]) -> Result<LoadedSidecar, SidecarError> {
 
     Ok(LoadedSidecar {
         edits: document.edits,
-        migrated: original_schema != SIDECAR_SCHEMA_VERSION,
+        migrated,
     })
 }
 

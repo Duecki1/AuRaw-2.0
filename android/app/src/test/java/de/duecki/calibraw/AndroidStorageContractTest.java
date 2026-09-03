@@ -40,13 +40,7 @@ public final class AndroidStorageContractTest {
         assertEquals(
                 ".calibraw-import-capture.dng.part",
                 AndroidStorageContract.importPartialName("capture.dng"));
-        assertEquals(
-                AndroidStorageContract.sidecarStagePrefix("capture.dng"),
-                AndroidStorageContract.sidecarStagePrefix("capture.dng"));
-
-        File legacy = new File(media, "legacy");
         assertTrue(library.mkdirs());
-        assertTrue(legacy.mkdirs());
         File trip = new File(library, "2026/Trip");
         assertTrue(trip.mkdirs());
 
@@ -60,24 +54,20 @@ public final class AndroidStorageContractTest {
 
         File currentRaw = new File(library, "capture.dng");
         File nestedRaw = new File(trip, "trip.dng");
-        File legacyRaw = new File(legacy, "old.nef");
         Files.write(currentRaw.toPath(), new byte[] {1});
         Files.write(nestedRaw.toPath(), new byte[] {2});
-        Files.write(legacyRaw.toPath(), new byte[] {2});
 
         assertTrue(AndroidStorageContract.isAllowedRawFile(
-                currentRaw, "capture.dng", library, legacy));
+                currentRaw, "capture.dng", library));
         assertTrue(AndroidStorageContract.isAllowedRawFile(
-                legacyRaw, "old.nef", library, legacy));
-        assertTrue(AndroidStorageContract.isAllowedRawFile(
-                nestedRaw, "trip.dng", library, legacy));
+                nestedRaw, "trip.dng", library));
         assertFalse(AndroidStorageContract.isAllowedRawFile(
-                currentRaw, "renamed.dng", library, legacy));
+                currentRaw, "renamed.dng", library));
 
         File outside = new File(root, "capture.dng");
         Files.write(outside.toPath(), new byte[] {3});
         assertFalse(AndroidStorageContract.isAllowedRawFile(
-                outside, "capture.dng", library, legacy));
+                outside, "capture.dng", library));
 
         try {
             AndroidStorageContract.libraryFolder(library, "../outside");
@@ -112,10 +102,6 @@ public final class AndroidStorageContractTest {
                 ".calibraw-import-capture.dng.part"));
         assertTrue(AndroidStorageContract.isLibraryTemporaryFileName(
                 ".calibraw-sidecar-123.part"));
-        assertTrue(AndroidStorageContract.isLibraryTemporaryFileName(
-                ".calibraw-migrate-old.nef.part"));
-        assertTrue(AndroidStorageContract.isLibraryTemporaryFileName(
-                ".calibraw-move-old.nef.part"));
         assertFalse(AndroidStorageContract.isLibraryTemporaryFileName("capture.dng"));
         assertFalse(AndroidStorageContract.isLibraryTemporaryFileName("notes.part"));
         assertFalse(AndroidStorageContract.isLibraryTemporaryFileName(
@@ -158,58 +144,7 @@ public final class AndroidStorageContractTest {
     }
 
     @Test
-    public void legacyMediaStoreRowsRequireExactIdentityAndOwnership() {
-        assertTrue(AndroidStorageContract.isAllowedLegacyMediaStoreRow(
-                42,
-                42,
-                "old.nef",
-                "old.nef",
-                "Download/CalibRaw/",
-                "Download/CalibRaw/",
-                "de.duecki.calibraw",
-                "de.duecki.calibraw",
-                0,
-                false));
-        assertFalse(AndroidStorageContract.isAllowedLegacyMediaStoreRow(
-                42,
-                42,
-                "old.nef",
-                "old.nef",
-                "Download/CalibRaw/",
-                "Download/CalibRaw/",
-                "de.duecki.calibraw",
-                "other.owner",
-                0,
-                false));
-        assertFalse(AndroidStorageContract.isAllowedLegacyMediaStoreRow(
-                42,
-                42,
-                "old.nef",
-                "old.nef",
-                "Download/CalibRaw/",
-                "Download/CalibRaw/",
-                "de.duecki.calibraw",
-                "de.duecki.calibraw",
-                1,
-                false));
-    }
-
-    @Test
-    public void legacyMigrationAndExportNamingFollowTheStorageContract() throws Exception {
-        File root = temporaryFolder.getRoot();
-        File library = new File(root, ".library");
-        assertTrue(library.mkdirs());
-
-        File legacyMoveSource = new File(root, "legacy-move.raw");
-        File legacyMoveDestination = new File(library, "legacy-move.raw");
-        byte[] migratedPayload = "legacy raw".getBytes(StandardCharsets.UTF_8);
-        Files.write(legacyMoveSource.toPath(), migratedPayload);
-
-        AndroidStorageContract.moveOrCopyLegacyFile(
-                legacyMoveSource, legacyMoveDestination, migratedPayload.length);
-        assertFalse(legacyMoveSource.exists());
-        assertArrayEquals(migratedPayload, Files.readAllBytes(legacyMoveDestination.toPath()));
-
+    public void exportNamingFollowsTheStorageContract() {
         assertEquals("Pictures/CalibRaw", AndroidStorageContract.exportRelativePath("Pictures"));
         assertEquals(
                 "Pictures/CalibRaw/edit.png",
