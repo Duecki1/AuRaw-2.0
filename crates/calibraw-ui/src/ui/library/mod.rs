@@ -3,8 +3,8 @@ use crate::app::{AppTab, CalibRawApp};
 use crate::pipeline::{
     apply_lensfun_correction, build_proxy, is_supported_raw_path, lensfun_catalog,
     load_raw_display_metadata, load_raw_file_with_profile_selection, load_raw_thumbnail,
-    mask_atlas_edge, GpuParams, LensfunLens, MaskGeometry, MaskRgbImage, MaskStack,
-    ProcessingQuality, ProxySpec, RawGpuPipeline, MAX_LOCAL_MASKS,
+    mask_atlas_edge, GpuParams, LensfunLens, MaskRgbImage, MaskStack, ProcessingQuality, ProxySpec,
+    RawGpuPipeline, MAX_LOCAL_MASKS,
 };
 use crate::pipeline::{ExportFormat, ExportSettings, RawThumbnail};
 use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind, Ui};

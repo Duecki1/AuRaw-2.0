@@ -304,36 +304,58 @@ impl EditHistory {
             && !self.redo.is_empty()
     }
 
+    fn restore_snapshot(
+        current: &mut EditSnapshot,
+        destination: &mut VecDeque<EditSnapshot>,
+        target: EditSnapshot,
+    ) -> (EditSnapshot, bool, bool) {
+        let masks_changed = !Arc::ptr_eq(&target.masks, &current.masks);
+        let remove_changed = !Arc::ptr_eq(&target.remove, &current.remove);
+        let present = std::mem::replace(current, target.clone());
+        Self::push_bounded(destination, present);
+        (target, masks_changed, remove_changed)
+    }
+
+    fn navigate(
+        &mut self,
+        exposure: &ExposureParams,
+        masks: &MaskStack,
+        lens: &LensCorrectionState,
+        redo: bool,
+    ) -> Option<(EditSnapshot, bool, bool)> {
+        self.commit_current_state(exposure, masks, lens);
+        let target = if redo {
+            self.redo.pop_back()?
+        } else {
+            self.undo.pop_back()?
+        };
+        let restored = if redo {
+            Self::restore_snapshot(&mut self.current, &mut self.undo, target)
+        } else {
+            Self::restore_snapshot(&mut self.current, &mut self.redo, target)
+        };
+        self.committed_revision = self.committed_revision.wrapping_add(1);
+        Some(restored)
+    }
+
+    #[cfg(test)]
     fn undo(
         &mut self,
         exposure: &ExposureParams,
         masks: &MaskStack,
         lens: &LensCorrectionState,
     ) -> Option<(EditSnapshot, bool, bool)> {
-        self.commit_current_state(exposure, masks, lens);
-        let target = self.undo.pop_back()?;
-        let masks_changed = !Arc::ptr_eq(&target.masks, &self.current.masks);
-        let remove_changed = !Arc::ptr_eq(&target.remove, &self.current.remove);
-        let present = std::mem::replace(&mut self.current, target.clone());
-        Self::push_bounded(&mut self.redo, present);
-        self.committed_revision = self.committed_revision.wrapping_add(1);
-        Some((target, masks_changed, remove_changed))
+        self.navigate(exposure, masks, lens, false)
     }
 
+    #[cfg(test)]
     fn redo(
         &mut self,
         exposure: &ExposureParams,
         masks: &MaskStack,
         lens: &LensCorrectionState,
     ) -> Option<(EditSnapshot, bool, bool)> {
-        self.commit_current_state(exposure, masks, lens);
-        let target = self.redo.pop_back()?;
-        let masks_changed = !Arc::ptr_eq(&target.masks, &self.current.masks);
-        let remove_changed = !Arc::ptr_eq(&target.remove, &self.current.remove);
-        let present = std::mem::replace(&mut self.current, target.clone());
-        Self::push_bounded(&mut self.undo, present);
-        self.committed_revision = self.committed_revision.wrapping_add(1);
-        Some((target, masks_changed, remove_changed))
+        self.navigate(exposure, masks, lens, true)
     }
 
     fn committed_revision(&self) -> u64 {
@@ -429,28 +451,24 @@ impl CalibRawApp {
     }
 
     pub(crate) fn undo_edit(&mut self) {
-        self.finish_mask_geometry_interaction();
-        let snapshot = self.persistence.history.undo(
-            &self.develop.exposure,
-            &self.masks.stack,
-            &self.develop.lens_correction,
-        );
-        if let Some((snapshot, masks_changed, remove_changed)) = snapshot {
-            self.apply_edit_snapshot(snapshot, masks_changed, remove_changed);
-            self.ui.notice = Some("Undid edit.".to_owned());
-        }
+        self.navigate_edit_history(false);
     }
 
     pub(crate) fn redo_edit(&mut self) {
+        self.navigate_edit_history(true);
+    }
+
+    fn navigate_edit_history(&mut self, redo: bool) {
         self.finish_mask_geometry_interaction();
-        let snapshot = self.persistence.history.redo(
+        let snapshot = self.persistence.history.navigate(
             &self.develop.exposure,
             &self.masks.stack,
             &self.develop.lens_correction,
+            redo,
         );
         if let Some((snapshot, masks_changed, remove_changed)) = snapshot {
             self.apply_edit_snapshot(snapshot, masks_changed, remove_changed);
-            self.ui.notice = Some("Redid edit.".to_owned());
+            self.ui.notice = Some(if redo { "Redid edit." } else { "Undid edit." }.to_owned());
         }
     }
 
