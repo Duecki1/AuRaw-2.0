@@ -39,13 +39,14 @@ fn sample_tone_guide_ev(pos: vec2<i32>) -> f32 {
 fn tone_percentiles() -> ToneCommon::TonePercentiles {
     let p0 = tone_stats.percentiles_0_field;
     let p1 = tone_stats.percentiles_1_field;
-    let guide_follow = adaptive_tone_user_exposure_ev() * 0.35;
+    // Histogram percentiles are measured before user exposure, so move them by the full user EV.
+    let exposure_offset = adaptive_tone_user_exposure_ev();
     return ToneCommon::TonePercentiles(
-        p0.x + guide_follow,
-        p0.y + guide_follow,
-        p0.z + guide_follow,
-        p0.w + guide_follow,
-        p1.x + guide_follow,
+        p0.x + exposure_offset,
+        p0.y + exposure_offset,
+        p0.z + exposure_offset,
+        p0.w + exposure_offset,
+        p1.x + exposure_offset,
     );
 }
 
