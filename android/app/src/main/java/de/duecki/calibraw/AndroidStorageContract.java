@@ -7,7 +7,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Locale;
@@ -82,11 +81,8 @@ final class AndroidStorageContract {
         return root.toPath().relativize(resolved.toPath()).toString().replace(File.separatorChar, '/');
     }
 
-    static boolean isAllowedRawFile(
-            File raw,
-            String expectedDisplayName,
-            File canonicalLibrary,
-            File legacyRoot) throws Exception {
+    static boolean isAllowedRawFile(File raw, String expectedDisplayName, File canonicalLibrary)
+            throws Exception {
         if (raw == null || expectedDisplayName == null) {
             return false;
         }
@@ -95,8 +91,7 @@ final class AndroidStorageContract {
         File canonicalLibraryRoot = canonicalLibrary.getCanonicalFile();
         return expectedDisplayName.equals(canonicalRaw.getName())
                 && parent != null
-                && (parent.toPath().startsWith(canonicalLibraryRoot.toPath())
-                        || legacyRoot.getCanonicalFile().equals(parent));
+                && parent.toPath().startsWith(canonicalLibraryRoot.toPath());
     }
 
     static String safeRawName(String requestedName) {
@@ -118,27 +113,6 @@ final class AndroidStorageContract {
                 && RAW_SUFFIXES.contains(displayName.substring(dot + 1).toLowerCase(Locale.ROOT));
     }
 
-    static boolean isAllowedLegacyMediaStoreRow(
-            long expectedId,
-            long storedId,
-            String expectedDisplayName,
-            String storedDisplayName,
-            String expectedRelativePath,
-            String storedRelativePath,
-            String expectedOwner,
-            String storedOwner,
-            int pending,
-            boolean hasAdditionalRow) {
-        return expectedId >= 0
-                && expectedId == storedId
-                && expectedDisplayName != null
-                && expectedDisplayName.equals(storedDisplayName)
-                && expectedRelativePath.equals(storedRelativePath)
-                && expectedOwner.equals(storedOwner)
-                && pending == 0
-                && !hasAdditionalRow;
-    }
-
     static String sidecarDisplayName(String rawDisplayName) {
         String name = sanitizeRawName(rawDisplayName);
         if (!name.equals(rawDisplayName)
@@ -146,20 +120,6 @@ final class AndroidStorageContract {
             throw new IllegalArgumentException("The RAW name cannot be used for a sidecar");
         }
         return name + ".calibraw";
-    }
-
-    static String sidecarStagePrefix(String rawDisplayName) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(
-                    rawDisplayName.getBytes(StandardCharsets.UTF_8));
-            StringBuilder prefix = new StringBuilder(".calibraw-stage-");
-            for (int index = 0; index < 16; index++) {
-                prefix.append(String.format(Locale.ROOT, "%02x", digest[index] & 0xff));
-            }
-            return prefix.append('-').toString();
-        } catch (Exception impossible) {
-            return ".calibraw-stage-" + Integer.toUnsignedString(rawDisplayName.hashCode(), 16) + '-';
-        }
     }
 
     static String importPartialName(String destinationName) {
@@ -171,9 +131,7 @@ final class AndroidStorageContract {
             return false;
         }
         return name.startsWith(".calibraw-import-")
-                || name.startsWith(".calibraw-sidecar-")
-                || name.startsWith(".calibraw-migrate-")
-                || name.startsWith(".calibraw-move-");
+                || name.startsWith(".calibraw-sidecar-");
     }
 
     static String exportRelativePath(String picturesDirectory) {
@@ -245,51 +203,6 @@ final class AndroidStorageContract {
         File sidecar = new File(directory, sidecarDisplayName(rawDisplayName));
         if (sidecar.exists() && !sidecar.delete()) {
             throw new IllegalStateException("Could not delete the RAW sidecar");
-        }
-    }
-
-    static void moveOrCopyLegacyFile(File source, File destination, long maximumBytes)
-            throws Exception {
-        try {
-            Files.move(source.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE);
-            return;
-        } catch (AtomicMoveNotSupportedException unsupported) {
-            try {
-                Files.move(source.toPath(), destination.toPath());
-                return;
-            } catch (Exception ignored) {
-            }
-        } catch (Exception ignored) {
-        }
-
-        File partial = new File(
-                destination.getParentFile(), ".calibraw-move-" + destination.getName() + ".part");
-        boolean published = false;
-        try {
-            try (FileInputStream input = new FileInputStream(source);
-                 FileOutputStream output = new FileOutputStream(partial)) {
-                BoundedStreams.copy(
-                        input,
-                        output,
-                        maximumBytes,
-                        "File exceeds the allowed size");
-                output.getFD().sync();
-            }
-            if (!partial.renameTo(destination)) {
-                throw new IllegalStateException("Could not publish migrated file " + destination);
-            }
-            published = true;
-            if (!source.delete() && source.exists()) {
-                if (!destination.delete() && destination.exists()) {
-                    destination.deleteOnExit();
-                }
-                published = false;
-                throw new IllegalStateException("Could not remove old file " + source);
-            }
-        } finally {
-            if (!published && !partial.delete() && partial.exists()) {
-                partial.deleteOnExit();
-            }
         }
     }
 

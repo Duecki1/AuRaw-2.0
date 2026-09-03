@@ -7,6 +7,7 @@ pub(crate) enum LibraryAction {
     PasteAdjustments(Vec<LibraryAsset>),
     Copy(Vec<LibraryAsset>),
     Cut(Vec<LibraryAsset>),
+    #[cfg(not(target_os = "android"))]
     PasteIntoAssetFolder(LibraryAsset),
     Duplicate(Vec<LibraryAsset>),
     Rename(LibraryAsset),
@@ -201,6 +202,7 @@ pub(crate) fn apply_library_action(
         LibraryAction::Cut(assets) => {
             set_library_clipboard(app, ImageClipboardMode::Cut, assets);
         }
+        #[cfg(not(target_os = "android"))]
         LibraryAction::PasteIntoAssetFolder(asset) => match duplicate_destination(&asset) {
             Ok(destination) => start_image_clipboard_paste(app, destination, ui.ctx()),
             Err(error) => app.library.status = format!("Could not determine paste folder: {error}"),

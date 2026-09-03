@@ -64,13 +64,10 @@ final class ThumbnailCache {
 
     void clear() {
         clearDirectory(persistentDirectory());
-        clearDirectory(legacyDirectory());
     }
 
     long sizeBytes() {
-        long persistent = directorySize(persistentDirectory());
-        long legacy = directorySize(legacyDirectory());
-        return persistent > Long.MAX_VALUE - legacy ? Long.MAX_VALUE : persistent + legacy;
+        return directorySize(persistentDirectory());
     }
 
     private File path(String identity, String suffix) throws Exception {
@@ -82,7 +79,6 @@ final class ThumbnailCache {
             name.append(String.format(Locale.ROOT, "%02x", value & 0xff));
         }
         File cached = new File(directory, name.append(suffix).toString());
-        migrateLegacyEntry(cached);
         touch(cached);
         trim(directory);
         return cached;
@@ -95,10 +91,6 @@ final class ThumbnailCache {
             throw new IllegalStateException("Could not create the persistent thumbnail cache");
         }
         return directory;
-    }
-
-    private File legacyDirectory() {
-        return new File(storage.getCacheDir(), "library-thumbnails");
     }
 
     private static void clearDirectory(File directory) {
@@ -130,28 +122,6 @@ final class ThumbnailCache {
             total = total > Long.MAX_VALUE - bytes ? Long.MAX_VALUE : total + bytes;
         }
         return total;
-    }
-
-    private void migrateLegacyEntry(File destination) {
-        File legacyDirectory = legacyDirectory();
-        if (!legacyDirectory.isDirectory()) {
-            return;
-        }
-        migrateLegacyFile(new File(legacyDirectory, destination.getName()), destination);
-        File fingerprint = new File(destination.getPath() + ".fingerprint");
-        migrateLegacyFile(
-                new File(legacyDirectory, destination.getName() + ".fingerprint"), fingerprint);
-    }
-
-    private static void migrateLegacyFile(File source, File destination) {
-        if (destination.isFile() || !source.isFile()) {
-            return;
-        }
-        try {
-            AndroidStorageContract.moveOrCopyLegacyFile(source, destination, MAX_BYTES);
-        } catch (Exception error) {
-            Log.w(LOG_TAG, "Could not migrate legacy thumbnail cache entry", error);
-        }
     }
 
     private static void touch(File cached) {

@@ -48,6 +48,7 @@ impl UiIcon {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 pub(crate) fn icon_toggle_button(
     ui: &mut Ui,
     icon: UiIcon,

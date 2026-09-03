@@ -7,6 +7,7 @@ use super::*;
 /// such as brush or subject-refinement settings must not widen a sidebar the
 /// user has already sized. Keep a separate persisted value that is updated
 /// only while the panel resize handle is being dragged.
+#[cfg(not(target_os = "android"))]
 fn develop_sidebar_user_width(
     ctx: &egui::Context,
     panel_id: egui::Id,
@@ -25,6 +26,7 @@ fn develop_sidebar_user_width(
     })
 }
 
+#[cfg(not(target_os = "android"))]
 fn set_develop_sidebar_panel_width(ctx: &egui::Context, panel_id: egui::Id, width: f32) {
     ctx.data_mut(|data| {
         data.insert_persisted(panel_id.with("user-width"), width);
@@ -43,6 +45,7 @@ fn set_develop_sidebar_panel_width(ctx: &egui::Context, panel_id: egui::Id, widt
     });
 }
 
+#[cfg(not(target_os = "android"))]
 fn dragged_develop_sidebar_width(
     ctx: &egui::Context,
     panel_id: egui::Id,

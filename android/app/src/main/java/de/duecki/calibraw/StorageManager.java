@@ -2,16 +2,11 @@ package de.duecki.calibraw;
 
 import android.content.ClipData;
 import android.content.ContentResolver;
-import android.content.ContentUris;
-import android.content.ContentValues;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
-import android.os.Build;
-import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
-import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Log;
 
@@ -19,7 +14,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -34,8 +28,6 @@ final class StorageManager {
     private static final int MAX_RAW_LIBRARY_FOLDERS = 10_000;
     private static final int MAX_RAW_LIBRARY_FOLDER_DEPTH = 64;
     private static final long STALE_TEMP_FILE_AGE_MS = 24L * 60L * 60L * 1000L;
-    private static final String LEGACY_MEDIASTORE_RAW_RELATIVE_PATH =
-            Environment.DIRECTORY_DOWNLOADS + "/CalibRaw/";
     private static final String RAW_PICKER_URI_KEY = "raw-document-uri";
 
     interface Callbacks {
@@ -235,7 +227,7 @@ final class StorageManager {
                             + " bytes; the Android import limit is "
                             + MAX_RAW_IMPORT_BYTES);
         }
-        return storeRawInLibrary(uri, displayName);
+        return storeRawFile(uri, displayName);
     }
 
     String rawLibraryLocation() {
@@ -312,18 +304,9 @@ final class StorageManager {
         return thumbnailCache.developedPath(uriText);
     }
 
-    private void copyDevelopedThumbnailCache(String sourceUri, String destinationUri)
-            throws Exception {
-        thumbnailCache.copyDeveloped(sourceUri, destinationUri);
-    }
-
     void copyRawLibraryDevelopedThumbnail(String sourceUri, String destinationUri)
             throws Exception {
-        copyDevelopedThumbnailCache(sourceUri, destinationUri);
-    }
-
-    private void clearDevelopedThumbnailCache(String uriText) {
-        thumbnailCache.clearDeveloped(uriText);
+        thumbnailCache.copyDeveloped(sourceUri, destinationUri);
     }
 
     void clearThumbnailCache() {
@@ -383,22 +366,8 @@ final class StorageManager {
     void removeRawSidecar(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
-        if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            removeRawSidecarLegacyMediaStore(displayName);
-            return;
-        }
         AndroidStorageContract.deleteSidecar(
                 new File(rawUri.getPath()).getParentFile(), displayName);
-    }
-
-    private void removeRawSidecarLegacyMediaStore(String rawDisplayName) {
-        boolean deletionFailed = false;
-        for (Uri generation : legacyMediaStoreSidecarUris(rawDisplayName)) {
-            deletionFailed |= deleteLegacyMediaStoreSidecarGeneration(generation, rawDisplayName) <= 0;
-        }
-        if (deletionFailed && !legacyMediaStoreSidecarUris(rawDisplayName).isEmpty()) {
-            throw new IllegalStateException("Android storage could not delete the RAW sidecar");
-        }
     }
 
     String importLocalRawLibraryDocument(String rawPath, String displayName) throws Exception {
@@ -408,7 +377,7 @@ final class StorageManager {
         }
         StoredRaw imported = null;
         try {
-            imported = storeRawInLibrary(Uri.fromFile(sourceRaw), displayName);
+            imported = storeRawFile(Uri.fromFile(sourceRaw), displayName);
             File sourceSidecar = new File(rawPath + ".calibraw");
             if (sourceSidecar.isFile()) {
                 publishRawSidecar(
@@ -442,11 +411,6 @@ final class StorageManager {
         if (!safeName.equals(requestedName) || !AndroidStorageContract.isRawName(requestedName)) {
             throw new IllegalArgumentException("Enter a safe supported RAW filename");
         }
-        if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            throw new IllegalStateException(
-                    "This legacy Android library item must finish migrating before it can be renamed");
-        }
-
         File sourceRaw = new File(rawUri.getPath());
         if (displayName.equals(requestedName)) {
             return rawUri.toString();
@@ -470,46 +434,34 @@ final class StorageManager {
         }
         String destinationUri = Uri.fromFile(destinationRaw).toString();
         try {
-            copyDevelopedThumbnailCache(rawUriText, destinationUri);
+            thumbnailCache.copyDeveloped(rawUriText, destinationUri);
         } catch (Exception error) {
             Log.w(LOG_TAG, "Renamed RAW but could not preserve its developed thumbnail cache", error);
-            clearDevelopedThumbnailCache(destinationUri);
+            thumbnailCache.clearDeveloped(destinationUri);
         }
-        clearDevelopedThumbnailCache(rawUriText);
+        thumbnailCache.clearDeveloped(rawUriText);
         return destinationUri;
     }
 
     void deleteRawLibraryDocument(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
-        boolean fileBacked = ContentResolver.SCHEME_FILE.equals(rawUri.getScheme());
-        File raw = fileBacked ? new File(rawUri.getPath()) : null;
-        if (fileBacked) {
-            if (raw.exists() && !raw.delete()) {
-                throw new IllegalStateException("Could not delete the RAW file");
-            }
-        } else if (storage.getContentResolver().delete(rawUri, null, null) <= 0) {
-            throw new IllegalStateException("Android storage could not delete the RAW file");
+        File raw = new File(rawUri.getPath());
+        if (raw.exists() && !raw.delete()) {
+            throw new IllegalStateException("Could not delete the RAW file");
         }
 
         try {
-            if (fileBacked) {
-                AndroidStorageContract.deleteSidecar(raw.getParentFile(), displayName);
-            } else {
-                removeRawSidecarLegacyMediaStore(displayName);
-            }
+            AndroidStorageContract.deleteSidecar(raw.getParentFile(), displayName);
         } catch (Exception error) {
             Log.w(LOG_TAG, "Deleted RAW but could not clean up its sidecar", error);
         }
-        clearDevelopedThumbnailCache(rawUriText);
+        thumbnailCache.clearDeveloped(rawUriText);
     }
 
     String materializeRawSidecar(String rawUriText, String displayName) throws Exception {
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
-        if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            return materializeRawSidecarLegacyMediaStore(displayName);
-        }
         File sidecar = new File(
                 new File(rawUri.getPath()).getParentFile(), AndroidStorageContract.sidecarDisplayName(displayName));
         if (!sidecar.isFile()) {
@@ -521,37 +473,6 @@ final class StorageManager {
         try {
             try (FileInputStream input = new FileInputStream(sidecar);
                  FileOutputStream output = new FileOutputStream(cached)) {
-                BoundedStreams.copy(
-                        input,
-                        output,
-                        MAX_SIDECAR_BYTES,
-                        storageLimitMessage(MAX_SIDECAR_BYTES));
-                output.getFD().sync();
-            }
-            completed = true;
-            return cached.getAbsolutePath();
-        } finally {
-            if (!completed && !cached.delete() && cached.exists()) {
-                cached.deleteOnExit();
-            }
-        }
-    }
-
-    private String materializeRawSidecarLegacyMediaStore(String rawDisplayName) throws Exception {
-        ArrayList<Uri> generations = legacyMediaStoreSidecarUris(rawDisplayName);
-        if (generations.isEmpty()) {
-            return "";
-        }
-
-        Uri newestGeneration = generations.get(0);
-        File cached = File.createTempFile("calibraw-sidecar-", ".calibraw", storage.getCacheDir());
-        boolean completed = false;
-        try {
-            try (InputStream input = storage.getContentResolver().openInputStream(newestGeneration);
-                 FileOutputStream output = new FileOutputStream(cached)) {
-                if (input == null) {
-                    throw new IllegalStateException("Android storage returned no sidecar stream");
-                }
                 BoundedStreams.copy(
                         input,
                         output,
@@ -582,175 +503,12 @@ final class StorageManager {
         }
         Uri rawUri = Uri.parse(rawUriText);
         verifyRawLibraryIdentity(rawUri, displayName);
-        if (!ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            return publishRawSidecarLegacyMediaStore(cached, displayName);
-        }
-        return publishRawSidecarFile(
-                cached, new File(rawUri.getPath()).getParentFile(), displayName);
-    }
-
-    private String publishRawSidecarLegacyMediaStore(File cached, String rawDisplayName) throws Exception {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
-        }
-        ContentResolver resolver = storage.getContentResolver();
-        String displayName = AndroidStorageContract.sidecarDisplayName(rawDisplayName);
-        String stagedName = AndroidStorageContract.sidecarStagePrefix(rawDisplayName)
-                + Long.toUnsignedString(System.nanoTime());
-        ArrayList<Uri> oldSidecars = legacyMediaStoreSidecarUris(rawDisplayName);
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.Downloads.DISPLAY_NAME, stagedName);
-        // A known MIME may make MediaProvider rewrite CalibRaw's custom extension.
-        values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream");
-        values.put(MediaStore.Downloads.RELATIVE_PATH, LEGACY_MEDIASTORE_RAW_RELATIVE_PATH);
-        values.put(MediaStore.Downloads.IS_PENDING, 1);
-        Uri destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-        if (destination == null) {
-            throw new IllegalStateException("Android MediaStore could not create the sidecar");
-        }
-
-        boolean contentPublished = false;
-        try {
-            try (FileInputStream input = new FileInputStream(cached);
-                 OutputStream output = resolver.openOutputStream(destination, "w")) {
-                if (output == null) {
-                    throw new IllegalStateException("Android storage returned no sidecar output");
-                }
-                BoundedStreams.copy(
-                        input,
-                        output,
-                        MAX_SIDECAR_BYTES,
-                        storageLimitMessage(MAX_SIDECAR_BYTES));
-                output.flush();
-            }
-            values.clear();
-            values.put(MediaStore.Downloads.IS_PENDING, 0);
-            if (resolver.update(destination, values, null, null) <= 0) {
-                throw new IllegalStateException("Android MediaStore could not publish the sidecar");
-            }
-            contentPublished = true;
-            boolean removedOldRows = true;
-            for (Uri oldSidecar : oldSidecars) {
-                if (!oldSidecar.equals(destination)) {
-                    removedOldRows &= deleteLegacyMediaStoreSidecarGeneration(
-                            oldSidecar, rawDisplayName) > 0;
-                }
-            }
-            if (!removedOldRows) {
-                return LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + stagedName;
-            }
-            values.clear();
-            values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
-            if (resolver.update(destination, values, null, null) <= 0) {
-                return LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + stagedName;
-            }
-            String actualName = queryStoredDisplayName(destination);
-            if (!displayName.equals(actualName)) {
-                values.clear();
-                values.put(MediaStore.Downloads.DISPLAY_NAME, stagedName);
-                resolver.update(destination, values, null, null);
-                return LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + queryStoredDisplayName(destination);
-            }
-            return LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + displayName;
-        } finally {
-            // A published staging row is a valid recovery generation; preserve it.
-            if (!contentPublished) {
-                resolver.delete(destination, null, null);
-            }
-        }
-    }
-
-    private String publishRawSidecarFile(
-            File cached,
-            File directory,
-            String rawDisplayName) throws Exception {
         return AndroidStorageContract.publishSidecarAtomically(
-                cached, directory, rawDisplayName, MAX_SIDECAR_BYTES);
-    }
-
-    private ArrayList<Uri> legacyMediaStoreSidecarUris(String rawDisplayName) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
-        }
-        ArrayList<Uri> result = new ArrayList<>();
-        String displayName = AndroidStorageContract.sidecarDisplayName(rawDisplayName);
-        String stagedPrefix = AndroidStorageContract.sidecarStagePrefix(rawDisplayName);
-        String[] projection = {
-                MediaStore.Downloads._ID,
-                MediaStore.Downloads.DISPLAY_NAME
-        };
-        String selection = legacyMediaStoreSidecarSelection();
-        String[] args = legacyMediaStoreSidecarSelectionArgs(displayName, stagedPrefix);
-        try (Cursor cursor = storage.getContentResolver().query(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                args,
-                MediaStore.Downloads._ID + " DESC")) {
-            if (cursor == null) {
-                throw new IllegalStateException("Android MediaStore returned no sidecar cursor");
-            }
-            int idColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads._ID);
-            int nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME);
-            while (cursor.moveToNext()) {
-                String foundName = cursor.getString(nameColumn);
-                if (foundName != null
-                        && (displayName.equals(foundName) || foundName.startsWith(stagedPrefix))) {
-                    result.add(ContentUris.withAppendedId(
-                            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                            cursor.getLong(idColumn)));
-                }
-            }
-        }
-        return result;
-    }
-
-    private int deleteLegacyMediaStoreSidecarGeneration(Uri generation, String rawDisplayName) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Legacy MediaStore sidecars require Android 10 or newer");
-        }
-        long generationId = ContentUris.parseId(generation);
-        String displayName = AndroidStorageContract.sidecarDisplayName(rawDisplayName);
-        String stagedPrefix = AndroidStorageContract.sidecarStagePrefix(rawDisplayName);
-        String selection = MediaStore.Downloads._ID + "=? AND ("
-                + legacyMediaStoreSidecarSelection() + ")";
-        String[] sidecarArgs = legacyMediaStoreSidecarSelectionArgs(displayName, stagedPrefix);
-        String[] args = new String[sidecarArgs.length + 1];
-        args[0] = Long.toString(generationId);
-        System.arraycopy(sidecarArgs, 0, args, 1, sidecarArgs.length);
-        return storage.getContentResolver().delete(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                selection,
-                args);
-    }
-
-    private static String legacyMediaStoreSidecarSelection() {
-        return MediaStore.Downloads.RELATIVE_PATH + "=? AND "
-                + MediaStore.Downloads.OWNER_PACKAGE_NAME + "=? AND "
-                + MediaStore.Downloads.IS_PENDING + "=0 AND ("
-                + MediaStore.Downloads.DISPLAY_NAME + "=? OR "
-                + MediaStore.Downloads.DISPLAY_NAME + " LIKE ? ESCAPE '\\')";
-    }
-
-    private String[] legacyMediaStoreSidecarSelectionArgs(String displayName, String stagedPrefix) {
-        return new String[]{
-                LEGACY_MEDIASTORE_RAW_RELATIVE_PATH,
-                storage.getPackageName(),
-                displayName,
-                escapeLike(stagedPrefix) + "%"
-        };
+                cached, new File(rawUri.getPath()).getParentFile(), displayName, MAX_SIDECAR_BYTES);
     }
 
     private void verifyRawLibraryIdentity(Uri rawUri, String expectedDisplayName) throws Exception {
-        if (ContentResolver.SCHEME_FILE.equals(rawUri.getScheme())) {
-            verifyFileRawLibraryIdentity(rawUri, expectedDisplayName);
-            return;
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            verifyLegacyMediaStoreRawIdentity(rawUri, expectedDisplayName);
-            return;
-        }
-        throw new IllegalArgumentException("The RAW library URI is invalid");
+        verifyFileRawLibraryIdentity(rawUri, expectedDisplayName);
     }
 
     private void verifyFileRawLibraryIdentity(
@@ -761,84 +519,9 @@ final class StorageManager {
         }
         File raw = new File(rawUri.getPath());
         if (!AndroidStorageContract.isAllowedRawFile(
-                raw, expectedDisplayName, rawLibraryDirectory(), externalMediaRootDirectory())) {
+                raw, expectedDisplayName, rawLibraryDirectory())) {
             throw new IllegalArgumentException("The RAW is outside CalibRaw's library");
         }
-    }
-
-    private void verifyLegacyMediaStoreRawIdentity(
-            Uri rawUri,
-            String expectedDisplayName) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Legacy MediaStore RAW storage requires Android 10 or newer");
-        }
-        Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
-        if (expectedDisplayName == null
-                || !AndroidStorageContract.isRawName(expectedDisplayName)
-                || !ContentResolver.SCHEME_CONTENT.equals(rawUri.getScheme())
-                || !collection.getAuthority().equals(rawUri.getAuthority())) {
-            throw new IllegalArgumentException("The RAW library URI is invalid");
-        }
-
-        long expectedId;
-        try {
-            expectedId = ContentUris.parseId(rawUri);
-        } catch (NumberFormatException error) {
-            throw new IllegalArgumentException("The RAW library URI is invalid", error);
-        }
-        if (expectedId < 0
-                || !ContentUris.withAppendedId(collection, expectedId).equals(rawUri)) {
-            throw new IllegalArgumentException("The RAW library URI is invalid");
-        }
-
-        String[] projection = {
-                MediaStore.Downloads._ID,
-                MediaStore.Downloads.DISPLAY_NAME,
-                MediaStore.Downloads.RELATIVE_PATH,
-                MediaStore.Downloads.OWNER_PACKAGE_NAME,
-                MediaStore.Downloads.IS_PENDING
-        };
-        try (Cursor cursor = storage.getContentResolver().query(
-                rawUri,
-                projection,
-                null,
-                null,
-                null)) {
-            if (cursor == null || !cursor.moveToFirst()) {
-                throw new IllegalArgumentException("The RAW is not in CalibRaw's library");
-            }
-            long storedId = cursor.getLong(cursor.getColumnIndexOrThrow(
-                    MediaStore.Downloads._ID));
-            String storedName = cursor.getString(cursor.getColumnIndexOrThrow(
-                    MediaStore.Downloads.DISPLAY_NAME));
-            String storedPath = cursor.getString(cursor.getColumnIndexOrThrow(
-                    MediaStore.Downloads.RELATIVE_PATH));
-            String storedOwner = cursor.getString(cursor.getColumnIndexOrThrow(
-                    MediaStore.Downloads.OWNER_PACKAGE_NAME));
-            int pending = cursor.getInt(cursor.getColumnIndexOrThrow(
-                    MediaStore.Downloads.IS_PENDING));
-            if (!AndroidStorageContract.isAllowedLegacyMediaStoreRow(
-                    expectedId,
-                    storedId,
-                    expectedDisplayName,
-                    storedName,
-                    LEGACY_MEDIASTORE_RAW_RELATIVE_PATH,
-                    storedPath,
-                    storage.getPackageName(),
-                    storedOwner,
-                    pending,
-                    cursor.moveToNext())) {
-                throw new IllegalArgumentException("The RAW is outside CalibRaw's library");
-            }
-        }
-    }
-
-    private static String escapeLike(String value) {
-        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
-
-    private StoredRaw storeRawInLibrary(Uri source, String requestedName) throws Exception {
-        return storeRawFile(source, requestedName);
     }
 
     private StoredRaw storeRawFile(Uri source, String requestedName) throws Exception {
@@ -900,20 +583,6 @@ final class StorageManager {
     private String listCombinedRawLibrary() {
         ArrayList<RawLibraryRecord> records = new ArrayList<>();
         records.addAll(listFileRawLibrary(selectedRawLibraryDirectory()));
-        if (selectedRawLibraryFolder.isEmpty()) {
-            try {
-                records.addAll(listFileRawLibrary(externalMediaRootDirectory()));
-            } catch (IllegalStateException error) {
-                Log.w(LOG_TAG, "Could not inspect the pre-.library RAW location", error);
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                try {
-                    records.addAll(listLegacyMediaStoreRawLibrary());
-                } catch (IllegalStateException error) {
-                    Log.w(LOG_TAG, "Could not inspect the legacy MediaStore RAW library", error);
-                }
-            }
-        }
         records.sort((left, right) -> {
             int modifiedOrder = Long.compare(right.modifiedSeconds, left.modifiedSeconds);
             return modifiedOrder != 0 ? modifiedOrder : left.uri.compareTo(right.uri);
@@ -969,54 +638,6 @@ final class StorageManager {
         }
     }
 
-    private ArrayList<RawLibraryRecord> listLegacyMediaStoreRawLibrary() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            throw new IllegalStateException("Legacy MediaStore RAW storage requires Android 10 or newer");
-        }
-        ArrayList<RawLibraryRecord> result = new ArrayList<>();
-        String[] projection = {
-                MediaStore.Downloads._ID,
-                MediaStore.Downloads.DISPLAY_NAME,
-                MediaStore.Downloads.SIZE,
-                MediaStore.Downloads.DATE_MODIFIED
-        };
-        String selection = MediaStore.Downloads.RELATIVE_PATH + "=? AND "
-                + MediaStore.Downloads.OWNER_PACKAGE_NAME + "=? AND "
-                + MediaStore.Downloads.IS_PENDING + "=0";
-        String[] selectionArgs = {LEGACY_MEDIASTORE_RAW_RELATIVE_PATH, storage.getPackageName()};
-        try (Cursor cursor = storage.getContentResolver().query(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                selectionArgs,
-                MediaStore.Downloads.DATE_MODIFIED + " DESC")) {
-            if (cursor == null) {
-                throw new IllegalStateException("Android MediaStore returned no RAW cursor");
-            }
-            int idColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads._ID);
-            int nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME);
-            int sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.SIZE);
-            int modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DATE_MODIFIED);
-            // One sentinel beyond the UI limit distinguishes exact-size from truncation.
-            while (result.size() <= MAX_RAW_LIBRARY_FILES && cursor.moveToNext()) {
-                String name = cursor.getString(nameColumn);
-                if (!AndroidStorageContract.isRawName(name)) {
-                    continue;
-                }
-                Uri uri = ContentUris.withAppendedId(
-                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                        cursor.getLong(idColumn));
-                result.add(new RawLibraryRecord(
-                        uri.toString(),
-                        name,
-                        LEGACY_MEDIASTORE_RAW_RELATIVE_PATH + name,
-                        Math.max(0, cursor.getLong(sizeColumn)),
-                        Math.max(0, cursor.getLong(modifiedColumn))));
-            }
-        }
-        return result;
-    }
-
     private ArrayList<RawLibraryRecord> listFileRawLibrary(File directory) {
         ArrayList<RawLibraryRecord> result = new ArrayList<>();
         File[] files = directory.listFiles();
@@ -1054,21 +675,6 @@ final class StorageManager {
                 .append(Uri.encode(displayPath)).append('\t')
                 .append(bytes).append('\t')
                 .append(modifiedSeconds).append('\n');
-    }
-
-    private String queryStoredDisplayName(Uri uri) {
-        String[] projection = {MediaStore.Downloads.DISPLAY_NAME};
-        try (Cursor cursor = storage.getContentResolver().query(uri, projection, null, null, null)) {
-            if (cursor == null || !cursor.moveToFirst()) {
-                throw new IllegalStateException("Android storage returned no stored filename");
-            }
-            String name = cursor.getString(cursor.getColumnIndexOrThrow(
-                    MediaStore.Downloads.DISPLAY_NAME));
-            if (name == null || name.isEmpty()) {
-                throw new IllegalStateException("Android storage returned an empty filename");
-            }
-            return name;
-        }
     }
 
     private File externalMediaRootDirectory() {
@@ -1114,152 +720,9 @@ final class StorageManager {
         }
     }
 
-    void startLegacyRawStorageMigration() {
-        new Thread(() -> {
-            try {
-                migrateLegacyExternalMediaRoot();
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    migrateLegacyMediaStoreRawLibrary();
-                }
-            } catch (Exception error) {
-                Log.w(LOG_TAG, "Legacy RAW library migration did not complete", error);
-            }
-        }, "CalibRaw RAW library migration").start();
-    }
-
-    private void migrateLegacyExternalMediaRoot() {
-        File root = externalMediaRootDirectory();
-        File library = rawLibraryDirectory();
-        File[] files = root.listFiles();
-        if (files == null) {
-            return;
-        }
-        for (File source : files) {
-            if (!source.isFile() || !AndroidStorageContract.isRawName(source.getName())) {
-                continue;
-            }
-            File destination = new File(library, source.getName());
-            if (destination.exists()) {
-                continue;
-            }
-            try {
-                AndroidStorageContract.moveOrCopyLegacyFile(source, destination, MAX_RAW_IMPORT_BYTES);
-            } catch (Exception error) {
-                Log.w(LOG_TAG, "Could not migrate legacy file RAW " + source.getName(), error);
-                continue;
-            }
-
-            File sourceSidecar = new File(root, AndroidStorageContract.sidecarDisplayName(source.getName()));
-            File destinationSidecar = new File(library, AndroidStorageContract.sidecarDisplayName(source.getName()));
-            if (sourceSidecar.isFile() && !destinationSidecar.exists()) {
-                try {
-                    AndroidStorageContract.moveOrCopyLegacyFile(sourceSidecar, destinationSidecar, MAX_SIDECAR_BYTES);
-                } catch (Exception error) {
-                    Log.w(LOG_TAG, "Could not migrate legacy file sidecar " + sourceSidecar.getName(), error);
-                }
-            }
-        }
-
-        // Recover a sidecar stranded after its RAW moved in a previous failed migration.
-        for (File sourceSidecar : files) {
-            String sidecarName = sourceSidecar.getName();
-            if (!sourceSidecar.isFile() || !sidecarName.endsWith(".calibraw")) {
-                continue;
-            }
-            String rawName = sidecarName.substring(0, sidecarName.length() - ".calibraw".length());
-            if (new File(root, rawName).exists()) {
-                continue;
-            }
-            File destinationRaw = new File(library, rawName);
-            File destinationSidecar = new File(library, sidecarName);
-            if (!destinationRaw.isFile() || destinationSidecar.exists()) {
-                continue;
-            }
-            try {
-                AndroidStorageContract.moveOrCopyLegacyFile(sourceSidecar, destinationSidecar, MAX_SIDECAR_BYTES);
-            } catch (Exception error) {
-                Log.w(LOG_TAG, "Could not recover legacy file sidecar " + sidecarName, error);
-            }
-        }
-    }
-
-    private void migrateLegacyMediaStoreRawLibrary() {
-        for (RawLibraryRecord record : listLegacyMediaStoreRawLibrary()) {
-            Uri source = Uri.parse(record.uri);
-            File destination = new File(rawLibraryDirectory(), AndroidStorageContract.safeRawName(record.displayName));
-            if (destination.exists()) {
-                continue;
-            }
-            File partial = new File(
-                    rawLibraryDirectory(), ".calibraw-migrate-" + destination.getName() + ".part");
-            String cachedSidecar = "";
-            boolean rawPublished = false;
-            try {
-                try (InputStream input = storage.getContentResolver().openInputStream(source);
-                     FileOutputStream output = new FileOutputStream(partial)) {
-                    if (input == null) {
-                        throw new IllegalStateException("Android storage returned no legacy RAW stream");
-                    }
-                    BoundedStreams.copy(
-                            input,
-                            output,
-                            MAX_RAW_IMPORT_BYTES,
-                            storageLimitMessage(MAX_RAW_IMPORT_BYTES));
-                    output.getFD().sync();
-                }
-                if (destination.exists() || !partial.renameTo(destination)) {
-                    throw new IllegalStateException("Could not migrate legacy RAW into " + rawLibraryDirectory());
-                }
-                rawPublished = true;
-
-                cachedSidecar = materializeRawSidecarLegacyMediaStore(record.displayName);
-                if (cachedSidecar != null && !cachedSidecar.isEmpty()) {
-                    publishRawSidecarFile(new File(cachedSidecar), rawLibraryDirectory(), destination.getName());
-                }
-
-                if (storage.getContentResolver().delete(source, null, null) <= 0) {
-                    throw new IllegalStateException(
-                            "Could not remove legacy MediaStore RAW after migration: " + source);
-                }
-                try {
-                    removeRawSidecarLegacyMediaStore(record.displayName);
-                } catch (Exception cleanupError) {
-                    Log.w(LOG_TAG, "Migrated RAW but could not remove every legacy sidecar", cleanupError);
-                }
-                rawPublished = false;
-            } catch (Exception error) {
-                Log.w(LOG_TAG, "Could not migrate legacy RAW " + record.displayName, error);
-                if (rawPublished) {
-                    if (!destination.delete() && destination.exists()) {
-                        destination.deleteOnExit();
-                    }
-                    File destinationSidecar = new File(
-                            rawLibraryDirectory(), AndroidStorageContract.sidecarDisplayName(destination.getName()));
-                    if (!destinationSidecar.delete() && destinationSidecar.exists()) {
-                        destinationSidecar.deleteOnExit();
-                    }
-                }
-            } finally {
-                if (!partial.delete() && partial.exists()) {
-                    partial.deleteOnExit();
-                }
-                if (cachedSidecar != null && !cachedSidecar.isEmpty()) {
-                    File cached = new File(cachedSidecar);
-                    if (!cached.delete() && cached.exists()) {
-                        cached.deleteOnExit();
-                    }
-                }
-            }
-        }
-    }
-
     private void deleteStoredRaw(Uri uri) {
         try {
-            if (ContentResolver.SCHEME_FILE.equals(uri.getScheme())) {
-                new File(uri.getPath()).delete();
-            } else {
-                storage.getContentResolver().delete(uri, null, null);
-            }
+            new File(uri.getPath()).delete();
         } catch (Exception ignored) {
         }
     }
