@@ -31,6 +31,29 @@ const MAX_DCP_SCAN_FILES: usize = 10_000;
 const MAX_DCP_SCAN_DEPTH: usize = 16;
 const MISSING_BASELINE_EXPOSURE_FALLBACK_EV: f32 = 1.25;
 
+/// `LIBRAW_RAWOPTIONS_CONVERTFLOAT_TO_INT` from LibRaw's
+/// `LibRaw_processing_options`. LibRaw turns this option on by default, so
+/// floating-point DNGs arrive as lossy 16-bit integers instead of the
+/// native `float_image`/`float3_image`/`float4_image` buffers. The enum is
+/// not part of the generated bindings, so its documented ABI value is
+/// reproduced here.
+const LIBRAW_RAWOPTIONS_CONVERTFLOAT_TO_INT: u32 = 1 << 1;
+
+/// Disables LibRaw's default lossy float-to-16-bit conversion for
+/// full-colour (filterless) files so LinearRaw DNGs stay in the native
+/// `float3_image`/`float4_image` buffers. Mosaic RAWs keep the default
+/// behaviour - including floating-point Bayer DNGs, which rely on the
+/// conversion to feed the single-channel `raw_image` path - leaving the
+/// established Bayer/X-Trans pipeline untouched.
+///
+/// # Safety
+/// `ctx` must reference an identified (opened) `LibRawContext`.
+unsafe fn preserve_linear_float_buffers(ctx: &LibRawContext) {
+    if (*ctx.raw).idata.filters == 0 {
+        (*ctx.raw).rawparams.options &= !LIBRAW_RAWOPTIONS_CONVERTFLOAT_TO_INT;
+    }
+}
+
 fn valid_baseline_exposure(value: f32) -> Option<f32> {
     (value.is_finite() && value > -999.0).then_some(value)
 }
@@ -227,6 +250,7 @@ pub(super) fn load_raw_file_with_profile_selection(
     };
 
     let unpack_started = Instant::now();
+    unsafe { preserve_linear_float_buffers(&ctx) };
     check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
     crate::diagnostics::record(format!(
         "LibRaw sensor unpack finished in {:.3}s",
@@ -973,6 +997,7 @@ fn load_raw_file_with_selected_profile(
         "open RAW file",
     )?;
     unsafe { validate_opened_raw_geometry(&ctx) }?;
+    unsafe { preserve_linear_float_buffers(&ctx) };
     check_libraw(unsafe { ffi::libraw_unpack(ctx.raw) }, "unpack RAW file")?;
 
     let mut loaded = unsafe { loaded_raw_from_context(&ctx, dcp_profile) }?;
@@ -1126,9 +1151,13 @@ unsafe fn loaded_raw_from_context(
     let other = &raw.other;
 
     if rawdata.raw_image.is_null() {
-        return Err(anyhow!(
-            "LibRaw did not expose a single-channel raw_image buffer"
-        ));
+        // Linear/full-colour DNGs (for example the LinearRaw files produced by
+        // many phone camera applications) never populate the single-channel
+        // `raw_image` buffer: LibRaw decodes them into the multi-sample
+        // `color3_image`/`color4_image` or `float3_image`/`float4_image`
+        // buffers instead. Convert those through the existing scene-linear
+        // raster path instead of failing outright.
+        return loaded_raw_from_linear_context(ctx, dcp_profile);
     }
 
     let raw_width = sizes.raw_width as u32;
@@ -1289,6 +1318,432 @@ where
     u32: TryFrom<T>,
 {
     u32::try_from(value).unwrap_or(0)
+}
+
+/// A decoded multi-sample (linear) RAW buffer exposed by LibRaw after unpack.
+///
+/// Linear DNGs store several samples per pixel - for example the 3-component
+/// `LinearRaw` files written by many phone camera applications - so LibRaw
+/// decodes them into `color3_image`/`color4_image` (integer) or
+/// `float3_image`/`float4_image` (floating point) instead of the
+/// single-channel `raw_image` buffer used by Bayer/X-Trans sensors.
+#[derive(Clone, Copy)]
+enum LinearSamplePlane {
+    /// `ushort (*color3_image)[3]`, row stride derived from `raw_pitch`.
+    U16x3(*const [u16; 3]),
+    /// `ushort (*color4_image)[4]`, row stride derived from `raw_pitch`.
+    U16x4(*const [u16; 4]),
+    /// `float (*float3_image)[3]`, row stride derived from `raw_pitch`.
+    F32x3(*const [f32; 3]),
+    /// `float (*float4_image)[4]`, row stride derived from `raw_pitch`.
+    F32x4(*const [f32; 4]),
+}
+
+// SAFETY: the decoded linear buffer is only read (never mutated) for the
+// duration of the parallel raster conversion, and the owning LibRaw context
+// is not otherwise accessed while the conversion runs.
+unsafe impl Send for LinearSamplePlane {}
+unsafe impl Sync for LinearSamplePlane {}
+
+impl LinearSamplePlane {
+    fn samples_per_pixel(self) -> usize {
+        match self {
+            Self::U16x3(_) | Self::F32x3(_) => 3,
+            Self::U16x4(_) | Self::F32x4(_) => 4,
+        }
+    }
+
+    /// Byte size of one multi-sample pixel entry in the buffer.
+    fn entry_bytes(self) -> usize {
+        match self {
+            Self::U16x3(_) => 3 * std::mem::size_of::<u16>(),
+            Self::U16x4(_) => 4 * std::mem::size_of::<u16>(),
+            Self::F32x3(_) => 3 * std::mem::size_of::<f32>(),
+            Self::F32x4(_) => 4 * std::mem::size_of::<f32>(),
+        }
+    }
+
+    /// Reads the samples of one buffer pixel as floats, zero-padding unused
+    /// planes so callers can index by physical plane safely.
+    ///
+    /// # Safety
+    /// `index` must address a pixel within the decoded buffer bounds.
+    unsafe fn sample(self, index: usize) -> [f32; 4] {
+        match self {
+            Self::U16x3(buffer) => {
+                let value = unsafe { *buffer.add(index) };
+                [
+                    f32::from(value[0]),
+                    f32::from(value[1]),
+                    f32::from(value[2]),
+                    0.0,
+                ]
+            }
+            Self::U16x4(buffer) => unsafe { *buffer.add(index) }.map(f32::from),
+            Self::F32x3(buffer) => {
+                let value = unsafe { *buffer.add(index) };
+                [value[0], value[1], value[2], 0.0]
+            }
+            Self::F32x4(buffer) => unsafe { *buffer.add(index) },
+        }
+    }
+}
+
+/// Selects the decoded linear buffer LibRaw populated for this file.
+///
+/// Integer LinearRaw DNGs usually surface as `color4_image` (LibRaw's
+/// `adobe_copy_pixel` legacy decoder path), while RawSpeed/DNG-SDK builds may
+/// expose `color3_image`; floating-point DNGs surface as `float3_image` or
+/// `float4_image`. Returns `None` when none of them is populated.
+unsafe fn detect_linear_sample_plane(rawdata: &ffi::libraw_rawdata_t) -> Option<LinearSamplePlane> {
+    if !rawdata.color4_image.is_null() {
+        Some(LinearSamplePlane::U16x4(rawdata.color4_image))
+    } else if !rawdata.color3_image.is_null() {
+        Some(LinearSamplePlane::U16x3(rawdata.color3_image))
+    } else if !rawdata.float3_image.is_null() {
+        Some(LinearSamplePlane::F32x3(rawdata.float3_image))
+    } else if !rawdata.float4_image.is_null() {
+        Some(LinearSamplePlane::F32x4(rawdata.float4_image))
+    } else {
+        None
+    }
+}
+
+/// Converts one decoded linear sample into white-balanced camera RGB.
+///
+/// Mirrors the sensor normalisation the GPU pipeline applies to mosaic data
+/// (`(sample - black) / (white - black)` clamped to the same 0..4 range,
+/// followed by the camera white-balance gains), so linear DNG pixels and
+/// demosaiced Bayer pixels follow identical camera-space mathematics before
+/// the shared camera-to-working transform.
+fn linear_sample_to_camera_rgb(
+    sample: [f32; 4],
+    planes: usize,
+    blacks: [f32; 4],
+    whites: [f32; 4],
+    wb: [f32; 4],
+    cfa_map: [u8; 4],
+) -> [f32; 4] {
+    let mut camera = [0.0f32; 4];
+    let mut green_sum = 0.0f32;
+    let mut green_count = 0.0f32;
+    for plane in 0..planes.min(4) {
+        let channel = cfa_map[plane].min(3) as usize;
+        let black = blacks[channel];
+        let white = whites[channel].max(black + 1.0);
+        let normalized = ((sample[plane] - black) / (white - black)).clamp(0.0, 4.0);
+        let value = normalized * wb[channel];
+        if channel == 1 || channel == 3 {
+            // Both green planes fold into the single logical green channel of
+            // the demosaiced pipeline, matching how mosaic greens are merged
+            // after demosaicing.
+            green_sum += value;
+            green_count += 1.0;
+        } else {
+            camera[channel] = value;
+        }
+    }
+    if green_count > 0.0 {
+        camera[1] = green_sum / green_count;
+    }
+    camera
+}
+
+/// Applies the camera-to-working matrix to white-balanced camera RGB.
+fn camera_rgb_to_working(camera: [f32; 4], matrix: [[f32; 4]; 3]) -> [f32; 3] {
+    matrix.map(|row| {
+        row[0] * camera[0] + row[1] * camera[1] + row[2] * camera[2] + row[3] * camera[3]
+    })
+}
+
+/// Float DNGs have no integer white level; LibRaw reports the observed
+/// maximum in `color.fmaximum`. Keep the metadata white level when it is
+/// present, but never clip float data below the observed maximum, mirroring
+/// how LibRaw normalises floating-point data internally.
+fn float_white_levels(metadata_levels: [f32; 4], observed_maximum: f32) -> [f32; 4] {
+    let observed = if observed_maximum.is_finite() && observed_maximum > 0.0 {
+        observed_maximum
+    } else {
+        1.0
+    };
+    metadata_levels.map(|level| level.max(observed).max(1.0))
+}
+
+/// Materialises a `LoadedRaw` from LibRaw's decoded linear/full-colour
+/// buffers.
+///
+/// The decoded samples are normalised (black/white levels), scaled by the
+/// camera as-shot white balance, and converted to the working colour space
+/// with the same helpers the mosaic path uses. The result is stored through
+/// the existing `scene_linear_raster` contract (scene-linear Rec.2020 RGB
+/// with identity camera transforms), so the established pre-demosaiced
+/// rendering pipeline applies unchanged.
+///
+/// # Safety
+/// `ctx` must reference a `LibRawContext` whose file was opened and
+/// successfully unpacked.
+unsafe fn loaded_raw_from_linear_context(
+    ctx: &LibRawContext,
+    dcp_profile: Option<DcpProfile>,
+) -> Result<LoadedRaw> {
+    let raw = &*ctx.raw;
+    let rawdata = &raw.rawdata;
+    let sizes = &rawdata.sizes;
+    let color = &rawdata.color;
+    let iparams = &rawdata.iparams;
+    let lens = &raw.lens;
+    let other = &raw.other;
+
+    let plane = detect_linear_sample_plane(rawdata).ok_or_else(|| {
+        if !rawdata.float_image.is_null() {
+            anyhow!(
+                "floating-point mosaic DNGs are not supported yet; convert the file to an integer or LinearRaw DNG"
+            )
+        } else {
+            anyhow!(
+                "LibRaw did not expose a decodable RAW buffer (raw_image and the linear color3/color4/float3/float4 buffers are all empty); this DNG variant is unsupported"
+            )
+        }
+    })?;
+
+    let colors = usize::try_from(iparams.colors.max(0))
+        .context("LibRaw reported an invalid colour-plane count")?;
+    if colors < 3 {
+        return Err(anyhow!(
+            "LibRaw reported {colors} colour planes for a linear RAW; full-colour DNGs require at least three"
+        ));
+    }
+    if colors > plane.samples_per_pixel() {
+        return Err(anyhow!(
+            "LibRaw reported {colors} colour planes but the decoded buffer only carries {} samples per pixel",
+            plane.samples_per_pixel()
+        ));
+    }
+
+    let raw_width = sizes.raw_width as u32;
+    let raw_height = sizes.raw_height as u32;
+    let crop_x = sizes.left_margin as u32;
+    let crop_y = sizes.top_margin as u32;
+    let width = sizes.width as u32;
+    let height = sizes.height as u32;
+    validate_raw_dimensions(width, height)
+        .context("LibRaw reported an image too large to process safely")?;
+    if !sizes.pixel_aspect.is_finite() || sizes.pixel_aspect <= 0.0 {
+        return Err(anyhow!(
+            "LibRaw reported invalid pixel aspect ratio {}",
+            sizes.pixel_aspect
+        ));
+    }
+    if (sizes.pixel_aspect - 1.0).abs() > 1e-6 {
+        return Err(anyhow!(
+                "non-square RAW pixels (aspect {}) require a geometry-resampling stage that CalibRaw does not implement yet",
+                sizes.pixel_aspect
+            ));
+    }
+    if !matches!(sizes.flip, 0 | 3 | 5 | 6) {
+        return Err(anyhow!(
+            "unsupported LibRaw orientation code {}; expected 0, 3, 5, or 6",
+            sizes.flip
+        ));
+    }
+    let crop_right = crop_x
+        .checked_add(width)
+        .ok_or_else(|| anyhow!("LibRaw horizontal crop overflow"))?;
+    let crop_bottom = crop_y
+        .checked_add(height)
+        .ok_or_else(|| anyhow!("LibRaw vertical crop overflow"))?;
+    if crop_right > raw_width || crop_bottom > raw_height {
+        return Err(anyhow!(
+            "LibRaw crop is outside RAW bounds: crop {}x{} at {},{} in {}x{}",
+            width,
+            height,
+            crop_x,
+            crop_y,
+            raw_width,
+            raw_height
+        ));
+    }
+
+    let cdesc = cdesc4(iparams);
+    let cfa_map = canonical_cfa_map(cdesc)?;
+    let physical_black_levels = black_levels(color.black, &color.cblack);
+    let physical_wb = white_balance(color.cam_mul, cdesc);
+
+    let calibration_compatible = dcp_profile
+        .as_ref()
+        .is_none_or(DcpProfile::calibration_is_compatible);
+    let (cam_to_srgb, profile_weight, _white_balance_model) = camera_to_working_matrix(
+        color,
+        physical_wb,
+        cdesc,
+        dcp_profile.as_ref(),
+        calibration_compatible,
+    )?;
+
+    let is_floating_point = matches!(
+        plane,
+        LinearSamplePlane::F32x3(_) | LinearSamplePlane::F32x4(_)
+    );
+    let physical_white_levels = if is_floating_point {
+        // Floating-point DNGs carry no integer white level: LibRaw reports
+        // `maximum` only when the file declares a WhiteLevel tag, and the
+        // observed `fmaximum` never lets HDR data clip below its own peak.
+        // The integer fallback of 65535 would silently dim float data.
+        let metadata_base = if color.maximum > 0 {
+            color.maximum as f32
+        } else {
+            1.0
+        };
+        float_white_levels([metadata_base; 4], color.fmaximum)
+    } else {
+        let linear_max = color.linear_max.map(normalize_libraw_linear_max);
+        white_levels(color.maximum, linear_max, physical_black_levels)
+    };
+
+    let blacks = canonicalize_f32x4(physical_black_levels, cfa_map);
+    let whites = canonicalize_f32x4(physical_white_levels, cfa_map);
+    let wb_coeffs = canonicalize_f32x4(physical_wb, cfa_map);
+
+    // Row layout: `raw_pitch` counts bytes per buffer row and every pixel
+    // entry occupies `entry_bytes` bytes.
+    let raw_pitch = sizes.raw_pitch as usize;
+    let entry_bytes = plane.entry_bytes();
+    anyhow::ensure!(
+        raw_pitch > 0 && raw_pitch.is_multiple_of(entry_bytes),
+        "LibRaw reported a raw_pitch of {raw_pitch} bytes, which is not a whole number of {}-byte linear pixels",
+        entry_bytes
+    );
+    let entries_per_row = raw_pitch / entry_bytes;
+    anyhow::ensure!(
+        entries_per_row >= raw_width as usize,
+        "LibRaw linear buffer row stride ({entries_per_row} pixels) is narrower than the sensor width ({raw_width})"
+    );
+    let buffer_entries = (raw_height as usize)
+        .checked_mul(entries_per_row)
+        .ok_or_else(|| anyhow!("LibRaw linear buffer size overflow"))?;
+
+    // Bounds: every decoded buffer allocates at least `raw_height` rows of
+    // `entries_per_row` multi-sample pixels, and the active-area crop was
+    // validated against those dimensions above.
+    let (out_width, out_height) = match sizes.flip {
+        5 | 6 => (height, width),
+        _ => (width, height),
+    };
+    let output_len = out_width
+        .checked_mul(out_height)
+        .ok_or_else(|| anyhow!("oriented RAW dimensions overflow"))?;
+    validate_raw_dimensions(out_width, out_height)?;
+    let raster_len = usize::try_from(output_len)
+        .context("oriented RAW pixel count does not fit this platform")?
+        .checked_mul(3)
+        .context("scene-linear raster element count overflow")?;
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(raster_len)
+        .context("reserve scene-linear raster buffer")?;
+    rgb.resize(raster_len, 0.0);
+
+    let planes = colors;
+    let flip = sizes.flip;
+    let width_usize = width as usize;
+    let height_usize = height as usize;
+    let crop_x_usize = crop_x as usize;
+    let crop_y_usize = crop_y as usize;
+    rgb.par_chunks_mut(out_width as usize * 3)
+        .enumerate()
+        .try_for_each(|(y, row)| -> Result<()> {
+            for (x, output) in row.chunks_exact_mut(3).enumerate() {
+                let (src_x, src_y) = oriented_source_pos(x, y, width_usize, height_usize, flip);
+                let index = (src_y + crop_y_usize)
+                    .checked_mul(entries_per_row)
+                    .and_then(|row_offset| row_offset.checked_add(src_x + crop_x_usize))
+                    .context("linear buffer index overflow")?;
+                anyhow::ensure!(
+                    index < buffer_entries,
+                    "LibRaw linear buffer access at {index} exceeds the decoded {buffer_entries} pixels"
+                );
+                let sample = plane.sample(index);
+                let camera = linear_sample_to_camera_rgb(
+                    sample,
+                    planes,
+                    blacks,
+                    whites,
+                    wb_coeffs,
+                    cfa_map,
+                );
+                output.copy_from_slice(&camera_rgb_to_working(camera, cam_to_srgb));
+            }
+            Ok(())
+        })?;
+    anyhow::ensure!(
+        rgb.iter().all(|value| value.is_finite()),
+        "LibRaw linear DNG conversion produced NaN or infinity"
+    );
+
+    let mut camera_profile = dcp_profile
+        .map(|profile| CameraProfile::from_dcp(profile, profile_weight))
+        .unwrap_or_default();
+    let baseline_exposure = valid_baseline_exposure(color.dng_levels.baseline_exposure);
+    apply_resolved_default_exposure(&mut camera_profile, baseline_exposure);
+    if !color.profile.is_null() && color.profile_length > 0 {
+        let length = usize::try_from(color.profile_length).unwrap_or(0);
+        if length <= 16 * 1024 * 1024 {
+            let source = std::slice::from_raw_parts(color.profile as *const u8, length);
+            let mut profile = Vec::new();
+            profile
+                .try_reserve_exact(length)
+                .context("reserve embedded camera ICC profile")?;
+            profile.extend_from_slice(source);
+            camera_profile.embedded_camera_icc = Some(profile);
+        } else {
+            log::warn!("ignoring embedded camera ICC profile larger than 16 MiB");
+        }
+    }
+
+    Ok(LoadedRaw {
+        width: out_width,
+        height: out_height,
+        camera_make: c_array_to_string(&iparams.make),
+        camera_model: c_array_to_string(&iparams.model),
+        lens_make: c_array_to_string(&lens.LensMake),
+        lens_model: c_array_to_string(&lens.Lens),
+        focal_length: finite_positive_or_zero(other.focal_len),
+        aperture: finite_positive_or_zero(other.aperture),
+        focus_distance: 0.0,
+        capture_metadata: super::CaptureMetadata {
+            iso_speed: finite_positive_or_zero(other.iso_speed),
+            shutter_seconds: finite_positive_or_zero(other.shutter),
+            flash: (color.flash_used.is_finite() && color.flash_used > 0.0).then_some(1),
+            description: c_array_to_string(&other.desc),
+            artist: c_array_to_string(&other.artist),
+        },
+        // Pre-demosaiced raster contract: the RGB payload is already
+        // scene-linear Rec.2020 and the camera transforms are the identity,
+        // matching `LoadedRaw::from_scene_linear_rec2020`.
+        cfa_kind: CfaKind::Bayer,
+        raw_pixels: Vec::new(),
+        scene_linear_raster: Some(rgb.into()),
+        color_indices: CompactPixelMap::repeating(out_width, out_height, 1, 1, vec![1]),
+        wb_coeffs: [1.0; 4],
+        cam_to_srgb: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        black_levels: [0.0; 4],
+        black_levels_per_pixel: CompactPixelMap::repeating(out_width, out_height, 1, 1, vec![0.0]),
+        white_levels: [1.0; 4],
+        noise_profile: NoiseProfile::default(),
+        camera_profile,
+        camera_profile_source: None,
+        available_camera_profiles: Vec::new(),
+        // The camera white balance and camera-to-working conversion were
+        // applied while building the raster, so no camera-space white-balance
+        // model is exposed for further camera-space adjustment.
+        white_balance_model: None,
+        lens_geometry: None,
+        ai_denoised: Arc::new(std::sync::RwLock::new(None)),
+        opposed_chroma_cache: Default::default(),
+    })
 }
 
 type ActivePixelData = (
@@ -1513,7 +1968,7 @@ fn cfa_kind_from_filters(filters: u32) -> Result<CfaKind> {
         9 => Ok(CfaKind::XTrans),
         value if value >= 1000 => Ok(CfaKind::Bayer),
         0 => Err(anyhow!(
-            "full-colour/linear RAW input is not supported by the CFA GPU pipeline"
+            "single-colour (monochrome) sensor layouts are not supported by the demosaic pipeline; export the file as an RGB LinearRaw DNG instead"
         )),
         1 => Err(anyhow!(
             "Leaf CatchLight 16x16 CFA is not supported by the current demosaic paths"
@@ -2832,11 +3287,12 @@ fn check_libraw(err: i32, action: &str) -> Result<()> {
 mod tests {
     use super::{
         adjusted_white_balance_coefficients, apply_resolved_default_exposure, black_levels,
-        cam_to_working, canonical_cfa_map, canonicalize_f32x4, cfa_kind_from_filters,
-        daylight_white_balance, effective_black_level, identity_4x4,
-        matching_thumbnail_orientation, oriented_source_pos, resolve_default_exposure_ev,
-        valid_baseline_exposure, validate_embedded_thumbnail_metadata, white_balance, white_levels,
-        CameraColorModel, CameraProfile, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint,
+        cam_to_working, camera_rgb_to_working, canonical_cfa_map, canonicalize_f32x4,
+        cfa_kind_from_filters, daylight_white_balance, effective_black_level, float_white_levels,
+        identity_4x4, linear_sample_to_camera_rgb, matching_thumbnail_orientation,
+        oriented_source_pos, resolve_default_exposure_ev, valid_baseline_exposure,
+        validate_embedded_thumbnail_metadata, white_balance, white_levels, CameraColorModel,
+        CameraProfile, CameraWhiteBalanceModel, CfaKind, DngColorEndpoint, LinearSamplePlane,
         MAX_EMBEDDED_THUMBNAIL_BYTES, MISSING_BASELINE_EXPOSURE_FALLBACK_EV,
     };
 
@@ -3064,5 +3520,750 @@ mod tests {
         let green_mean = 0.5 * (wb[1] + wb[3]);
         assert!((green_mean - 1.0).abs() < 1e-6);
         assert!((wb[1] - wb[3]).abs() > 1e-3);
+    }
+
+    #[test]
+    fn linear_samples_normalize_black_white_and_camera_wb() {
+        // RGGB plane order, shared black/white levels, camera gains of 2/1/4.
+        let camera = linear_sample_to_camera_rgb(
+            [640.0, 640.0, 640.0, 640.0],
+            4,
+            [128.0; 4],
+            [1152.0; 4],
+            [2.0, 1.0, 4.0, 1.0],
+            [0, 1, 2, 3],
+        );
+        // (640 - 128) / (1152 - 128) = 0.5, then scaled by the white balance.
+        assert!((camera[0] - 1.0).abs() < 1e-6);
+        // Both green planes average into the single logical green channel.
+        assert!((camera[1] - 0.5).abs() < 1e-6);
+        assert!((camera[2] - 2.0).abs() < 1e-6);
+        assert_eq!(camera[3], 0.0);
+    }
+
+    #[test]
+    fn linear_samples_clamp_like_the_mosaic_pipeline() {
+        let camera = linear_sample_to_camera_rgb(
+            [5000.0, 5000.0, 5000.0, 5000.0],
+            3,
+            [128.0; 4],
+            [1152.0; 4],
+            [1.0; 4],
+            [0, 1, 2, 3],
+        );
+        // (5000 - 128) / (1152 - 128) is far above unity; the sensor path
+        // clamps at 4.0 so highlight reconstruction keeps some headroom.
+        assert!((camera[0] - 4.0).abs() < 1e-6);
+        assert!((camera[1] - 4.0).abs() < 1e-6);
+        assert!((camera[2] - 4.0).abs() < 1e-6);
+        // Negative samples clamp to zero instead of producing negative RGB.
+        let camera = linear_sample_to_camera_rgb(
+            [0.0, 0.0, 0.0, 0.0],
+            3,
+            [128.0; 4],
+            [1152.0; 4],
+            [1.0; 4],
+            [0, 1, 2, 3],
+        );
+        assert_eq!(camera, [0.0; 4]);
+    }
+
+    #[test]
+    fn three_plane_linear_samples_keep_the_fourth_plane_isolated() {
+        let camera = linear_sample_to_camera_rgb(
+            [640.0, 640.0, 640.0, 4095.0],
+            3,
+            [128.0; 4],
+            [1152.0; 4],
+            [1.0; 4],
+            [0, 1, 2, 3],
+        );
+        // The padding plane of a 3-sample buffer must never leak into RGB.
+        assert!((camera[1] - 0.5).abs() < 1e-6);
+        assert!((camera[3] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn camera_rgb_to_working_applies_the_camera_matrix() {
+        let matrix = [
+            [0.5, 0.25, 0.25, 0.0],
+            [0.1, 0.8, 0.1, 0.0],
+            [0.2, 0.2, 0.6, 0.0],
+        ];
+        let working = camera_rgb_to_working([1.0, 0.5, 0.25, 0.0], matrix);
+        assert!((working[0] - 0.6875).abs() < 1e-6);
+        assert!((working[1] - 0.525).abs() < 1e-6);
+        assert!((working[2] - 0.45).abs() < 1e-6);
+    }
+
+    #[test]
+    fn float_white_levels_cover_the_observed_maxima() {
+        // HDR float data must extend the white level instead of clipping.
+        assert_eq!(float_white_levels([1.0; 4], 2.0), [2.0; 4]);
+        assert_eq!(float_white_levels([4000.0; 4], 2.0), [4000.0; 4]);
+        // Missing metadata levels and missing maxima both fall back to unity.
+        assert_eq!(float_white_levels([0.0; 4], f32::NAN), [1.0; 4]);
+        assert_eq!(float_white_levels([0.0; 4], -1.0), [1.0; 4]);
+        // Observed maxima below unity never dim a well-exposed float image.
+        assert_eq!(float_white_levels([1.0; 4], 0.25), [1.0; 4]);
+    }
+
+    #[test]
+    fn linear_plane_buffers_pad_unused_samples() {
+        let u16x3: [[u16; 3]; 2] = [[10, 20, 30], [40, 50, 60]];
+        let plane = LinearSamplePlane::U16x3(u16x3.as_ptr());
+        assert_eq!(plane.samples_per_pixel(), 3);
+        assert_eq!(plane.entry_bytes(), 6);
+        let sample = unsafe { plane.sample(1) };
+        assert_eq!(sample, [40.0, 50.0, 60.0, 0.0]);
+
+        let u16x4: [[u16; 4]; 1] = [[1, 2, 3, 4]];
+        let plane = LinearSamplePlane::U16x4(u16x4.as_ptr());
+        assert_eq!(plane.samples_per_pixel(), 4);
+        assert_eq!(plane.entry_bytes(), 8);
+        assert_eq!(unsafe { plane.sample(0) }, [1.0, 2.0, 3.0, 4.0]);
+
+        let f32x3: [[f32; 3]; 1] = [[0.25, 0.5, 0.75]];
+        let plane = LinearSamplePlane::F32x3(f32x3.as_ptr());
+        assert_eq!(plane.samples_per_pixel(), 3);
+        assert_eq!(plane.entry_bytes(), 12);
+        assert_eq!(unsafe { plane.sample(0) }, [0.25, 0.5, 0.75, 0.0]);
+
+        let f32x4: [[f32; 4]; 1] = [[0.25, 0.5, 0.75, 1.0]];
+        let plane = LinearSamplePlane::F32x4(f32x4.as_ptr());
+        assert_eq!(plane.samples_per_pixel(), 4);
+        assert_eq!(plane.entry_bytes(), 16);
+        assert_eq!(unsafe { plane.sample(0) }, [0.25, 0.5, 0.75, 1.0]);
+    }
+
+    /// Minimal little-endian TIFF writer for synthetic DNG fixtures.
+    mod synthetic_dng {
+        use std::io::{self, Write};
+        use std::path::Path;
+
+        const TIFF_ASCII: u16 = 2;
+        const TIFF_SHORT: u16 = 3;
+        const TIFF_LONG: u16 = 4;
+        const TIFF_RATIONAL: u16 = 5;
+
+        const PHOTOMETRIC_CFA: u16 = 32803;
+
+        enum TiffValue {
+            Bytes(Vec<u8>),
+            Ascii(String),
+            Shorts(Vec<u16>),
+            Longs(Vec<u32>),
+            Rationals(Vec<(u32, u32)>),
+        }
+
+        impl TiffValue {
+            fn field_type(&self) -> u16 {
+                match self {
+                    Self::Bytes(_) => 1,
+                    Self::Ascii(_) => TIFF_ASCII,
+                    Self::Shorts(_) => TIFF_SHORT,
+                    Self::Longs(_) => TIFF_LONG,
+                    Self::Rationals(_) => TIFF_RATIONAL,
+                }
+            }
+
+            fn count(&self) -> u32 {
+                match self {
+                    Self::Bytes(values) => values.len() as u32,
+                    Self::Ascii(text) => text.len() as u32 + 1,
+                    Self::Shorts(values) => values.len() as u32,
+                    Self::Longs(values) => values.len() as u32,
+                    Self::Rationals(values) => values.len() as u32,
+                }
+            }
+
+            fn payload(&self) -> Vec<u8> {
+                let mut out = Vec::new();
+                match self {
+                    Self::Bytes(values) => out.extend_from_slice(values),
+                    Self::Ascii(text) => {
+                        out.extend_from_slice(text.as_bytes());
+                        out.push(0);
+                    }
+                    Self::Shorts(values) => {
+                        for value in values {
+                            out.extend_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                    Self::Longs(values) => {
+                        for value in values {
+                            out.extend_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                    Self::Rationals(values) => {
+                        for (numerator, denominator) in values {
+                            out.extend_from_slice(&numerator.to_le_bytes());
+                            out.extend_from_slice(&denominator.to_le_bytes());
+                        }
+                    }
+                }
+                out
+            }
+        }
+
+        fn rational(value: f32) -> (u32, u32) {
+            let scaled = (value * 1_000_000.0).round();
+            (scaled as u32, 1_000_000)
+        }
+
+        pub(super) struct DngSpec {
+            pub width: u32,
+            pub height: u32,
+            /// `32803` for mosaic (CFA) DNGs, `34892` for LinearRaw DNGs.
+            pub photometric: u16,
+            pub samples_per_pixel: u16,
+            pub bits_per_sample: u16,
+            /// `Some(3)` marks floating-point sample data.
+            pub sample_format: Option<u16>,
+            pub orientation: Option<u16>,
+            /// Per-sample (LinearRaw) or shared (CFA) black levels.
+            pub black_level: Vec<f32>,
+            /// Per-sample (LinearRaw) or shared (CFA) white levels.
+            pub white_level: Vec<u32>,
+            pub as_shot_neutral: [f32; 3],
+            pub color_matrix: [[f32; 3]; 3],
+            pub pixels: Vec<u8>,
+        }
+
+        pub(super) fn write_dng(path: &Path, spec: &DngSpec) -> io::Result<()> {
+            let is_cfa = spec.photometric == PHOTOMETRIC_CFA;
+            let mut tags: Vec<(u16, TiffValue)> = vec![
+                (254, TiffValue::Longs(vec![0])),
+                (256, TiffValue::Longs(vec![spec.width])),
+                (257, TiffValue::Longs(vec![spec.height])),
+                (
+                    258,
+                    TiffValue::Shorts(vec![spec.bits_per_sample; spec.samples_per_pixel as usize]),
+                ),
+                (259, TiffValue::Shorts(vec![1])),
+                (262, TiffValue::Shorts(vec![spec.photometric])),
+                (271, TiffValue::Ascii("TestCam".to_owned())),
+                (
+                    272,
+                    TiffValue::Ascii(if is_cfa {
+                        "Bayer Unit".to_owned()
+                    } else {
+                        "Linear Unit".to_owned()
+                    }),
+                ),
+                // StripOffsets: patched with the final pixel-data offset below.
+                (273, TiffValue::Longs(vec![0])),
+                (277, TiffValue::Shorts(vec![spec.samples_per_pixel])),
+                (278, TiffValue::Longs(vec![spec.height])),
+                (279, TiffValue::Longs(vec![spec.pixels.len() as u32])),
+                (284, TiffValue::Shorts(vec![1])),
+            ];
+            if let Some(orientation) = spec.orientation {
+                tags.push((274, TiffValue::Shorts(vec![orientation])));
+            }
+            if let Some(sample_format) = spec.sample_format {
+                tags.push((
+                    339,
+                    TiffValue::Shorts(vec![sample_format; spec.samples_per_pixel as usize]),
+                ));
+            }
+            if is_cfa {
+                tags.push((33421, TiffValue::Shorts(vec![2, 2])));
+                // RGGB mosaic.
+                tags.push((33422, TiffValue::Bytes(vec![0, 1, 1, 2])));
+            }
+            tags.extend([
+                (50706, TiffValue::Bytes(vec![1, 4, 0, 0])),
+                (50708, TiffValue::Ascii("TestCam Synthetic".to_owned())),
+                (50713, TiffValue::Shorts(vec![1, 1])),
+            ]);
+            if spec.black_level.len() == 1 {
+                tags.push((
+                    50714,
+                    TiffValue::Rationals(vec![rational(spec.black_level[0])]),
+                ));
+            } else {
+                tags.push((
+                    50714,
+                    TiffValue::Rationals(spec.black_level.iter().copied().map(rational).collect()),
+                ));
+            }
+            if !spec.white_level.is_empty() {
+                if spec.white_level.len() == 1 {
+                    tags.push((
+                        50717,
+                        TiffValue::Shorts(vec![
+                            u16::try_from(spec.white_level[0]).expect("white level fits a SHORT")
+                        ]),
+                    ));
+                } else {
+                    tags.push((
+                        50717,
+                        TiffValue::Shorts(
+                            spec.white_level
+                                .iter()
+                                .copied()
+                                .map(|value| {
+                                    u16::try_from(value).expect("white level fits a SHORT")
+                                })
+                                .collect(),
+                        ),
+                    ));
+                }
+            }
+            tags.extend([
+                (50718, TiffValue::Shorts(vec![21])),
+                (
+                    50721,
+                    TiffValue::Rationals(
+                        spec.color_matrix
+                            .iter()
+                            .flat_map(|row| row.iter().copied())
+                            .map(rational)
+                            .collect(),
+                    ),
+                ),
+                (
+                    50728,
+                    TiffValue::Rationals(
+                        spec.as_shot_neutral.iter().copied().map(rational).collect(),
+                    ),
+                ),
+            ]);
+
+            tags.sort_by_key(|(tag, _)| *tag);
+            let ifd_size = 2 + 12 * tags.len() + 4;
+
+            let mut value_area: Vec<u8> = Vec::new();
+            let mut placements: Vec<usize> = Vec::with_capacity(tags.len());
+            for (_, value) in &tags {
+                let payload = value.payload();
+                if payload.len() > 4 {
+                    while !value_area.len().is_multiple_of(2) {
+                        value_area.push(0);
+                    }
+                    placements.push(value_area.len());
+                    value_area.extend_from_slice(&payload);
+                } else {
+                    placements.push(usize::MAX);
+                }
+            }
+            let data_offset = 8 + ifd_size + value_area.len();
+
+            let mut out = Vec::new();
+            out.extend_from_slice(b"II");
+            out.extend_from_slice(&42u16.to_le_bytes());
+            out.extend_from_slice(&8u32.to_le_bytes());
+            out.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+            for ((tag, value), placement) in tags.iter().zip(&placements) {
+                out.extend_from_slice(&tag.to_le_bytes());
+                out.extend_from_slice(&value.field_type().to_le_bytes());
+                out.extend_from_slice(&value.count().to_le_bytes());
+                let mut payload = value.payload();
+                if *tag == 273 {
+                    // StripOffsets: patch with the resolved pixel-data offset.
+                    let strip_offset =
+                        u32::try_from(data_offset).expect("synthetic DNG strip offset fits a LONG");
+                    payload = strip_offset.to_le_bytes().to_vec();
+                }
+                if payload.len() > 4 {
+                    let field_offset = u32::try_from(8 + ifd_size + placement)
+                        .expect("synthetic DNG value offset fits a LONG");
+                    out.extend_from_slice(&field_offset.to_le_bytes());
+                } else {
+                    payload.resize(4, 0);
+                    out.extend_from_slice(&payload);
+                }
+            }
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&value_area);
+            debug_assert_eq!(out.len(), data_offset);
+            out.extend_from_slice(&spec.pixels);
+
+            let mut file = std::fs::File::create(path)?;
+            file.write_all(&out)
+        }
+    }
+
+    /// Shared fixture metadata for the synthetic DNG loading tests.
+    mod dng_fixtures {
+        use super::synthetic_dng::{write_dng, DngSpec};
+        use std::path::{Path, PathBuf};
+
+        pub(super) const WIDTH: u32 = 24;
+        pub(super) const HEIGHT: u32 = 22;
+        pub(super) const BLACK: u32 = 128;
+        pub(super) const WHITE: u32 = 4000;
+        pub(super) const AS_SHOT_NEUTRAL: [f32; 3] = [0.5, 1.0, 0.25];
+        pub(super) const COLOR_MATRIX: [[f32; 3]; 3] = [
+            [0.4124, 0.3576, 0.1805],
+            [0.2126, 0.7152, 0.0722],
+            [0.0193, 0.1192, 0.9505],
+        ];
+
+        /// Deterministic grey-card luminance factor in 0..0.5.
+        pub(super) fn luminance(x: u32, y: u32) -> f32 {
+            (x as f32 / WIDTH as f32 + y as f32 / HEIGHT as f32) * 0.25
+        }
+
+        /// The as-shot neutral value of a canonical colour channel; the second
+        /// green plane shares the first green's neutral.
+        pub(super) fn neutral_of_channel(channel: usize) -> f32 {
+            match channel {
+                0 => AS_SHOT_NEUTRAL[0],
+                2 => AS_SHOT_NEUTRAL[2],
+                _ => AS_SHOT_NEUTRAL[1],
+            }
+        }
+
+        /// Canonical RGGB channel of a mosaic site.
+        fn rggb_channel(x: u32, y: u32) -> usize {
+            match (x % 2, y % 2) {
+                (0, 0) => 0,
+                (1, 0) => 1,
+                (0, 1) => 3,
+                _ => 2,
+            }
+        }
+
+        /// Sensor code a grey-card mosaic site stores for the given luminance.
+        fn mosaic_sample(x: u32, y: u32) -> u16 {
+            let channel = rggb_channel(x, y);
+            let value = BLACK as f32
+                + (WHITE - BLACK) as f32 * luminance(x, y) * neutral_of_channel(channel);
+            value.round() as u16
+        }
+
+        fn float_sample(x: u32, y: u32, channel: usize) -> f32 {
+            BLACK as f32 + (WHITE - BLACK) as f32 * luminance(x, y) * neutral_of_channel(channel)
+        }
+
+        pub(super) fn bayer_mosaic_pixels() -> Vec<u8> {
+            let mut pixels = Vec::with_capacity((WIDTH * HEIGHT * 2) as usize);
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    pixels.extend_from_slice(&mosaic_sample(x, y).to_le_bytes());
+                }
+            }
+            pixels
+        }
+
+        pub(super) fn linear_gray_pixels() -> Vec<u8> {
+            let mut pixels = Vec::with_capacity((WIDTH * HEIGHT * 3 * 2) as usize);
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    for channel in 0..3 {
+                        let value = float_sample(x, y, channel).round() as u16;
+                        pixels.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
+            pixels
+        }
+
+        pub(super) fn base_spec(photometric: u16, samples: u16, pixels: Vec<u8>) -> DngSpec {
+            // LibRaw rounds per-sample LinearRaw blacks to the nearest code
+            // (cblack = fcblack + 0.5) while shared CFA blacks are truncated
+            // (black = fblack), so the fixtures offset by half a code value
+            // to make both paths agree on an effective black level of 128.
+            let black_level = if samples == 1 {
+                vec![128.5]
+            } else {
+                vec![127.5; samples as usize]
+            };
+            DngSpec {
+                width: WIDTH,
+                height: HEIGHT,
+                photometric,
+                samples_per_pixel: samples,
+                bits_per_sample: 16,
+                sample_format: None,
+                orientation: None,
+                black_level,
+                white_level: vec![WHITE; samples as usize],
+                as_shot_neutral: AS_SHOT_NEUTRAL,
+                color_matrix: COLOR_MATRIX,
+                pixels,
+            }
+        }
+
+        pub(super) fn write_bayer_dng(dir: &Path) -> PathBuf {
+            let path = dir.join("bayer.dng");
+            write_dng(&path, &base_spec(32803, 1, bayer_mosaic_pixels()))
+                .expect("write synthetic Bayer DNG");
+            path
+        }
+
+        pub(super) fn write_linear_dng(dir: &Path) -> PathBuf {
+            let path = dir.join("linear.dng");
+            write_dng(&path, &base_spec(34892, 3, linear_gray_pixels()))
+                .expect("write synthetic LinearRaw DNG");
+            path
+        }
+    }
+
+    #[test]
+    fn bayer_dng_still_loads_through_the_mosaic_path() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let path = dng_fixtures::write_bayer_dng(temp.path());
+        let raw = super::load_raw_file(&path).expect("load synthetic Bayer DNG");
+
+        assert_eq!(raw.width, dng_fixtures::WIDTH);
+        assert_eq!(raw.height, dng_fixtures::HEIGHT);
+        assert!(!raw.is_pre_demosaiced_raster());
+        assert!(raw.scene_linear_raster().is_none());
+        assert_eq!(raw.raw_pixels.len(), (24 * 22) as usize);
+        assert!(matches!(raw.cfa_kind, CfaKind::Bayer));
+
+        // The mosaic layout, black/white levels, and camera white balance
+        // must stay exactly as the metadata describes them.
+        for (x, y) in [(0u32, 0u32), (5, 3), (12, 11), (23, 21)] {
+            let index = (y * dng_fixtures::WIDTH + x) as usize;
+            let expected = dng_fixtures::luminance(x, y);
+            let channel = match (x % 2, y % 2) {
+                (0, 0) => 0usize,
+                (1, 0) => 1,
+                (0, 1) => 3,
+                _ => 2,
+            };
+            let neutral = dng_fixtures::neutral_of_channel(channel);
+            let expected_sample = (dng_fixtures::BLACK as f32
+                + (dng_fixtures::WHITE - dng_fixtures::BLACK) as f32 * expected * neutral)
+                .round() as u16;
+            assert_eq!(
+                raw.raw_pixels[index], expected_sample,
+                "mosaic sample at {x},{y}"
+            );
+            assert_eq!(raw.color_indices[index] as usize, channel);
+        }
+
+        for channel in 0..4 {
+            assert!((raw.black_levels[channel] - 128.0).abs() < 1e-4);
+            assert!((raw.white_levels[channel] - 4000.0).abs() < 1e-4);
+        }
+        assert!((raw.wb_coeffs[0] - 2.0).abs() < 1e-4);
+        assert!((raw.wb_coeffs[1] - 1.0).abs() < 1e-4);
+        assert!((raw.wb_coeffs[2] - 4.0).abs() < 1e-4);
+        assert!(raw.white_balance_model.is_some());
+        assert!(raw
+            .cam_to_srgb
+            .iter()
+            .flatten()
+            .any(|value| value.abs() > 1e-3));
+    }
+
+    #[test]
+    fn linear_phone_dng_loads_as_scene_linear_raster() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let bayer_path = dng_fixtures::write_bayer_dng(temp.path());
+        let linear_path = dng_fixtures::write_linear_dng(temp.path());
+
+        // Reference load of the equivalent mosaic file: its metadata-driven
+        // white balance and camera-to-working matrix define the expected
+        // camera-space mathematics the linear conversion must reproduce.
+        let reference = super::load_raw_file(&bayer_path).expect("load reference Bayer DNG");
+        let raw = super::load_raw_file(&linear_path).expect("load synthetic LinearRaw DNG");
+
+        assert_eq!(raw.width, dng_fixtures::WIDTH);
+        assert_eq!(raw.height, dng_fixtures::HEIGHT);
+        assert!(raw.is_pre_demosaiced_raster());
+        let raster = raw
+            .scene_linear_raster()
+            .expect("linear DNG must expose a scene-linear raster");
+        assert_eq!(
+            raster.len(),
+            (dng_fixtures::WIDTH * dng_fixtures::HEIGHT * 3) as usize
+        );
+        assert!(raster.iter().all(|value| value.is_finite()));
+        assert!(raw.raw_pixels.is_empty());
+        // Pre-demosaiced raster contract: identity camera transforms.
+        assert_eq!(raw.wb_coeffs, [1.0; 4]);
+        assert_eq!(
+            raw.cam_to_srgb,
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ]
+        );
+
+        let wb = reference.wb_coeffs;
+        let matrix = reference.cam_to_srgb;
+        let range = (dng_fixtures::WHITE - dng_fixtures::BLACK) as f32;
+        let expected_camera = |x: u32, y: u32| -> [f32; 4] {
+            let mut camera = [0.0f32; 4];
+            for plane in 0..3 {
+                let stored = dng_fixtures::BLACK as f32
+                    + range * dng_fixtures::luminance(x, y) * dng_fixtures::AS_SHOT_NEUTRAL[plane];
+                // The u16 rounding error is bounded by half a code value.
+                let normalized =
+                    ((stored.round() - dng_fixtures::BLACK as f32) / range).clamp(0.0, 4.0);
+                camera[plane] = normalized * wb[plane];
+            }
+            camera
+        };
+
+        for (x, y) in [(0u32, 0u32), (7, 4), (12, 11), (19, 17), (23, 21)] {
+            let index = (y * dng_fixtures::WIDTH + x) as usize;
+            let camera = expected_camera(x, y);
+            let working = camera_rgb_to_working(camera, matrix);
+            for channel in 0..3 {
+                assert!(
+                    (raster[index * 3 + channel] - working[channel]).abs() < 5e-3,
+                    "raster mismatch at {x},{y} channel {channel}: {} vs {}",
+                    raster[index * 3 + channel],
+                    working[channel]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn floating_point_linear_dng_loads_as_scene_linear_raster() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let bayer_path = dng_fixtures::write_bayer_dng(temp.path());
+
+        // HDR float LinearRaw: one pixel reaches 2.0, so LibRaw's observed
+        // maximum extends the white level beyond the default of 1.0.
+        let width = dng_fixtures::WIDTH;
+        let height = dng_fixtures::HEIGHT;
+        let mut pixels = vec![0.0f32; (width * height * 3) as usize];
+        for (index, value) in pixels.iter_mut().enumerate() {
+            let y = (index / (width as usize * 3)) as u32;
+            let x = ((index % (width as usize * 3)) / 3) as u32;
+            let channel = index % 3;
+            let base = 0.05 + 0.4 * dng_fixtures::luminance(x, y);
+            *value = base * dng_fixtures::AS_SHOT_NEUTRAL[channel];
+        }
+        pixels[(5 * width as usize + 6) * 3] = 2.0;
+        pixels[(5 * width as usize + 6) * 3 + 1] = 1.0;
+        pixels[(5 * width as usize + 6) * 3 + 2] = 0.5;
+        let mut pixel_bytes = Vec::with_capacity(pixels.len() * 4);
+        for value in &pixels {
+            pixel_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let path = temp.path().join("float.dng");
+        let mut spec = dng_fixtures::base_spec(34892, 3, pixel_bytes);
+        spec.bits_per_sample = 32;
+        spec.sample_format = Some(3);
+        spec.black_level = vec![0.0; 3];
+        spec.white_level = Vec::new();
+        synthetic_dng::write_dng(&path, &spec).expect("write synthetic float DNG");
+
+        let reference = super::load_raw_file(&bayer_path).expect("load reference Bayer DNG");
+        let raw = super::load_raw_file(&path).expect("load synthetic float DNG");
+        assert!(raw.is_pre_demosaiced_raster());
+        assert_eq!(raw.width, width);
+        assert_eq!(raw.height, height);
+        let raster = raw
+            .scene_linear_raster()
+            .expect("float DNG must expose a scene-linear raster");
+        assert_eq!(raster.len(), pixels.len());
+        assert!(raster.iter().all(|value| value.is_finite()));
+
+        let wb = reference.wb_coeffs;
+        let matrix = reference.cam_to_srgb;
+        // The observed float maximum (2.0) sets the white level, so a full
+        // 2.0 sample normalises to unity instead of clipping.
+        let white = 2.0f32;
+        for (x, y) in [(6u32, 5u32), (0, 0), (12, 11), (23, 21)] {
+            let index = (y * width + x) as usize;
+            let mut camera = [0.0f32; 4];
+            for channel in 0..3 {
+                let stored = pixels[index * 3 + channel] / white;
+                camera[channel] = stored * wb[channel];
+            }
+            let working = camera_rgb_to_working(camera, matrix);
+            for channel in 0..3 {
+                assert!(
+                    (raster[index * 3 + channel] - working[channel]).abs() < 1e-4,
+                    "float raster mismatch at {x},{y} channel {channel}: {} vs {}",
+                    raster[index * 3 + channel],
+                    working[channel]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oriented_linear_dng_rotates_the_raster_ninety_degrees() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let bayer_path = dng_fixtures::write_bayer_dng(temp.path());
+
+        let path = temp.path().join("oriented.dng");
+        let mut spec = dng_fixtures::base_spec(34892, 3, dng_fixtures::linear_gray_pixels());
+        // Orientation 6 (90 degrees clockwise) maps to LibRaw flip 6.
+        spec.orientation = Some(6);
+        synthetic_dng::write_dng(&path, &spec).expect("write oriented LinearRaw DNG");
+
+        let reference = super::load_raw_file(&bayer_path).expect("load reference Bayer DNG");
+        let raw = super::load_raw_file(&path).expect("load oriented LinearRaw DNG");
+
+        // The rotated raster swaps the output dimensions.
+        assert_eq!(raw.width, dng_fixtures::HEIGHT);
+        assert_eq!(raw.height, dng_fixtures::WIDTH);
+        assert!(raw.is_pre_demosaiced_raster());
+        let raster = raw.scene_linear_raster().expect("oriented raster");
+
+        let wb = reference.wb_coeffs;
+        let matrix = reference.cam_to_srgb;
+        let range = (dng_fixtures::WHITE - dng_fixtures::BLACK) as f32;
+        let expected_at = |x_out: u32, y_out: u32| -> [f32; 3] {
+            // flip 6: output(x, y) samples source (y, height - 1 - x).
+            let (src_x, src_y) = (y_out, dng_fixtures::HEIGHT - 1 - x_out);
+            let mut camera = [0.0f32; 4];
+            for plane in 0..3 {
+                let stored = dng_fixtures::BLACK as f32
+                    + range
+                        * dng_fixtures::luminance(src_x, src_y)
+                        * dng_fixtures::AS_SHOT_NEUTRAL[plane];
+                let normalized =
+                    ((stored.round() - dng_fixtures::BLACK as f32) / range).clamp(0.0, 4.0);
+                camera[plane] = normalized * wb[plane];
+            }
+            camera_rgb_to_working(camera, matrix)
+        };
+
+        for (x, y) in [(0u32, 0u32), (9, 6), (21, 0), (0, 23), (21, 23)] {
+            let index = (y * dng_fixtures::HEIGHT + x) as usize;
+            let expected = expected_at(x, y);
+            for channel in 0..3 {
+                assert!(
+                    (raster[index * 3 + channel] - expected[channel]).abs() < 5e-3,
+                    "oriented raster mismatch at output {x},{y} channel {channel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn floating_point_mosaic_dng_keeps_the_converted_mosaic_path() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+
+        // A single-sample floating-point CFA DNG relies on LibRaw's default
+        // float-to-16-bit conversion to feed the single-channel raw_image
+        // buffer, so it must keep loading through the mosaic pipeline.
+        let width = dng_fixtures::WIDTH;
+        let height = dng_fixtures::HEIGHT;
+        let pixels: Vec<u8> = (0..width * height)
+            .map(|index| 0.5f32 * (index as f32 / (width * height) as f32))
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let path = temp.path().join("float-mosaic.dng");
+        let mut spec = dng_fixtures::base_spec(32803, 1, pixels);
+        spec.bits_per_sample = 32;
+        spec.sample_format = Some(3);
+        spec.black_level = vec![0.0];
+        spec.white_level = Vec::new();
+        synthetic_dng::write_dng(&path, &spec).expect("write float mosaic DNG");
+
+        let raw = super::load_raw_file(&path).expect("load float mosaic DNG");
+        assert!(!raw.is_pre_demosaiced_raster());
+        assert!(raw.scene_linear_raster().is_none());
+        assert_eq!(raw.width, width);
+        assert_eq!(raw.height, height);
+        assert_eq!(raw.raw_pixels.len(), (width * height) as usize);
+        assert!(matches!(raw.cfa_kind, CfaKind::Bayer));
     }
 }

@@ -34,3 +34,6 @@ windows-sys.workspace = true
 bindgen.workspace = true
 pkg-config.workspace = true
 toml_edit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
