@@ -26,7 +26,7 @@ pub const DEVELOPED_THUMBNAIL_SUFFIX: &str = ".calibraw-thumb.jpg";
 #[cfg(not(target_os = "android"))]
 const DEVELOPED_THUMBNAIL_FINGERPRINT_SUFFIX: &str = ".calibraw-thumb.fingerprint";
 pub const MAX_SIDECAR_BYTES: u64 = if cfg!(target_os = "android") {
-    128 * 1024 * 1024
+    32 * 1024 * 1024
 } else {
     256 * 1024 * 1024
 };
