@@ -39,6 +39,7 @@ eframe = { workspace = true, features = ["accesskit", "wgpu", "default_fonts", "
 env_logger.workspace = true
 pollster.workspace = true
 rfd.workspace = true
+trash.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 calibraw-ffi.workspace = true

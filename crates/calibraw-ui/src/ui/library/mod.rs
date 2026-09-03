@@ -732,6 +732,7 @@ pub(crate) struct LibraryState {
     folder_name_dialog: Option<LibraryFolderNameDialog>,
     #[cfg(not(target_os = "android"))]
     folder_delete_confirmation: Option<PathBuf>,
+    delete_originals_confirmation: Option<Vec<LibraryAsset>>,
     raw_name_dialog: Option<LibraryRawNameDialog>,
     export_dialog: Option<LibraryExportDialog>,
     adjustment_paste_dialog: Option<LibraryAdjustmentPasteDialog>,

@@ -5720,6 +5720,40 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (`MIT`)
 
 Used by:
+- `iana-time-zone 0.1.65` — https://github.com/strawlab/iana-time-zone
+
+```text
+Copyright (c) 2020 Andrew D. Straw
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+## MIT License (`MIT`)
+
+Used by:
 - `downcast-rs 1.2.1` — https://github.com/marcianx/downcast-rs
 
 ```text
@@ -6470,6 +6504,31 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License (`MIT`)
 
 Used by:
+- `trash 5.2.7` — https://github.com/ArturKovacs/trash
+
+```text
+Copyright 2019 Artúr Barnabás Kovács
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+```
+
+## MIT License (`MIT`)
+
+Used by:
 - `as-raw-xcb-connection 1.0.1` — https://github.com/psychon/as-raw-xcb-connection
 
 ```text
@@ -7212,6 +7271,7 @@ Used by:
 - `accesskit_windows 0.32.1` — https://github.com/AccessKit/accesskit
 - `block2 0.5.1` — https://github.com/madsmtm/objc2
 - `block2 0.6.2` — https://github.com/madsmtm/objc2
+- `chrono 0.4.45` — https://github.com/chronotope/chrono
 - `dispatch2 0.3.1` — https://github.com/madsmtm/objc2
 - `dispatch 0.2.0` — http://github.com/SSheldon/rust-dispatch
 - `dpi 0.1.2` — https://github.com/rust-windowing/winit
@@ -7249,12 +7309,16 @@ Used by:
 - `type-map 0.5.1` — https://github.com/kardeiz/type-map
 - `winapi-x86_64-pc-windows-gnu 0.4.0` — https://github.com/retep998/winapi-rs
 - `windows-collections 0.3.2` — https://github.com/microsoft/windows-rs
+- `windows-core 0.56.0` — https://github.com/microsoft/windows-rs
 - `windows-core 0.62.2` — https://github.com/microsoft/windows-rs
 - `windows-future 0.3.2` — https://github.com/microsoft/windows-rs
+- `windows-implement 0.56.0` — https://github.com/microsoft/windows-rs
 - `windows-implement 0.60.2` — https://github.com/microsoft/windows-rs
+- `windows-interface 0.56.0` — https://github.com/microsoft/windows-rs
 - `windows-interface 0.59.3` — https://github.com/microsoft/windows-rs
 - `windows-link 0.2.1` — https://github.com/microsoft/windows-rs
 - `windows-numerics 0.3.1` — https://github.com/microsoft/windows-rs
+- `windows-result 0.1.2` — https://github.com/microsoft/windows-rs
 - `windows-result 0.4.1` — https://github.com/microsoft/windows-rs
 - `windows-strings 0.5.1` — https://github.com/microsoft/windows-rs
 - `windows-sys 0.52.0` — https://github.com/microsoft/windows-rs
@@ -7264,6 +7328,7 @@ Used by:
 - `windows-targets 0.52.6` — https://github.com/microsoft/windows-rs
 - `windows-targets 0.53.5` — https://github.com/microsoft/windows-rs
 - `windows-threading 0.2.1` — https://github.com/microsoft/windows-rs
+- `windows 0.56.0` — https://github.com/microsoft/windows-rs
 - `windows 0.62.2` — https://github.com/microsoft/windows-rs
 - `windows_x86_64_gnu 0.52.6` — https://github.com/microsoft/windows-rs
 - `windows_x86_64_gnu 0.53.1` — https://github.com/microsoft/windows-rs
@@ -8461,6 +8526,35 @@ all copies or substantial portions of the Software.
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+```
+
+## MIT License (`MIT`)
+
+Used by:
+- `urlencoding 2.1.3` — https://github.com/kornelski/rust_urlencoding
+
+```text
+© 2016 Bertram Truong
+© 2021 Kornel Lesiński
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
