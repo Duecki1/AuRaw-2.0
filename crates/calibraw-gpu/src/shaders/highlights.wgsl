@@ -4,6 +4,7 @@
 // Copyright (C) 2026 CalibRaw contributors (WGSL adaptation).
 
 #import calibraw::common as Common
+#import calibraw::raw_sampling as RawSampling
 
 @group(0) @binding(3) var reconstructed_raw_write: texture_storage_2d<r32float, write>;
 
@@ -42,16 +43,11 @@ fn highlight_raw_camera_at(pos: vec2<i32>) -> f32 {
     return highlight_raw_sensor_at(p) * highlight_wb_for_cfa_channel(channel);
 }
 
-fn lch_common_clip() -> f32 {
-    let min_wb = min(min(Common::camera_uniforms.wb.r, Common::camera_uniforms.wb.g), min(Common::camera_uniforms.wb.b, Common::camera_uniforms.wb.a));
-    return max(Common::camera_uniforms.highlight_clip, 0.01) * max(min_wb, 1e-6);
-}
-
 fn lch_reconstructed_cfa_at(pos: vec2<i32>) -> f32 {
     let center = Common::clamp_pos(pos);
     let center_color = highlight_color_at(center);
     let original = highlight_raw_camera_at(center);
-    let clip = lch_common_clip();
+    let clip = RawSampling::shared_highlight_clip();
     let strength = clamp(Common::camera_uniforms.highlight_reconstruction, 0.0, 1.0);
 
     if center.x >= i32(Common::camera_uniforms.width) - 1 || center.y >= i32(Common::camera_uniforms.height) - 1 {

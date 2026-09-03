@@ -2,8 +2,9 @@ use super::{
     pack_effect_mask, pack_local_point_curve, pack_point_curve, processing_work_format,
     shader_manager::ShaderManager, work_shader_source, ProcessingQuality, SHADER_BAYER_RCD_P1,
     SHADER_BAYER_RCD_P2, SHADER_BAYER_RCD_P3, SHADER_BAYER_RCD_P4, SHADER_COLOR_DENOISE,
-    SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_REMOVE_COMPOSITE,
-    SHADER_SCENE_ADJUSTMENTS, SHADER_TONEMAP, SHADER_TONE_ANALYSIS, SHADER_VIEW_TRANSFORM,
+    SHADER_CREATIVE_EFFECTS, SHADER_DUAL_DEMOSAIC, SHADER_HIGHLIGHTS, SHADER_RAW_SAMPLING,
+    SHADER_REMOVE_COMPOSITE, SHADER_SCENE_ADJUSTMENTS, SHADER_TONEMAP, SHADER_TONE_ANALYSIS,
+    SHADER_VIEW_TRANSFORM,
     SHADER_XTRANS_DEMOSAIC, SHADER_XTRANS_FINISH,
 };
 use crate::pipeline::{LocalMask, MaskEffect, MaskKind, PointCurve};
@@ -24,6 +25,90 @@ fn validate_shader(name: &str, source: &str, quality: ProcessingQuality) {
     )
     .validate(&module)
     .unwrap_or_else(|error| panic!("{name} did not validate: {error}"));
+}
+
+fn shader_f32_const(source: &str, name: &str) -> f32 {
+    let declaration = format!("const {name}: f32 = ");
+    source
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix(&declaration)
+                .and_then(|value| value.strip_suffix(';'))
+        })
+        .unwrap_or_else(|| panic!("shader constant {name} is missing"))
+        .parse::<f32>()
+        .unwrap_or_else(|error| panic!("shader constant {name} is not numeric: {error}"))
+}
+
+fn shared_highlight_clip_for_test(highlight_clip: f32, wb: [f32; 4]) -> f32 {
+    let safety = shader_f32_const(SHADER_RAW_SAMPLING, "SHARED_HIGHLIGHT_CLIP_SAFETY");
+    let min_wb = wb.into_iter().fold(f32::INFINITY, f32::min);
+    safety * highlight_clip.max(0.01) * min_wb.max(1e-6)
+}
+
+fn adjacent_f32(value: f32, above: bool) -> f32 {
+    assert!(value.is_finite() && value > 0.0);
+    let bits = value.to_bits();
+    f32::from_bits(if above { bits + 1 } else { bits - 1 })
+}
+
+#[test]
+fn lch_and_rcd_share_common_highlight_clip_definition() {
+    assert!(SHADER_RAW_SAMPLING.contains("fn shared_highlight_clip() -> f32"));
+    assert!(SHADER_RAW_SAMPLING.contains("raw_camera_at(p) >= shared_highlight_clip()"));
+    assert!(SHADER_HIGHLIGHTS.contains("#import calibraw::raw_sampling as RawSampling"));
+    assert!(SHADER_HIGHLIGHTS.contains("let clip = RawSampling::shared_highlight_clip();"));
+    assert!(!SHADER_HIGHLIGHTS.contains("fn lch_common_clip()"));
+
+    validate_shader("highlights", SHADER_HIGHLIGHTS, ProcessingQuality::Preview);
+    validate_shader("Bayer pass 2", SHADER_BAYER_RCD_P2, ProcessingQuality::Preview);
+}
+
+#[test]
+fn common_highlight_clip_classifies_adjacent_values_consistently() {
+    let highlight_clip = 1.0;
+    let wb = [2.0, 1.0, 1.5, 1.0];
+    let clip = shared_highlight_clip_for_test(highlight_clip, wb);
+    let below = adjacent_f32(clip, false);
+    let above = adjacent_f32(clip, true);
+
+    let raw_sampling_clipped = |value: f32| value >= clip;
+    let lch_clipped = |value: f32| value >= clip;
+
+    assert!(!raw_sampling_clipped(below));
+    assert!(!lch_clipped(below));
+    assert!(raw_sampling_clipped(above));
+    assert!(lch_clipped(above));
+
+    // This boundary would have exposed the former LCh 1.0-vs-shared 0.995 drift.
+    let former_lch_clip = highlight_clip * wb.into_iter().fold(f32::INFINITY, f32::min);
+    assert!(above < former_lch_clip);
+}
+
+#[test]
+fn opposed_sensor_and_wb_domain_clipping_are_equivalent() {
+    const DARKTABLE_OPPOSED_CLIP_MAGIC: f32 = 0.987;
+
+    let highlight_clip = 1.03_f32;
+    let sensor_clip = DARKTABLE_OPPOSED_CLIP_MAGIC * highlight_clip.max(0.01);
+    let sensor_values = [
+        adjacent_f32(sensor_clip, false),
+        sensor_clip,
+        adjacent_f32(sensor_clip, true),
+        0.5 * sensor_clip,
+        1.5 * sensor_clip,
+    ];
+
+    for wb in [0.5_f32, 1.0, 1.75, 2.4] {
+        for raw_sensor in sensor_values {
+            let raw_camera = raw_sensor * wb;
+            let sensor_domain = raw_sensor >= sensor_clip;
+            let wb_domain = raw_camera
+                >= DARKTABLE_OPPOSED_CLIP_MAGIC * highlight_clip.max(0.01) * wb;
+            assert_eq!(sensor_domain, wb_domain, "wb={wb}, raw_sensor={raw_sensor}");
+        }
+    }
 }
 
 #[test]
