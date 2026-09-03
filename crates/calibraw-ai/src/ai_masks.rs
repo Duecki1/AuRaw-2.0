@@ -88,9 +88,9 @@ impl BiRefNetQuality {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Low => "Low",
-            Self::Medium => "Medium",
-            Self::High => "High",
+            Self::Low => "Good (<12GB VRAM)",
+            Self::Medium => "Better",
+            Self::High => "Best (not recommended)",
         }
     }
 
@@ -102,7 +102,7 @@ impl BiRefNetQuality {
         match self {
             Self::Low => BiRefNetModelSpec {
                 checkpoint: "BiRefNet General-Lite",
-                download_label: "BiRefNet General-Lite (Low)",
+                download_label: "BiRefNet General-Lite (Good)",
                 url: BIREFNET_LOW_MODEL_URL,
                 bytes: BIREFNET_LOW_MODEL_BYTES,
                 sha256_hex: BIREFNET_LOW_MODEL_SHA256_HEX,
@@ -113,7 +113,7 @@ impl BiRefNetQuality {
             },
             Self::Medium => BiRefNetModelSpec {
                 checkpoint: "BiRefNet Lite-2K",
-                download_label: "BiRefNet Lite-2K (Medium)",
+                download_label: "BiRefNet Lite-2K (Better)",
                 url: BIREFNET_MEDIUM_MODEL_URL,
                 bytes: BIREFNET_MEDIUM_MODEL_BYTES,
                 sha256_hex: BIREFNET_MEDIUM_MODEL_SHA256_HEX,
@@ -124,7 +124,7 @@ impl BiRefNetQuality {
             },
             Self::High => BiRefNetModelSpec {
                 checkpoint: "BiRefNet HR",
-                download_label: "BiRefNet HR (High)",
+                download_label: "BiRefNet HR (Best)",
                 url: BIREFNET_HIGH_MODEL_URL,
                 bytes: BIREFNET_HIGH_MODEL_BYTES,
                 sha256_hex: BIREFNET_HIGH_MODEL_SHA256_HEX,
