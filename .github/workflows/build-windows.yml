@@ -246,8 +246,8 @@ jobs:
           }
 
           & $iscc `
-            "/DAppVersion=`"$appVersion`"" `
-            "/DArtifactArch=`"${{ matrix.artifact_arch }}`"" `
+            "/DAppVersion=$appVersion" `
+            "/DArtifactArch=${{ matrix.artifact_arch }}" `
             "packaging/windows/calibraw.iss"
           if ($LASTEXITCODE -ne 0) {
             throw "Inno Setup failed with exit code $LASTEXITCODE."
